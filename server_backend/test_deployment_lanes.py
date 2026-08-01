@@ -117,7 +117,9 @@ def test_ci_is_draft_aware_and_uses_shared_component_classifier() -> None:
 
 def test_documentation_runs_when_a_draft_becomes_ready_without_deploying() -> None:
     workflow = text(".github/workflows/docs.yml")
+    pull_request_trigger = workflow.split("pull_request:", 1)[1].split("push:", 1)[0]
     assert "types: [opened, reopened, synchronize, ready_for_review]" in workflow
+    assert "paths:" not in pull_request_trigger
     assert "github.event.pull_request.draft == false" in workflow
     assert "if: github.event_name != 'pull_request'" in workflow
 
