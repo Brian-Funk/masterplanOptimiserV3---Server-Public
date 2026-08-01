@@ -82,6 +82,14 @@ def latest_stable_tag(
     raise AssertionError("release discovery retry loop exited unexpectedly")
 
 
+def host_container_user() -> str:
+    """Return the POSIX owner used for private release-verification files."""
+
+    if not hasattr(os, "getuid") or not hasattr(os, "getgid"):
+        raise RuntimeError("signed release installation requires a POSIX host")
+    return f"{os.getuid()}:{os.getgid()}"
+
+
 def download(url: str, target: Path, limit: int) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "mp-opt-release-installer/1"})
     with urllib.request.urlopen(request, timeout=60) as response, target.open("wb") as output:
@@ -95,7 +103,14 @@ def download(url: str, target: Path, limit: int) -> None:
 
 def run_cosign(work: Path, *arguments: str) -> None:
     subprocess.run(
-        ["docker", "run", "--rm", "-v", f"{work}:/work:ro", COSIGN_IMAGE, *arguments],
+        [
+            "docker", "run", "--rm",
+            "--user", host_container_user(),
+            "--env", "HOME=/tmp",
+            "-v", f"{work}:/work:ro",
+            COSIGN_IMAGE,
+            *arguments,
+        ],
         check=True,
     )
 

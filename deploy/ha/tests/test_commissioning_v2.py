@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -293,6 +294,33 @@ class SignedReleaseTests(unittest.TestCase):
                     install_release.main()
 
             self.assertEqual(list(root.iterdir()), [])
+
+    def test_cosign_reads_private_host_files_as_their_owner_without_widening_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            manifest = work / "release-manifest.json"
+            manifest.write_text("{}", encoding="utf-8")
+            work.chmod(0o700)
+            manifest.chmod(0o600)
+
+            with mock.patch.object(
+                install_release,
+                "host_container_user",
+                return_value="1000:1000",
+            ), mock.patch.object(subprocess, "run") as run:
+                install_release.run_cosign(work, "verify-blob", "/work/release-manifest.json")
+
+            command = run.call_args.args[0]
+            self.assertEqual(command[:7], [
+                "docker", "run", "--rm",
+                "--user", "1000:1000",
+                "--env", "HOME=/tmp",
+            ])
+            self.assertIn(f"{work}:/work:ro", command)
+            if os.name == "posix":
+                self.assertEqual(work.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(manifest.stat().st_mode & 0o777, 0o600)
+            self.assertTrue(run.call_args.kwargs["check"])
 
     def test_release_contains_signed_operations_frontend_and_images(self) -> None:
         self.assertIn("operations.tar.gz", RELEASE)
