@@ -345,15 +345,15 @@ ui_copyable_terminal_text() {
     fi
     exec {tty_fd}<>"$tty" || return 1
     {
-        printf '%s' "$clear_sequence"
-        printf '\n============================================================\n'
-        printf '%s\n' "$title"
-        printf '============================================================\n\n'
-        printf 'This is normal selectable terminal text.\n\n'
-        printf '%s\n' '----- COPY FROM HERE -----'
-        printf '%s\n' "$body"
-        printf '%s\n' '----- END COPYABLE TEXT -----'
-        printf '\n============================================================\n'
+        printf '%s' "$clear_sequence" &&
+        printf '\n============================================================\n' &&
+        printf '%s\n' "$title" &&
+        printf '============================================================\n\n' &&
+        printf 'This is normal selectable terminal text.\n\n' &&
+        printf '%s\n' '----- COPY FROM HERE -----' &&
+        printf '%s\n' "$body" &&
+        printf '%s\n' '----- END COPYABLE TEXT -----' &&
+        printf '\n============================================================\n' &&
         printf '%s\n' "$guidance"
     } >&"$tty_fd" || status=1
     if [ "$status" -eq 0 ]; then

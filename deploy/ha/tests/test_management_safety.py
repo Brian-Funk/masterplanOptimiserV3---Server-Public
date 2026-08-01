@@ -422,6 +422,7 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
         self.assertLess(selectable.index("clear_sequence="), selectable.index("normal selectable terminal text"))
         self.assertIn("normal selectable terminal text", selectable)
         self.assertIn("printf '%s\\n' '----- COPY FROM HERE -----'", selectable)
+        self.assertIn("'----- COPY FROM HERE -----' &&", selectable)
         self.assertNotIn("ui_text_file", presenter)
         self.assertIn("mp_portable_show_copyable_commands", exporter)
         self.assertIn("mp_portable_show_copyable_commands", importer)
