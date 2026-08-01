@@ -30,7 +30,7 @@ jobs:
       operations: ${{ steps.detect.outputs.operations }}
       any: ${{ steps.detect.outputs.any }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -72,12 +72,12 @@ jobs:
     if: needs.changes.outputs.any == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.14"
           cache: pip
           cache-dependency-path: |
             backend/requirements.txt
@@ -136,10 +136,10 @@ jobs:
             return 1
           }
           pull_with_retry aquasec/trivy:0.72.0
-          if [[ "$BACKEND" == true ]]; then pull_with_retry python:3.11-alpine; fi
+          if [[ "$BACKEND" == true ]]; then pull_with_retry python:3.14-alpine; fi
           if [[ "$CADDY" == true ]]; then pull_with_retry golang:1.26.5-alpine; pull_with_retry caddy:2-alpine; fi
-          if [[ "$DATABASE" == true ]]; then pull_with_retry golang:1.26.5-alpine; pull_with_retry postgres:16-alpine; fi
-          if [[ "$TOOLS" == true ]]; then pull_with_retry node:22-alpine; fi
+          if [[ "$DATABASE" == true ]]; then pull_with_retry golang:1.26.5-alpine; pull_with_retry postgres:18-alpine; fi
+          if [[ "$TOOLS" == true ]]; then pull_with_retry node:25-alpine; fi
           declare -a images=()
           if [[ "$BACKEND" == true ]]; then docker build -f infra/Dockerfile -t mp-opt-backend:ci .; images+=(mp-opt-backend:ci); fi
           if [[ "$DATABASE" == true ]]; then docker build -f infra/Dockerfile.postgres -t mp-opt-postgres:ci .; images+=(mp-opt-postgres:ci); fi
@@ -177,7 +177,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18
         env:
           POSTGRES_DB: masterplan_test
           POSTGRES_USER: masterplan_test
@@ -187,13 +187,13 @@ jobs:
           --health-cmd "pg_isready -U masterplan_test -d masterplan_test"
           --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/setup-python@v6
         if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.database == 'true' || needs.changes.outputs.operations == 'true'
         with:
-          python-version: "3.11"
+          python-version: "3.14"
           cache: pip
           cache-dependency-path: |
             backend/requirements.txt

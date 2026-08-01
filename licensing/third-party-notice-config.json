@@ -15,12 +15,12 @@
   ],
   "other_components": [
     {
-      "name": "python:3.11-alpine and Alpine packages",
+      "name": "python:3.14-alpine and Alpine packages",
       "license": "Python-2.0 and package-specific licences",
       "evidence": "Digest-pinned backend image SBOM in each signed release"
     },
     {
-      "name": "node:22-alpine and Alpine packages",
+      "name": "node:25-alpine and Alpine packages",
       "license": "MIT and package-specific licences",
       "evidence": "Digest-pinned tools image SBOM in each signed release"
     },

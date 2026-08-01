@@ -74,7 +74,7 @@ describe("Logo", () => {
     const gradientDiv = container.querySelector(
       ".absolute.inset-0",
     ) as HTMLElement;
-    expect(gradientDiv.style.background).toContain("#2563eb");
-    expect(gradientDiv.style.background).toContain("#7c3aed");
+    expect(gradientDiv.style.background).toContain("rgb(37, 99, 235)");
+    expect(gradientDiv.style.background).toContain("rgb(124, 58, 237)");
   });
 });

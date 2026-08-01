@@ -119,7 +119,7 @@ def test_activation_email_brand_and_qr_assets_are_packaged_predictably():
 
     assert "SMTP_FROM_NAME=Masterplan Access" in example_env
     assert 'smtp_from_name="Masterplan Access"' in management_actions
-    assert "FROM python:3.11-alpine" in dockerfile
+    assert "FROM python:3.14-alpine" in dockerfile
     assert "apk add --no-cache font-dejavu" in dockerfile
     assert "fonts-dejavu-core" not in dockerfile
     assert (

@@ -1,4 +1,4 @@
-module github.com/Brian-Funk/MasterplanOptimiserV3---Server/infra/caddy-dns-witness
+module github.com/Brian-Funk/masterplanOptimiserV3---Server-Public/infra/caddy-dns-witness
 
 go 1.25
 

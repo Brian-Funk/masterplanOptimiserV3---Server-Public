@@ -1,27 +1,28 @@
 version: 2
+multi-ecosystem-groups:
+  all-dependencies:
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps"
 updates:
   - package-ecosystem: pip
     directory: /backend
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+    patterns: ["*"]
+    multi-ecosystem-group: all-dependencies
   - package-ecosystem: npm
     directory: /web
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+    patterns: ["*"]
+    multi-ecosystem-group: all-dependencies
   - package-ecosystem: npm
     directory: /infra/cloudflare-ha-witness
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+    patterns: ["*"]
+    multi-ecosystem-group: all-dependencies
   - package-ecosystem: docker
     directory: /infra
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+    patterns: ["*"]
+    multi-ecosystem-group: all-dependencies
   - package-ecosystem: github-actions
     directory: /
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+    patterns: ["*"]
+    multi-ecosystem-group: all-dependencies

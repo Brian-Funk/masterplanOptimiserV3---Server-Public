@@ -78,13 +78,13 @@ manifest before running it as root (use a locally version-pinned `cosign`):
 
 ```bash
 TAG=vMAJOR.MINOR.PATCH
-BASE="https://github.com/Brian-Funk/MasterplanOptimiserV3---Server/releases/download/${TAG}"
+BASE="https://github.com/Brian-Funk/masterplanOptimiserV3---Server-Public/releases/download/${TAG}"
 curl -fL "${BASE}/release-manifest.json" -o /tmp/mp-opt-release.json
 curl -fL "${BASE}/release-manifest.bundle" -o /tmp/mp-opt-release.bundle
 curl -fL "${BASE}/mp-opt-setup.sh" -o /tmp/mp-opt-setup.sh
 cosign verify-blob --bundle /tmp/mp-opt-release.bundle \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github\.com/Brian-Funk/MasterplanOptimiserV3---Server/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
+  --certificate-identity-regexp '^https://github\.com/Brian-Funk/masterplanOptimiserV3---Server-Public/\.github/workflows/release\.yml@refs/(tags/v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$' \
   /tmp/mp-opt-release.json
 COMMIT="$(jq -er --arg tag "$TAG" \
   'select(.tag == $tag) | .commit | select(test("^[0-9a-f]{40}$"))' \
@@ -92,7 +92,9 @@ COMMIT="$(jq -er --arg tag "$TAG" \
 printf '%s  %s\n' "$(jq -r .bootstrap.sha256 /tmp/mp-opt-release.json)" \
   /tmp/mp-opt-setup.sh | sha256sum -c -
 less /tmp/mp-opt-setup.sh
-sudo bash /tmp/mp-opt-setup.sh --ref "$COMMIT"
+sudo bash /tmp/mp-opt-setup.sh \
+  --repository-url https://github.com/Brian-Funk/masterplanOptimiserV3---Server-Public.git \
+  --ref "$COMMIT"
 ```
 
 Reconnect and run `mp-opt` to resume any incomplete external checkpoint.

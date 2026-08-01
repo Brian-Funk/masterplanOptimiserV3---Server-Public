@@ -15,15 +15,15 @@ import tarfile
 import tempfile
 import urllib.request
 
-REPOSITORY = "Brian-Funk/MasterplanOptimiserV3---Server"
+REPOSITORY = "Brian-Funk/masterplanOptimiserV3---Server-Public"
 COSIGN_IMAGE = (
     "ghcr.io/sigstore/cosign/cosign@"
     "sha256:be924970ba7438c22e18067dec5637946d6566eac711f5bedd1584e7137008fb"
 )
 ISSUER = "https://token.actions.githubusercontent.com"
 IDENTITY = (
-    r"^https://github\.com/Brian-Funk/MasterplanOptimiserV3---Server/"
-    r"\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$"
+    r"^https://github\.com/Brian-Funk/masterplanOptimiserV3---Server-Public/"
+    r"\.github/workflows/release\.yml@refs/(?:tags/v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$"
 )
 IMAGE = re.compile(r"^ghcr\.io/brian-funk/masterplanoptimiserv3---server/[a-z-]+@sha256:[0-9a-f]{64}$")
 
