@@ -53,7 +53,11 @@ def test_signed_lane_is_exact_tag_peer_first_and_immutable() -> None:
     assert "push:" not in workflow.split("permissions:", 1)[0]
     assert "retired-tags.txt" in workflow
     assert 'git rev-parse origin/main' in workflow
-    assert "git merge-base --is-ancestor" not in workflow
+    assert "inputs.release_tag" in workflow
+    assert '[[ "$GITHUB_REF" == refs/heads/main ]]' in workflow
+    assert '[[ "$(git rev-parse HEAD)" == "$tag_commit" ]]' in workflow
+    assert 'git merge-base --is-ancestor "$tag_commit" origin/main' in workflow
+    assert ".verification.verified == true" in workflow
     assert "pyproject.toml" in workflow
     assert "web/package.json" in workflow
     assert "web/package-lock.json" in workflow
@@ -77,7 +81,10 @@ def test_release_version_is_synchronised_and_documented() -> None:
 def test_signed_release_preflight_binds_exact_latest_green_main() -> None:
     workflow = text(".github/workflows/release.yml")
     assert 'git rev-parse origin/main' in workflow
-    assert "git merge-base --is-ancestor" not in workflow
+    assert '[[ "$GITHUB_REF" == refs/tags/v* ]]' in workflow
+    assert '[[ "$tag_commit" == "$GITHUB_SHA" ]]' in workflow
+    assert 'git merge-base --is-ancestor "$tag_commit" origin/main' in workflow
+    assert 'RELEASE_COMMIT=$tag_commit' in workflow
     assert "pyproject.toml" in workflow
     assert "web/package.json" in workflow
     assert "web/package-lock.json" in workflow
@@ -88,6 +95,8 @@ def test_signed_release_preflight_binds_exact_latest_green_main() -> None:
 
 def test_public_release_is_reverified_from_anonymous_downloads() -> None:
     workflow = text(".github/workflows/release.yml")
+    assert '.private == false and .visibility == "public"' in workflow
+    assert ".private == false &&" not in workflow
     assert 'releases/tags/${TAG}' in workflow
     assert "--certificate-identity \"$identity\"" in workflow
     assert "verify_asset .frontend" in workflow
@@ -108,7 +117,9 @@ def test_ci_is_draft_aware_and_uses_shared_component_classifier() -> None:
 
 def test_documentation_runs_when_a_draft_becomes_ready_without_deploying() -> None:
     workflow = text(".github/workflows/docs.yml")
+    pull_request_trigger = workflow.split("pull_request:", 1)[1].split("push:", 1)[0]
     assert "types: [opened, reopened, synchronize, ready_for_review]" in workflow
+    assert "paths:" not in pull_request_trigger
     assert "github.event.pull_request.draft == false" in workflow
     assert "if: github.event_name != 'pull_request'" in workflow
 
