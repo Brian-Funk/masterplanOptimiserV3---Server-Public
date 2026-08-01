@@ -39,6 +39,8 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("MP_PUBLIC_SOURCE_REPOSITORY_URL=$repository", common)
         self.assertIn("MP_PUBLIC_SOURCE_REVISION=$revision", common)
         self.assertIn('[[ "$revision" =~ ^[0-9a-f]{40}$ ]]', common)
+        self.assertIn("stat -c '%u:%g'", common)
+        self.assertIn('docker run --rm --user "$owner" -e HOME=/tmp', common)
 
     def test_standalone_test_deployment_never_publishes_ha_witness(self) -> None:
         self.assertIn(

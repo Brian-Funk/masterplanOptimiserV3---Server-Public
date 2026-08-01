@@ -851,7 +851,7 @@ mp_prepare_frontend_csp_runtime() {
 # not contain git and mounts only web/, so resolve the public repository and
 # immutable revision on the host and pass them into Next.js explicitly.
 mp_build_frontend_container() {
-    local repository_root="${1:-$MP_ROOT}" repository revision source_url
+    local repository_root="${1:-$MP_ROOT}" repository revision source_url owner
     local -a source_environment
     repository="${MP_PUBLIC_SOURCE_REPOSITORY_URL:-}"
     revision="${MP_PUBLIC_SOURCE_REVISION:-}"
@@ -871,7 +871,10 @@ mp_build_frontend_container() {
     if [ -n "$source_url" ]; then
         source_environment+=(-e "MP_PUBLIC_SOURCE_URL=$source_url")
     fi
-    docker run --rm "${source_environment[@]}" \
+    owner="$(stat -c '%u:%g' "$repository_root/web")" || return 1
+    [[ "$owner" =~ ^[0-9]+:[0-9]+$ ]] \
+        || { printf 'Frontend source ownership could not be determined.\n' >&2; return 1; }
+    docker run --rm --user "$owner" -e HOME=/tmp "${source_environment[@]}" \
         -v "$repository_root/web:/app" -w /app node:22-alpine \
         sh -c 'npm ci --no-audit && npm audit --omit=dev --audit-level=high && npm run lint && npm run build'
 }
