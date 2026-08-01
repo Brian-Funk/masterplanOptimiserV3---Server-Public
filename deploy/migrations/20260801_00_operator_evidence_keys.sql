@@ -10,7 +10,7 @@ ALTER TABLE evidence_keys DROP CONSTRAINT IF EXISTS ck_evidence_key_role;
 ALTER TABLE evidence_keys DROP CONSTRAINT IF EXISTS evidence_keys_role_check;
 ALTER TABLE evidence_keys ADD CONSTRAINT ck_evidence_key_role CHECK (role IN (
     'instance','controller','root_operator','desktop_operator',
-    'backup_custodian','evidence_auditor'
+    'backup_custodian','evidence_auditor','processor'
 ));
 
 ALTER TABLE evidence_keys DROP CONSTRAINT IF EXISTS ck_evidence_key_revocation_reason;

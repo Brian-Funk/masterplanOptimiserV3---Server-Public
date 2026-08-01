@@ -1478,14 +1478,43 @@ mp_permissions_report() {
     done
 }
 
-# Apply every committed idempotent SQL migration in filename order.
+# Apply each immutable SQL migration once in filename order. Historical
+# installations predate the ledger, so their first ledger-aware deployment
+# safely reconciles the idempotent scripts and records their exact hashes.
 mp_apply_migrations() {
-    local migration
+    local migration name hash recorded
     mp_compose_init
+    "${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 \
+        -U masterplan -d masterplan -c \
+        "CREATE TABLE IF NOT EXISTS mp_schema_migrations (
+            name VARCHAR(255) PRIMARY KEY,
+            sha256 VARCHAR(64) NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );" >/dev/null || return 1
     for migration in "$MP_ROOT"/deploy/migrations/*.sql; do
         [ -f "$migration" ] || continue
-        printf '       Applying migration: %s\n' "$(basename "$migration")"
+        name="$(basename "$migration")"
+        [[ "$name" =~ ^[0-9]{8}_[a-z0-9_]+\.sql$ ]] \
+            || { printf '       Invalid migration filename: %s\n' "$name" >&2; return 1; }
+        hash="$(sha256sum "$migration" | awk '{print $1}')" || return 1
+        recorded="$("${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 \
+            -U masterplan -d masterplan -Atqc \
+            "SELECT sha256 FROM mp_schema_migrations WHERE name = '$name';")" \
+            || return 1
+        if [ -n "$recorded" ]; then
+            [ "$recorded" = "$hash" ] \
+                || { printf '       Applied migration hash changed: %s\n' "$name" >&2; return 1; }
+            printf '       Migration already applied: %s\n' "$name"
+            continue
+        fi
+        printf '       Applying migration: %s\n' "$name"
         "${MP_COMPOSE[@]}" exec -T db psql \
-            -v ON_ERROR_STOP=1 -U masterplan -d masterplan < "$migration" >/dev/null
+            -v ON_ERROR_STOP=1 -U masterplan -d masterplan < "$migration" >/dev/null \
+            || { printf '       Migration failed: %s\n' "$name" >&2; return 1; }
+        "${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 \
+            -U masterplan -d masterplan -c \
+            "INSERT INTO mp_schema_migrations (name, sha256) VALUES ('$name', '$hash');" \
+            >/dev/null \
+            || { printf '       Migration ledger update failed: %s\n' "$name" >&2; return 1; }
     done
 }

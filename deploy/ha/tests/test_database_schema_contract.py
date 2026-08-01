@@ -12,6 +12,9 @@ MIGRATION = (
 COMMON = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
 ACTIONS = (ROOT / "deploy/management/actions.sh").read_text(encoding="utf-8")
 DEPLOY = (ROOT / "deploy/deploy.sh").read_text(encoding="utf-8")
+RETENTION_MIGRATION = (
+    ROOT / "deploy/migrations/20260731_retention_scheduler.sql"
+).read_text(encoding="utf-8")
 POSTGRES_INTEGRATION = (
     ROOT / "deploy/ha/tests/postgres_schema_contract.py"
 ).read_text(encoding="utf-8")
@@ -25,6 +28,20 @@ def shell_function(source: str, name: str) -> str:
 
 
 class DatabaseSchemaContractTests(unittest.TestCase):
+    def test_fresh_schema_overlap_migrations_are_ordered_and_idempotent(self) -> None:
+        migrations = sorted(path.name for path in (ROOT / "deploy/migrations").glob("*.sql"))
+        self.assertLess(
+            migrations.index("20260801_00_operator_evidence_keys.sql"),
+            migrations.index("20260801_four_domain_key_separation.sql"),
+        )
+        for fragment in (
+            "ADD COLUMN IF NOT EXISTS purge_grace_days",
+            "DROP CONSTRAINT IF EXISTS ck_event_purge_grace_days",
+            "CREATE INDEX IF NOT EXISTS ix_events_purge_due_at",
+            "CREATE TABLE IF NOT EXISTS retention_scheduler_state",
+        ):
+            self.assertIn(fragment, RETENTION_MIGRATION)
+
     def test_orm_metadata_models_the_singleton_generation_contract(self) -> None:
         self.assertIn(
             'CheckConstraint("id = 1", name="ha_cluster_state_id_check")',
@@ -90,6 +107,9 @@ class DatabaseSchemaContractTests(unittest.TestCase):
         )
         self.assertLess(migration, verification)
         self.assertLess(verification, application_start)
+        self.assertIn("Waiting for public HTTPS health", DEPLOY)
+        self.assertIn("backend is healthy, but trusted public HTTPS is unavailable", DEPLOY)
+        self.assertIn("certificate authority has rate-limited", DEPLOY)
 
     def test_recovery_evidence_contains_the_named_contract_report(self) -> None:
         evidence = shell_function(ACTIONS, "mp_collect_recovery_evidence")

@@ -1,6 +1,7 @@
 """Regression tests for production provisioning and management scripts."""
 
 from pathlib import Path
+import hashlib
 import os
 import stat
 import subprocess
@@ -191,8 +192,8 @@ def test_dynamic_migrations_run_in_filename_order(tmp_path: Path):
     installation = tmp_path / "installation"
     migrations = installation / "deploy" / "migrations"
     migrations.mkdir(parents=True)
-    (migrations / "002_second.sql").write_text("second\n", encoding="utf-8")
-    (migrations / "001_first.sql").write_text("first\n", encoding="utf-8")
+    (migrations / "20990102_second.sql").write_text("second\n", encoding="utf-8")
+    (migrations / "20990101_first.sql").write_text("first\n", encoding="utf-8")
     migration_log = tmp_path / "migrations.log"
     common = root / "deploy" / "management" / "common.sh"
     script = f'''
@@ -204,7 +205,42 @@ mp_apply_migrations
     result = _run_bash(script, {"MP_ROOT": str(installation)})
     assert result.returncode == 0, result.stderr
     assert migration_log.read_text(encoding="utf-8") == "first\nsecond\n"
-    assert result.stdout.index("001_first.sql") < result.stdout.index("002_second.sql")
+    assert result.stdout.index("20990101_first.sql") < result.stdout.index("20990102_second.sql")
+
+
+def test_dynamic_migrations_stop_at_first_sql_failure(tmp_path: Path):
+    """A later successful script must never mask an earlier migration failure."""
+    root = _server_root()
+    installation = tmp_path / "installation"
+    migrations = installation / "deploy" / "migrations"
+    migrations.mkdir(parents=True)
+    (migrations / "20990101_first.sql").write_text("first\n", encoding="utf-8")
+    (migrations / "20990102_second.sql").write_text("second\n", encoding="utf-8")
+    migration_log = tmp_path / "migrations.log"
+    common = root / "deploy" / "management" / "common.sh"
+    script = f'''\nsource "{common}"\nmp_compose_init() {{ MP_COMPOSE=(fake_compose); }}\nfake_compose() {{\n    cat >> "{migration_log}"\n    [ "$(wc -l < "{migration_log}")" -ne 1 ]\n}}\n! mp_apply_migrations\n'''
+    result = _run_bash(script, {"MP_ROOT": str(installation)})
+    assert result.returncode == 0, result.stderr
+    assert migration_log.read_text(encoding="utf-8") == "first\n"
+    assert "Migration failed: 20990101_first.sql" in result.stderr
+
+
+def test_dynamic_migrations_skip_matching_ledger_entry(tmp_path: Path):
+    """An unchanged recorded migration must not execute a second time."""
+    root = _server_root()
+    installation = tmp_path / "installation"
+    migrations = installation / "deploy" / "migrations"
+    migrations.mkdir(parents=True)
+    migration = migrations / "20990101_first.sql"
+    migration.write_text("first\n", encoding="utf-8")
+    digest = hashlib.sha256(migration.read_bytes()).hexdigest()
+    migration_log = tmp_path / "migrations.log"
+    common = root / "deploy" / "management" / "common.sh"
+    script = f'''\nsource "{common}"\nmp_compose_init() {{ MP_COMPOSE=(fake_compose); }}\nfake_compose() {{\n    case "$*" in\n        *"SELECT sha256 FROM mp_schema_migrations"*) printf '%s\\n' "{digest}" ;;\n        *) cat >> "{migration_log}" ;;\n    esac\n}}\nmp_apply_migrations\n'''
+    result = _run_bash(script, {"MP_ROOT": str(installation)})
+    assert result.returncode == 0, result.stderr
+    assert not migration_log.exists() or not migration_log.read_text(encoding="utf-8")
+    assert "Migration already applied: 20990101_first.sql" in result.stdout
 
 
 def test_caddy_validation_and_logs_follow_active_topology(tmp_path: Path):

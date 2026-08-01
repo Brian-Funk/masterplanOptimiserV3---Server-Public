@@ -284,8 +284,20 @@ for i in $(seq 1 15); do
         echo "       Backend healthy!"
         break
     fi
+    printf '       Waiting for public HTTPS health (%d/15)...\n' "$i"
     if [ "$i" -eq 15 ]; then
-        echo "  ERROR: Backend not responding. Check: docker compose logs backend"
+        if "${MP_COMPOSE[@]}" exec -T backend python -c \
+            'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3).read()' \
+            >/dev/null 2>&1; then
+            echo "  ERROR: The backend is healthy, but trusted public HTTPS is unavailable."
+            if [ "$(mp_caddy_mode)" = container ] \
+                && "${MP_COMPOSE[@]}" logs --tail 200 caddy 2>&1 | grep -q 'rateLimited'; then
+                echo "  The certificate authority has rate-limited certificate issuance."
+                echo "  Preserve Caddy certificate storage and resume after the retry time shown below."
+            fi
+        else
+            echo "  ERROR: The backend health endpoint is not responding."
+        fi
         "${MP_COMPOSE[@]}" logs --tail 100 backend >&2 || true
         case "$(mp_caddy_mode)" in
             container) "${MP_COMPOSE[@]}" logs --tail 100 caddy >&2 || true ;;

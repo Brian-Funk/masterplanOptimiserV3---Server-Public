@@ -325,14 +325,18 @@ def test_frontend_build_generates_and_reloads_build_specific_csp():
     actions = (root / "deploy" / "management" / "actions.sh").read_text(
         encoding="utf-8",
     )
+    common = (root / "deploy" / "management" / "common.sh").read_text(
+        encoding="utf-8",
+    )
 
     generator = "deploy/generate_frontend_csp.py"
     assert generator in deploy_script
     assert generator in actions
-    assert deploy_script.index("npm run build") < deploy_script.index(generator)
+    assert "npm run build" in common
+    assert deploy_script.index("mp_build_frontend_container") < deploy_script.index(generator)
     rebuild = actions[actions.index("mp_rebuild_frontend()") :]
     rebuild = rebuild[: rebuild.index("# Print one bounded service log selection")]
-    assert rebuild.index("npm run build") < rebuild.index(generator)
+    assert rebuild.index("mp_build_frontend_container") < rebuild.index(generator)
     assert rebuild.index(generator) < rebuild.index("mp_caddy_reload")
 
     for caddy_name in ("Caddyfile", "Caddyfile.local"):
