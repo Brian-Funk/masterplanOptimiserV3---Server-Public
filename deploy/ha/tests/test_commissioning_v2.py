@@ -204,6 +204,42 @@ class PairingCodeTests(unittest.TestCase):
             replacement.index('mp_setup_state_begin replace-primary'),
         )
 
+    def test_standalone_dns_wait_retries_at_thirty_second_intervals(self) -> None:
+        script = r'''
+            TEST_ROOT="$(mktemp -d)"
+            trap 'rm -rf -- "$TEST_ROOT"' EXIT
+            export MP_ROOT="$PWD" MP_STATE="$TEST_ROOT/state"
+            mkdir -p "$MP_STATE"
+            source deploy/management/setup_v2.sh
+            export MP_DNS_POLL_INTERVAL_SECONDS=30
+            TEST_ATTEMPTS="$TEST_ROOT/attempts"
+            TEST_SLEEPS="$TEST_ROOT/sleeps"
+            export TEST_ATTEMPTS TEST_SLEEPS
+            dig() {
+                local count=0
+                [ -s "$TEST_ATTEMPTS" ] && count="$(cat "$TEST_ATTEMPTS")"
+                count=$((count + 1))
+                printf '%s\n' "$count" > "$TEST_ATTEMPTS"
+                if [ "$count" -lt 3 ]; then
+                    printf '203.0.113.9\n'
+                else
+                    printf '198.51.100.7\n'
+                fi
+            }
+            sleep() { printf '%s\n' "$1" >> "$TEST_SLEEPS"; }
+            mp_setup_wait_for_standalone_dns example.test 198.51.100.7
+            printf 'attempts=%s\n' "$(cat "$TEST_ATTEMPTS")"
+            printf 'sleeps=%s\n' "$(paste -sd, "$TEST_SLEEPS")"
+        '''
+        result = subprocess.run(
+            ["bash", "-Eeuo", "pipefail", "-c", script], cwd=ROOT,
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("attempts=3", result.stdout)
+        self.assertIn("sleeps=30,30", result.stdout)
+        self.assertIn("Public DNS now resolves", result.stdout)
+
     def test_launcher_resumes_before_showing_waiting_for_primary(self) -> None:
         launcher = (ROOT / "manage.sh").read_text(encoding="utf-8")
         self.assertLess(

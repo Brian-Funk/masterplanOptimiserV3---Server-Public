@@ -262,8 +262,34 @@ mp_setup_verify_smtp_and_dns() {
     ui_message "Email verified" "SMTP delivery succeeded and public SPF, DKIM and DMARC records are visible. The TUI did not modify mail DNS."
 }
 
+mp_setup_standalone_dns_matches() {
+    local domain="$1" public_ip="$2" public_ipv6="${3:-}" answer answer6
+    answer="$(dig +short A "$domain" | grep -Fx "$public_ip" || true)"
+    [ -n "$answer" ] || return 1
+    if [ -n "$public_ipv6" ]; then
+        answer6="$(dig +short AAAA "$domain" | python3 -c 'import ipaddress,sys; expected=ipaddress.IPv6Address(sys.argv[1]); raise SystemExit(0 if any(ipaddress.IPv6Address(line.strip()) == expected for line in sys.stdin if line.strip()) else 1)' "$public_ipv6" 2>/dev/null && printf matched || true)"
+        [ "$answer6" = matched ] || return 1
+    fi
+}
+
+mp_setup_wait_for_standalone_dns() (
+    local domain="$1" public_ip="$2" public_ipv6="${3:-}" interval attempt=1 address_label=address
+    interval="${MP_DNS_POLL_INTERVAL_SECONDS:-30}"
+    [[ "$interval" =~ ^[0-9]+$ ]] || interval=30
+    trap 'return 130' INT TERM PIPE
+    while ! mp_setup_standalone_dns_matches "$domain" "$public_ip" "$public_ipv6"; do
+        printf '[%s] Public DNS is not visible yet (check %d). Retrying in %s seconds.\n' \
+            "$(date -u +%H:%M:%SZ)" "$attempt" "$interval"
+        sleep "$interval" || return $?
+        attempt=$((attempt + 1))
+    done
+    [ -z "$public_ipv6" ] || address_label=addresses
+    printf '[%s] Public DNS now resolves to the configured %s.\n' \
+        "$(date -u +%H:%M:%SZ)" "$address_label"
+)
+
 mp_setup_verify_standalone_dns() {
-    local domain public_ip public_ipv6 answer answer6 records ipv6_record=""
+    local domain public_ip public_ipv6 records ipv6_record=""
     domain="$(mp_env_get DOMAIN)" || return 1
     public_ip="$(curl -4fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
     public_ip="$(ui_input "Public DNS" "Public IPv4 address of this VPS" "$public_ip")" || return 1
@@ -283,16 +309,12 @@ mp_setup_verify_standalone_dns() {
         'Hostname: %s\n\nA record:\n  Type: A\n  Name: %s\n  Value: %s\n  TTL: 60\n  Cloudflare proxy: DNS only (grey cloud)%s' \
         "$domain" "$domain" "$public_ip" "$ipv6_record"
     ui_copyable_terminal_text "Public DNS checkpoint" "$records" \
-        "Copy these values to the DNS provider, wait for propagation, then press Enter to verify and return to commissioning." \
+        "Copy these values to the DNS provider, then press Enter. MP-OPT will check immediately and every 30 seconds until public DNS is ready." \
         || return 1
-    answer="$(dig +short A "$domain" | grep -Fx "$public_ip" || true)"
-    [ -n "$answer" ] \
-        || { ui_error "Public DNS does not yet resolve ${domain} to ${public_ip}. Wait for propagation and resume commissioning; deployment has not started."; return 1; }
-    if [ -n "$public_ipv6" ]; then
-        answer6="$(dig +short AAAA "$domain" | python3 -c 'import ipaddress,sys; expected=ipaddress.IPv6Address(sys.argv[1]); raise SystemExit(0 if any(ipaddress.IPv6Address(line.strip()) == expected for line in sys.stdin if line.strip()) else 1)' "$public_ipv6" 2>/dev/null && printf matched || true)"
-        [ "$answer6" = matched ] \
-            || { ui_error "Public DNS does not yet resolve ${domain} to ${public_ipv6}. Wait for propagation and resume commissioning; deployment has not started."; return 1; }
-    fi
+    ui_run_command "Waiting for public DNS" \
+        "Checking immediately and every 30 seconds. Press Ctrl+C or close SSH to pause safely; commissioning will resume at this checkpoint." \
+        mp_setup_wait_for_standalone_dns "$domain" "$public_ip" "$public_ipv6" \
+        || { ui_message "DNS wait paused" "Public DNS is not ready yet. No deployment was started; resume commissioning whenever you want to continue the automatic checks."; return 1; }
 }
 
 mp_setup_primary_create() {
