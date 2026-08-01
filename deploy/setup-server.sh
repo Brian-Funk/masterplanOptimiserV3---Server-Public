@@ -6,7 +6,7 @@
 set -euo pipefail
 
 [ "$(id -u)" -eq 0 ] || { echo "Run this bootstrap as root." >&2; exit 1; }
-REPOSITORY_URL="${MP_REPOSITORY_URL:-https://github.com/Brian-Funk/MasterplanOptimiserV3---Server.git}"
+REPOSITORY_URL="${MP_REPOSITORY_URL:-https://github.com/Brian-Funk/masterplanOptimiserV3---Server-Public.git}"
 REPOSITORY_REF="${MP_REPOSITORY_REF:-}"
 LAUNCH_TUI=1
 while [ "$#" -gt 0 ]; do
