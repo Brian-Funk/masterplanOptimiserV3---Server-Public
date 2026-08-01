@@ -9,6 +9,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import urllib.error
 from unittest import mock
 
 from deploy.ha import pairing
@@ -233,6 +234,66 @@ class DnsOnlyHaTests(unittest.TestCase):
 
 
 class SignedReleaseTests(unittest.TestCase):
+    @staticmethod
+    def github_error(status: int) -> urllib.error.HTTPError:
+        return urllib.error.HTTPError(
+            "https://api.github.com/repos/example/releases/latest",
+            status,
+            "simulated",
+            {},
+            None,
+        )
+
+    def test_release_discovery_retries_a_transient_404_then_succeeds(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value = io.BytesIO(b'{"tag_name":"v3.8.0"}')
+        opener = mock.Mock(side_effect=[self.github_error(404), response])
+        sleeper = mock.Mock()
+
+        self.assertEqual(
+            install_release.latest_stable_tag(opener=opener, sleeper=sleeper),
+            "v3.8.0",
+        )
+        self.assertEqual(opener.call_count, 2)
+        sleeper.assert_called_once_with(1)
+
+    def test_release_discovery_exhausts_bounded_retries_without_busy_looping(self) -> None:
+        opener = mock.Mock(
+            side_effect=[
+                self.github_error(404)
+                for _ in range(len(install_release.LATEST_RELEASE_RETRY_DELAYS) + 1)
+            ]
+        )
+        sleeper = mock.Mock()
+
+        with self.assertRaisesRegex(
+            install_release.ReleaseDiscoveryError,
+            r"failed after 4 attempt\(s\): HTTP 404",
+        ):
+            install_release.latest_stable_tag(opener=opener, sleeper=sleeper)
+
+        self.assertEqual(opener.call_count, 4)
+        self.assertEqual(
+            [call.args[0] for call in sleeper.call_args_list],
+            list(install_release.LATEST_RELEASE_RETRY_DELAYS),
+        )
+
+    def test_release_discovery_failure_does_not_create_installation_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(
+                install_release,
+                "latest_stable_tag",
+                side_effect=install_release.ReleaseDiscoveryError("simulated"),
+            ), mock.patch(
+                "sys.argv",
+                ["install_release.py", "--repo-root", str(root)],
+            ):
+                with self.assertRaises(install_release.ReleaseDiscoveryError):
+                    install_release.main()
+
+            self.assertEqual(list(root.iterdir()), [])
+
     def test_release_contains_signed_operations_frontend_and_images(self) -> None:
         self.assertIn("operations.tar.gz", RELEASE)
         self.assertIn("cosign sign-blob", RELEASE)

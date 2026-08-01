@@ -11,8 +11,11 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 
 REPOSITORY = "Brian-Funk/masterplanOptimiserV3---Server-Public"
@@ -26,6 +29,57 @@ IDENTITY = (
     r"\.github/workflows/release\.yml@refs/(?:tags/v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$"
 )
 IMAGE = re.compile(r"^ghcr\.io/brian-funk/masterplanoptimiserv3---server/[a-z-]+@sha256:[0-9a-f]{64}$")
+LATEST_RELEASE_RETRY_DELAYS = (1, 2, 4)
+TRANSIENT_RELEASE_HTTP_STATUSES = {404, 408, 425, 429, 500, 502, 503, 504}
+
+
+class ReleaseDiscoveryError(RuntimeError):
+    """The stable release could not be resolved without weakening trust."""
+
+
+def latest_stable_tag(
+    repository: str = REPOSITORY,
+    *,
+    opener=urllib.request.urlopen,
+    sleeper=time.sleep,
+) -> str:
+    """Resolve the latest stable tag with bounded retries for transient failures."""
+
+    url = f"https://api.github.com/repos/{repository}/releases/latest"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "mp-opt-release-installer/1",
+        },
+    )
+    attempts = len(LATEST_RELEASE_RETRY_DELAYS) + 1
+    for attempt in range(attempts):
+        try:
+            with opener(request, timeout=30) as response:
+                payload = json.load(response)
+            tag = payload.get("tag_name") if isinstance(payload, dict) else None
+            if not isinstance(tag, str) or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
+                raise ReleaseDiscoveryError(
+                    "GitHub's latest release response has no stable semantic-version tag"
+                )
+            return tag
+        except urllib.error.HTTPError as error:
+            retryable = error.code in TRANSIENT_RELEASE_HTTP_STATUSES
+            detail = f"HTTP {error.code}"
+            cause = error
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            retryable = True
+            detail = type(error).__name__
+            cause = error
+
+        if not retryable or attempt == attempts - 1:
+            raise ReleaseDiscoveryError(
+                f"GitHub latest-release discovery failed after {attempt + 1} attempt(s): {detail}"
+            ) from cause
+        sleeper(LATEST_RELEASE_RETRY_DELAYS[attempt])
+
+    raise AssertionError("release discovery retry loop exited unexpectedly")
 
 
 def download(url: str, target: Path, limit: int) -> None:
@@ -154,13 +208,7 @@ def main() -> int:
     if args.rollback:
         return rollback(root)
     if args.tag == "latest":
-        with urllib.request.urlopen(
-            urllib.request.Request(
-                f"https://api.github.com/repos/{REPOSITORY}/releases/latest",
-                headers={"User-Agent": "mp-opt-release-installer/1"},
-            ), timeout=30,
-        ) as response:
-            tag = str(json.load(response)["tag_name"])
+        tag = latest_stable_tag()
     else:
         tag = args.tag
     if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
@@ -331,4 +379,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except ReleaseDiscoveryError as error:
+        print(f"Release discovery failed: {error}", file=sys.stderr)
+        raise SystemExit(1) from None
