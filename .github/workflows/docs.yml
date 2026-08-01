@@ -83,13 +83,13 @@ jobs:
         run: mkdocs build --strict
 
       - name: Configure GitHub Pages
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && (github.event.repository.visibility == 'public' || !endsWith(github.repository, '-Public'))
         uses: actions/configure-pages@v5
         with:
           enablement: true
 
       - name: Upload GitHub Pages artefact
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && (github.event.repository.visibility == 'public' || !endsWith(github.repository, '-Public'))
         uses: actions/upload-pages-artifact@v4
         with:
           path: site
@@ -97,7 +97,7 @@ jobs:
   deploy-docs:
     name: Deploy documentation
     needs: build-docs
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && (github.event.repository.visibility == 'public' || !endsWith(github.repository, '-Public'))
     runs-on: ubuntu-latest
     permissions:
       pages: write
