@@ -379,7 +379,10 @@ apply_commit() {
     if grep -qw frontend <<< "$components"; then
         sync_frontend "$MP_TEST_SOURCE"
     fi
-    if grep -qw witness <<< "$components"; then
+    # A commit may contain HA witness changes while being validated on a
+    # standalone server. Keep those sources in the exact checkout, but publish
+    # the external Worker only for an active dynamic-HA topology.
+    if [ "$role" = dynamic ] && grep -qw witness <<< "$components"; then
         deploy_witness "$target"
     fi
     compose_activate "$components"

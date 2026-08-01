@@ -40,6 +40,12 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("MP_PUBLIC_SOURCE_REVISION=$revision", common)
         self.assertIn('[[ "$revision" =~ ^[0-9a-f]{40}$ ]]', common)
 
+    def test_standalone_test_deployment_never_publishes_ha_witness(self) -> None:
+        self.assertIn(
+            'if [ "$role" = dynamic ] && grep -qw witness <<< "$components"',
+            SUPERVISOR,
+        )
+
     def test_accepts_only_exact_lowercase_commits_and_canonical_tags(self) -> None:
         commit = "a" * 40
         self.assertEqual(MODULE.require_commit(commit), commit)
