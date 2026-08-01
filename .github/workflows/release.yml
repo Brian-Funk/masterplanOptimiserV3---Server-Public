@@ -277,7 +277,7 @@ jobs:
           identity="https://github.com/${GITHUB_WORKFLOW_REF}"
           release="$(curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
-          jq -e --arg tag "$TAG" '.tag_name == $tag && .name == $tag && .draft == false && .prerelease == false' \
+          jq -e --arg tag "$TAG" '.tag_name == $tag and .name == $tag and .draft == false and .prerelease == false' \
             <<< "$release" >/dev/null
           verification_dir="$(mktemp -d)"
           trap 'rm -rf "$verification_dir"' EXIT
