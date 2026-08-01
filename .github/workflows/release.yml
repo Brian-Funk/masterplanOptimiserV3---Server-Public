@@ -69,7 +69,11 @@ jobs:
             [[ "$tag_commit" == "$GITHUB_SHA" ]]
             [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
           fi
-          [[ -z "$(gh release view "$TAG" --json id --jq .id 2>/dev/null || true)" ]]
+          existing_release_id="$(gh release view "$TAG" --json id --jq .id 2>/dev/null || true)"
+          if [[ -n "$existing_release_id" && -z "$RECOVERY_TAG" ]]; then
+            echo "Release $TAG already exists outside guarded recovery mode." >&2
+            exit 1
+          fi
           tag_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}")"
           tag_object="$(jq -er '.object.sha' <<< "$tag_ref")"
           tag_record="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}")"
@@ -84,6 +88,11 @@ jobs:
             || { echo "server-ci-result is $status/$conclusion for $tag_commit" >&2; exit 1; }
           echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "release_commit=$tag_commit" >> "$GITHUB_OUTPUT"
+          if [[ -n "$existing_release_id" ]]; then
+            echo "release_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_exists=false" >> "$GITHUB_OUTPUT"
+          fi
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           echo "RELEASE_COMMIT=$tag_commit" >> "$GITHUB_ENV"
       - name: Verify public source distribution
@@ -99,12 +108,14 @@ jobs:
               "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${TAG}/deploy/setup-server.sh" \
               --output /dev/null
       - name: Log in to GHCR
+        if: steps.release.outputs.release_exists != 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Resolve previous signed release and component plan
+        if: steps.release.outputs.release_exists != 'true'
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
@@ -132,6 +143,7 @@ jobs:
           echo "previous_manifest=$previous_manifest" >> "$GITHUB_OUTPUT"
           echo "components=$components" >> "$GITHUB_OUTPUT"
       - name: Build changed images and reuse unchanged digests
+        if: steps.release.outputs.release_exists != 'true'
         id: images
         env:
           REGISTRY: ghcr.io/brian-funk/masterplanoptimiserv3---server
@@ -173,6 +185,7 @@ jobs:
               || { echo "${reference} is not anonymously readable. Make every production GHCR package public." >&2; exit 1; }
           done
       - name: Build static frontend asset
+        if: steps.release.outputs.release_exists != 'true'
         working-directory: web
         env:
           MP_PUBLIC_SOURCE_REPOSITORY_URL: https://github.com/${{ github.repository }}
@@ -185,6 +198,7 @@ jobs:
           npm run lint
           npm run build
       - name: Generate CycloneDX software bills of materials
+        if: steps.release.outputs.release_exists != 'true'
         env:
           BACKEND: ${{ steps.images.outputs.backend }}
           CADDY: ${{ steps.images.outputs.caddy }}
@@ -213,6 +227,7 @@ jobs:
             jq -e '.bomFormat == "CycloneDX" and (.components | type == "array")' "$sbom" >/dev/null
           done
       - name: Create and sign release manifest
+        if: steps.release.outputs.release_exists != 'true'
         env:
           BACKEND: ${{ steps.images.outputs.backend }}
           CADDY: ${{ steps.images.outputs.caddy }}
@@ -258,6 +273,7 @@ jobs:
                 tools:{asset:"sbom-tools.cdx.json",sha256:$sbom_tools_sha}}}' > release-manifest.json
           cosign sign-blob --yes --bundle release-manifest.bundle release-manifest.json
       - name: Publish immutable GitHub Release
+        if: steps.release.outputs.release_exists != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -266,11 +282,6 @@ jobs:
             --verify-tag --generate-notes --title "$TAG"
           [[ "$(gh release view "$TAG" --json name,tagName --jq '.name + " " + .tagName')" == "$TAG $TAG" ]]
       - name: Verify anonymous public release
-        env:
-          BACKEND: ${{ steps.images.outputs.backend }}
-          CADDY: ${{ steps.images.outputs.caddy }}
-          POSTGRES: ${{ steps.images.outputs.postgres }}
-          TOOLS: ${{ steps.images.outputs.tools }}
         run: |
           set -Eeuo pipefail
           unset GH_TOKEN GITHUB_TOKEN
@@ -315,6 +326,11 @@ jobs:
           verify_asset .sboms.caddy
           verify_asset .sboms.postgres
           verify_asset .sboms.tools
+          image_pattern='^ghcr\.io/brian-funk/masterplanoptimiserv3---server/(backend|caddy|postgres|tools)@sha256:[0-9a-f]{64}$'
+          BACKEND="$(jq -er --arg pattern "$image_pattern" '.images.backend | select(test($pattern))' release-manifest.json)"
+          CADDY="$(jq -er --arg pattern "$image_pattern" '.images.caddy | select(test($pattern))' release-manifest.json)"
+          POSTGRES="$(jq -er --arg pattern "$image_pattern" '.images.postgres | select(test($pattern))' release-manifest.json)"
+          TOOLS="$(jq -er --arg pattern "$image_pattern" '.images.tools | select(test($pattern))' release-manifest.json)"
           docker logout ghcr.io >/dev/null 2>&1 || true
           for reference in "$BACKEND" "$CADDY" "$POSTGRES" "$TOOLS"; do
             docker buildx imagetools inspect "$reference" >/dev/null
