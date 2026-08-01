@@ -21,7 +21,7 @@ frozenlist==1.8.0
 greenlet==3.5.4
 h11==0.16.0
 http_ece==1.2.1
-httpcore2==2.7.0
+httpcore2==2.9.1
 httptools==0.8.0
 httpx2==2.7.0
 idna==3.18
