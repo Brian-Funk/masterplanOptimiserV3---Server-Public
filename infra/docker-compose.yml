@@ -11,7 +11,7 @@ x-bounded-logging: &bounded-logging
 
 services:
   db:
-    image: ${MP_POSTGRES_IMAGE:-masterplan-postgres:18-hardened}
+    image: ${MP_POSTGRES_IMAGE:-masterplan-postgres:16-hardened}
     build:
       context: ..
       dockerfile: infra/Dockerfile.postgres

@@ -138,7 +138,7 @@ jobs:
           pull_with_retry aquasec/trivy:0.72.0
           if [[ "$BACKEND" == true ]]; then pull_with_retry python:3.14-alpine; fi
           if [[ "$CADDY" == true ]]; then pull_with_retry golang:1.26.5-alpine; pull_with_retry caddy:2-alpine; fi
-          if [[ "$DATABASE" == true ]]; then pull_with_retry golang:1.26.5-alpine; pull_with_retry postgres:18-alpine; fi
+          if [[ "$DATABASE" == true ]]; then pull_with_retry golang:1.26.5-alpine; pull_with_retry postgres:16-alpine; fi
           if [[ "$TOOLS" == true ]]; then pull_with_retry node:25-alpine; fi
           declare -a images=()
           if [[ "$BACKEND" == true ]]; then docker build -f infra/Dockerfile -t mp-opt-backend:ci .; images+=(mp-opt-backend:ci); fi
@@ -177,7 +177,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:18
+        image: postgres:16
         env:
           POSTGRES_DB: masterplan_test
           POSTGRES_USER: masterplan_test

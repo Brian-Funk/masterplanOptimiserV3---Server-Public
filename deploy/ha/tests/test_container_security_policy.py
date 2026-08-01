@@ -90,7 +90,7 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
         self.assertIn("RUN apk upgrade --no-cache", caddy)
         self.assertIn("ARG GO_VERSION=1.26.5", postgres)
         self.assertIn("go install github.com/tianon/gosu@${GOSU_VERSION}", postgres)
-        self.assertIn("FROM postgres:18-alpine", postgres)
+        self.assertIn("FROM postgres:16-alpine", postgres)
         self.assertIn("FROM node:25-alpine", tools)
         self.assertIn("ARG WRANGLER_VERSION=4.115.0", tools)
         self.assertIn("RUN apk upgrade --no-cache", tools)
@@ -134,7 +134,7 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
             "python:3.14-alpine",
             "golang:1.26.5-alpine",
             "caddy:2-alpine",
-            "postgres:18-alpine",
+            "postgres:16-alpine",
             "aquasec/trivy:0.72.0",
         ):
             self.assertIn(image, workflow)
