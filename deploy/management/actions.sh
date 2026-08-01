@@ -91,7 +91,7 @@ mp_guided_initial_configuration() {
     local configure_smtp smtp_host smtp_port smtp_username smtp_token smtp_repeat
     local smtp_security smtp_from_email smtp_from_name smtp_reply_to staging
 
-    domain="$(ui_input "Site identity" "Public application domain" "mp-opt.net")" || return 1
+    domain="$(ui_input "Site identity" "Public application domain (for example schedule.example.org)" "")" || return 1
     mp_validate_hostname "$domain" || { ui_error "Enter a valid DNS hostname."; return 1; }
     app_name="$(ui_input "Site identity" "Passkey application name" "Masterplan Access")" || return 1
     mp_validate_env_value "$app_name" || { ui_error "The application name contains unsupported configuration characters."; return 1; }
@@ -107,7 +107,7 @@ mp_guided_initial_configuration() {
             || { ui_error "The database password does not meet the required format."; return 1; }
     fi
 
-    claims_email="$(ui_input "Web push" "VAPID contact email" "access@${domain}")" || return 1
+    claims_email="$(ui_input "Web push" "VAPID contact email (for example admin@example.org)" "")" || return 1
     mp_validate_email_address "$claims_email" || { ui_error "Enter a valid VAPID contact email."; return 1; }
     vapid="$(mp_generate_vapid_private_key)"
     root_token="$(mp_random_secret)"
@@ -118,22 +118,22 @@ mp_guided_initial_configuration() {
     smtp_security="starttls"; smtp_from_email=""; smtp_from_name="Masterplan Access"; smtp_reply_to=""
     if ui_confirm "Optional activation email" "Configure SMTP activation email now? You can safely skip this and configure it later."; then
         configure_smtp="yes"
-        smtp_host="$(ui_input "SMTP" "SMTP hostname" "smtp.protonmail.ch")" || return 1
+        smtp_host="$(ui_input "SMTP" "SMTP hostname (for example smtp.example.org)" "")" || return 1
         mp_validate_hostname "$smtp_host" || { ui_error "Enter a valid SMTP hostname."; return 1; }
         smtp_port="$(ui_input "SMTP" "SMTP port" "587")" || return 1
         [[ "$smtp_port" =~ ^[0-9]+$ ]] && [ "$smtp_port" -ge 1 ] && [ "$smtp_port" -le 65535 ] \
             || { ui_error "SMTP port must be between 1 and 65535."; return 1; }
         smtp_security="$(ui_menu "SMTP" "Connection security" "starttls" "STARTTLS, usually port 587" "tls" "Implicit TLS, usually port 465")" || return 1
-        smtp_username="$(ui_input "SMTP" "SMTP username")" || return 1
+        smtp_username="$(ui_input "SMTP" "SMTP username (for example notifications@example.org)")" || return 1
         mp_validate_env_value "$smtp_username" || { ui_error "The SMTP username contains unsupported configuration characters."; return 1; }
         smtp_token="$(ui_password "SMTP" "Provider-issued SMTP token")" || return 1
         smtp_repeat="$(ui_password "SMTP" "Repeat the SMTP token")" || return 1
         [ -n "$smtp_token" ] && [ "$smtp_token" = "$smtp_repeat" ] || { ui_error "The SMTP tokens do not match."; return 1; }
-        smtp_from_email="$(ui_input "SMTP" "Sender email" "access@${domain}")" || return 1
+        smtp_from_email="$(ui_input "SMTP" "Sender email (for example notifications@example.org)" "")" || return 1
         mp_validate_email_address "$smtp_from_email" || { ui_error "Enter a valid sender email."; return 1; }
         smtp_from_name="$(ui_input "SMTP" "Sender display name" "Masterplan Access")" || return 1
         mp_validate_env_value "$smtp_from_name" || { ui_error "The sender name contains unsupported configuration characters."; return 1; }
-        smtp_reply_to="$(ui_input "SMTP" "Optional reply-to email")" || return 1
+        smtp_reply_to="$(ui_input "SMTP" "Optional reply-to email (for example support@example.org)")" || return 1
         if [ -n "$smtp_reply_to" ] && ! mp_validate_email_address "$smtp_reply_to"; then
             ui_error "Enter a valid reply-to email or leave it blank."
             return 1
@@ -272,18 +272,18 @@ mp_configure_smtp() {
     local host port username security from_email from_name reply_to token token_repeat
     local staging old_env old_token status
     mp_require_active_or_standalone || return 1
-    host="$(ui_input "SMTP" "SMTP hostname" "$(mp_env_get SMTP_HOST 2>/dev/null || printf smtp.protonmail.ch)")" || return 1
+    host="$(ui_input "SMTP" "SMTP hostname (for example smtp.example.org)" "$(mp_env_get SMTP_HOST 2>/dev/null || true)")" || return 1
     mp_validate_hostname "$host" || { ui_error "Enter a valid SMTP hostname."; return 1; }
     port="$(ui_input "SMTP" "SMTP port" "$(mp_env_get SMTP_PORT 2>/dev/null || printf 587)")" || return 1
     [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { ui_error "Invalid SMTP port."; return 1; }
     security="$(ui_menu "SMTP" "Connection security" "starttls" "STARTTLS" "tls" "Implicit TLS")" || return 1
-    username="$(ui_input "SMTP" "SMTP username" "$(mp_env_get SMTP_USERNAME 2>/dev/null || true)")" || return 1
+    username="$(ui_input "SMTP" "SMTP username (for example notifications@example.org)" "$(mp_env_get SMTP_USERNAME 2>/dev/null || true)")" || return 1
     mp_validate_env_value "$username" || { ui_error "The SMTP username contains unsupported configuration characters."; return 1; }
-    from_email="$(ui_input "SMTP" "Sender email" "$(mp_env_get SMTP_FROM_EMAIL 2>/dev/null || true)")" || return 1
+    from_email="$(ui_input "SMTP" "Sender email (for example notifications@example.org)" "$(mp_env_get SMTP_FROM_EMAIL 2>/dev/null || true)")" || return 1
     mp_validate_email_address "$from_email" || { ui_error "Enter a valid sender email."; return 1; }
     from_name="$(ui_input "SMTP" "Sender display name" "$(mp_env_get SMTP_FROM_NAME 2>/dev/null || printf 'Masterplan Access')")" || return 1
     mp_validate_env_value "$from_name" || { ui_error "The sender name contains unsupported configuration characters."; return 1; }
-    reply_to="$(ui_input "SMTP" "Optional reply-to email" "$(mp_env_get SMTP_REPLY_TO 2>/dev/null || true)")" || return 1
+    reply_to="$(ui_input "SMTP" "Optional reply-to email (for example support@example.org)" "$(mp_env_get SMTP_REPLY_TO 2>/dev/null || true)")" || return 1
     [ -z "$reply_to" ] || mp_validate_email_address "$reply_to" || { ui_error "Invalid reply-to email."; return 1; }
     token="$(ui_password "SMTP" "Provider-issued SMTP token")" || return 1
     token_repeat="$(ui_password "SMTP" "Repeat the SMTP token")" || return 1

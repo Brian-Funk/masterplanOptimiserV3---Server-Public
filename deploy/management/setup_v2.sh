@@ -119,7 +119,7 @@ mp_setup_present_bootstrap() {
 
 mp_setup_prepare_node_material() {
     local node_id="$1" identity ssh_key public_ip public_ipv6 confirmed
-    mp_require_commands age age-keygen curl jq openssl ssh ssh-keygen || return 1
+    mp_require_commands age age-keygen jq openssl ssh ssh-keygen || return 1
     sudo -n install -d -o "$USER" -g "$(id -gn)" -m 0700 "$MP_HA_HOME" "$MP_HA_HOME/secrets" || return 1
     identity="$MP_HA_HOME/secrets/replication_age_identity"
     ssh_key="$HOME/.ssh/mp_opt_ha_peer"
@@ -132,14 +132,12 @@ mp_setup_prepare_node_material() {
         ssh-keygen -q -t ed25519 -N '' -C "mp-opt-${node_id}" -f "$ssh_key" || return 1
     fi
     chmod 600 "$ssh_key"; chmod 644 "$ssh_key.pub"
-    public_ip="$(curl -4fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
-    public_ip="$(ui_input "Public address" "Public IPv4 address for this VPS" "$public_ip")" || return 1
+    public_ip="$(ui_input "Public address" "Public IPv4 address for this VPS (for example 203.0.113.10)" "")" || return 1
     python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$public_ip" \
         || { ui_error "Enter a valid public IPv4 address."; return 1; }
-    confirmed="$(ui_input "Public address" "Type the public IPv4 address once more" "$public_ip")" || return 1
+    confirmed="$(ui_input "Public address" "Type the public IPv4 address once more" "")" || return 1
     [ "$public_ip" = "$confirmed" ] || { ui_error "The public IPv4 addresses do not match."; return 1; }
-    public_ipv6="$(curl -6fsS --max-time 10 https://api64.ipify.org 2>/dev/null || true)"
-    public_ipv6="$(ui_input "Public address" "Optional public IPv6 address for this VPS" "$public_ipv6")" || return 1
+    public_ipv6="$(ui_input "Public address" "Optional public IPv6 address for this VPS (for example 2001:db8::10)" "")" || return 1
     [ -z "$public_ipv6" ] \
         || python3 -c 'import ipaddress,sys; ipaddress.IPv6Address(sys.argv[1])' "$public_ipv6" \
         || { ui_error "Enter a valid public IPv6 address or leave it blank."; return 1; }
@@ -261,7 +259,7 @@ mp_setup_verify_smtp_and_dns() {
     fi
     from_email="$(mp_env_get SMTP_FROM_EMAIL)" || return 1
     domain="${from_email##*@}"
-    selector="$(ui_input "Email DNS" "DKIM selector supplied by the SMTP provider (the part before ._domainkey)" "default")" || return 1
+    selector="$(ui_input "Email DNS" "DKIM selector supplied by the SMTP provider (for example default or provider1; the part before ._domainkey)" "")" || return 1
     [[ "$selector" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] \
         || { ui_error "Enter the DKIM selector exactly as supplied by the mail provider."; return 1; }
     printf -v records \
@@ -311,12 +309,10 @@ mp_setup_wait_for_standalone_dns() (
 mp_setup_verify_standalone_dns() {
     local domain public_ip public_ipv6 records ipv6_record=""
     domain="$(mp_env_get DOMAIN)" || return 1
-    public_ip="$(curl -4fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
-    public_ip="$(ui_input "Public DNS" "Public IPv4 address of this VPS" "$public_ip")" || return 1
+    public_ip="$(ui_input "Public DNS" "Public IPv4 address of this VPS (for example 203.0.113.10)" "")" || return 1
     python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$public_ip" \
         || { ui_error "Enter a valid public IPv4 address."; return 1; }
-    public_ipv6="$(curl -6fsS --max-time 10 https://api64.ipify.org 2>/dev/null || true)"
-    public_ipv6="$(ui_input "Public DNS" "Optional public IPv6 address of this VPS" "$public_ipv6")" || return 1
+    public_ipv6="$(ui_input "Public DNS" "Optional public IPv6 address of this VPS (for example 2001:db8::10)" "")" || return 1
     [ -z "$public_ipv6" ] \
         || python3 -c 'import ipaddress,sys; ipaddress.IPv6Address(sys.argv[1])' "$public_ipv6" \
         || { ui_error "Enter a valid public IPv6 address or leave it blank."; return 1; }

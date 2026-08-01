@@ -706,9 +706,9 @@ def test_initial_wizard_can_skip_smtp_without_putting_secrets_in_env(tmp_path: P
         ui_message() { return 0; }
         ui_input() {
             case "$2" in
-                "Public application domain") printf '%s\n' 'mp-opt.net' ;;
+                "Public application domain (for example schedule.example.org)") printf '%s\n' 'schedule.example.org' ;;
                 "Passkey application name") printf '%s\n' 'Masterplan Access' ;;
-                "VAPID contact email") printf '%s\n' 'access@mp-opt.net' ;;
+                "VAPID contact email (for example admin@example.org)") printf '%s\n' 'admin@example.org' ;;
                 *) return 1 ;;
             esac
         }

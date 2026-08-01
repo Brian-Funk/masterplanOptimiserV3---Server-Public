@@ -20,6 +20,7 @@ from deploy.release import install_release
 ROOT = Path(__file__).resolve().parents[3]
 SETUP = (ROOT / "deploy/management/setup_v2.sh").read_text(encoding="utf-8")
 COMMON = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
+ACTIONS = (ROOT / "deploy/management/actions.sh").read_text(encoding="utf-8")
 DEPLOY = (ROOT / "deploy/deploy.sh").read_text(encoding="utf-8")
 WORKER = (ROOT / "infra/cloudflare-ha-witness/src/index.ts").read_text(encoding="utf-8")
 CADDY = (ROOT / "infra/Caddyfile.ha").read_text(encoding="utf-8")
@@ -41,6 +42,31 @@ def shell_function(source: str, name: str) -> str:
 
 
 class PairingCodeTests(unittest.TestCase):
+    def test_operator_owned_values_have_neutral_examples_not_deployment_presets(self) -> None:
+        guided = shell_function(ACTIONS, "mp_guided_initial_configuration")
+        configure_smtp = shell_function(ACTIONS, "mp_configure_smtp")
+        node_material = shell_function(SETUP, "mp_setup_prepare_node_material")
+        standalone_dns = shell_function(SETUP, "mp_setup_verify_standalone_dns")
+        smtp_dns = shell_function(SETUP, "mp_setup_verify_smtp_and_dns")
+
+        self.assertNotIn("mp-opt.net", guided)
+        self.assertNotIn("smtp.protonmail.ch", guided)
+        self.assertNotIn("access@", guided)
+        self.assertNotIn("smtp.protonmail.ch", configure_smtp)
+        self.assertIn("schedule.example.org", guided)
+        self.assertIn("admin@example.org", guided)
+        self.assertIn("smtp.example.org", guided)
+        self.assertIn("notifications@example.org", guided)
+        self.assertIn("support@example.org", guided)
+
+        for prompt in (node_material, standalone_dns):
+            self.assertNotIn("api.ipify.org", prompt)
+            self.assertNotIn("api64.ipify.org", prompt)
+            self.assertIn("203.0.113.10", prompt)
+            self.assertIn("2001:db8::10", prompt)
+        self.assertNotIn('"default")', smtp_dns)
+        self.assertIn("default or provider1", smtp_dns)
+
     def test_full_loss_runbook_links_the_current_destructive_gate(self) -> None:
         self.assertIn(
             "[destructive recovery drill completion gate]"
