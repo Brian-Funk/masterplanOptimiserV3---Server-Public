@@ -204,6 +204,21 @@ class PairingCodeTests(unittest.TestCase):
             replacement.index('mp_setup_state_begin replace-primary'),
         )
 
+    def test_test_policy_restores_exact_management_checkout_after_signed_baseline(self) -> None:
+        install = shell_function(SETUP, "mp_setup_install_signed_release")
+        restore = shell_function(SETUP, "mp_setup_restore_test_management_checkout")
+        installer = install.index("install_release.py")
+        self.assertGreater(
+            install.index("mp_setup_restore_test_management_checkout", installer),
+            installer,
+        )
+        self.assertGreaterEqual(install.count("mp_setup_restore_test_management_checkout"), 2)
+        self.assertIn('= test ] || return 0', restore)
+        self.assertIn('git -C "$MP_ROOT" rev-parse HEAD', restore)
+        self.assertIn('restore --source="$commit" --', restore)
+        self.assertIn("deploy manage.sh configure-production.sh", restore)
+        self.assertIn("diff --quiet --ignore-submodules", restore)
+
     def test_standalone_dns_wait_retries_at_thirty_second_intervals(self) -> None:
         script = r'''
             TEST_ROOT="$(mktemp -d)"

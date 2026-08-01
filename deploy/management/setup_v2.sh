@@ -11,10 +11,28 @@ MP_SETUP_V2_PENDING_LOCAL_JOIN="${MP_SETUP_V2_PENDING_LOCAL_JOIN:-$MP_STATE/pend
 MP_SETUP_V2_PENDING_REPLACEMENT="${MP_SETUP_V2_PENDING_REPLACEMENT:-$MP_STATE/pending-replacement-request.json}"
 MP_SETUP_V2_IMPORT_RECEIPT="${MP_SETUP_V2_IMPORT_RECEIPT:-$MP_STATE/setup-import-receipt.json}"
 
+# A signed baseline replaces the active management scripts with its bundled
+# operations. On an explicitly test-policy VPS, restore only the exact pushed
+# management checkout that launched commissioning so campaign fixes remain in
+# effect without rebuilding or relabelling the signed application images.
+mp_setup_restore_test_management_checkout() {
+    local commit
+    [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)" = test ] || return 0
+    commit="$(git -C "$MP_ROOT" rev-parse HEAD 2>/dev/null || true)"
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
+    git -C "$MP_ROOT" cat-file -e "${commit}^{commit}" || return 1
+    git -C "$MP_ROOT" restore --source="$commit" -- \
+        deploy manage.sh configure-production.sh || return 1
+    git -C "$MP_ROOT" diff --quiet --ignore-submodules -- \
+        deploy manage.sh configure-production.sh
+}
+
 mp_setup_install_signed_release() {
     if [ -s "$MP_ROOT/.release.env" ] \
         && grep -Eq '^MP_TOOLS_IMAGE=ghcr\.io/brian-funk/masterplanoptimiserv3---server/tools@sha256:[0-9a-f]{64}$' \
             "$MP_ROOT/.release.env"; then
+        mp_setup_restore_test_management_checkout \
+            || { ui_error "The signed baseline exists, but the exact test-campaign management checkout could not be restored. Commissioning remains paused."; return 1; }
         [ "$(jq -r '.state // empty' "$MP_SETUP_V2_STATE" 2>/dev/null || true)" != in_progress ] \
             || mp_setup_state_mark signed_release
         return 0
@@ -23,6 +41,8 @@ mp_setup_install_signed_release() {
         "Verifying the newest stable release and downloading immutable images" \
         python3 "$MP_ROOT/deploy/release/install_release.py" --repo-root "$MP_ROOT" \
         || { ui_error "The signed production release could not be installed. Check internet access and resume setup; no application data was changed."; return 1; }
+    mp_setup_restore_test_management_checkout \
+        || { ui_error "The signed baseline was installed, but the exact test-campaign management checkout could not be restored. Commissioning stopped before configuration or deployment."; return 1; }
     [ "$(jq -r '.state // empty' "$MP_SETUP_V2_STATE" 2>/dev/null || true)" != in_progress ] \
         || mp_setup_state_mark signed_release
 }
