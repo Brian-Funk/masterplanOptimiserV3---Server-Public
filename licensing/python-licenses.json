@@ -84,7 +84,7 @@
       "license": "MIT",
       "project_url": "https://pypi.org/project/http-ece/"
     },
-    "httpcore2==2.7.0": {
+    "httpcore2==2.9.1": {
       "license": "BSD-3-Clause",
       "project_url": "https://pypi.org/project/httpcore2/"
     },
@@ -92,7 +92,7 @@
       "license": "MIT",
       "project_url": "https://pypi.org/project/httptools/"
     },
-    "httpx2==2.7.0": {
+    "httpx2==2.9.1": {
       "license": "BSD-3-Clause",
       "project_url": "https://pypi.org/project/httpx2/"
     },
@@ -132,11 +132,15 @@
       "license": "BSD-2-Clause",
       "project_url": "https://pypi.org/project/pyasn1/"
     },
+    "pyasn1-modules==0.4.2": {
+      "license": "BSD-2-Clause",
+      "project_url": "https://pypi.org/project/pyasn1-modules/"
+    },
     "pycparser==3.0": {
       "license": "BSD-3-Clause",
       "project_url": "https://pypi.org/project/pycparser/"
     },
-    "pydantic-core==2.23.4": {
+    "pydantic-core==2.46.4": {
       "license": "MIT",
       "project_url": "https://pypi.org/project/pydantic_core/"
     },
@@ -144,7 +148,7 @@
       "license": "MIT",
       "project_url": "https://pypi.org/project/pydantic-settings/"
     },
-    "pydantic==2.9.2": {
+    "pydantic==2.13.4": {
       "license": "MIT",
       "project_url": "https://pypi.org/project/pydantic/"
     },
@@ -176,7 +180,7 @@
       "license": "MIT",
       "project_url": "https://pypi.org/project/slowapi/"
     },
-    "sqlalchemy==2.0.35": {
+    "sqlalchemy==2.0.51": {
       "license": "MIT",
       "project_url": "https://pypi.org/project/SQLAlchemy/"
     },
@@ -212,7 +216,7 @@
       "license": "MIT",
       "project_url": "https://pypi.org/project/watchfiles/"
     },
-    "webauthn==2.7.1": {
+    "webauthn==3.0.0": {
       "license": "BSD-3-Clause",
       "project_url": "https://pypi.org/project/webauthn/"
     },
@@ -220,7 +224,7 @@
       "license": "BSD-3-Clause",
       "project_url": "https://pypi.org/project/websockets/"
     },
-    "wrapt==2.2.2": {
+    "wrapt==2.3.0": {
       "license": "BSD-2-Clause",
       "project_url": "https://pypi.org/project/wrapt/"
     },

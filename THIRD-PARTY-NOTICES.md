@@ -30,9 +30,9 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | greenlet | 3.5.4 | MIT AND PSF-2.0 | https://pypi.org/project/greenlet/ |
 | h11 | 0.16.0 | MIT | https://pypi.org/project/h11/ |
 | http-ece | 1.2.1 | MIT | https://pypi.org/project/http-ece/ |
-| httpcore2 | 2.7.0 | BSD-3-Clause | https://pypi.org/project/httpcore2/ |
+| httpcore2 | 2.9.1 | BSD-3-Clause | https://pypi.org/project/httpcore2/ |
 | httptools | 0.8.0 | MIT | https://pypi.org/project/httptools/ |
-| httpx2 | 2.7.0 | BSD-3-Clause | https://pypi.org/project/httpx2/ |
+| httpx2 | 2.9.1 | BSD-3-Clause | https://pypi.org/project/httpx2/ |
 | idna | 3.18 | BSD-3-Clause | https://pypi.org/project/idna/ |
 | limits | 5.8.0 | MIT | https://pypi.org/project/limits/ |
 | multidict | 6.7.1 | Apache License 2.0 | https://pypi.org/project/multidict/ |
@@ -41,11 +41,12 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | propcache | 0.5.2 | Apache-2.0 | https://pypi.org/project/propcache/ |
 | psycopg2-binary | 2.9.10 | LGPL with exceptions | https://pypi.org/project/psycopg2-binary/ |
 | py-vapid | 1.9.4 | MPL-2.0 | https://pypi.org/project/py-vapid/ |
+| pyasn1-modules | 0.4.2 | BSD-2-Clause | https://pypi.org/project/pyasn1-modules/ |
 | pyasn1 | 0.6.4 | BSD-2-Clause | https://pypi.org/project/pyasn1/ |
 | pycparser | 3.0 | BSD-3-Clause | https://pypi.org/project/pycparser/ |
-| pydantic-core | 2.23.4 | MIT | https://pypi.org/project/pydantic_core/ |
+| pydantic-core | 2.46.4 | MIT | https://pypi.org/project/pydantic_core/ |
 | pydantic-settings | 2.6.0 | MIT | https://pypi.org/project/pydantic-settings/ |
-| pydantic | 2.9.2 | MIT | https://pypi.org/project/pydantic/ |
+| pydantic | 2.13.4 | MIT | https://pypi.org/project/pydantic/ |
 | pyopenssl | 26.3.0 | Apache-2.0 | https://pypi.org/project/pyOpenSSL/ |
 | python-dotenv | 1.2.2 | BSD-3-Clause | https://pypi.org/project/python-dotenv/ |
 | pywebpush | 2.3.0 | MPL-2.0 | https://pypi.org/project/pywebpush/ |
@@ -53,7 +54,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | qrcode | 8.2 | BSD-3-Clause | https://pypi.org/project/qrcode/ |
 | requests | 2.34.2 | Apache-2.0 | https://pypi.org/project/requests/ |
 | slowapi | 0.1.10 | MIT | https://pypi.org/project/slowapi/ |
-| sqlalchemy | 2.0.35 | MIT | https://pypi.org/project/SQLAlchemy/ |
+| sqlalchemy | 2.0.51 | MIT | https://pypi.org/project/SQLAlchemy/ |
 | starlette | 1.3.1 | BSD-3-Clause | https://pypi.org/project/starlette/ |
 | truststore | 0.10.4 | MIT | https://pypi.org/project/truststore/ |
 | typing-extensions | 4.16.0 | PSF-2.0 | https://pypi.org/project/typing-extensions/ |
@@ -62,9 +63,9 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | uvicorn | 0.32.0 | BSD-3-Clause | https://pypi.org/project/uvicorn/ |
 | uvloop | 0.22.1 | MIT | https://pypi.org/project/uvloop/ |
 | watchfiles | 1.2.0 | MIT | https://pypi.org/project/watchfiles/ |
-| webauthn | 2.7.1 | BSD-3-Clause | https://pypi.org/project/webauthn/ |
+| webauthn | 3.0.0 | BSD-3-Clause | https://pypi.org/project/webauthn/ |
 | websockets | 16.1.1 | BSD-3-Clause | https://pypi.org/project/websockets/ |
-| wrapt | 2.2.2 | BSD-2-Clause | https://pypi.org/project/wrapt/ |
+| wrapt | 2.3.0 | BSD-2-Clause | https://pypi.org/project/wrapt/ |
 | yarl | 1.24.5 | Apache-2.0 | https://pypi.org/project/yarl/ |
 
 ## Node packages
@@ -73,7 +74,8 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 |---|---:|---|---|
 | @adobe/css-tools | 4.5.0 | MIT | `web/package-lock.json` |
 | @alloc/quick-lru | 5.2.0 | MIT | `web/package-lock.json` |
-| @asamuzakjp/css-color | 3.2.0 | MIT | `web/package-lock.json` |
+| @asamuzakjp/css-color | 6.0.5 | MIT | `web/package-lock.json` |
+| @asamuzakjp/dom-selector | 8.3.0 | MIT | `web/package-lock.json` |
 | @babel/code-frame | 7.29.7 | MIT | `web/package-lock.json` |
 | @babel/compat-data | 7.29.7 | MIT | `web/package-lock.json` |
 | @babel/core | 7.29.7 | MIT | `web/package-lock.json` |
@@ -91,6 +93,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | @babel/template | 7.29.7 | MIT | `web/package-lock.json` |
 | @babel/traverse | 7.29.7 | MIT | `web/package-lock.json` |
 | @babel/types | 7.29.7 | MIT | `web/package-lock.json` |
+| @bramus/specificity | 2.4.2 | MIT | `web/package-lock.json` |
 | @cloudflare/kv-asset-handler | 0.5.0 | MIT OR Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
 | @cloudflare/unenv-preset | 2.16.1 | MIT OR Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
 | @cloudflare/workerd-darwin-64 | 1.20260722.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
@@ -99,11 +102,12 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | @cloudflare/workerd-linux-arm64 | 1.20260722.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
 | @cloudflare/workerd-windows-64 | 1.20260722.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
 | @cspotcode/source-map-support | 0.8.1 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
-| @csstools/color-helpers | 5.1.0 | MIT-0 | `web/package-lock.json` |
-| @csstools/css-calc | 2.1.4 | MIT | `web/package-lock.json` |
-| @csstools/css-color-parser | 3.1.0 | MIT | `web/package-lock.json` |
-| @csstools/css-parser-algorithms | 3.0.5 | MIT | `web/package-lock.json` |
-| @csstools/css-tokenizer | 3.0.4 | MIT | `web/package-lock.json` |
+| @csstools/color-helpers | 6.1.0 | MIT-0 | `web/package-lock.json` |
+| @csstools/css-calc | 3.3.0 | MIT | `web/package-lock.json` |
+| @csstools/css-color-parser | 4.1.10 | MIT | `web/package-lock.json` |
+| @csstools/css-parser-algorithms | 4.0.0 | MIT | `web/package-lock.json` |
+| @csstools/css-syntax-patches-for-csstree | 1.1.7 | MIT-0 | `web/package-lock.json` |
+| @csstools/css-tokenizer | 4.0.0 | MIT | `web/package-lock.json` |
 | @emnapi/core | 1.10.0 | MIT | `web/package-lock.json` |
 | @emnapi/core | 1.11.1 | MIT | `web/package-lock.json` |
 | @emnapi/runtime | 1.10.0 | MIT | `web/package-lock.json` |
@@ -147,6 +151,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | @eslint/js | 9.39.5 | MIT | `web/package-lock.json` |
 | @eslint/object-schema | 2.1.7 | Apache-2.0 | `web/package-lock.json` |
 | @eslint/plugin-kit | 0.4.1 | Apache-2.0 | `web/package-lock.json` |
+| @exodus/bytes | 1.15.1 | MIT | `web/package-lock.json` |
 | @gerrit0/mini-shiki | 3.23.0 | MIT | `web/package-lock.json` |
 | @humanfs/core | 0.19.2 | Apache-2.0 | `web/package-lock.json` |
 | @humanfs/node | 0.16.8 | Apache-2.0 | `web/package-lock.json` |
@@ -249,7 +254,6 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | @rolldown/binding-wasm32-wasi | 1.1.5 | MIT | `web/package-lock.json` |
 | @rolldown/binding-win32-arm64-msvc | 1.1.5 | MIT | `web/package-lock.json` |
 | @rolldown/binding-win32-x64-msvc | 1.1.5 | MIT | `web/package-lock.json` |
-| @rolldown/pluginutils | 1.0.0-rc.7 | MIT | `web/package-lock.json` |
 | @rolldown/pluginutils | 1.0.1 | MIT | `web/package-lock.json` |
 | @rtsao/scc | 1.1.0 | MIT | `web/package-lock.json` |
 | @shikijs/engine-oniguruma | 3.23.0 | MIT | `web/package-lock.json` |
@@ -259,13 +263,13 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | @shikijs/vscode-textmate | 10.0.2 | MIT | `web/package-lock.json` |
 | @simplewebauthn/browser | 13.3.0 | MIT | `web/package-lock.json` |
 | @sindresorhus/is | 7.2.0 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
-| @speed-highlight/core | 1.2.17 | CC0-1.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @speed-highlight/core | 1.2.19 | CC0-1.0 | `infra/cloudflare-ha-witness/package-lock.json` |
 | @standard-schema/spec | 1.1.0 | MIT | `web/package-lock.json` |
 | @swc/helpers | 0.5.15 | Apache-2.0 | `web/package-lock.json` |
 | @testing-library/dom | 10.4.1 | MIT | `web/package-lock.json` |
 | @testing-library/jest-dom | 6.6.3 | MIT | `web/package-lock.json` |
-| @testing-library/react | 16.1.0 | MIT | `web/package-lock.json` |
-| @testing-library/user-event | 14.5.2 | MIT | `web/package-lock.json` |
+| @testing-library/react | 16.3.2 | MIT | `web/package-lock.json` |
+| @testing-library/user-event | 14.6.1 | MIT | `web/package-lock.json` |
 | @tybys/wasm-util | 0.10.3 | MIT | `web/package-lock.json` |
 | @types/aria-query | 5.0.4 | MIT | `web/package-lock.json` |
 | @types/chai | 5.2.3 | MIT | `web/package-lock.json` |
@@ -288,6 +292,26 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | @typescript-eslint/typescript-estree | 8.65.0 | MIT | `web/package-lock.json` |
 | @typescript-eslint/utils | 8.65.0 | MIT | `web/package-lock.json` |
 | @typescript-eslint/visitor-keys | 8.65.0 | MIT | `web/package-lock.json` |
+| @typescript/typescript-aix-ppc64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-darwin-arm64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-darwin-x64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-freebsd-arm64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-freebsd-x64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-linux-arm | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-linux-arm64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-linux-loong64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-linux-mips64el | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-linux-ppc64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-linux-riscv64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-linux-s390x | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-linux-x64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-netbsd-arm64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-netbsd-x64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-openbsd-arm64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-openbsd-x64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-sunos-x64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-win32-arm64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @typescript/typescript-win32-x64 | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
 | @unrs/resolver-binding-android-arm-eabi | 1.12.2 | MIT | `web/package-lock.json` |
 | @unrs/resolver-binding-android-arm64 | 1.12.2 | MIT | `web/package-lock.json` |
 | @unrs/resolver-binding-darwin-arm64 | 1.12.2 | MIT | `web/package-lock.json` |
@@ -310,7 +334,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | @unrs/resolver-binding-win32-arm64-msvc | 1.12.2 | MIT | `web/package-lock.json` |
 | @unrs/resolver-binding-win32-ia32-msvc | 1.12.2 | MIT | `web/package-lock.json` |
 | @unrs/resolver-binding-win32-x64-msvc | 1.12.2 | MIT | `web/package-lock.json` |
-| @vitejs/plugin-react | 6.0.1 | MIT | `web/package-lock.json` |
+| @vitejs/plugin-react | 6.0.4 | MIT | `web/package-lock.json` |
 | @vitest/expect | 4.1.10 | MIT | `web/package-lock.json` |
 | @vitest/mocker | 4.1.10 | MIT | `web/package-lock.json` |
 | @vitest/pretty-format | 4.1.10 | MIT | `web/package-lock.json` |
@@ -320,7 +344,6 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | @vitest/utils | 4.1.10 | MIT | `web/package-lock.json` |
 | acorn | 8.17.0 | MIT | `web/package-lock.json` |
 | acorn-jsx | 5.3.2 | MIT | `web/package-lock.json` |
-| agent-base | 7.1.4 | MIT | `web/package-lock.json` |
 | ajv | 6.15.0 | MIT | `web/package-lock.json` |
 | ansi-regex | 5.0.1 | MIT | `web/package-lock.json` |
 | ansi-styles | 4.3.0 | MIT | `web/package-lock.json` |
@@ -342,13 +365,13 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | assertion-error | 2.0.1 | MIT | `web/package-lock.json` |
 | ast-types-flow | 0.0.8 | MIT | `web/package-lock.json` |
 | async-function | 1.0.0 | MIT | `web/package-lock.json` |
-| asynckit | 0.4.0 | MIT | `web/package-lock.json` |
 | autoprefixer | 10.5.4 | MIT | `web/package-lock.json` |
 | available-typed-arrays | 1.0.7 | MIT | `web/package-lock.json` |
 | axe-core | 4.12.1 | MPL-2.0 | `web/package-lock.json` |
 | axobject-query | 4.1.0 | Apache-2.0 | `web/package-lock.json` |
 | balanced-match | 4.0.4 | MIT | `web/package-lock.json` |
 | baseline-browser-mapping | 2.11.5 | Apache-2.0 | `web/package-lock.json` |
+| bidi-js | 1.0.3 | MIT | `web/package-lock.json` |
 | binary-extensions | 2.3.0 | MIT | `web/package-lock.json` |
 | blake3-wasm | 2.1.5 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
 | brace-expansion | 5.0.8 | MIT | `web/package-lock.json` |
@@ -367,17 +390,16 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | client-only | 0.0.1 | MIT | `web/package-lock.json` |
 | color-convert | 2.0.1 | MIT | `web/package-lock.json` |
 | color-name | 1.1.4 | MIT | `web/package-lock.json` |
-| combined-stream | 1.0.8 | MIT | `web/package-lock.json` |
 | commander | 4.1.1 | MIT | `web/package-lock.json` |
 | convert-source-map | 2.0.0 | MIT | `web/package-lock.json` |
 | cookie | 1.1.1 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
 | cross-spawn | 7.0.6 | MIT | `web/package-lock.json` |
+| css-tree | 3.2.1 | MIT | `web/package-lock.json` |
 | css.escape | 1.5.1 | MIT | `web/package-lock.json` |
 | cssesc | 3.0.0 | MIT | `web/package-lock.json` |
-| cssstyle | 4.6.0 | MIT | `web/package-lock.json` |
 | csstype | 3.2.3 | MIT | `web/package-lock.json` |
 | damerau-levenshtein | 1.0.8 | BSD-2-Clause | `web/package-lock.json` |
-| data-urls | 5.0.0 | MIT | `web/package-lock.json` |
+| data-urls | 7.0.0 | MIT | `web/package-lock.json` |
 | data-view-buffer | 1.0.2 | MIT | `web/package-lock.json` |
 | data-view-byte-length | 1.0.2 | MIT | `web/package-lock.json` |
 | data-view-byte-offset | 1.0.1 | MIT | `web/package-lock.json` |
@@ -387,7 +409,6 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | deep-is | 0.1.4 | MIT | `web/package-lock.json` |
 | define-data-property | 1.1.4 | MIT | `web/package-lock.json` |
 | define-properties | 1.2.1 | MIT | `web/package-lock.json` |
-| delayed-stream | 1.0.0 | MIT | `web/package-lock.json` |
 | dequal | 2.0.3 | MIT | `web/package-lock.json` |
 | detect-libc | 2.1.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
 | detect-libc | 2.1.2 | Apache-2.0 | `web/package-lock.json` |
@@ -400,7 +421,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | electron-to-chromium | 1.5.396 | ISC | `web/package-lock.json` |
 | emoji-regex | 9.2.2 | MIT | `web/package-lock.json` |
 | entities | 4.5.0 | BSD-2-Clause | `web/package-lock.json` |
-| entities | 6.0.1 | BSD-2-Clause | `web/package-lock.json` |
+| entities | 8.0.0 | BSD-2-Clause | `web/package-lock.json` |
 | error-stack-parser-es | 1.0.5 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
 | es-abstract | 1.24.2 | MIT | `web/package-lock.json` |
 | es-abstract-get | 1.0.0 | MIT | `web/package-lock.json` |
@@ -448,7 +469,6 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | flat-cache | 4.0.1 | MIT | `web/package-lock.json` |
 | flatted | 3.4.3 | ISC | `web/package-lock.json` |
 | for-each | 0.3.5 | MIT | `web/package-lock.json` |
-| form-data | 4.0.6 | MIT | `web/package-lock.json` |
 | fraction.js | 5.3.4 | MIT | `web/package-lock.json` |
 | fsevents | 2.3.3 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
 | fsevents | 2.3.3 | MIT | `web/package-lock.json` |
@@ -476,10 +496,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | hasown | 2.0.4 | MIT | `web/package-lock.json` |
 | hermes-estree | 0.25.1 | MIT | `web/package-lock.json` |
 | hermes-parser | 0.25.1 | MIT | `web/package-lock.json` |
-| html-encoding-sniffer | 4.0.0 | MIT | `web/package-lock.json` |
-| http-proxy-agent | 7.0.2 | MIT | `web/package-lock.json` |
-| https-proxy-agent | 7.0.6 | MIT | `web/package-lock.json` |
-| iconv-lite | 0.6.3 | MIT | `web/package-lock.json` |
+| html-encoding-sniffer | 6.0.0 | MIT | `web/package-lock.json` |
 | ignore | 5.3.2 | MIT | `web/package-lock.json` |
 | ignore | 7.0.6 | MIT | `web/package-lock.json` |
 | import-fresh | 3.3.1 | MIT | `web/package-lock.json` |
@@ -521,7 +538,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | jiti | 1.21.7 | MIT | `web/package-lock.json` |
 | js-tokens | 4.0.0 | MIT | `web/package-lock.json` |
 | js-yaml | 4.3.0 | MIT | `web/package-lock.json` |
-| jsdom | 25.0.1 | MIT | `web/package-lock.json` |
+| jsdom | 30.0.1 | MIT | `web/package-lock.json` |
 | jsesc | 3.1.0 | MIT | `web/package-lock.json` |
 | json-buffer | 3.0.1 | MIT | `web/package-lock.json` |
 | json-schema-traverse | 0.4.1 | MIT | `web/package-lock.json` |
@@ -553,7 +570,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | lodash | 4.18.1 | MIT | `web/package-lock.json` |
 | lodash.merge | 4.6.2 | MIT | `web/package-lock.json` |
 | loose-envify | 1.4.0 | MIT | `web/package-lock.json` |
-| lru-cache | 10.4.3 | ISC | `web/package-lock.json` |
+| lru-cache | 11.5.2 | BlueOak-1.0.0 | `web/package-lock.json` |
 | lru-cache | 5.1.1 | ISC | `web/package-lock.json` |
 | lucide-react | 0.555.0 | ISC | `web/package-lock.json` |
 | lunr | 2.3.9 | MIT | `web/package-lock.json` |
@@ -561,13 +578,12 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | magic-string | 0.30.21 | MIT | `web/package-lock.json` |
 | markdown-it | 14.3.0 | MIT | `web/package-lock.json` |
 | math-intrinsics | 1.1.0 | MIT | `web/package-lock.json` |
+| mdn-data | 2.27.1 | CC0-1.0 | `web/package-lock.json` |
 | mdurl | 2.1.0 | MIT | `web/package-lock.json` |
 | merge2 | 1.4.1 | MIT | `web/package-lock.json` |
 | micromatch | 4.0.8 | MIT | `web/package-lock.json` |
-| mime-db | 1.52.0 | MIT | `web/package-lock.json` |
-| mime-types | 2.1.35 | MIT | `web/package-lock.json` |
 | min-indent | 1.0.1 | MIT | `web/package-lock.json` |
-| miniflare | 4.20260722.0 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
+| miniflare | 4.20260722.1 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
 | minimatch | 10.2.5 | BlueOak-1.0.0 | `web/package-lock.json` |
 | minimist | 1.2.8 | MIT | `web/package-lock.json` |
 | ms | 2.1.3 | MIT | `web/package-lock.json` |
@@ -579,7 +595,6 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | node-exports-info | 1.6.2 | MIT | `web/package-lock.json` |
 | node-releases | 2.0.51 | MIT | `web/package-lock.json` |
 | normalize-path | 3.0.0 | MIT | `web/package-lock.json` |
-| nwsapi | 2.2.24 | MIT | `web/package-lock.json` |
 | object-assign | 4.1.1 | MIT | `web/package-lock.json` |
 | object-hash | 3.0.0 | MIT | `web/package-lock.json` |
 | object-inspect | 1.13.4 | MIT | `web/package-lock.json` |
@@ -595,7 +610,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | p-limit | 3.1.0 | MIT | `web/package-lock.json` |
 | p-locate | 5.0.0 | MIT | `web/package-lock.json` |
 | parent-module | 1.0.1 | MIT | `web/package-lock.json` |
-| parse5 | 7.3.0 | MIT | `web/package-lock.json` |
+| parse5 | 8.0.1 | MIT | `web/package-lock.json` |
 | path-exists | 4.0.0 | MIT | `web/package-lock.json` |
 | path-key | 3.1.1 | MIT | `web/package-lock.json` |
 | path-parse | 1.0.7 | MIT | `web/package-lock.json` |
@@ -622,8 +637,8 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | punycode.js | 2.3.1 | MIT | `web/package-lock.json` |
 | qrcode.react | 4.2.0 | ISC | `web/package-lock.json` |
 | queue-microtask | 1.2.3 | MIT | `web/package-lock.json` |
-| react | 19.2.7 | MIT | `web/package-lock.json` |
-| react-dom | 19.2.7 | MIT | `web/package-lock.json` |
+| react | 19.2.8 | MIT | `web/package-lock.json` |
+| react-dom | 19.2.8 | MIT | `web/package-lock.json` |
 | react-is | 16.13.1 | MIT | `web/package-lock.json` |
 | react-is | 17.0.2 | MIT | `web/package-lock.json` |
 | read-cache | 1.0.0 | MIT | `web/package-lock.json` |
@@ -631,19 +646,17 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | redent | 3.0.0 | MIT | `web/package-lock.json` |
 | reflect.getprototypeof | 1.0.10 | MIT | `web/package-lock.json` |
 | regexp.prototype.flags | 1.5.4 | MIT | `web/package-lock.json` |
+| require-from-string | 2.0.2 | MIT | `web/package-lock.json` |
 | resolve | 1.22.12 | MIT | `web/package-lock.json` |
 | resolve | 2.0.0-next.7 | MIT | `web/package-lock.json` |
 | resolve-from | 4.0.0 | MIT | `web/package-lock.json` |
 | resolve-pkg-maps | 1.0.0 | MIT | `web/package-lock.json` |
 | reusify | 1.1.0 | MIT | `web/package-lock.json` |
 | rolldown | 1.1.5 | MIT | `web/package-lock.json` |
-| rrweb-cssom | 0.7.1 | MIT | `web/package-lock.json` |
-| rrweb-cssom | 0.8.0 | MIT | `web/package-lock.json` |
 | run-parallel | 1.2.0 | MIT | `web/package-lock.json` |
 | safe-array-concat | 1.1.4 | MIT | `web/package-lock.json` |
 | safe-push-apply | 1.0.0 | MIT | `web/package-lock.json` |
 | safe-regex-test | 1.1.0 | MIT | `web/package-lock.json` |
-| safer-buffer | 2.1.2 | MIT | `web/package-lock.json` |
 | saxes | 6.0.0 | ISC | `web/package-lock.json` |
 | scheduler | 0.27.0 | MIT | `web/package-lock.json` |
 | semver | 6.3.1 | ISC | `web/package-lock.json` |
@@ -688,11 +701,11 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | tinyexec | 1.2.4 | MIT | `web/package-lock.json` |
 | tinyglobby | 0.2.17 | MIT | `web/package-lock.json` |
 | tinyrainbow | 3.1.0 | MIT | `web/package-lock.json` |
-| tldts | 6.1.86 | MIT | `web/package-lock.json` |
-| tldts-core | 6.1.86 | MIT | `web/package-lock.json` |
+| tldts | 7.4.10 | MIT | `web/package-lock.json` |
+| tldts-core | 7.4.10 | MIT | `web/package-lock.json` |
 | to-regex-range | 5.0.1 | MIT | `web/package-lock.json` |
-| tough-cookie | 5.1.2 | BSD-3-Clause | `web/package-lock.json` |
-| tr46 | 5.1.1 | MIT | `web/package-lock.json` |
+| tough-cookie | 6.0.2 | BSD-3-Clause | `web/package-lock.json` |
+| tr46 | 6.0.0 | MIT | `web/package-lock.json` |
 | ts-api-utils | 2.5.0 | MIT | `web/package-lock.json` |
 | ts-interface-checker | 0.1.13 | Apache-2.0 | `web/package-lock.json` |
 | tsconfig-paths | 3.15.0 | MIT | `web/package-lock.json` |
@@ -705,12 +718,13 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | typed-array-length | 1.0.8 | MIT | `web/package-lock.json` |
 | typedoc | 0.28.20 | Apache-2.0 | `web/package-lock.json` |
 | typedoc-plugin-markdown | 4.12.0 | MIT | `web/package-lock.json` |
-| typescript | 5.9.3 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
 | typescript | 5.9.3 | Apache-2.0 | `web/package-lock.json` |
+| typescript | 7.0.2 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
 | typescript-eslint | 8.65.0 | MIT | `web/package-lock.json` |
 | uc.micro | 2.1.0 | MIT | `web/package-lock.json` |
 | unbox-primitive | 1.1.0 | MIT | `web/package-lock.json` |
 | undici | 7.28.0 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
+| undici | 8.9.0 | MIT | `web/package-lock.json` |
 | undici-types | 6.21.0 | MIT | `web/package-lock.json` |
 | unenv | 2.0.0-rc.24 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
 | unrs-resolver | 1.12.2 | MIT | `web/package-lock.json` |
@@ -720,10 +734,10 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | vite | 8.1.5 | MIT | `web/package-lock.json` |
 | vitest | 4.1.10 | MIT | `web/package-lock.json` |
 | w3c-xmlserializer | 5.0.0 | MIT | `web/package-lock.json` |
-| webidl-conversions | 7.0.0 | BSD-2-Clause | `web/package-lock.json` |
-| whatwg-encoding | 3.1.1 | MIT | `web/package-lock.json` |
-| whatwg-mimetype | 4.0.0 | MIT | `web/package-lock.json` |
-| whatwg-url | 14.2.0 | MIT | `web/package-lock.json` |
+| webidl-conversions | 8.0.1 | BSD-2-Clause | `web/package-lock.json` |
+| whatwg-mimetype | 5.0.0 | MIT | `web/package-lock.json` |
+| whatwg-url | 16.0.1 | MIT | `web/package-lock.json` |
+| whatwg-url | 17.1.0 | MIT | `web/package-lock.json` |
 | which | 2.0.2 | ISC | `web/package-lock.json` |
 | which-boxed-primitive | 1.1.1 | MIT | `web/package-lock.json` |
 | which-builtin-type | 1.2.1 | MIT | `web/package-lock.json` |
@@ -732,9 +746,8 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | why-is-node-running | 2.3.0 | MIT | `web/package-lock.json` |
 | word-wrap | 1.2.5 | MIT | `web/package-lock.json` |
 | workerd | 1.20260722.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
-| wrangler | 4.114.0 | MIT OR Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| wrangler | 4.115.0 | MIT OR Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
 | ws | 8.21.0 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
-| ws | 8.21.1 | MIT | `web/package-lock.json` |
 | xml-name-validator | 5.0.0 | Apache-2.0 | `web/package-lock.json` |
 | xmlchars | 2.2.0 | MIT | `web/package-lock.json` |
 | yallist | 3.1.1 | ISC | `web/package-lock.json` |
@@ -749,8 +762,8 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 
 | Component | Licence or notice | Evidence |
 |---|---|---|
-| python:3.11-alpine and Alpine packages | Python-2.0 and package-specific licences | Digest-pinned backend image SBOM in each signed release |
-| node:22-alpine and Alpine packages | MIT and package-specific licences | Digest-pinned tools image SBOM in each signed release |
+| python:3.14-alpine and Alpine packages | Python-2.0 and package-specific licences | Digest-pinned backend image SBOM in each signed release |
+| node:25-alpine and Alpine packages | MIT and package-specific licences | Digest-pinned tools image SBOM in each signed release |
 | Go toolchain | BSD-3-Clause | Build-stage provenance in the Caddy and PostgreSQL image definitions |
 | Caddy | Apache-2.0 | Digest-pinned Caddy image SBOM in each signed release |
 | PostgreSQL | PostgreSQL | Digest-pinned PostgreSQL image SBOM in each signed release |

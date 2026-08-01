@@ -5,7 +5,7 @@ FROM golang:${GO_VERSION}-alpine AS gosu-builder
 ARG GOSU_VERSION
 RUN CGO_ENABLED=0 go install github.com/tianon/gosu@${GOSU_VERSION}
 
-FROM postgres:16-alpine
+FROM postgres:18-alpine
 
 # gosu is used by the official entrypoint before PostgreSQL starts. Rebuild it
 # with a patched Go standard library and refresh Alpine packages while keeping

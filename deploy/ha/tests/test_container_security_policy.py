@@ -34,14 +34,14 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
 
         self.assertIn("fastapi==0.139.2", requirements)
         self.assertIn("python-dotenv==1.2.2", requirements)
-        self.assertIn("httpx2==2.7.0", requirements)
+        self.assertIn("httpx2==2.9.1", requirements)
         self.assertNotIn("python-dotenv==1.0.1", requirements)
         self.assertNotIn("httpx==0.27.2", requirements)
 
     def test_backend_image_checks_dependencies_and_removes_build_tools(self) -> None:
         dockerfile = (ROOT / "infra/Dockerfile").read_text(encoding="utf-8")
 
-        self.assertIn("FROM python:3.11-alpine", dockerfile)
+        self.assertIn("FROM python:3.14-alpine", dockerfile)
         self.assertIn("apk upgrade --no-cache", dockerfile)
         self.assertIn("apk add --no-cache font-dejavu", dockerfile)
         self.assertIn("PIP_ROOT_USER_ACTION=ignore", dockerfile)
@@ -90,7 +90,8 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
         self.assertIn("RUN apk upgrade --no-cache", caddy)
         self.assertIn("ARG GO_VERSION=1.26.5", postgres)
         self.assertIn("go install github.com/tianon/gosu@${GOSU_VERSION}", postgres)
-        self.assertIn("FROM postgres:16-alpine", postgres)
+        self.assertIn("FROM postgres:18-alpine", postgres)
+        self.assertIn("FROM node:25-alpine", tools)
         self.assertNotIn("ENTRYPOINT", postgres)
         self.assertIn('npm install --global "wrangler@${WRANGLER_VERSION}"', tools)
         self.assertIn("/usr/local/lib/node_modules/npm", tools)
@@ -126,10 +127,10 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
         self.assertIn("pull_with_retry()", workflow)
         self.assertIn('for attempt in 1 2 3; do', workflow)
         for image in (
-            "python:3.11-alpine",
+            "python:3.14-alpine",
             "golang:1.26.5-alpine",
             "caddy:2-alpine",
-            "postgres:16-alpine",
+            "postgres:18-alpine",
             "aquasec/trivy:0.72.0",
         ):
             self.assertIn(image, workflow)

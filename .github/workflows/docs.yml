@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -74,13 +74,13 @@ jobs:
 
       - name: Configure GitHub Pages
         if: github.event_name != 'pull_request' && (github.event.repository.visibility == 'public' || !endsWith(github.repository, '-Public'))
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
         with:
           enablement: true
 
       - name: Upload GitHub Pages artefact
         if: github.event_name != 'pull_request' && (github.event.repository.visibility == 'public' || !endsWith(github.repository, '-Public'))
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
