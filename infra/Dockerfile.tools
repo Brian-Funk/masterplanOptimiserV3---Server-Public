@@ -1,0 +1,25 @@
+FROM node:22-alpine
+
+ARG WRANGLER_VERSION=4.114.0
+
+# This signed, immutable release image is used only while commissioning the
+# Cloudflare witness. No Node.js or npm installation is required on a VPS.
+RUN npm install --global "wrangler@${WRANGLER_VERSION}" \
+    && npm cache clean --force \
+    && rm -rf \
+        /root/.npm \
+        /usr/local/lib/node_modules/corepack \
+        /usr/local/lib/node_modules/npm \
+        /opt/yarn-v* \
+    && rm -f \
+        /usr/local/bin/corepack \
+        /usr/local/bin/npm \
+        /usr/local/bin/npx \
+        /usr/local/bin/yarn \
+        /usr/local/bin/yarnpkg \
+    && test ! -e /usr/local/lib/node_modules/npm \
+    && test ! -e /usr/local/bin/npm \
+    && wrangler --version
+
+WORKDIR /tmp
+ENTRYPOINT ["wrangler"]

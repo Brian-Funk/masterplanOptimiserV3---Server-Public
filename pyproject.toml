@@ -1,0 +1,12 @@
+[project]
+name = "masterplan-server"
+version = "3.8.0"
+license = "AGPL-3.0-only"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["server_backend", "server_postgres"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

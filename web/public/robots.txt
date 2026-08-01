@@ -1,0 +1,11 @@
+User-agent: *
+Allow: /login
+Allow: /about
+Allow: /privacy
+Allow: /terms
+Allow: /disclaimer
+Disallow: /api/
+Disallow: /admin/
+Disallow: /calendar/
+Disallow: /bootstrap/
+Disallow: /activate/

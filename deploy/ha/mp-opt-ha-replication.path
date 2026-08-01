@@ -1,0 +1,9 @@
+[Unit]
+Description=Run MP-OPT replication immediately when an application request is queued
+
+[Path]
+DirectoryNotEmpty=/opt/masterplan/runtime/ha-requests
+Unit=mp-opt-ha-replication.service
+
+[Install]
+WantedBy=multi-user.target

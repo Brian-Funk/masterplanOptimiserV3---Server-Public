@@ -1,0 +1,181 @@
+{
+  "format": "mp-opt-storage-security-checklist-v1",
+  "controls": [
+    {
+      "id": "provider_disk_encryption",
+      "scope": "provider",
+      "label": "VPS physical-disk encryption status reviewed",
+      "allow_not_applicable": false,
+      "value_format": "none",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "provider_snapshot_policy",
+      "scope": "provider",
+      "label": "Provider snapshot use is explicitly disabled or documented",
+      "allow_not_applicable": false,
+      "value_format": "snapshot_policy",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "provider_snapshot_encryption",
+      "scope": "provider",
+      "label": "Provider snapshot encryption reviewed",
+      "allow_not_applicable": true,
+      "value_format": "none",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "provider_snapshot_lifecycle",
+      "scope": "provider",
+      "label": "Snapshot location, retention, deletion and restore lifecycle recorded",
+      "allow_not_applicable": true,
+      "value_format": "none",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "provider_staff_access",
+      "scope": "provider",
+      "label": "Provider staff and support access model reviewed",
+      "allow_not_applicable": false,
+      "value_format": "none",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "provider_data_centre_country",
+      "scope": "provider",
+      "label": "Data-centre country recorded",
+      "allow_not_applicable": false,
+      "value_format": "country_code",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "provider_deletion_lifecycle",
+      "scope": "provider",
+      "label": "Provider account, volume and snapshot deletion lifecycle reviewed",
+      "allow_not_applicable": false,
+      "value_format": "none",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "provider_dpa_subprocessors",
+      "scope": "provider",
+      "label": "DPA and subprocessor status reviewed",
+      "allow_not_applicable": false,
+      "value_format": "none",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "workstation_account_authentication",
+      "scope": "workstation",
+      "label": "Controller OS account is authenticated and not shared",
+      "allow_not_applicable": false,
+      "value_format": "none",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "workstation_full_disk_encryption",
+      "scope": "workstation",
+      "label": "Full-disk encryption is enabled",
+      "allow_not_applicable": false,
+      "value_format": "disk_encryption",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "workstation_security_updates",
+      "scope": "workstation",
+      "label": "Operating-system security updates are current",
+      "allow_not_applicable": false,
+      "value_format": "none",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "workstation_screen_lock",
+      "scope": "workstation",
+      "label": "Automatic screen locking is enabled",
+      "allow_not_applicable": false,
+      "value_format": "none",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "workstation_local_access",
+      "scope": "workstation",
+      "label": "Local-user access to application data is restricted",
+      "allow_not_applicable": false,
+      "value_format": "none",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "workstation_backup_media",
+      "scope": "workstation",
+      "label": "Backup and removable media are protected",
+      "allow_not_applicable": true,
+      "value_format": "none",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "workstation_cloud_sync",
+      "scope": "workstation",
+      "label": "Cloud-sync behaviour is disabled or processor-approved",
+      "allow_not_applicable": false,
+      "value_format": "cloud_sync",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "workstation_deletion_locations",
+      "scope": "workstation",
+      "label": "Database, exports, diagnostics, backups and external copies are in deletion scope",
+      "allow_not_applicable": false,
+      "value_format": "none",
+      "status": "not_checked",
+      "recorded_value": null,
+      "evidence_reference": null,
+      "reviewed_at": null
+    }
+  ]
+}

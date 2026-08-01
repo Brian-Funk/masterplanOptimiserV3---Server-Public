@@ -1,0 +1,2 @@
+# Published tags are immutable. Retired tags remain burned forever.
+v3.4.0

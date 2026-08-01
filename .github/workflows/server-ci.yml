@@ -1,0 +1,242 @@
+name: Server CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect affected server components
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.detect.outputs.backend }}
+      frontend: ${{ steps.detect.outputs.frontend }}
+      database: ${{ steps.detect.outputs.database }}
+      caddy: ${{ steps.detect.outputs.caddy }}
+      tools: ${{ steps.detect.outputs.tools }}
+      witness: ${{ steps.detect.outputs.witness }}
+      operations: ${{ steps.detect.outputs.operations }}
+      any: ${{ steps.detect.outputs.any }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify changed files
+        id: detect
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ "${{ github.event_name }}" == workflow_dispatch ]]; then
+            components='["backend","frontend","database","caddy","tools","witness","operations"]'
+          else
+            if [[ "${{ github.event_name }}" == pull_request ]]; then
+              base="${{ github.event.pull_request.base.sha }}"
+              target="${{ github.event.pull_request.head.sha }}"
+            else
+              base="${{ github.event.before }}"
+              target="${{ github.sha }}"
+            fi
+            if [[ "$base" =~ ^0+$ ]]; then
+              components='["backend","frontend","database","caddy","tools","witness","operations"]'
+            else
+              plan="$(python3 deploy/test_deployment.py classify --repo . --base "$base" --target "$target")"
+              components="$(jq -c .components <<< "$plan")"
+              jq . <<< "$plan"
+            fi
+          fi
+          for component in backend frontend database caddy tools witness operations; do
+            if jq -e --arg component "$component" 'index($component) != null' <<< "$components" >/dev/null; then
+              echo "$component=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$component=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+          if [[ "$(jq length <<< "$components")" -gt 0 ]]; then echo 'any=true' >> "$GITHUB_OUTPUT"; else echo 'any=false' >> "$GITHUB_OUTPUT"; fi
+
+  server-native:
+    name: Server-native validation
+    needs: changes
+    if: needs.changes.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements.lock.txt
+            backend/requirements-test.txt
+      - uses: actions/setup-node@v5
+        if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.witness == 'true'
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            infra/cloudflare-ha-witness/package-lock.json
+      - name: Audit the complete publishable source tree
+        run: python deploy/security/publication_audit.py
+      - name: Verify generated third-party notices
+        run: python deploy/licensing/generate_third_party_notices.py --check
+      - name: Validate production operations and HA
+        if: needs.changes.outputs.operations == 'true' || needs.changes.outputs.database == 'true' || needs.changes.outputs.caddy == 'true'
+        env:
+          DATABASE_URL: postgresql://masterplan:ci-compose-validation-only@db:5432/masterplan
+          POSTGRES_PASSWORD: ci-compose-validation-only
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          bash -n manage.sh configure-production.sh deploy/deploy.sh deploy/setup-server.sh deploy/test-deployment.sh deploy/signed-deployment.sh deploy/management/*.sh deploy/ha/*.sh
+          shellcheck --severity=error manage.sh configure-production.sh deploy/deploy.sh deploy/setup-server.sh deploy/test-deployment.sh deploy/signed-deployment.sh deploy/management/*.sh deploy/ha/*.sh
+          python -m compileall deploy/ha deploy/management deploy/test_deployment.py
+          python -m unittest discover -s deploy/ha/tests -p 'test_*.py' -v
+          install -m 0600 .env.example .env
+          trap 'rm -f .env' EXIT
+          docker compose --env-file .env.example -f infra/docker-compose.yml -f infra/docker-compose.prod.yml config --quiet
+          HA_MODE=ha HA_ROLE=dynamic HA_NODE_ID=node-a HA_PEER_NODE_ID=node-b HA_CLUSTER_ID=ci HA_GENERATION=1 HA_WITNESS_URL=https://witness.example.test docker compose --env-file .env.example -f infra/docker-compose.yml -f infra/docker-compose.prod.yml -f infra/docker-compose.ha.yml config --quiet
+      - name: Validate backend dependencies and source
+        if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.database == 'true'
+        working-directory: backend
+        run: |
+          python -m pip install --constraint requirements.lock.txt -r requirements.txt pip-audit
+          python -m pip_audit -r requirements.lock.txt
+          python -m compileall app
+      - name: Build and scan affected images
+        if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.database == 'true' || needs.changes.outputs.caddy == 'true' || needs.changes.outputs.tools == 'true'
+        env:
+          BACKEND: ${{ needs.changes.outputs.backend }}
+          DATABASE: ${{ needs.changes.outputs.database }}
+          CADDY: ${{ needs.changes.outputs.caddy }}
+          TOOLS: ${{ needs.changes.outputs.tools }}
+        run: |
+          set -Eeuo pipefail
+          pull_with_retry() {
+            local image="$1"
+            for attempt in 1 2 3; do
+              docker pull "$image" && return 0
+              [[ "$attempt" == 3 ]] || sleep $((attempt * 5))
+            done
+            return 1
+          }
+          pull_with_retry aquasec/trivy:0.72.0
+          if [[ "$BACKEND" == true ]]; then pull_with_retry python:3.11-alpine; fi
+          if [[ "$CADDY" == true ]]; then pull_with_retry golang:1.26.5-alpine; pull_with_retry caddy:2-alpine; fi
+          if [[ "$DATABASE" == true ]]; then pull_with_retry golang:1.26.5-alpine; pull_with_retry postgres:16-alpine; fi
+          if [[ "$TOOLS" == true ]]; then pull_with_retry node:22-alpine; fi
+          declare -a images=()
+          if [[ "$BACKEND" == true ]]; then docker build -f infra/Dockerfile -t mp-opt-backend:ci .; images+=(mp-opt-backend:ci); fi
+          if [[ "$DATABASE" == true ]]; then docker build -f infra/Dockerfile.postgres -t mp-opt-postgres:ci .; images+=(mp-opt-postgres:ci); fi
+          if [[ "$CADDY" == true ]]; then docker build -f infra/Dockerfile.caddy -t mp-opt-caddy:ci .; images+=(mp-opt-caddy:ci); fi
+          if [[ "$TOOLS" == true ]]; then docker build -f infra/Dockerfile.tools -t mp-opt-tools:ci .; images+=(mp-opt-tools:ci); fi
+          for image in "${images[@]}"; do
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v mp-opt-ci-trivy-cache:/root/.cache/ aquasec/trivy:0.72.0 image --quiet --scanners vuln --severity HIGH,CRITICAL --exit-code 1 "$image"
+          done
+          if [[ "$CADDY" == true ]]; then
+            docker run --rm -v "$PWD/infra/Caddyfile:/etc/caddy/Caddyfile:ro" \
+              mp-opt-caddy:ci caddy fmt --diff /etc/caddy/Caddyfile >/dev/null
+          fi
+      - name: Validate frontend
+        if: needs.changes.outputs.frontend == 'true'
+        working-directory: web
+        run: |
+          npm ci --no-audit
+          npm audit --audit-level=high
+          npm audit --omit=dev --audit-level=high
+          npm run lint
+          npm run build
+          npm test
+          npm run docs:typedoc
+      - name: Validate Cloudflare witness
+        if: needs.changes.outputs.witness == 'true'
+        working-directory: infra/cloudflare-ha-witness
+        run: |
+          npm ci --ignore-scripts
+          npm run check
+
+  repository-tests:
+    name: Repository-local server test suite
+    needs: [changes, server-native]
+    if: always() && needs.changes.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: masterplan_test
+          POSTGRES_USER: masterplan_test
+          POSTGRES_PASSWORD: masterplan_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U masterplan_test -d masterplan_test"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.database == 'true' || needs.changes.outputs.operations == 'true'
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements.lock.txt
+            backend/requirements-test.txt
+      - uses: actions/setup-node@v5
+        if: needs.changes.outputs.frontend == 'true'
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install backend test dependencies
+        if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.database == 'true' || needs.changes.outputs.operations == 'true'
+        run: |
+          python -m pip install -r backend/requirements-test.txt
+      - name: Run backend and PostgreSQL tests
+        if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.database == 'true'
+        env:
+          DATABASE_URL: postgresql://masterplan_test:masterplan_test@localhost:5432/masterplan_test
+          ENVIRONMENT: development
+        run: |
+          PYTHONPATH=backend python deploy/ha/tests/postgres_schema_contract.py
+          python -m pytest server_backend/ -v
+          python -m pytest server_postgres/ -v
+      - name: Run deployment and management contracts
+        if: needs.changes.outputs.operations == 'true' && needs.changes.outputs.backend != 'true' && needs.changes.outputs.database != 'true'
+        run: |
+          python -m pytest server_backend/test_management_cli.py server_backend/test_server_management_scripts.py server_backend/test_deployment_lanes.py -v
+  server-ci-result:
+    name: server-ci-result
+    needs: [changes, server-native, repository-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate result
+        env:
+          DRAFT: ${{ github.event.pull_request.draft || false }}
+          ANY: ${{ needs.changes.outputs.any }}
+          NATIVE: ${{ needs.server-native.result }}
+          TESTS: ${{ needs.repository-tests.result }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "$DRAFT" == true ]]; then echo 'Draft PR: heavy CI intentionally deferred.'; exit 0; fi
+          if [[ "$ANY" != true ]]; then echo 'No server-relevant changes.'; exit 0; fi
+          [[ "$NATIVE" == success ]]
+          [[ "$TESTS" == success ]]

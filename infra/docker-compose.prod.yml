@@ -1,0 +1,125 @@
+# ── Production overrides ──────────────────────────────────────
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Reads non-secret settings such as DOMAIN from the root .env file. Database
+# and application credentials are mounted from protected files under secrets/.
+# ──────────────────────────────────────────────────────────────
+
+services:
+  db:
+    environment:
+      POSTGRES_USER: masterplan
+      POSTGRES_PASSWORD_FILE: /run/secrets/database_password
+      POSTGRES_DB: masterplan
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  backend:
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    environment:
+      DATABASE_URL: ""
+      DATABASE_USER: masterplan
+      DATABASE_HOST: db
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: masterplan
+      HA_MODE: ${HA_MODE:-standalone}
+      HA_ROLE: ${HA_ROLE:-standalone}
+      HA_NODE_ID: ${HA_NODE_ID:-standalone}
+      HA_PEER_NODE_ID: ${HA_PEER_NODE_ID:-}
+      HA_CLUSTER_ID: ${HA_CLUSTER_ID:-}
+      HA_GENERATION: ${HA_GENERATION:-0}
+      HA_HEARTBEAT_INTERVAL_SECONDS: ${HA_HEARTBEAT_INTERVAL_SECONDS:-5}
+      HA_CONTROL_WITNESS_REQUIRED: ${HA_CONTROL_WITNESS_REQUIRED:-false}
+      HA_CONTROL_STATE_PATH: /runtime/ha-control.json
+      HA_CONTROL_WITNESS_MAX_AGE_SECONDS: ${HA_CONTROL_WITNESS_MAX_AGE_SECONDS:-90}
+      HA_WITNESS_URL: ${HA_WITNESS_URL:-}
+      HA_LEASE_STATE_PATH: /runtime/ha-control.json
+      HA_REPLICATION_STATUS_PATH: /runtime/ha-replication.json
+      HA_REPLICATION_REQUEST_DIR: /runtime/ha-requests
+      HA_SNAPSHOT_STATUS_PATH: /runtime/ha-snapshot-status.json
+      COMPLIANCE_REQUEST_DIR: /runtime/compliance-requests
+      COMPLIANCE_RECEIPT_DIR: /runtime/compliance-receipts
+      HA_RECOVERY_STORAGE_MODE: ${HA_RECOVERY_STORAGE_MODE:-manual_portable}
+      EVIDENCE_MODE: ${EVIDENCE_MODE:-advisory}
+      EVIDENCE_HOME: /evidence
+      EVIDENCE_SIGNING_KEY_PATH: /run/secrets/evidence_signing_key
+      EVIDENCE_TOOL_PATH: /app/evidence_manifest.py
+      EVIDENCE_TOMBSTONE_RETENTION_DAYS: ${EVIDENCE_TOMBSTONE_RETENTION_DAYS:-1095}
+      EVIDENCE_GITHUB_FINE_GRAINED_TOKEN_PATH: /run/secrets/evidence_github_fine_grained_token
+      EVIDENCE_GIT_ARCHIVE_ENABLED: ${EVIDENCE_GIT_ARCHIVE_ENABLED:-false}
+      EVIDENCE_GIT_API_BASE_URL: ${EVIDENCE_GIT_API_BASE_URL:-https://api.github.com}
+      EVIDENCE_GIT_REPOSITORY_OWNER: ${EVIDENCE_GIT_REPOSITORY_OWNER:-}
+      EVIDENCE_GIT_REPOSITORY_NAME: ${EVIDENCE_GIT_REPOSITORY_NAME:-}
+      EVIDENCE_GIT_REPOSITORY_ID: ${EVIDENCE_GIT_REPOSITORY_ID:-}
+      EVIDENCE_GIT_DEFAULT_BRANCH: ${EVIDENCE_GIT_DEFAULT_BRANCH:-main}
+      EVIDENCE_GITHUB_TOKEN_FINGERPRINT: ${EVIDENCE_GITHUB_TOKEN_FINGERPRINT:-unconfigured}
+      EVIDENCE_GIT_PROTECTION_ACK_VERSION: ${EVIDENCE_GIT_PROTECTION_ACK_VERSION:-}
+      EVIDENCE_CONTROLLER_ID: ${EVIDENCE_CONTROLLER_ID:-}
+      EVIDENCE_ALLOWED_INSTANCE_ID: ${EVIDENCE_ALLOWED_INSTANCE_ID:-}
+      EVIDENCE_TRUST_ROOT: /evidence/controller-trust
+      EVIDENCE_GIT_BUNDLE_DIR: /evidence/archive-queue
+      EVIDENCE_GIT_UPLOAD_SCHEDULE_SECONDS: ${EVIDENCE_GIT_UPLOAD_SCHEDULE_SECONDS:-900}
+      EVIDENCE_GIT_RETRY_LIMIT: ${EVIDENCE_GIT_RETRY_LIMIT:-8}
+      EVIDENCE_GIT_BRANCH_PREFIX: ${EVIDENCE_GIT_BRANCH_PREFIX:-ingest}
+      EVIDENCE_GIT_CHECK_POLL_SECONDS: ${EVIDENCE_GIT_CHECK_POLL_SECONDS:-30}
+      EVIDENCE_GIT_CHECK_TIMEOUT_SECONDS: ${EVIDENCE_GIT_CHECK_TIMEOUT_SECONDS:-1800}
+      EVIDENCE_GIT_LEASE_SECONDS: ${EVIDENCE_GIT_LEASE_SECONDS:-120}
+      EVENT_PURGE_GRACE_DAYS: ${EVENT_PURGE_GRACE_DAYS:-90}
+      RETENTION_SCHEDULER_INTERVAL_SECONDS: ${RETENTION_SCHEDULER_INTERVAL_SECONDS:-300}
+    volumes:
+      - ../runtime:/runtime:ro
+      - ../runtime/compliance-requests:/runtime/compliance-requests:rw
+      - ../state/evidence:/evidence:rw
+    secrets:
+      - database_password
+      - ip_hmac_key
+      - secret_key
+      - vapid_private_key
+      - root_bootstrap_token
+      - smtp_token
+      - evidence_signing_key
+      - evidence_github_fine_grained_token
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  caddy:
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../runtime:/etc/caddy/runtime:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - ../web/out:/srv/static:ro
+    environment:
+      DOMAIN: ${DOMAIN:-mp-opt.net}
+    restart: unless-stopped
+
+secrets:
+  database_password:
+    file: ../secrets/database_password
+  ip_hmac_key:
+    file: ../secrets/ip_hmac_key
+  secret_key:
+    file: ../secrets/secret_key
+  vapid_private_key:
+    file: ../secrets/vapid_private_key
+  root_bootstrap_token:
+    file: ../secrets/root_bootstrap_token
+  smtp_token:
+    file: ../secrets/smtp_token
+  evidence_signing_key:
+    file: ../secrets/evidence_signing_key
+  evidence_github_fine_grained_token:
+    file: ../secrets/evidence_github_fine_grained_token

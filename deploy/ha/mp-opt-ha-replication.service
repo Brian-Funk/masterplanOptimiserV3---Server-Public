@@ -1,0 +1,18 @@
+[Unit]
+Description=MP-OPT_SERVER scheduled point-in-time replication
+After=network-online.target docker.service mp-opt-ha-lease.service
+
+[Service]
+Type=oneshot
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/masterplan
+ExecStart=/usr/bin/python3 /opt/masterplan/deploy/ha/replication_scheduler.py
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/etc/mp-opt-ha /opt/masterplan
+ReadWritePaths=/opt/masterplan/runtime /home/deploy/.local/state/mp-opt-ha-replication /home/deploy/.local/state/mp-opt-server
+RestrictSUIDSGID=true

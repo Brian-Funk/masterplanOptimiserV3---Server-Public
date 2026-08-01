@@ -1,0 +1,58 @@
+{$DOMAIN:localhost} {
+	# ── Request body size limit ─────────────────────────────────
+	request_body {
+		max_size 5MB
+	}
+
+	# ── Security headers ────────────────────────────────────────
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		X-Permitted-Cross-Domain-Policies "none"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		# Generated from the exact inline scripts in the exported Next.js build.
+		import /etc/caddy/runtime/frontend-csp.caddy
+		-Server
+	}
+
+	# ── API requests - proxy to FastAPI backend ─────────────────
+	handle /api/* {
+		reverse_proxy backend:8000
+	}
+
+	# Instance-specific legal notices must remain readable without JavaScript.
+	@governanceNotice path /privacy /legal /data-policy /retention /rights /processors
+	handle @governanceNotice {
+		rewrite * /api/v1/governance/public{path}.html
+		reverse_proxy backend:8000
+	}
+
+	# ── Health check endpoint ───────────────────────────────────
+	handle /health {
+		reverse_proxy backend:8000
+	}
+
+	# Public HA transition status; safe on both Primary and Standby.
+	handle /ha/status {
+		reverse_proxy backend:8000
+	}
+
+	# Strict writer-readiness probe for diagnostics (not pool liveness).
+	handle /ha/ready {
+		reverse_proxy backend:8000
+	}
+
+	# ── Everything else - serve the static Next.js frontend ─────
+	@serviceWorker path /sw.js
+	header @serviceWorker Cache-Control "no-cache, no-store, must-revalidate"
+
+	handle {
+		root * /srv/static
+		try_files {path} {path}/index.html {path}.html /index.html
+		file_server
+	}
+}

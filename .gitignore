@@ -1,0 +1,45 @@
+.env
+.env.*
+!.env.example
+.release.env
+.test-deployment.env
+deploy/.env
+deploy/.env.*
+!deploy/.env.example
+secrets/
+__pycache__/
+*.pyc
+node_modules/
+web/out/
+runtime/
+.next/
+nul
+
+# Copilot session/memory files
+.copilot-memory/
+.copilot-session/
+**/memories/
+*session-plan*.md
+*copilot-plan*.md
+.github/copilot-instructions.md
+
+# Generated documentation
+docs/generated/
+site/
+
+# Local tooling caches
+.pytest_cache/
+.coverage
+htmlcov/
+*.tsbuildinfo
+.wrangler/
+
+# Retired commissioning evidence can still exist in an operator checkout.
+# Keep it out of releases even though the old coordinators are no longer shipped.
+ha-soak-evidence/
+ha-certification-evidence/
+ha-verification-evidence/
+
+# Off-server snapshot identities must never enter Git
+*.agekey
+*.mpopt-snapshot

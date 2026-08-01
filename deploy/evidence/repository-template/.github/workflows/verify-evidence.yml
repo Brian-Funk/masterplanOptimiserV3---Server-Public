@@ -1,0 +1,19 @@
+name: Verify accountability evidence
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Verify the complete private evidence repository
+        run: python3 scripts/evidence_repository.py verify --archive .

@@ -1,0 +1,128 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --color-primary: #2563eb;
+  --color-secondary: #7c3aed;
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-error: #ef4444;
+  --color-info: #3b82f6;
+  --color-surface: #ffffff;
+  --color-surface-alt: #f7f8fa;
+  --color-surface-muted: #f1f3f5;
+  --color-foreground: #111827;
+  --color-foreground-muted: #667085;
+  --color-border: #e4e7ec;
+}
+
+/* Base light mode */
+html {
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+  --color-surface: #282c34;
+  --color-surface-alt: #22252a;
+  --color-surface-muted: #2d333d;
+  --color-foreground: #e5e7eb;
+  --color-foreground-muted: #9da5b4;
+  --color-border: #3d434f;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  font-family: var(--font-source-sans), -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Light mode defaults */
+body {
+  min-width: 320px;
+  background: var(--color-surface-alt);
+  color: var(--color-foreground);
+}
+
+/* Dark mode  -  Bluloco Dark inspired palette (matching GC desktop app) */
+html.dark body {
+  background-color: #22252a;
+  color: #abb2bf;
+}
+
+html.dark .dark\:bg-gray-900 {
+  background-color: #22252a !important;
+}
+html.dark .dark\:bg-gray-800 {
+  background-color: #282c34 !important;
+}
+html.dark .dark\:bg-gray-700 {
+  background-color: #2d333d !important;
+}
+html.dark .dark\:border-gray-700 {
+  border-color: #3d434f !important;
+}
+html.dark .dark\:border-gray-600 {
+  border-color: #545862 !important;
+}
+
+/* Dark mode */
+html.dark body {
+  @apply bg-gray-900 text-gray-100;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+@media (max-width: 767px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
+.safe-area-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.mobile-page-with-nav {
+  padding-bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
+}
+
+@media (min-width: 768px) {
+  .mobile-page-with-nav {
+    padding-bottom: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

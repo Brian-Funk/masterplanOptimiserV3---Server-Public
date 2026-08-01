@@ -1,0 +1,11 @@
+[Unit]
+Description=Run MP-OPT_SERVER HA snapshots hourly
+
+[Timer]
+OnCalendar=*-*-* *:17:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=mp-opt-ha-snapshots.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,34 @@
+ARG GO_VERSION=1.26.5
+ARG CADDY_VERSION=v2.11.4
+ARG XCADDY_VERSION=v0.4.5
+ARG GRPC_VERSION=v1.82.1
+ARG X_TEXT_VERSION=v0.39.0
+
+FROM golang:${GO_VERSION}-alpine AS builder
+ARG CADDY_VERSION
+ARG XCADDY_VERSION
+ARG GRPC_VERSION
+ARG X_TEXT_VERSION
+COPY infra/caddy-dns-witness /src/caddy-dns-witness
+RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION} \
+    && CGO_ENABLED=0 /go/bin/xcaddy build ${CADDY_VERSION} \
+        --with github.com/Brian-Funk/MasterplanOptimiserV3---Server/infra/caddy-dns-witness=/src/caddy-dns-witness \
+        --replace google.golang.org/grpc@v1.81.0=google.golang.org/grpc@${GRPC_VERSION} \
+        --replace golang.org/x/text=golang.org/x/text@${X_TEXT_VERSION} \
+        --output /go/bin/caddy \
+    && go version -m /go/bin/caddy \
+        | awk -v grpc_version="${GRPC_VERSION}" -v text_version="${X_TEXT_VERSION}" \
+            '$1 == "=>" && $2 == "google.golang.org/grpc" && $3 == grpc_version { grpc_found=1 } \
+             $1 == "=>" && $2 == "golang.org/x/text" && $3 == text_version { text_found=1 } \
+             END { exit !(grpc_found && text_found) }' \
+    && /go/bin/caddy list-modules \
+        | grep -Fx 'dns.providers.mpopt_witness'
+
+FROM caddy:2-alpine
+
+# Upstream tags can briefly lag Alpine and Go security releases. Refresh the
+# OS packages and replace the standard Caddy binary with the same Caddy release
+# compiled by a patched Go toolchain.
+RUN apk upgrade --no-cache
+COPY --from=builder /go/bin/caddy /usr/bin/caddy
+RUN caddy version
