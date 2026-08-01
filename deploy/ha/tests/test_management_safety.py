@@ -73,6 +73,13 @@ class CaddyConversionSafetyTests(unittest.TestCase):
         self.assertIn("mp_unlock()", COMMON_SOURCE)
 
 
+class TerminalExitSafetyTests(unittest.TestCase):
+    def test_every_management_exit_clears_the_operator_terminal(self) -> None:
+        cleanup = function_body(MENU_SOURCE, "mp_cleanup")
+        self.assertIn("clear </dev/tty >/dev/tty", cleanup)
+        self.assertIn("trap mp_cleanup EXIT TERM", MENU_SOURCE)
+
+
 class SnapshotServiceSafetyTests(unittest.TestCase):
     def test_backend_secret_contract_is_group_readable_without_broadening_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

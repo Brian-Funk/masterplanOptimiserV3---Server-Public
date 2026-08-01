@@ -109,11 +109,13 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
 
     def test_deploy_refreshes_images_sequentially_with_buildkit(self) -> None:
         deploy = (ROOT / "deploy/deploy.sh").read_text(encoding="utf-8")
+        common = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
 
         self.assertIn("export DOCKER_BUILDKIT=1", deploy)
         self.assertIn("for service in db caddy backend", deploy)
         self.assertIn('build --pull "$service"', deploy)
-        self.assertIn("node:22-alpine", deploy)
+        self.assertIn("mp_build_frontend_container", deploy)
+        self.assertIn("node:22-alpine", common)
 
     def test_ci_audits_dependencies_and_fails_on_any_serious_cve(self) -> None:
         workflow = (ROOT / ".github/workflows/server-ci.yml").read_text(

@@ -31,6 +31,15 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("NOT is_root_admin", SUPERVISOR)
         self.assertIn("count(*) FROM webauthn_credentials) = 1", SUPERVISOR)
 
+    def test_frontend_build_uses_host_resolved_exact_source_identity(self) -> None:
+        common = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
+        self.assertIn("mp_build_frontend_container", SUPERVISOR)
+        self.assertIn("remote get-url origin", common)
+        self.assertIn("rev-parse HEAD", common)
+        self.assertIn("MP_PUBLIC_SOURCE_REPOSITORY_URL=$repository", common)
+        self.assertIn("MP_PUBLIC_SOURCE_REVISION=$revision", common)
+        self.assertIn('[[ "$revision" =~ ^[0-9a-f]{40}$ ]]', common)
+
     def test_accepts_only_exact_lowercase_commits_and_canonical_tags(self) -> None:
         commit = "a" * 40
         self.assertEqual(MODULE.require_commit(commit), commit)

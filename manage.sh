@@ -30,6 +30,11 @@ mp_initialise_paths
 # Remove any transient private recovery identity when the menu exits unexpectedly.
 mp_cleanup() {
     mp_remove_identity_file "${MP_GUARD_IDENTITY:-}"
+    # Leave no full-screen menu or command output behind in the operator's
+    # terminal after any normal, failed or interrupted management session.
+    if mp_has_terminal; then
+        clear </dev/tty >/dev/tty 2>/dev/null || true
+    fi
 }
 trap mp_cleanup EXIT TERM
 trap ':' INT

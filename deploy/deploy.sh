@@ -205,11 +205,7 @@ if [ -f "$REPO_DIR/.release.env" ]; then
         || { echo "  ERROR: Signed frontend assets are incomplete. Reinstall the release."; exit 1; }
 else
     echo "[3/5] Building frontend..."
-    docker run --rm \
-        -v "$REPO_DIR/web:/app" \
-        -w /app \
-        node:22-alpine \
-        sh -c "npm ci --no-audit && npm audit --omit=dev --audit-level=high && npm run lint && npm run build"
+    mp_build_frontend_container "$REPO_DIR"
     python3 "$REPO_DIR/deploy/stamp_service_worker.py" "$REPO_DIR/web/out/sw.js" \
         "$(git -C "$REPO_DIR" rev-parse HEAD)"
     python3 "$REPO_DIR/deploy/generate_frontend_csp.py" "$REPO_DIR/web/out" \

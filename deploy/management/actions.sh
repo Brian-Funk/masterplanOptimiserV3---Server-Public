@@ -1281,8 +1281,7 @@ mp_rebuild_frontend() {
     fi
     if ! ui_run_command "Rebuild frontend" \
         "Installing pinned packages and building the static frontend" \
-        docker run --rm -v "$MP_ROOT/web:/app" -w /app node:22-alpine \
-        sh -c 'npm ci --no-audit && npm audit --omit=dev --audit-level=high && npm run lint && npm run build'; then
+        mp_build_frontend_container "$MP_ROOT"; then
         mp_audit "frontend.rebuild" "failed" "build"
         return 1
     fi

@@ -846,6 +846,36 @@ mp_prepare_frontend_csp_runtime() {
     chmod 0755 "$compliance_receipt_dir" || return 1
 }
 
+# Build the static frontend in the pinned Node container while preserving an
+# exact corresponding-source identity. The deliberately small Node image does
+# not contain git and mounts only web/, so resolve the public repository and
+# immutable revision on the host and pass them into Next.js explicitly.
+mp_build_frontend_container() {
+    local repository_root="${1:-$MP_ROOT}" repository revision source_url
+    local -a source_environment
+    repository="${MP_PUBLIC_SOURCE_REPOSITORY_URL:-}"
+    revision="${MP_PUBLIC_SOURCE_REVISION:-}"
+    source_url="${MP_PUBLIC_SOURCE_URL:-}"
+    [ -n "$repository" ] \
+        || repository="$(git -C "$repository_root" remote get-url origin)" \
+        || return 1
+    [ -n "$revision" ] \
+        || revision="$(git -C "$repository_root" rev-parse HEAD)" \
+        || return 1
+    [[ "$revision" =~ ^[0-9a-f]{40}$ ]] \
+        || { printf 'Frontend source revision is not an exact commit SHA.\n' >&2; return 1; }
+    source_environment=(
+        -e "MP_PUBLIC_SOURCE_REPOSITORY_URL=$repository"
+        -e "MP_PUBLIC_SOURCE_REVISION=$revision"
+    )
+    if [ -n "$source_url" ]; then
+        source_environment+=(-e "MP_PUBLIC_SOURCE_URL=$source_url")
+    fi
+    docker run --rm "${source_environment[@]}" \
+        -v "$repository_root/web:/app" -w /app node:22-alpine \
+        sh -c 'npm ci --no-audit && npm audit --omit=dev --audit-level=high && npm run lint && npm run build'
+}
+
 # Print the active reverse-proxy topology without changing service state.
 mp_caddy_mode() {
     mp_compose_init

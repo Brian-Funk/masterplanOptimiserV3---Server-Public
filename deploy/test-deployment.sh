@@ -176,8 +176,7 @@ build_component() {
 }
 
 build_frontend() {
-    docker run --rm -v "$MP_TEST_SOURCE/web:/app" -w /app node:22-alpine \
-        sh -c 'npm ci --no-audit && npm audit --omit=dev --audit-level=high && npm run lint && npm run build'
+    mp_build_frontend_container "$MP_TEST_SOURCE"
     python3 "$MP_TEST_SOURCE/deploy/stamp_service_worker.py" \
         "$MP_TEST_SOURCE/web/out/sw.js" "$(git -C "$MP_TEST_SOURCE" rev-parse HEAD)"
     mkdir -p "$MP_TEST_SOURCE/runtime"
