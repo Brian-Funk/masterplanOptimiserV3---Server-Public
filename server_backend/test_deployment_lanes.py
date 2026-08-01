@@ -97,6 +97,11 @@ def test_public_release_is_reverified_from_anonymous_downloads() -> None:
     workflow = text(".github/workflows/release.yml")
     assert '.private == false and .visibility == "public"' in workflow
     assert ".private == false &&" not in workflow
+    assert '.tag_name == $tag and .name == $tag and .draft == false and .prerelease == false' in workflow
+    assert ".tag_name == $tag &&" not in workflow
+    assert 'release_exists=true' in workflow
+    assert "if: steps.release.outputs.release_exists != 'true'" in workflow
+    assert ".images.backend | select(test($pattern))" in workflow
     assert 'releases/tags/${TAG}' in workflow
     assert "--certificate-identity \"$identity\"" in workflow
     assert "verify_asset .frontend" in workflow
