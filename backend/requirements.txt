@@ -1,7 +1,7 @@
 # FastAPI Backend
 fastapi==0.139.2
 uvicorn[standard]==0.32.0
-sqlalchemy==2.0.35
+sqlalchemy==2.0.51
 pydantic==2.9.2
 pydantic-settings==2.6.0
 python-dotenv==1.2.2
