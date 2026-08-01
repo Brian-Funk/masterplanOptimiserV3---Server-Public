@@ -181,6 +181,7 @@ sync_frontend() {
 
 compose_activate() {
     local components="$1"
+    mp_prepare_backend_secret_permissions
     mp_compose_init
     mp_compose_validate
     if grep -qw database <<< "$components"; then

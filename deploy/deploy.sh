@@ -132,6 +132,10 @@ ensure_secret_files() {
 }
 
 ensure_secret_files
+mp_prepare_backend_secret_permissions || {
+    echo "  ERROR: Backend secret permissions could not be prepared." >&2
+    exit 1
+}
 
 # ── 2. Pull latest code ─────────────────────────────────────
 if [ "$PULL_LATEST" -eq 1 ] && [ ! -f "$REPO_DIR/.release.env" ]; then

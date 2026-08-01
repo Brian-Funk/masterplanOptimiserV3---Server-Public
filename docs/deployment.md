@@ -119,7 +119,10 @@ refuses mismatched sources before removing either setting.
 The wizard also creates the independent `secrets/ip_hmac_key`. It keys only the
 daily IP pseudonym HMAC and must never equal the general application secret.
 Private values must stay out of Git, diagnostics and ordinary Compose output.
-Keep all secret files mode `0600` in a mode `0700` directory.
+Keep `.env` and non-runtime secret material mode `0600`. Runtime-mounted
+backend secrets are owner-writable and backend-group-readable (`0640`) inside
+the mode-`0700` canonical secret directory; the fixed group ID `10001` has no
+host directory traversal and exists solely for the unprivileged container.
 
 The first-run wizard selects the final topology explicitly. HA node names,
 peer identities, direct TLS, DNS routing and replication settings are generated

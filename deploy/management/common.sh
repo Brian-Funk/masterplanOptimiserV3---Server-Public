@@ -711,6 +711,33 @@ mp_validate_snapshot_name() {
     [ "${#value}" -ge 1 ] && [ "${#value}" -le 64 ] && [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
 }
 
+# Give the fixed unprivileged backend identity read-only access to the exact
+# secrets mounted by Compose. The operator remains the owner so guarded TUI
+# rotations can replace them; the mode-0700 parent directory prevents the
+# runtime group from traversing the canonical host secret store.
+mp_prepare_backend_secret_permissions() {
+    local file
+    local -a files=(
+        "$MP_ROOT/secrets/database_password"
+        "$MP_ROOT/secrets/ip_hmac_key"
+        "$MP_ROOT/secrets/secret_key"
+        "$MP_ROOT/secrets/vapid_private_key"
+        "$MP_ROOT/secrets/root_bootstrap_token"
+        "$MP_ROOT/secrets/smtp_token"
+        "$MP_ROOT/secrets/evidence_signing_key"
+        "$MP_ROOT/secrets/evidence_github_fine_grained_token"
+    )
+    for file in "${files[@]}"; do
+        [ -e "$file" ] || continue
+        [ -f "$file" ] && [ ! -L "$file" ] || {
+            printf 'Refusing unsafe backend secret path: %s\n' "$file" >&2
+            return 1
+        }
+        sudo -n chown ":10001" -- "$file" || return 1
+        chmod 0640 -- "$file" || return 1
+    done
+}
+
 # Build the exact production Compose command, including the local override.
 mp_compose_init() {
     mp_load_ha_config || return 1
@@ -768,6 +795,7 @@ mp_retire_root_bootstrap_secret() {
     if mp_root_bootstrap_is_disabled; then
         : > "$MP_ROOT/secrets/root_bootstrap_token" || return 1
         chmod 600 "$MP_ROOT/secrets/root_bootstrap_token" || return 1
+        mp_prepare_backend_secret_permissions || return 1
     fi
 }
 

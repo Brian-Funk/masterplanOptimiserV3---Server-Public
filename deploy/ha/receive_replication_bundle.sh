@@ -266,6 +266,7 @@ sudo -n chmod 700 "$stage/evidence.new"
 sudo -n rm -rf "$MP_ROOT/state/evidence"
 sudo -n mv "$stage/evidence.new" "$MP_ROOT/state/evidence"
 mp_snapshot_publish_status
+mp_prepare_backend_secret_permissions
 "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend caddy >/dev/null
 "${MP_COMPOSE[@]}" exec -T db pg_isready -U masterplan -d masterplan >/dev/null
 "${MP_COMPOSE[@]}" exec -T caddy \

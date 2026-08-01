@@ -260,6 +260,7 @@ mp_guided_initial_configuration() {
 # Recreate only the backend and confirm public health after a static setting change.
 mp_recreate_backend() {
     mp_require_active_or_standalone || return 1
+    mp_prepare_backend_secret_permissions || return 1
     mp_compose_validate || return 1
     mp_compose_init
     "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend >/dev/null || return 1
@@ -822,6 +823,7 @@ mp_rotate_database_password() {
         return 1
     fi
     rm -f "$staged"; unset password repeat escaped
+    mp_prepare_backend_secret_permissions || { mp_guard_rollback "Database secret permissions could not be prepared."; return 1; }
     if ! mp_compose_validate; then mp_guard_rollback "Database configuration validation failed."; return 1; fi
     mp_compose_init
     if ! "${MP_COMPOSE[@]}" up -d --force-recreate db backend >/dev/null; then

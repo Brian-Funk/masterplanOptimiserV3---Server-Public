@@ -827,6 +827,7 @@ mp_snapshot_restore_configuration() {
     printf "ALTER ROLE masterplan PASSWORD '%s';\n" "$escaped_password" \
         | "${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U masterplan -d postgres >/dev/null || return 1
     unset target_password escaped_password
+    mp_prepare_backend_secret_permissions || return 1
     return 0
 }
 

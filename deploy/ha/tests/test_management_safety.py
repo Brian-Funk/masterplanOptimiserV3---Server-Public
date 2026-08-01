@@ -74,6 +74,49 @@ class CaddyConversionSafetyTests(unittest.TestCase):
 
 
 class SnapshotServiceSafetyTests(unittest.TestCase):
+    def test_backend_secret_contract_is_group_readable_without_broadening_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            secrets = root / "secrets"
+            secrets.mkdir(mode=0o700)
+            names = (
+                "database_password", "ip_hmac_key", "secret_key",
+                "vapid_private_key", "root_bootstrap_token", "smtp_token",
+                "evidence_signing_key", "evidence_github_fine_grained_token",
+            )
+            for name in names:
+                path = secrets / name
+                path.write_text("synthetic", encoding="utf-8")
+                path.chmod(0o600)
+            log = root / "sudo.log"
+            command = f'''
+                set -Eeuo pipefail
+                export MP_ROOT={shlex.quote(str(root))}
+                export TEST_SUDO_LOG={shlex.quote(str(log))}
+                source {shlex.quote(str(ROOT / "deploy/management/common.sh"))}
+                sudo() {{
+                    [ "$1" != -n ] || shift
+                    printf '%s\n' "$*" >> "$TEST_SUDO_LOG"
+                }}
+                mp_prepare_backend_secret_permissions
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", command],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(stat.S_IMODE(secrets.stat().st_mode), 0o700)
+            self.assertTrue(all(
+                stat.S_IMODE((secrets / name).stat().st_mode) == 0o640
+                for name in names
+            ))
+            chowns = log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(chowns), len(names))
+            self.assertTrue(all(
+                line.startswith("chown :10001 -- ")
+                for line in chowns
+            ))
+
     def test_snapshot_payload_permissions_do_not_depend_on_operator_umask(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

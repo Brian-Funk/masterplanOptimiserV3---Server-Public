@@ -27,7 +27,8 @@ current VPS operator and applies to the next window immediately.
 When `.env` does not exist, the menu opens the production wizard. It collects
 the application domain, passkey display name, internal database credentials and
 VAPID contact. Application, VAPID and root-bootstrap secrets are generated into
-mode `0600` Docker secret files. The database password is stored only in
+mode `0640` Docker secret files owned by the operator and readable only by the
+fixed unprivileged backend group. The database password is stored only in
 `secrets/database_password`, and a separate IP-pseudonymisation key is stored
 only in `secrets/ip_hmac_key`. Neither value is written to `.env`.
 
@@ -187,7 +188,9 @@ current installation, avoiding accidental proxy conversion or port conflicts.
 
 - Never copy the age private identity into `.env`, `secrets/` or the repository.
 - Do not send diagnostics, snapshots or bootstrap codes through untrusted chat.
-- Keep `.env` and secret files mode `0600`, with their directories mode `0700`.
+- Keep `.env` mode `0600`; keep runtime-mounted backend secrets mode `0640`
+  with operator ownership and backend group `10001`, inside a mode `0700`
+  directory. Snapshot payload copies remain mode `0600`.
 - Rotate the database password, application secret and IP HMAC key only through
   their guarded Configuration actions. IP HMAC rotation intentionally ends
   pseudonym continuity but does not revoke existing sessions.
