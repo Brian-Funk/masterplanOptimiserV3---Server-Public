@@ -1,0 +1,355 @@
+"""Contracts for resumable commissioning, DNS routing and signed releases."""
+
+from __future__ import annotations
+
+import io
+import json
+from pathlib import Path
+import subprocess
+import tarfile
+import tempfile
+import unittest
+from unittest import mock
+
+from deploy.ha import pairing
+from deploy.release import install_release
+
+
+ROOT = Path(__file__).resolve().parents[3]
+SETUP = (ROOT / "deploy/management/setup_v2.sh").read_text(encoding="utf-8")
+COMMON = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
+DEPLOY = (ROOT / "deploy/deploy.sh").read_text(encoding="utf-8")
+WORKER = (ROOT / "infra/cloudflare-ha-witness/src/index.ts").read_text(encoding="utf-8")
+CADDY = (ROOT / "infra/Caddyfile.ha").read_text(encoding="utf-8")
+CADDY_IMAGE = (ROOT / "infra/Dockerfile.caddy").read_text(encoding="utf-8")
+RELEASE = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+SCHEDULER = (ROOT / "deploy/ha/replication_scheduler.py").read_text(encoding="utf-8")
+INSTALL_RELEASE = (ROOT / "deploy/release/install_release.py").read_text(encoding="utf-8")
+BOOTSTRAP = (ROOT / "deploy/setup-server.sh").read_text(encoding="utf-8")
+PORTABLE_RECOVERY_DOC = (ROOT / "docs/portable-snapshot-recovery.md").read_text(
+    encoding="utf-8"
+)
+
+
+def shell_function(source: str, name: str) -> str:
+    marker = f"{name}() {{"
+    start = source.index(marker)
+    next_function = source.find("\nmp_", start + len(marker))
+    return source[start:next_function if next_function >= 0 else len(source)]
+
+
+class PairingCodeTests(unittest.TestCase):
+    def test_full_loss_runbook_links_the_current_destructive_gate(self) -> None:
+        self.assertIn(
+            "[destructive recovery drill completion gate]"
+            "(recovery-drill.md#completion-gate)",
+            PORTABLE_RECOVERY_DOC,
+        )
+        self.assertNotIn(
+            "high-availability.md#5-destructive-verification-gate",
+            PORTABLE_RECOVERY_DOC,
+        )
+
+    def test_round_trip_and_tamper_detection(self) -> None:
+        document = {
+            "format": "mp-opt-ha-join-v1",
+            "cluster_id": "mp-opt-cluster-1234",
+            "domain": "calendar.example.org",
+            "witness_url": "https://witness.example.workers.dev",
+            "pairing_secret": "a" * 48,
+            "node_id": "node-b",
+        }
+        encoded = pairing.encode_document(document)
+        self.assertEqual(pairing.decode_code(encoded), document)
+        replacement = "A" if encoded[-1] != "A" else "B"
+        with self.assertRaises(ValueError):
+            pairing.decode_code(encoded[:-1] + replacement)
+
+    def test_cli_never_outputs_a_private_node_identity(self) -> None:
+        self.assertNotIn("AGE-SECRET-KEY", SETUP)
+        self.assertIn("pending-ha-join.json", SETUP)
+        self.assertIn("expiresAt: now + 15 * 60 * 1000", WORKER)
+
+    def test_fresh_modes_cannot_overwrite_an_existing_installation(self) -> None:
+        self.assertIn("A live standalone configuration already exists", SETUP)
+        self.assertIn("Join codes are accepted only on a fresh", SETUP)
+        self.assertIn("full-loss recovery is only for a replacement VPS", SETUP)
+
+    def test_replacement_pairing_targets_whichever_node_is_lost(self) -> None:
+        self.assertIn('--arg target "$HA_PEER_NODE_ID"', SETUP)
+        self.assertIn("node_id:$target", SETUP)
+        self.assertIn('--arg node "$HA_NODE_ID"', SETUP)
+        self.assertIn('--arg peer "$HA_PEER_NODE_ID"', SETUP)
+        self.assertNotIn('printf \'{"node_id":"node-a"}', SETUP)
+
+    def test_expired_pairing_code_can_be_reissued_safely(self) -> None:
+        self.assertIn("const activePairing", WORKER)
+        self.assertIn("The previous code expired", SETUP)
+
+    def test_worker_commissioning_requests_are_exactly_retryable(self) -> None:
+        self.assertIn("bootstrapHash", WORKER)
+        self.assertIn("bootstrapDisposition(existing.bootstrapHash, bootstrapHash)", WORKER)
+        self.assertIn("joinDisposition(pairing, pairSecretHash, materialHash", WORKER)
+        self.assertIn("pairing.consumedAt = Date.now()", WORKER)
+        self.assertIn("const exactPairingRetry", WORKER)
+        self.assertNotIn("delete cluster.pairing", WORKER)
+
+    def test_local_pending_receipts_cover_both_remote_commit_boundaries(self) -> None:
+        self.assertIn("pending-witness-bootstrap.json", SETUP)
+        self.assertIn("mp-opt-pending-witness-bootstrap-v1", SETUP)
+        self.assertIn("pending-local-join.json", SETUP)
+        self.assertIn("mp-opt-pending-local-join-v1", SETUP)
+        self.assertLess(
+            SETUP.index('mv "$bootstrap_tmp" "$MP_SETUP_V2_PENDING_BOOTSTRAP"'),
+            SETUP.index('mp_setup_witness_call bootstrap'),
+        )
+        self.assertLess(
+            SETUP.index('mv "$pending" "$MP_SETUP_V2_PENDING_LOCAL_JOIN"'),
+            SETUP.index('mp_setup_witness_call join'),
+        )
+
+    def test_full_loss_uses_the_exact_import_receipt_and_blank_restore(self) -> None:
+        self.assertIn("setup-import-receipt.json", SETUP)
+        self.assertIn('mp_snapshot_restore_full_loss "$imported_snapshot"', SETUP)
+        self.assertNotIn("mp_snapshot_restore_interactive || return 1", SETUP)
+        snapshots = (ROOT / "deploy/management/snapshots.sh").read_text(encoding="utf-8")
+        self.assertIn("mp_snapshot_restore_full_loss()", snapshots)
+        self.assertIn("Old HA identity, TLS topology", snapshots)
+        self.assertIn('rm -f "$MP_ROOT/infra/docker-compose.override.yml"', snapshots)
+        self.assertIn("resume_installed=true", snapshots)
+        self.assertIn('cmp -s "$payload/config/.env" "$MP_ROOT/.env"', snapshots)
+        self.assertIn("docker volume inspect masterplan_pgdata", snapshots)
+
+    def test_commission_menu_is_contextual_at_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            state.mkdir()
+            capture = root / "menu.txt"
+            script = r'''
+                export MP_ROOT="$1" MP_STATE="$2" MENU_CAPTURE="$3"
+                export MP_SETUP_V2_STATE="$2/setup-state.json"
+                source "$4/deploy/management/setup_v2.sh"
+                ui_menu() { printf '%s\n' "$*" > "$MENU_CAPTURE"; printf 'cancel\n'; }
+                ui_message() { :; }
+                ui_error() { return 1; }
+                mp_ha_role() { printf '%s\n' "${TEST_ROLE:-standalone}"; }
+                mp_setup_v2
+            '''
+            def menu(env: dict[str, str]) -> str:
+                result = subprocess.run(
+                    ["bash", "-Eeuo", "pipefail", "-c", script, "bash",
+                     str(root), str(state), str(capture), str(ROOT)],
+                    env={**__import__("os").environ, **env}, text=True,
+                    capture_output=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return capture.read_text(encoding="utf-8")
+
+            blank = menu({"TEST_ROLE": "standalone"})
+            self.assertIn("Fresh single-node server", blank)
+            self.assertIn("Join an existing HA pair", blank)
+            self.assertNotIn("Convert this existing", blank)
+
+            (root / ".env").write_text("DOMAIN=example.test\n", encoding="utf-8")
+            standalone = menu({"TEST_ROLE": "standalone"})
+            self.assertIn("Add a blank second VPS", standalone)
+            self.assertNotIn("Fresh single-node server", standalone)
+
+            ha = menu({"TEST_ROLE": "dynamic"})
+            self.assertIn("Replace the lost peer", ha)
+            self.assertNotIn("Fresh two-node HA", ha)
+
+    def test_every_supported_setup_has_guarded_checkpoint_order(self) -> None:
+        standalone = shell_function(SETUP, "mp_setup_standalone")
+        for earlier, later in (
+            ("mp_guided_initial_configuration", "mp_setup_present_bootstrap"),
+            ("mp_setup_present_bootstrap", "mp_setup_verify_standalone_dns"),
+            ("mp_setup_verify_standalone_dns", 'deploy/deploy.sh" --no-pull'),
+            ('deploy/deploy.sh" --no-pull', "mp_configure_recovery_recipient"),
+            ("mp_validate_installation", "mp_setup_verify_smtp_and_dns"),
+        ):
+            self.assertLess(standalone.index(earlier), standalone.index(later))
+
+        primary = shell_function(SETUP, "mp_setup_primary_create")
+        self.assertLess(primary.index("migration_snapshot"), primary.index("witness_bootstrap"))
+        self.assertLess(
+            primary.index('mv "$bootstrap_tmp" "$MP_SETUP_V2_PENDING_BOOTSTRAP"'),
+            primary.index("mp_setup_witness_call bootstrap"),
+        )
+        self.assertLess(
+            primary.index("mp_setup_witness_call bootstrap"),
+            primary.index('mv "$pending" "$MP_SETUP_V2_PENDING_JOIN"'),
+        )
+
+        joining = shell_function(SETUP, "mp_setup_join_node")
+        self.assertLess(
+            joining.index('mv "$pending" "$MP_SETUP_V2_PENDING_LOCAL_JOIN"'),
+            joining.index("mp_setup_witness_call join"),
+        )
+        self.assertLess(
+            joining.index("mp_setup_witness_call join"),
+            joining.index("mp_setup_install_ha_identity"),
+        )
+
+        replacement = shell_function(SETUP, "mp_setup_replace_standby")
+        self.assertLess(
+            replacement.index('mv "$replacement_tmp" "$MP_SETUP_V2_PENDING_REPLACEMENT"'),
+            replacement.index("mp_setup_witness_call pair-open"),
+        )
+        self.assertLess(
+            replacement.index("mp_setup_witness_call pair-open"),
+            replacement.index('mp_setup_state_begin replace-primary'),
+        )
+
+    def test_launcher_resumes_before_showing_waiting_for_primary(self) -> None:
+        launcher = (ROOT / "manage.sh").read_text(encoding="utf-8")
+        self.assertLess(
+            launcher.index('ui_confirm "Resume commissioning"'),
+            launcher.index('ui_message "Waiting for the primary"'),
+        )
+
+
+class DnsOnlyHaTests(unittest.TestCase):
+    def test_new_clusters_use_scoped_dns_and_exact_acme_name(self) -> None:
+        self.assertIn('provider: "cloudflare-dns"', WORKER)
+        self.assertIn('const expected = `_acme-challenge.${cluster.routing.hostname}`', WORKER)
+        self.assertIn('return this.env.CLOUDFLARE_DNS_API_TOKEN || ""', WORKER)
+        self.assertIn('if (type !== "TXT") record.proxied = false', WORKER)
+        self.assertIn("DNS_TTL_SECONDS = 60", WORKER)
+
+    def test_vps_caddy_has_no_cloudflare_credential(self) -> None:
+        self.assertIn("dns mpopt_witness", CADDY)
+        self.assertNotIn("CLOUDFLARE_API_TOKEN", CADDY)
+        self.assertNotIn("CLOUDFLARE_DNS_API_TOKEN", CADDY)
+        self.assertIn("dns.providers.mpopt_witness", CADDY_IMAGE)
+        self.assertNotIn("CLOUDFLARE_DNS_API_TOKEN", CADDY_IMAGE)
+
+    def test_setup_hardcodes_nodes_and_guides_legacy_retirement(self) -> None:
+        self.assertIn("node-a", SETUP)
+        self.assertIn("node-b", SETUP)
+        self.assertIn("legacy-load-balancer-retirement.json", SETUP)
+        self.assertIn("date -u -d '+7 days'", SETUP)
+
+
+class SignedReleaseTests(unittest.TestCase):
+    def test_release_contains_signed_operations_frontend_and_images(self) -> None:
+        self.assertIn("operations.tar.gz", RELEASE)
+        self.assertIn("cosign sign-blob", RELEASE)
+        self.assertIn("cosign sign --yes", RELEASE)
+        self.assertIn("--platform linux/amd64,linux/arm64", RELEASE)
+        self.assertIn("Dockerfile.tools", RELEASE)
+        self.assertIn("MP_TOOLS_IMAGE", INSTALL_RELEASE)
+        self.assertIn('"$tools_image" deploy /worker/src/index.ts', SETUP)
+        self.assertIn(".release.env", COMMON)
+        self.assertIn("--no-build", DEPLOY)
+        self.assertIn("mp-opt-setup.sh", RELEASE)
+        self.assertRegex(
+            install_release.COSIGN_IMAGE,
+            r"^ghcr\.io/sigstore/cosign/cosign@sha256:[0-9a-f]{64}$",
+        )
+
+    def test_bootstrap_rejects_moving_refs_and_does_not_execute_remote_shell(self) -> None:
+        self.assertNotIn("get.docker.com", BOOTSTRAP)
+        self.assertNotIn("| sh", BOOTSTRAP)
+        self.assertNotIn("| bash", BOOTSTRAP)
+        self.assertNotIn('MP_REPOSITORY_REF:-main', BOOTSTRAP)
+        self.assertIn("A verified stable release tag is required", BOOTSTRAP)
+        self.assertIn('/usr/sbin/sshd -T', BOOTSTRAP)
+
+    def test_one_previous_release_can_be_exchanged_for_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pairs = [
+                (root / "deploy", root / ".deploy.previous"),
+                (root / "infra", root / ".infra.previous"),
+                (root / "web/out", root / "web/.out.previous"),
+                (root / "runtime/frontend-csp.caddy", root / "runtime/.frontend-csp.previous"),
+                (root / "manage.sh", root / ".manage.sh.previous"),
+                (root / "configure-production.sh", root / ".configure-production.sh.previous"),
+                (root / ".release.env", root / ".release.env.previous"),
+            ]
+            for current, previous in pairs:
+                current.parent.mkdir(parents=True, exist_ok=True)
+                previous.parent.mkdir(parents=True, exist_ok=True)
+                if current.suffix or current.name in {"manage.sh", "configure-production.sh"}:
+                    current.write_text("current", encoding="utf-8")
+                    previous.write_text("previous", encoding="utf-8")
+                else:
+                    current.mkdir()
+                    previous.mkdir()
+                    (current / "marker").write_text("current", encoding="utf-8")
+                    (previous / "marker").write_text("previous", encoding="utf-8")
+
+            self.assertEqual(install_release.rollback(root), 0)
+            for current, previous in pairs:
+                if current.is_dir():
+                    self.assertEqual((current / "marker").read_text(), "previous")
+                    self.assertEqual((previous / "marker").read_text(), "current")
+                else:
+                    self.assertEqual(current.read_text(), "previous")
+                    self.assertEqual(previous.read_text(), "current")
+
+    def test_incomplete_release_exchange_restores_both_sides(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current = root / "current"
+            previous = root / "previous"
+            current.write_text("current", encoding="utf-8")
+            previous.write_text("previous", encoding="utf-8")
+            original_replace = Path.replace
+            calls = 0
+
+            def fail_final_exchange(path: Path, target: Path):
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    raise OSError("simulated final rename failure")
+                return original_replace(path, target)
+
+            with mock.patch.object(Path, "replace", fail_final_exchange):
+                with self.assertRaises(OSError):
+                    install_release.swap_with_previous(current, previous)
+            self.assertEqual(current.read_text(encoding="utf-8"), "current")
+            self.assertEqual(previous.read_text(encoding="utf-8"), "previous")
+
+    def test_public_release_is_usable_without_github_credentials(self) -> None:
+        self.assertIn("Verify public source distribution", RELEASE)
+        self.assertIn("Verify anonymous public release", RELEASE)
+        self.assertIn(".private == false", RELEASE)
+        self.assertIn("docker logout ghcr.io", RELEASE)
+        self.assertGreaterEqual(RELEASE.count("docker buildx imagetools inspect"), 2)
+        self.assertIn("cosign verify-blob --bundle release-manifest.bundle", RELEASE)
+        self.assertIn("verify_asset .sboms.source", RELEASE)
+        self.assertIn('--certificate-identity "$identity"', RELEASE)
+        self.assertNotIn("GH_TOKEN", BOOTSTRAP)
+        self.assertNotIn("GITHUB_TOKEN", BOOTSTRAP)
+        self.assertNotIn("Authorization", INSTALL_RELEASE)
+
+    def test_safe_extract_rejects_traversal_and_unexpected_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "bad.tar.gz"
+            with tarfile.open(archive, "w:gz") as output:
+                info = tarfile.TarInfo("../escape")
+                info.size = 1
+                output.addfile(info, io.BytesIO(b"x"))
+            with self.assertRaises(RuntimeError):
+                install_release.safe_extract(archive, root / "out", "operations")
+
+            archive = root / "unexpected.tar.gz"
+            with tarfile.open(archive, "w:gz") as output:
+                info = tarfile.TarInfo("secrets/token")
+                info.size = 1
+                output.addfile(info, io.BytesIO(b"x"))
+            with self.assertRaises(RuntimeError):
+                install_release.safe_extract(archive, root / "out", "operations")
+
+    def test_five_minute_verified_copy_is_the_default(self) -> None:
+        self.assertIn("'),'5');", SCHEDULER)
+        runtime = (ROOT / "backend/app/core/runtime_settings.py").read_text(encoding="utf-8")
+        self.assertIn('"ha_replication_interval_minutes": {"default": 5', runtime)
+
+
+if __name__ == "__main__":
+    unittest.main()

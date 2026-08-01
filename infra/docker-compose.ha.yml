@@ -1,0 +1,40 @@
+# Symmetric, provider-neutral HA overlay. Both nodes use this exact file.
+services:
+  backend:
+    environment:
+      HA_MODE: ha
+      HA_ROLE: dynamic
+      HA_NODE_ID: ${HA_NODE_ID:?Set HA_NODE_ID}
+      HA_PEER_NODE_ID: ${HA_PEER_NODE_ID:?Set HA_PEER_NODE_ID}
+      HA_CLUSTER_ID: ${HA_CLUSTER_ID:?Set HA_CLUSTER_ID}
+      HA_GENERATION: ${HA_GENERATION:-1}
+      HA_WITNESS_URL: ${HA_WITNESS_URL:?Set HA_WITNESS_URL}
+      HA_CONTROL_WITNESS_REQUIRED: "true"
+      HA_CONTROL_STATE_PATH: /runtime/ha-control.json
+      HA_LEASE_STATE_PATH: /runtime/ha-control.json
+      HA_REPLICATION_STATUS_PATH: /runtime/ha-replication.json
+      HA_REPLICATION_REQUEST_DIR: /runtime/ha-requests
+      HA_SNAPSHOT_STATUS_PATH: /runtime/ha-snapshot-status.json
+      COMPLIANCE_REQUEST_DIR: /runtime/compliance-requests
+      COMPLIANCE_RECEIPT_DIR: /runtime/compliance-receipts
+      HA_RECOVERY_STORAGE_MODE: ${HA_RECOVERY_STORAGE_MODE:-manual_portable}
+    volumes:
+      - ../runtime:/runtime:ro
+      - ../runtime/ha-requests:/runtime/ha-requests:rw
+      - ../runtime/compliance-requests:/runtime/compliance-requests:rw
+    secrets:
+      - ha_node_token
+
+  caddy:
+    environment:
+      HA_NODE_ID: ${HA_NODE_ID:?Set HA_NODE_ID}
+      HA_CLUSTER_ID: ${HA_CLUSTER_ID:?Set HA_CLUSTER_ID}
+      HA_WITNESS_URL: ${HA_WITNESS_URL:?Set HA_WITNESS_URL}
+    secrets:
+      - ha_node_token
+    volumes:
+      - ./Caddyfile.ha:/etc/caddy/Caddyfile:ro
+
+secrets:
+  ha_node_token:
+    file: /etc/mp-opt-ha/secrets/node_token

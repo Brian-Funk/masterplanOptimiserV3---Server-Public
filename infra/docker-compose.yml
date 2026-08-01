@@ -1,0 +1,94 @@
+name: masterplan
+
+# Runtime stdout/stderr is operational evidence, not an indefinite archive.
+# Bound every container's local JSON log; host/provider logs have a separate
+# controller-owned retention policy documented in docs/log-inventory.md.
+x-bounded-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  db:
+    image: ${MP_POSTGRES_IMAGE:-masterplan-postgres:16-hardened}
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.postgres
+    environment:
+      POSTGRES_USER: masterplan
+      POSTGRES_PASSWORD_FILE: /run/secrets/database_password
+      POSTGRES_DB: masterplan
+    secrets:
+      - database_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U masterplan"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    logging: *bounded-logging
+
+  backend:
+    image: ${MP_BACKEND_IMAGE:-masterplan-backend:latest}
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      # Deliberately override any legacy .env value. The backend constructs its
+      # URL in-process from the mounted password file and these non-secret parts.
+      DATABASE_URL: ""
+      DATABASE_USER: masterplan
+      DATABASE_HOST: db
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: masterplan
+      API_HOST: "0.0.0.0"
+      API_PORT: "8000"
+    secrets:
+      - database_password
+      - ip_hmac_key
+    logging: *bounded-logging
+
+  caddy:
+    image: ${MP_CADDY_IMAGE:-masterplan-caddy:2-hardened}
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.local:/etc/caddy/Caddyfile:ro
+      - ../runtime:/etc/caddy/runtime:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - ../web/out:/srv/static:ro
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    logging: *bounded-logging
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+secrets:
+  database_password:
+    file: ../secrets/database_password
+  ip_hmac_key:
+    file: ../secrets/ip_hmac_key

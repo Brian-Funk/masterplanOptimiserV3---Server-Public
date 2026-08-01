@@ -1,0 +1,187 @@
+{
+  "format": "masterplan-session-storage-contract-v1",
+  "scope": "Supported Masterplan Server browser client",
+  "controller_confirmation_required": true,
+  "controller_selections": [
+    {
+      "id": "regular_absolute_lifetime",
+      "runtime_key": "session_ttl_hours",
+      "default": 8,
+      "minimum": 1,
+      "maximum": 720,
+      "unit": "hours"
+    },
+    {
+      "id": "privileged_absolute_lifetime",
+      "runtime_key": "session_ttl_hours_admin",
+      "default": 1,
+      "minimum": 1,
+      "maximum": 24,
+      "unit": "hours"
+    },
+    {
+      "id": "inactivity_lifetime",
+      "runtime_key": "session_inactivity_minutes",
+      "default": 30,
+      "minimum": 5,
+      "maximum": 1440,
+      "unit": "minutes"
+    },
+    {
+      "id": "privileged_action_reauthentication_window",
+      "runtime_key": "reauth_window_minutes",
+      "default": 5,
+      "minimum": 1,
+      "maximum": 30,
+      "unit": "minutes"
+    },
+    {
+      "id": "offline_calendar_access_window",
+      "runtime_key": "offline_access_ttl_hours",
+      "default": 24,
+      "minimum": 1,
+      "maximum": 24,
+      "unit": "hours"
+    }
+  ],
+  "production_cookie_profile": [
+    {
+      "id": "session",
+      "setting": "SESSION_COOKIE_NAME",
+      "generated_name": "__Host-mp_session",
+      "secure": true,
+      "http_only": true,
+      "same_site": "lax",
+      "path": "/",
+      "domain": null,
+      "max_age_source": "server_session_absolute_expiry",
+      "server_storage": "sha256_digest_only"
+    },
+    {
+      "id": "csrf",
+      "setting": "CSRF_COOKIE_NAME",
+      "generated_name": "__Host-mp_csrf",
+      "secure": true,
+      "http_only": false,
+      "same_site": "lax",
+      "path": "/",
+      "domain": null,
+      "max_age_source": "server_session_absolute_expiry",
+      "server_storage": "auth_session_record"
+    }
+  ],
+  "csrf": {
+    "write_methods": ["DELETE", "PATCH", "POST", "PUT"],
+    "header": "X-CSRF-Token",
+    "cookie_setting": "CSRF_COOKIE_NAME",
+    "comparison": "constant_time_exact_match",
+    "exact_exempt_paths": [
+      "/api/v1/activation/validate",
+      "/api/v1/auth/exchange",
+      "/api/v1/passkey/auth/begin",
+      "/api/v1/passkey/auth/complete",
+      "/api/v1/passkey/bootstrap/begin",
+      "/api/v1/passkey/bootstrap/complete"
+    ],
+    "exempt_prefixes": ["/api/v1/publish/"],
+    "conditional_exemption": "Passkey registration begin/complete may use an X-Activation-Token instead of cookie authentication."
+  },
+  "session_transitions": [
+    {
+      "id": "exchange_creates_active_session",
+      "trigger": "valid single-use passkey exchange",
+      "result": "hashed server record plus session and CSRF cookies"
+    },
+    {
+      "id": "absolute_expiry_denies_access",
+      "trigger": "current time is later than expires_at",
+      "result": "authentication denied"
+    },
+    {
+      "id": "inactivity_expiry_denies_access",
+      "trigger": "current time is later than last_seen_at plus the configured inactivity lifetime",
+      "result": "authentication denied"
+    },
+    {
+      "id": "logout_revokes_and_clears",
+      "trigger": "CSRF-protected logout",
+      "result": "current record revoked and both cookies cleared"
+    },
+    {
+      "id": "owned_session_revocation",
+      "trigger": "account owner revokes an active session",
+      "result": "target record revoked; current-session cookies also cleared"
+    },
+    {
+      "id": "retention_cleanup_deletes_records",
+      "trigger": "expired or revoked record passes its separately configured retention cutoff",
+      "result": "server session record deleted"
+    }
+  ],
+  "reauthentication": {
+    "runtime_key": "reauth_window_minutes",
+    "mechanism": "fresh passkey verification timestamps the current server session",
+    "policy": "Destructive, credential, governance, evidence, recovery, high-availability and security-setting operations identified by route dependencies require recent reauthentication.",
+    "failure": "HTTP 403 Re-authentication required"
+  },
+  "browser_stores": [
+    {
+      "id": "cookies",
+      "keys": ["SESSION_COOKIE_NAME", "CSRF_COOKIE_NAME"],
+      "content": "opaque session token and request-integrity token",
+      "created": "successful session exchange",
+      "removed": "logout, current-session revocation, browser removal or cookie expiry",
+      "retention": "bounded by server absolute session expiry"
+    },
+    {
+      "id": "localStorage",
+      "keys": [
+        "theme",
+        "mp-install-prompt-dismissed",
+        "mpopt:web-edits:dismissed:<event>:<fingerprint>",
+        "mp-opt-offline-calendar-enabled:<user>",
+        "mp-opt-offline-access"
+      ],
+      "content": "preferences, offline opt-in and bounded offline access metadata; no session token or calendar payload",
+      "created": "explicit preference or successful online access",
+      "removed": "preference removal, logout where applicable, denied/expired access or browser site-data removal",
+      "retention": "preference-specific; offline marker expires no later than the configured window or local end of day"
+    },
+    {
+      "id": "sessionStorage",
+      "keys": ["mp-dismissed-<event>", "mp-opt-route-secret:<route>:<name>"],
+      "content": "tab-only announcement state and transient activation, recovery or shared-route capability",
+      "created": "dismissal or route-secret capture",
+      "removed": "tab close; route secret also removed after completion or definitive rejection",
+      "retention": "current browser tab session"
+    },
+    {
+      "id": "browser_history",
+      "keys": ["mp-opt-route-secret:<route>:<name>"],
+      "content": "transient route capability after removal from the visible URL",
+      "created": "route-secret capture",
+      "removed": "completion or definitive rejection; otherwise browser history lifecycle",
+      "retention": "current matching history entry"
+    },
+    {
+      "id": "IndexedDB",
+      "keys": ["mp-opt-offline-calendar/calendar-payloads/<user>:<event>"],
+      "content": "explicitly enabled, schema-validated participant-safe offline calendar payload",
+      "created": "successful durable write after explicit opt-in",
+      "removed": "expiry, invalid schema, authorisation denial, logout, explicit removal or loss of access",
+      "retention": "configured offline access window, additionally capped at local end of day"
+    },
+    {
+      "id": "Cache API",
+      "keys": ["mp-opt-app-<release>"],
+      "content": "versioned static application shell and static assets; never authenticated API responses",
+      "created": "service-worker install or static asset fetch",
+      "removed": "service-worker activation replaces an old release or browser site-data removal",
+      "retention": "current release cache version"
+    }
+  ],
+  "external_boundaries": [
+    "Browser profile synchronisation, device or OS backups and provider copies are outside application control.",
+    "Application cleanup success does not prove physical deletion from copies outside controlled systems."
+  ]
+}

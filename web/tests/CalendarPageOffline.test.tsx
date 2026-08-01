@@ -1,0 +1,338 @@
+/**
+ * Offline calendar rendering regressions.
+ */
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import React from "react";
+
+const mockPush = vi.hoisted(() => vi.fn());
+const mockReplace = vi.hoisted(() => vi.fn());
+const mockUseAuth = vi.hoisted(() => vi.fn());
+const mockUseServiceAvailability = vi.hoisted(() => vi.fn());
+const mockApiFetch = vi.hoisted(() => vi.fn());
+const mockGetOfflineCalendarPayload = vi.hoisted(() => vi.fn());
+const mockStoreOfflineCalendarPayload = vi.hoisted(() => vi.fn());
+const mockOfflineCalendarStorageEnabled = vi.hoisted(() => vi.fn());
+const mockSetOfflineCalendarStorageEnabled = vi.hoisted(() => vi.fn());
+const mockClearOfflineCalendarCacheForUser = vi.hoisted(() => vi.fn());
+const mockRoute = vi.hoisted(() => ({
+  searchParams: new URLSearchParams("event=1"),
+}));
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mockPush, replace: mockReplace }),
+  useSearchParams: () => mockRoute.searchParams,
+}));
+
+vi.mock("@/contexts/AuthContext", () => ({
+  useAuth: mockUseAuth,
+}));
+
+vi.mock("@/contexts/ServiceAvailabilityContext", () => ({
+  useServiceAvailability: () => mockUseServiceAvailability(),
+}));
+
+vi.mock("@/lib/api", () => ({
+  apiFetch: mockApiFetch,
+}));
+
+vi.mock("@/lib/offlineCalendarCache", () => ({
+  clearOfflineCalendarCacheForUser: mockClearOfflineCalendarCacheForUser,
+  getOfflineCalendarPayload: mockGetOfflineCalendarPayload,
+  OfflineCalendarStorageError: class OfflineCalendarStorageError extends Error {},
+  offlineCalendarStorageEnabled: mockOfflineCalendarStorageEnabled,
+  setOfflineCalendarStorageEnabled: mockSetOfflineCalendarStorageEnabled,
+  storeOfflineCalendarPayload: mockStoreOfflineCalendarPayload,
+}));
+
+vi.mock("@/components/DynamicPWA", () => ({ DynamicPWA: () => null }));
+vi.mock("@/components/ThemeToggle", () => ({ ThemeToggle: () => null }));
+vi.mock("@/components/Logo", () => ({ Logo: () => <div>Logo</div> }));
+vi.mock("@/components/Footer", () => ({ Footer: () => <footer /> }));
+vi.mock("@/components/NotificationBell", () => ({ NotificationBell: () => null }));
+vi.mock("@/components/AnnouncementBanner", () => ({ AnnouncementBanner: () => null }));
+vi.mock("@/components/WebEditReviewModal", () => ({ WebEditReviewModal: () => null }));
+vi.mock("@/components/ScheduleWebEditIndicator", () => ({
+  ScheduleWebEditIndicator: () => null,
+}));
+vi.mock("@/components/TaskDetailModal", () => ({ TaskDetailModal: () => null }));
+vi.mock("@/components/CreateTaskModal", () => ({ CreateTaskModal: () => null }));
+vi.mock("@/components/ChangesModal", () => ({ ChangesModal: () => null }));
+vi.mock("@/components/PublicScheduleCalendarGrid", () => ({
+  PublicScheduleCalendarGrid: () => <div>Public schedule grid</div>,
+}));
+vi.mock("@/components/CalendarGrid", () => ({
+  CalendarGrid: ({ tasks }: { tasks: Array<{ id: number; name: string }> }) => (
+    <div data-testid="calendar-grid">
+      {tasks.map((task) => (
+        <span key={task.id}>{task.name}</span>
+      ))}
+    </div>
+  ),
+}));
+vi.mock("@/components/DraftChangesPanel", () => ({
+  DraftChangesPanel: ({ commitDisabled }: { commitDisabled: boolean }) => (
+    <button disabled={commitDisabled}>Commit</button>
+  ),
+}));
+
+const futureMarker = {
+  schema_version: 1 as const,
+  user_id: 42,
+  event_id: 1,
+  cached_at: "2026-05-21T09:30:00.000Z",
+  valid_until: "2999-05-21T23:59:59.999Z",
+  ttl_hours: 24,
+};
+
+const user = {
+  id: 42,
+  username: "viewer",
+  display_name: "Viewer",
+  email: null,
+  is_root_admin: false,
+  is_admin: false,
+  is_issuer: false,
+  can_edit: true,
+  is_active: true,
+  is_activated: true,
+  linked_person_id: null,
+  event_id: 1,
+  offline_access_ttl_hours: 24,
+};
+
+const cachedCalendar = {
+  event_id: 1,
+  event_name: "Cached Masterplan",
+  start_date: null,
+  end_date: null,
+  day_aliases: null,
+  persons: [],
+  public_schedule_items: [],
+  tasks: [
+    {
+      id: 1,
+      external_task_id: 10,
+      name: "Opening Session",
+      summary: null,
+      description: null,
+      start: "2026-05-21T09:00:00",
+      end: "2026-05-21T10:00:00",
+      location_name: "Hall A",
+      location_address: null,
+      task_type_code: null,
+      task_type_name: null,
+      color: null,
+      attendees: [],
+      field_assignments: null,
+      field_values: null,
+      field_definitions: null,
+      additional: null,
+      sort_order: 0,
+      has_web_edit: false,
+      web_edit_edited_at: null,
+      web_edit_edited_by: null,
+      web_edit_edited_by_user_id: null,
+      web_edit_change_summary: [],
+    },
+  ],
+};
+
+function authState(overrides = {}) {
+  return {
+    user: null,
+    logout: vi.fn(),
+    isLoading: false,
+    isAuthenticated: false,
+    authStatus: "offline",
+    offlineAccess: futureMarker,
+    offlineAccessExpired: false,
+    refreshUser: vi.fn(),
+    ...overrides,
+  };
+}
+
+describe("CalendarPage offline cache", () => {
+  beforeEach(() => {
+    mockPush.mockReset();
+    mockReplace.mockReset();
+    mockUseAuth.mockReset();
+    mockUseServiceAvailability.mockReset();
+    mockUseServiceAvailability.mockReturnValue({
+      state: "device_offline",
+      status: null,
+      isReady: false,
+      refresh: vi.fn(),
+    });
+    mockApiFetch.mockReset();
+    mockGetOfflineCalendarPayload.mockReset();
+    mockStoreOfflineCalendarPayload.mockReset();
+    mockStoreOfflineCalendarPayload.mockResolvedValue({ schema_version: 2 });
+    mockOfflineCalendarStorageEnabled.mockReset();
+    mockOfflineCalendarStorageEnabled.mockReturnValue(true);
+    mockSetOfflineCalendarStorageEnabled.mockReset();
+    mockClearOfflineCalendarCacheForUser.mockReset();
+    mockRoute.searchParams = new URLSearchParams("event=1");
+    localStorage.clear();
+  });
+
+  it("renders a cached calendar while offline with a valid marker", async () => {
+    mockUseAuth.mockReturnValue(authState());
+    mockGetOfflineCalendarPayload.mockResolvedValue({
+      user_id: 42,
+      event_id: 1,
+      cached_at: futureMarker.cached_at,
+      payload: cachedCalendar,
+    });
+
+    const { default: CalendarPage } = await import("@/app/calendar/page");
+    render(<CalendarPage />);
+
+    expect(await screen.findByText("Cached Masterplan")).toBeInTheDocument();
+    expect(screen.getByText("Opening Session")).toBeInTheDocument();
+    expect(screen.getByText("You are offline")).toBeInTheDocument();
+    expect(screen.getByText(/Showing the read-only schedule saved at/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Commit" })).toBeDisabled();
+    expect(mockApiFetch).not.toHaveBeenCalled();
+  });
+
+  it("shows a calm empty state when no cached calendar exists", async () => {
+    mockUseAuth.mockReturnValue(authState());
+    mockGetOfflineCalendarPayload.mockResolvedValue(null);
+
+    const { default: CalendarPage } = await import("@/app/calendar/page");
+    render(<CalendarPage />);
+
+    expect(await screen.findByText("You are offline")).toBeInTheDocument();
+    expect(
+      screen.getByText("Reconnect for live schedule access. No saved schedule is available on this device."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /view saved schedule/i })).not.toBeInTheDocument();
+  });
+
+  it("does not reveal cached data after offline access expires", async () => {
+    mockUseAuth.mockReturnValue(
+      authState({
+        offlineAccess: null,
+        offlineAccessExpired: true,
+      }),
+    );
+    mockGetOfflineCalendarPayload.mockResolvedValue({
+      user_id: 42,
+      event_id: 1,
+      cached_at: futureMarker.cached_at,
+      payload: cachedCalendar,
+    });
+
+    const { default: CalendarPage } = await import("@/app/calendar/page");
+    render(<CalendarPage />);
+
+    expect(
+      await screen.findByText("Saved-schedule access has expired. Reconnect and sign in again."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Cached Masterplan")).not.toBeInTheDocument();
+    expect(mockGetOfflineCalendarPayload).not.toHaveBeenCalled();
+  });
+
+  it("falls back to cached calendar data after an online fetch failure", async () => {
+    mockUseServiceAvailability.mockReturnValue({
+      state: "ready",
+      status: null,
+      isReady: true,
+      refresh: vi.fn(),
+    });
+    mockUseAuth.mockReturnValue(
+      authState({
+        user,
+        isAuthenticated: true,
+        authStatus: "authenticated",
+      }),
+    );
+    mockApiFetch.mockRejectedValue(new TypeError("Failed to fetch"));
+    mockGetOfflineCalendarPayload.mockResolvedValue({
+      user_id: 42,
+      event_id: 1,
+      cached_at: futureMarker.cached_at,
+      payload: cachedCalendar,
+    });
+
+    const { default: CalendarPage } = await import("@/app/calendar/page");
+    render(<CalendarPage />);
+
+    expect(await screen.findByText("Cached Masterplan")).toBeInTheDocument();
+    expect(mockApiFetch).toHaveBeenCalledWith("/api/v1/calendar/1");
+  });
+
+  it("stores live calendar data after a successful online fetch", async () => {
+    mockUseServiceAvailability.mockReturnValue({
+      state: "ready",
+      status: null,
+      isReady: true,
+      refresh: vi.fn(),
+    });
+    mockUseAuth.mockReturnValue(
+      authState({
+        user,
+        isAuthenticated: true,
+        authStatus: "authenticated",
+      }),
+    );
+    mockApiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => cachedCalendar,
+    });
+
+    const { default: CalendarPage } = await import("@/app/calendar/page");
+    render(<CalendarPage />);
+
+    await waitFor(() => {
+      expect(mockStoreOfflineCalendarPayload).toHaveBeenCalledWith(
+        42,
+        1,
+        cachedCalendar,
+        expect.any(String),
+        expect.any(String),
+      );
+    });
+    expect(mockApiFetch).toHaveBeenCalledWith(
+      "/api/v1/calendar/1/offline",
+      { cache: "no-store" },
+    );
+  });
+
+  it("reports a failed optional save and does not claim that storage is enabled", async () => {
+    mockOfflineCalendarStorageEnabled.mockReturnValue(false);
+    mockUseServiceAvailability.mockReturnValue({
+      state: "ready",
+      status: null,
+      isReady: true,
+      refresh: vi.fn(),
+    });
+    mockUseAuth.mockReturnValue(authState({
+      user,
+      isAuthenticated: true,
+      authStatus: "authenticated",
+    }));
+    mockApiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => cachedCalendar,
+    });
+    mockStoreOfflineCalendarPayload.mockRejectedValueOnce(
+      new Error("The offline schedule could not be saved on this device."),
+    );
+
+    const { default: CalendarPage } = await import("@/app/calendar/page");
+    render(<CalendarPage />);
+    const enable = await screen.findByRole("button", { name: "Enable offline copy" });
+    fireEvent.click(enable);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The offline schedule could not be saved on this device.",
+    );
+    expect(mockSetOfflineCalendarStorageEnabled).toHaveBeenNthCalledWith(1, 42, true);
+    expect(mockSetOfflineCalendarStorageEnabled).toHaveBeenNthCalledWith(2, 42, false);
+    expect(screen.getByRole("button", { name: "Enable offline copy" })).toBeInTheDocument();
+  });
+});

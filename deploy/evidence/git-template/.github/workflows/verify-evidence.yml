@@ -1,0 +1,39 @@
+name: Verify archived controller evidence
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evidence-verification:
+    name: Evidence verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Verify every portable bundle, digest, identity and complete chain
+        run: python tools/verify_evidence_repo.py .
+  ingestion-path-validation:
+    name: Ingestion path validation
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Require exactly one new bundle and digest directory
+        run: >-
+          python tools/validate_ingestion_paths.py .
+          --base "${{ github.event.pull_request.base.sha }}"
+          --head "${{ github.event.pull_request.head.sha }}"

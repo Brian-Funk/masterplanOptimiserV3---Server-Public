@@ -1,0 +1,117 @@
+{
+  "format": "masterplan-public-claim-policy-v1",
+  "rules": [
+    {
+      "id": "CLAIM-COMPLIANCE-STATUS",
+      "description": "Do not state that software or a deployment is GDPR or FADP compliant.",
+      "pattern": "\\b(?:is|are|will be|becomes?)\\s+(?:fully\\s+|automatically\\s+|100%\\s+)?(?:GDPR|Swiss\\s+FADP|FADP)[ -]compliant\\b",
+      "flags": "i",
+      "guidance": "Describe tested technical behaviour and leave legal conclusions to the controller."
+    },
+    {
+      "id": "CLAIM-CERTIFICATION",
+      "description": "Do not claim GDPR or FADP certification.",
+      "pattern": "\\b(?:is|are|was|were|becomes?)\\s+(?:officially\\s+)?(?:GDPR|FADP)[ -]certified\\b|\\bcertified\\s+(?:as\\s+)?(?:GDPR|FADP)[ -]compliant\\b",
+      "flags": "i",
+      "guidance": "State that Masterplan does not provide legal certification."
+    },
+    {
+      "id": "CLAIM-DELETION-PROOF",
+      "description": "Do not claim software proves or guarantees physical deletion of every copy.",
+      "pattern": "\\b(?:guarantees?|proves?|ensures?)\\s+(?:that\\s+)?(?:all|every|complete|permanent|physical|no)\\s+.{0,40}\\b(?:deleted|deletion|copies?)\\b",
+      "flags": "i",
+      "safe_prefix_patterns": [
+        "\\b(?:cannot|can\\s+not|does\\s+not|do\\s+not|did\\s+not|will\\s+not|must\\s+not|never)\\b[^.!?;]{0,100}\\s+$",
+        "\\b(?:no|nothing|neither)\\b[^.!?]{0,80}\\s+$"
+      ],
+      "guidance": "Distinguish signed workflow evidence from physical deletion outside the controlled system."
+    },
+    {
+      "id": "CLAIM-NO-PERSONAL-DATA",
+      "description": "Do not make an unscoped claim that a service handles no personal data.",
+      "pattern": "\\b(?:does|do)\\s+not\\s+(?:collect|process|store|transmit)\\s+(?:any\\s+)?personal\\s+data\\b",
+      "flags": "i",
+      "guidance": "Name the exact technical scope and identify hosting or controller facts that remain external."
+    },
+    {
+      "id": "CLAIM-DATA-RESIDENCY",
+      "description": "Do not state blanket national or regional data residency without controller evidence.",
+      "pattern": "\\b(?:all|every)\\s+(?:personal\\s+)?data\\s+(?:is|are)\\s+(?:stored|hosted|kept)\\s+(?:only\\s+)?in\\s+(?:Switzerland|the\\s+EU|the\\s+European\\s+Union|the\\s+EEA)\\b",
+      "flags": "i",
+      "guidance": "Report configured storage and support-access countries as controller-confirmed facts."
+    },
+    {
+      "id": "CLAIM-DATA-NEVER-LEAVES",
+      "description": "Do not make an absolute claim that data never leaves a device, country or deployment.",
+      "pattern": "\\b(?:personal\\s+)?data\\s+never\\s+leaves\\s+(?:the\\s+)?(?:device|server|country|deployment|controller)\\b",
+      "flags": "i",
+      "guidance": "Describe the bounded flow and any provider, backup or support path."
+    },
+    {
+      "id": "CLAIM-PROVIDER-ABSOLUTE",
+      "description": "Do not make absolute named-provider access or processing claims.",
+      "pattern": "\\b(?:Cloudflare|Google|Firebase|Mozilla|GitHub|SMTP\\s+provider|hosting\\s+provider)\\s+(?:never|always|cannot|can\\s+not|does\\s+not|will\\s+not)\\s+(?:access|process|receive|store|read|retain)\\b",
+      "flags": "i",
+      "guidance": "Use controller-confirmed provider facts and narrowly describe protocol behaviour."
+    },
+    {
+      "id": "CLAIM-ANONYMITY",
+      "description": "Do not describe operational data or logs as fully anonymous.",
+      "pattern": "\\b(?:data|users?|records?|logs?)\\s+(?:is|are)\\s+(?:fully|completely|truly)\\s+anonymous\\b",
+      "flags": "i",
+      "guidance": "Use pseudonymous or de-identified only when the exact transformation is documented."
+    },
+    {
+      "id": "CLAIM-AUTOMATIC-LAWFUL-BASIS",
+      "description": "Software cannot establish a controller legal basis.",
+      "pattern": "\\b(?:the\\s+)?software\\s+(?:establishes|determines|provides)\\s+(?:a\\s+)?lawful\\s+basis\\b",
+      "flags": "i",
+      "guidance": "Record legal-basis fields as controller decisions, not software findings."
+    }
+  ],
+  "profiles": {
+    "server": {
+      "root_files": [
+        "README.md",
+        "SECURITY.md",
+        "SELF-HOSTING-DATA-PROTECTION.md",
+        "PERMITTED-DATA-AND-ACCEPTABLE-USE.md",
+        "CONTROLLER-AND-OPERATOR-CHECKLIST.md",
+        "SUPPORT-DATA-POLICY.md"
+      ],
+      "trees": [
+        {"path": "docs", "extensions": [".md"]},
+        {"path": "web/src", "extensions": [".ts", ".tsx"]}
+      ],
+      "exclude_prefixes": ["web/src/__tests__", "web/src/tests"]
+    },
+    "docs": {
+      "root_files": ["README.md", "SECURITY.md", "SELF-HOSTING-DATA-PROTECTION.md"],
+      "trees": [
+        {"path": "docs", "extensions": [".md"]},
+        {"path": "src", "extensions": [".ts", ".tsx"]}
+      ],
+      "exclude_prefixes": ["roadmap", "src/__tests__"]
+    },
+    "app": {
+      "root_files": [
+        "README.md",
+        "SECURITY.md",
+        "SELF-HOSTING-DATA-PROTECTION.md",
+        "PERMITTED-DATA-AND-ACCEPTABLE-USE.md",
+        "CONTROLLER-AND-OPERATOR-CHECKLIST.md",
+        "SUPPORT-DATA-POLICY.md"
+      ],
+      "trees": [
+        {"path": "docs", "extensions": [".md"]},
+        {"path": "web/src", "extensions": [".ts", ".tsx"]}
+      ],
+      "exclude_prefixes": ["web/src/__tests__", "web/src/tests"]
+    },
+    "testing": {
+      "root_files": ["README.md", "SECURITY.md", "SELF-HOSTING-DATA-PROTECTION.md"],
+      "trees": [],
+      "exclude_prefixes": ["server_backend/fixtures", "desktop_backend/fixtures"]
+    }
+  }
+}

@@ -1,0 +1,8 @@
+# Default: auto-detect
+* text=auto
+
+# Force LF for shell scripts (they run on Linux)
+*.sh text eol=lf
+
+# Force CRLF for Windows batch files
+*.bat text eol=crlf

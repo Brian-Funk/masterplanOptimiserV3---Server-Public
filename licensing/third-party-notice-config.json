@@ -1,0 +1,48 @@
+{
+  "project": "Masterplan Optimiser Server",
+  "python_locks": [
+    "backend/requirements.lock.txt"
+  ],
+  "npm_locks": [
+    "web/package-lock.json",
+    "infra/cloudflare-ha-witness/package-lock.json"
+  ],
+  "python_metadata": "licensing/python-licenses.json",
+  "python_license_overrides": {},
+  "output_files": [
+    "THIRD-PARTY-NOTICES.md",
+    "web/legal-artifacts/THIRD-PARTY-NOTICES.md"
+  ],
+  "other_components": [
+    {
+      "name": "python:3.11-alpine and Alpine packages",
+      "license": "Python-2.0 and package-specific licences",
+      "evidence": "Digest-pinned backend image SBOM in each signed release"
+    },
+    {
+      "name": "node:22-alpine and Alpine packages",
+      "license": "MIT and package-specific licences",
+      "evidence": "Digest-pinned tools image SBOM in each signed release"
+    },
+    {
+      "name": "Go toolchain",
+      "license": "BSD-3-Clause",
+      "evidence": "Build-stage provenance in the Caddy and PostgreSQL image definitions"
+    },
+    {
+      "name": "Caddy",
+      "license": "Apache-2.0",
+      "evidence": "Digest-pinned Caddy image SBOM in each signed release"
+    },
+    {
+      "name": "PostgreSQL",
+      "license": "PostgreSQL",
+      "evidence": "Digest-pinned PostgreSQL image SBOM in each signed release"
+    },
+    {
+      "name": "DejaVu fonts",
+      "license": "Bitstream-Vera",
+      "evidence": "Installed from Alpine for local activation-QR rendering"
+    }
+  ]
+}

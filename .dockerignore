@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.env.*
+secrets/
+**/__pycache__/
+**/*.pyc
+**/node_modules/
+web/.next/
+web/out/
+runtime/
+docs/generated/
+site/
+.pytest_cache/
+.coverage
+htmlcov/

@@ -1,0 +1,17 @@
+{
+  "name": "mp-opt-ha-witness",
+  "private": true,
+  "version": "1.0.0",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "test:unit": "node --test --experimental-strip-types src/incident_history.test.ts src/commissioning.test.ts",
+    "test": "npm run test:unit && wrangler deploy --dry-run --outdir .wrangler/dry-run",
+    "check": "npm run test:unit && wrangler deploy --dry-run --outdir .wrangler/dry-run"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "wrangler": "^4.114.0"
+  }
+}

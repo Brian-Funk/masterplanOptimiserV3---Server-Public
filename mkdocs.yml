@@ -1,0 +1,102 @@
+site_name: Masterplan Optimiser Server
+site_description: Server documentation for Masterplan Optimiser.
+repo_url: https://github.com/Brian-Funk/masterplanOptimiserV3---Server
+repo_name: Brian-Funk/masterplanOptimiserV3---Server
+strict: true
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: blue
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: blue
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+nav:
+  - Home: index.md
+  - Setup: setup.md
+  - Architecture: architecture.md
+  - Workflows: workflows.md
+  - Governance and Privacy: governance.md
+  - Compliance Evidence: compliance-evidence.md
+  - Controller Evidence Git: evidence/controller-evidence-git.md
+  - Human-readable Evidence: evidence/human-readable-evidence.md
+  - Exact-stack Qualification: exact-stack-qualification.md
+  - Deployment: deployment.md
+  - Publication Runbook: publication-runbook.md
+  - Server Management: server-management.md
+  - Snapshot Recovery Key: snapshot-recovery-key.md
+  - Portable Snapshot and Disaster Recovery: portable-snapshot-recovery.md
+  - High Availability: high-availability.md
+  - Production HA Migration: production-ha-migration.md
+  - Recovery Drill: recovery-drill.md
+  - Security: security.md
+  - Cryptographic Inventory: cryptographic-inventory.md
+  - Key Custody and Trust: key-custody-and-trust.md
+  - Storage Security Checklist: storage-security-checklist.md
+  - Log Inventory and Retention: log-inventory.md
+  - Retention Scheduler and Event Deletion: retention-scheduler.md
+  - Incident Response: incident-response.md
+  - Deletion Accountability: deletion-accountability.md
+  - Contributing: contributing.md
+  - API Reference:
+      - Python Overview: generated/python/index.md
+      - Backend API: generated/python/backend.md
+      - Core Services: generated/python/core.md
+      - TypeScript API: generated/typescript/README.md
+
+not_in_nav: |
+  generated/typescript/**
+
+plugins:
+  - search
+  - gen-files:
+      scripts:
+        - docs/gen_ref_pages.py
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths:
+            - backend
+          options:
+            docstring_style: google
+            docstring_options:
+              warn_unknown_params: false
+            members_order: source
+            show_root_heading: true
+            show_root_full_path: false
+            show_source: true
+            show_signature_annotations: true
+            separate_signature: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true

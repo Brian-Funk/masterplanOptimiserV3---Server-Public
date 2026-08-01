@@ -1,0 +1,29 @@
+# FastAPI Backend
+fastapi==0.139.2
+uvicorn[standard]==0.32.0
+sqlalchemy==2.0.35
+pydantic==2.9.2
+pydantic-settings==2.6.0
+python-dotenv==1.2.2
+
+# Auth (WebAuthn only  -  no password hashing needed)
+# webauthn is listed below under FIDO2
+
+# WebAuthn / FIDO2 passkey support
+webauthn==2.7.1
+
+# Rate limiting
+slowapi>=0.1.9
+
+# Database
+psycopg2-binary==2.9.10
+
+# HTTP client used by current Starlette/FastAPI TestClient
+httpx2==2.7.0
+
+# Web Push notifications
+pywebpush>=2.0.0
+py-vapid>=1.9.0
+cryptography>=42.0.0
+email-validator>=2.2.0
+qrcode[pil]>=8.0
