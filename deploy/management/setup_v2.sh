@@ -107,14 +107,54 @@ mp_setup_present_bootstrap() {
         || { ui_error "The protected root bootstrap code is missing or empty."; return 1; }
     token="$(cat "$MP_ROOT/secrets/root_bootstrap_token")" || return 1
     printf -v body \
-        'Open https://%s/bootstrap\n\nRoot bootstrap code:\n%s\n\nStore this code securely. It is not written to the management log.' \
+        'Open https://%s/bootstrap now.\n\nRoot bootstrap code:\n%s\n\nRegister the root passkey in the browser before continuing setup. Store this code securely until registration succeeds; it is not written to the management log.' \
         "$domain" "$token"
     ui_copyable_terminal_text "Root bootstrap" "$body" \
-        "Copy and store the bootstrap code securely, then press Enter to return to setup." || {
+        "Copy the code, open the URL and start root-passkey registration. Press Enter after the browser ceremony begins; setup will wait for successful completion." || {
         unset token body
         return 1
     }
     unset token body
+}
+
+mp_setup_wait_for_root_passkey() (
+    local interval attempt=1
+    interval="${MP_ROOT_PASSKEY_POLL_INTERVAL_SECONDS:-5}"
+    [[ "$interval" =~ ^[0-9]+$ ]] || interval=5
+    trap 'return 130' INT TERM PIPE
+    while ! mp_root_bootstrap_is_disabled; do
+        printf '[%s] Root passkey is not registered yet (check %d). Retrying in %s seconds.\n' \
+            "$(date -u +%H:%M:%SZ)" "$attempt" "$interval"
+        sleep "$interval" || return $?
+        attempt=$((attempt + 1))
+    done
+    mp_retire_root_bootstrap_secret || return 1
+    printf '[%s] Root passkey registration is complete and the bootstrap secret is retired.\n' \
+        "$(date -u +%H:%M:%SZ)"
+)
+
+mp_setup_register_root_passkey() {
+    mp_setup_present_bootstrap || return 1
+    ui_run_command "Waiting for root passkey" \
+        "Complete registration in the browser. Setup checks every 5 seconds. Press Ctrl+C or close SSH to pause safely; commissioning will resume at this checkpoint." \
+        mp_setup_wait_for_root_passkey \
+        || { ui_message "Root passkey setup paused" "Registration has not been confirmed. No recovery key was created and commissioning will resume at this checkpoint."; return 1; }
+}
+
+mp_setup_apply_fresh_test_commit() {
+    local commit deployed
+    [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)" = test ] \
+        || return 0
+    commit="$(git -C "$MP_ROOT" rev-parse HEAD 2>/dev/null || true)"
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] \
+        || { ui_error "The exact test-campaign commit could not be identified."; return 1; }
+    deployed="$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)"
+    [ "$deployed" != "$commit" ] || return 0
+    ui_run_command "Install exact test-campaign build" \
+        "Building the pushed backend, frontend and proxy from commit ${commit}. Snapshot-free migration is permitted only because commissioning proved this is the fresh root-only disposable database." \
+        "$MP_ROOT/deploy/test-deployment.sh" apply "$commit" \
+            --confirm-full --confirm-migrations --fresh-commissioning \
+        || { ui_error "The exact test-campaign application build failed. Recovery-key setup remains locked and commissioning will resume here."; return 1; }
 }
 
 mp_setup_prepare_node_material() {
@@ -354,10 +394,6 @@ mp_setup_primary_create() {
             return 0
         }
         mp_setup_state_mark configuration
-    fi
-    if [ "$mode" = ha-primary-new ] && ! mp_setup_state_has bootstrap_presented; then
-        mp_setup_present_bootstrap || return 1
-        mp_setup_state_mark bootstrap_presented
     fi
     domain="$(mp_env_get DOMAIN)" || return 1
     if [ "$mode" = convert-ha ] && ! mp_setup_state_has recovery_recipient; then
@@ -779,6 +815,7 @@ mp_setup_primary_resume() {
     local cluster witness token body response peer mode pairing_expires pairing_secret join_code domain pending
     [ -s "$MP_SETUP_V2_PENDING_JOIN" ] || { ui_error "The protected pending join record is missing."; return 1; }
     mp_load_ha_config || return 1
+    mode="$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE")" || return 1
     cluster="$HA_CLUSTER_ID"; witness="$HA_WITNESS_URL"
     token="$(cat "$MP_HA_HOME/secrets/node_token")"
     body="$(mktemp "$MP_STATE/pair-state.XXXXXX")" || return 1
@@ -822,13 +859,20 @@ mp_setup_primary_resume() {
         "$(jq -r .age_recipient <<< "$peer")" || return 1
     mp_setup_state_mark paired
     if ! mp_setup_state_has deployed; then
-        mode="$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE")"
         if [ "$mode" = convert-ha ] && [ -f "$MP_ROOT/infra/docker-compose.override.yml" ]; then
             mp_ha_convert_host_caddy || return 1
         fi
         "$MP_ROOT/deploy/deploy.sh" --no-pull || return 1
         python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null || return 1
         mp_setup_state_mark deployed
+    fi
+    if [ "$mode" = ha-primary-new ] && ! mp_setup_state_has root_passkey_registered; then
+        mp_setup_register_root_passkey || return 1
+        mp_setup_state_mark root_passkey_registered
+    fi
+    if [ "$mode" = ha-primary-new ] && ! mp_setup_state_has test_commit_deployed; then
+        mp_setup_apply_fresh_test_commit || return 1
+        mp_setup_state_mark test_commit_deployed
     fi
     if ! mp_setup_state_has recovery_recipient; then
         [ -s "$MP_RECIPIENT_FILE" ] || mp_configure_recovery_recipient || return 1
@@ -855,7 +899,7 @@ mp_setup_primary_resume() {
     fi
     rm -f "$body" "$MP_SETUP_V2_PENDING_JOIN"; unset token
     mp_setup_state_complete
-    ui_message "HA commissioning complete" "${HA_NODE_ID} is primary. ${HA_PEER_NODE_ID} accepted the current complete encrypted copy, all readiness gates passed, and automatic failover is enabled with a two-minute loss threshold and five-minute copy target. After registering the root passkey, open https://$(mp_env_get DOMAIN)/admin/governance to publish the controller-specific legal centre."
+    ui_message "HA commissioning complete" "${HA_NODE_ID} is primary. ${HA_PEER_NODE_ID} accepted the current complete encrypted copy, all readiness gates passed, and automatic failover is enabled with a two-minute loss threshold and five-minute copy target. Open https://$(mp_env_get DOMAIN)/admin/governance to publish the controller-specific legal centre."
 }
 
 mp_setup_standalone() {
@@ -873,10 +917,6 @@ mp_setup_standalone() {
         }
         mp_setup_state_mark configuration
     fi
-    if ! mp_setup_state_has bootstrap_presented; then
-        mp_setup_present_bootstrap || return 1
-        mp_setup_state_mark bootstrap_presented
-    fi
     if ! mp_setup_state_has public_dns; then
         mp_setup_verify_standalone_dns || return 1
         mp_setup_state_mark public_dns
@@ -884,6 +924,14 @@ mp_setup_standalone() {
     if ! mp_setup_state_has deployed; then
         "$MP_ROOT/deploy/deploy.sh" --no-pull || return 1
         mp_setup_state_mark deployed
+    fi
+    if ! mp_setup_state_has root_passkey_registered; then
+        mp_setup_register_root_passkey || return 1
+        mp_setup_state_mark root_passkey_registered
+    fi
+    if ! mp_setup_state_has test_commit_deployed; then
+        mp_setup_apply_fresh_test_commit || return 1
+        mp_setup_state_mark test_commit_deployed
     fi
     if ! mp_setup_state_has recovery_recipient; then
         [ -s "$MP_RECIPIENT_FILE" ] || mp_configure_recovery_recipient || return 1
@@ -898,7 +946,7 @@ mp_setup_standalone() {
         mp_setup_state_mark smtp_verified
     fi
     mp_setup_state_complete
-    ui_message "Standalone commissioning complete" "The application is live. Open the shown bootstrap URL and register the root passkey. Then open https://$(mp_env_get DOMAIN)/admin/governance to publish the controller-specific legal centre. Use Configuration > SMTP test for an end-to-end delivery check if SMTP was enabled."
+    ui_message "Standalone commissioning complete" "The application is live and the root passkey is registered. Open https://$(mp_env_get DOMAIN)/admin/governance to publish the controller-specific legal centre. Use Configuration > SMTP test for an end-to-end delivery check if SMTP was enabled."
 }
 
 mp_setup_restore_full_loss() {

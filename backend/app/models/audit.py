@@ -21,5 +21,7 @@ class AuditLog(Base):
     resource_type = Column(String(64), nullable=True)
     resource_id = Column(Integer, nullable=True)
     detail = Column(Text, nullable=True)  # canonical bounded JSON object
-    ip_hash = Column(String(32), nullable=True)
+    # Versioned IP pseudonyms include the HMAC key identifier as well as the
+    # bounded digest. Keep enough room for deliberate format/key-id rotation.
+    ip_hash = Column(String(80), nullable=True)
     outcome = Column(String(16), default="success")  # success | denied | error

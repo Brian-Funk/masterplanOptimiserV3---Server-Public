@@ -100,7 +100,12 @@ export default function LoginPage() {
   useEffect(() => {
     if (user && isReady) {
       if (user.is_admin || user.is_root_admin) {
-        router.push("/admin");
+        const requested = new URLSearchParams(window.location.search).get("next");
+        router.push(
+          user.is_root_admin && requested === "/recovery-key"
+            ? "/recovery-key"
+            : "/admin",
+        );
       } else if (user.is_issuer && user.event_id) {
         // Issuers see the calendar first; they reach admin via the top bar
         router.push(`/calendar?event=${user.event_id}`);

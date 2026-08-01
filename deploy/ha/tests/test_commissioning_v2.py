@@ -24,6 +24,7 @@ ACTIONS = (ROOT / "deploy/management/actions.sh").read_text(encoding="utf-8")
 DEPLOY = (ROOT / "deploy/deploy.sh").read_text(encoding="utf-8")
 WORKER = (ROOT / "infra/cloudflare-ha-witness/src/index.ts").read_text(encoding="utf-8")
 CADDY = (ROOT / "infra/Caddyfile.ha").read_text(encoding="utf-8")
+CADDY_STANDALONE = (ROOT / "infra/Caddyfile").read_text(encoding="utf-8")
 CADDY_IMAGE = (ROOT / "infra/Dockerfile.caddy").read_text(encoding="utf-8")
 RELEASE = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
 SCHEDULER = (ROOT / "deploy/ha/replication_scheduler.py").read_text(encoding="utf-8")
@@ -191,13 +192,28 @@ class PairingCodeTests(unittest.TestCase):
     def test_every_supported_setup_has_guarded_checkpoint_order(self) -> None:
         standalone = shell_function(SETUP, "mp_setup_standalone")
         for earlier, later in (
-            ("mp_guided_initial_configuration", "mp_setup_present_bootstrap"),
-            ("mp_setup_present_bootstrap", "mp_setup_verify_standalone_dns"),
+            ("mp_guided_initial_configuration", "mp_setup_verify_standalone_dns"),
             ("mp_setup_verify_standalone_dns", 'deploy/deploy.sh" --no-pull'),
-            ('deploy/deploy.sh" --no-pull', "mp_configure_recovery_recipient"),
+            ('deploy/deploy.sh" --no-pull', "mp_setup_register_root_passkey"),
+            ("mp_setup_register_root_passkey", "mp_setup_apply_fresh_test_commit"),
+            ("mp_setup_apply_fresh_test_commit", "mp_configure_recovery_recipient"),
             ("mp_validate_installation", "mp_setup_verify_smtp_and_dns"),
         ):
             self.assertLess(standalone.index(earlier), standalone.index(later))
+
+        primary_resume = shell_function(SETUP, "mp_setup_primary_resume")
+        self.assertLess(
+            primary_resume.index('deploy/deploy.sh" --no-pull'),
+            primary_resume.index("mp_setup_register_root_passkey"),
+        )
+        self.assertLess(
+            primary_resume.index("mp_setup_register_root_passkey"),
+            primary_resume.index("mp_setup_apply_fresh_test_commit"),
+        )
+        self.assertLess(
+            primary_resume.index("mp_setup_apply_fresh_test_commit"),
+            primary_resume.index("mp_configure_recovery_recipient"),
+        )
 
         primary = shell_function(SETUP, "mp_setup_primary_create")
         self.assertLess(primary.index("migration_snapshot"), primary.index("witness_bootstrap"))
@@ -303,6 +319,15 @@ class DnsOnlyHaTests(unittest.TestCase):
         self.assertNotIn("CLOUDFLARE_DNS_API_TOKEN", CADDY)
         self.assertIn("dns.providers.mpopt_witness", CADDY_IMAGE)
         self.assertNotIn("CLOUDFLARE_DNS_API_TOKEN", CADDY_IMAGE)
+
+    def test_recovery_key_route_requires_root_and_fresh_passkey(self) -> None:
+        for caddy in (CADDY_STANDALONE, CADDY):
+            self.assertIn("@recoveryKey path /recovery-key", caddy)
+            self.assertIn("forward_auth @recoveryKey backend:8000", caddy)
+            self.assertIn("uri /api/v1/auth/root-access", caddy)
+        page = (ROOT / "web/src/app/recovery-key/page.tsx").read_text(encoding="utf-8")
+        self.assertIn("/api/v1/auth/recovery-key-access", page)
+        self.assertIn("withReauth", page)
 
     def test_setup_hardcodes_nodes_and_guides_legacy_retirement(self) -> None:
         self.assertIn("node-a", SETUP)

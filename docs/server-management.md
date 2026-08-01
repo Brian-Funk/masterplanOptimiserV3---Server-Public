@@ -37,10 +37,12 @@ blank and `secrets/smtp_token` is created as an empty protected file. If
 configured, the provider token is entered twice without echo and is never
 written to `.env`.
 
-The wizard can also store an `age` public recovery recipient. Generate and
-back up the key pair on a separate trusted computer. Only the recipient
-beginning with `age1` belongs on a VPS. The exact generation, two-copy backup,
-HA synchronization and rotation procedure is in
+After deployment, commissioning pauses until the root passkey is registered.
+The browser recovery-key generator is then available only to a signed-in root
+session with recent passkey verification. Generate and back up the key pair on
+a separate trusted computer; only the public recipient beginning with `age1`
+belongs on a VPS. The exact generation, two-copy backup, HA synchronization and
+rotation procedure is in
 [Snapshot recovery key](snapshot-recovery-key.md).
 
 ## Menu areas

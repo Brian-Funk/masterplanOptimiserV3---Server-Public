@@ -106,6 +106,56 @@ def _ceremony(db, ceremony_id: str) -> PasskeyCeremony:
     return db.query(PasskeyCeremony).filter(PasskeyCeremony.id == ceremony_id).one()
 
 
+def test_root_bootstrap_commits_credential_and_audit_with_production_ip_hash(
+    db,
+    monkeypatch,
+):
+    """A valid first passkey must not roll back while writing its audit row."""
+    from app.core.config import settings
+    from app.core.governance import BOOTSTRAP_POLICY_SHA256, BOOTSTRAP_POLICY_VERSION
+    from app.models.server_setting import ServerSetting
+
+    token = "root-bootstrap-regression-token-with-enough-entropy"
+    root = create_test_user(
+        db,
+        username="bootstrap.root",
+        is_root_admin=True,
+        is_admin=True,
+        is_activated=False,
+    )
+    monkeypatch.setattr(settings, "ROOT_BOOTSTRAP_TOKEN", token)
+    monkeypatch.setattr(
+        settings,
+        "IP_HMAC_KEY",
+        "bootstrap-audit-ip-key-with-sufficient-entropy",
+    )
+    _install_registration_success(monkeypatch, b"root-bootstrap-credential")
+    client = _raw_client()
+
+    begin = client.post(
+        "/api/v1/passkey/bootstrap/begin",
+        headers={"X-Bootstrap-Token": token},
+    )
+    assert begin.status_code == 200
+    complete = client.post(
+        "/api/v1/passkey/bootstrap/complete",
+        headers={"X-Bootstrap-Token": token},
+        json={
+            **_registration_body(begin.json()["ceremony_id"]),
+            "policy_version": BOOTSTRAP_POLICY_VERSION,
+            "policy_sha256": BOOTSTRAP_POLICY_SHA256,
+        },
+    )
+
+    assert complete.status_code == 200, complete.text
+    assert db.query(WebAuthnCredential).filter_by(user_id=root.id).count() == 1
+    assert db.query(AuditLog).filter_by(action="passkey.bootstrap").count() == 1
+    assert db.query(ServerSetting).filter_by(
+        key="root_bootstrap_disabled",
+        value="true",
+    ).count() == 1
+
+
 def test_verified_reset_replaces_all_previous_passkeys(db):
     """A successful reset leaves only the newly verified credential usable."""
 

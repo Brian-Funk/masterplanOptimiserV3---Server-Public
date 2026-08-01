@@ -782,12 +782,16 @@ mp_root_bootstrap_is_disabled() {
     mp_compose_init || return 1
     "${MP_COMPOSE[@]}" up -d db >/dev/null 2>&1 || return 1
     disabled="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d masterplan -Atqc \
-        "SELECT EXISTS (
-            SELECT 1 FROM server_settings WHERE key='root_bootstrap_disabled' AND value='true'
-            UNION ALL
-            SELECT 1 FROM users u JOIN webauthn_credentials c ON c.user_id=u.id
-            WHERE u.is_root_admin
-        )" 2>/dev/null || true)"
+        "SELECT
+            EXISTS (
+                SELECT 1 FROM server_settings
+                WHERE key='root_bootstrap_disabled' AND value='true'
+            )
+            AND EXISTS (
+                SELECT 1 FROM users u
+                JOIN webauthn_credentials c ON c.user_id=u.id
+                WHERE u.is_root_admin
+            )" 2>/dev/null || true)"
     [ "$disabled" = t ]
 }
 
@@ -1031,6 +1035,14 @@ WITH contract(ordinal, invariant, satisfied) AS (
                 WHERE table_schema = 'public'
                   AND table_name = 'ha_cluster_state'
                   AND column_name = 'updated_at'
+            ), FALSE)),
+        (12, 'audit_log.ip_hash_accepts_versioned_hmac',
+            COALESCE((
+                SELECT character_maximum_length >= 80
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'audit_log'
+                  AND column_name = 'ip_hash'
             ), FALSE))
 )
 SELECT invariant, CASE WHEN satisfied THEN 'pass' ELSE 'fail' END
@@ -1269,9 +1281,9 @@ mp_configure_recovery_recipient() {
     local recipient current probe fingerprint old_fingerprint role scope_message domain handoff
     domain="$(mp_env_get DOMAIN 2>/dev/null || true)"
     if [ -n "$domain" ]; then
-        printf -v handoff 'Recovery-key generator URL:\nhttps://%s/recovery-key' "$domain"
+        printf -v handoff 'Sign in with the registered root passkey:\nhttps://%s/login?next=/recovery-key\n\nRoot-only recovery-key generator URL:\nhttps://%s/recovery-key' "$domain" "$domain"
         ui_copyable_terminal_text "Recovery encryption" "$handoff" \
-            "Copy the URL, create and save the private identity in two protected places on the workstation, then press Enter to return and paste only the public age1… recipient." \
+            "Sign in with the root passkey, create and save the private identity in two protected places on the workstation, then press Enter to return and paste only the public age1... recipient." \
             || return 1
     fi
     recipient="$(ui_input "Recovery encryption" "Paste the public age recipient beginning with age1")" || return 1

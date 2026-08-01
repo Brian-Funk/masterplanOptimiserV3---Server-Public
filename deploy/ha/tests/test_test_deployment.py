@@ -17,9 +17,20 @@ assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
+SUPERVISOR = (ROOT / "deploy" / "test-deployment.sh").read_text(encoding="utf-8")
 
 
 class TestDeploymentPlannerTests(unittest.TestCase):
+    def test_snapshot_free_apply_is_confined_to_fresh_root_only_commissioning(self) -> None:
+        self.assertIn("--fresh-commissioning", SUPERVISOR)
+        self.assertIn("require_fresh_commissioning_database", SUPERVISOR)
+        self.assertIn('.state == "in_progress"', SUPERVISOR)
+        self.assertIn('.mode == "standalone-new"', SUPERVISOR)
+        self.assertIn('.mode == "ha-primary-new"', SUPERVISOR)
+        self.assertIn("NOT EXISTS (SELECT 1 FROM events)", SUPERVISOR)
+        self.assertIn("NOT is_root_admin", SUPERVISOR)
+        self.assertIn("count(*) FROM webauthn_credentials) = 1", SUPERVISOR)
+
     def test_accepts_only_exact_lowercase_commits_and_canonical_tags(self) -> None:
         commit = "a" * 40
         self.assertEqual(MODULE.require_commit(commit), commit)

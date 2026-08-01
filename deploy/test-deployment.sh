@@ -30,6 +30,7 @@ Usage:
   deploy/test-deployment.sh policy status|test|production
   deploy/test-deployment.sh plan COMMIT
   deploy/test-deployment.sh apply COMMIT [--confirm-full] [--confirm-migrations]
+      [--fresh-commissioning]
       [--cloudflare-worker NAME --cloudflare-token-stdin]
   deploy/test-deployment.sh rollback
   deploy/test-deployment.sh restore-signed
@@ -49,6 +50,29 @@ require_test_policy() {
         ui_error "Unsigned deployments are disabled. This server is production-policy."
         return 1
     }
+}
+
+require_fresh_commissioning_database() {
+    local setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v1.json}" safe
+    [ -s "$setup_state" ] || { ui_error "Fresh commissioning state is missing."; return 1; }
+    jq -e '.state == "in_progress" and (.mode == "standalone-new" or .mode == "ha-primary-new")' \
+        "$setup_state" >/dev/null \
+        || { ui_error "Snapshot-free test deployment is limited to fresh commissioning."; return 1; }
+    [ ! -s "$MP_RECIPIENT_FILE" ] \
+        || { ui_error "Fresh commissioning already has recovery material; use the normal snapshot-protected deployment path."; return 1; }
+    mp_compose_init
+    safe="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d masterplan -Atqc \
+        "SELECT
+            NOT EXISTS (SELECT 1 FROM events)
+            AND NOT EXISTS (SELECT 1 FROM users WHERE NOT is_root_admin)
+            AND (SELECT count(*) FROM webauthn_credentials) = 1
+            AND EXISTS (
+                SELECT 1 FROM users u
+                JOIN webauthn_credentials c ON c.user_id=u.id
+                WHERE u.is_root_admin
+            )" 2>/dev/null || true)"
+    [ "$safe" = t ] \
+        || { ui_error "The database is not the narrow fresh root-only commissioning state."; return 1; }
 }
 
 set_policy() {
@@ -278,7 +302,7 @@ deploy_witness() {
 }
 
 apply_commit() {
-    local target="$1" confirm_full="$2" confirm_migrations="$3"
+    local target="$1" confirm_full="$2" confirm_migrations="$3" fresh_commissioning="$4"
     local plan previous components snapshot="" automatic=false role component image
     local -a remote_args
     require_test_policy
@@ -320,8 +344,12 @@ apply_commit() {
     mp_lock
     trap 'mp_unlock' EXIT
     if [ "$(jq -r .migrations <<< "$plan")" = true ]; then
-        snapshot="$(mp_snapshot_create full "test-deploy-${target:0:12}")"
-        [ -n "$snapshot" ]
+        if [ "$fresh_commissioning" = true ]; then
+            require_fresh_commissioning_database
+        else
+            snapshot="$(mp_snapshot_create full "test-deploy-${target:0:12}")"
+            [ -n "$snapshot" ]
+        fi
     fi
     cp -a "$MP_TEST_ENV" "$MP_TEST_STATE_DIR/previous.env" 2>/dev/null || : > "$MP_TEST_STATE_DIR/previous.env"
     chmod 600 "$MP_TEST_STATE_DIR/previous.env"
@@ -418,7 +446,7 @@ rollback() {
     [ -s "$MP_TEST_STATE_FILE" ] || { ui_error "No test deployment can be rolled back."; return 1; }
     previous="$(jq -r '.previous_commit // empty' "$MP_TEST_STATE_FILE")"
     if [ -n "$previous" ] && [ "$previous" != "$(jq -r '.signed_baseline.commit // empty' "$MP_TEST_STATE_FILE")" ]; then
-        apply_commit "$previous" true true
+        apply_commit "$previous" true true false
     else
         restore_signed
     fi
@@ -443,11 +471,12 @@ case "$command" in
         [ "$#" -ge 1 ] || { usage; exit 2; }
         target="$1"; shift
         confirm_full=false; confirm_migrations=false
-        cloudflare_worker=""; cloudflare_token_stdin=false
+        cloudflare_worker=""; cloudflare_token_stdin=false; fresh_commissioning=false
         while [ "$#" -gt 0 ]; do
             case "$1" in
                 --confirm-full) confirm_full=true ;;
                 --confirm-migrations) confirm_migrations=true ;;
+                --fresh-commissioning) fresh_commissioning=true ;;
                 --cloudflare-worker)
                     shift
                     [ "$#" -gt 0 ] || { usage; exit 2; }
@@ -469,7 +498,7 @@ case "$command" in
             usage
             exit 2
         fi
-        apply_commit "$target" "$confirm_full" "$confirm_migrations"
+        apply_commit "$target" "$confirm_full" "$confirm_migrations" "$fresh_commissioning"
         unset CLOUDFLARE_API_TOKEN MP_TEST_WORKER_NAME
         ;;
     rollback) [ "$#" -eq 0 ] || { usage; exit 2; }; rollback ;;

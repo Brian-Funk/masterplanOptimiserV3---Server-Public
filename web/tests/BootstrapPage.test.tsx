@@ -159,7 +159,7 @@ describe("BootstrapPage", () => {
         screen.getByText(/Root passkey registered successfully/),
       ).toBeInTheDocument();
       expect(
-        screen.getByRole("button", { name: /go to login/i }),
+        screen.getByRole("button", { name: /sign in and create recovery key/i }),
       ).toBeInTheDocument();
     });
 
@@ -204,12 +204,14 @@ describe("BootstrapPage", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: /go to login/i }),
+        screen.getByRole("button", { name: /sign in and create recovery key/i }),
       ).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: /go to login/i }));
-    expect(mockPush).toHaveBeenCalledWith("/login");
+    await user.click(
+      screen.getByRole("button", { name: /sign in and create recovery key/i }),
+    );
+    expect(mockPush).toHaveBeenCalledWith("/login?next=/recovery-key");
   });
 
   it("shows error when registration begin fails", async () => {

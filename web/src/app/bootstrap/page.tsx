@@ -207,9 +207,9 @@ export default function BootstrapPage() {
                 type="button"
                 variant="primary"
                 fullWidth
-                onClick={() => router.push("/login")}
+                onClick={() => router.push("/login?next=/recovery-key")}
               >
-                Go to Login
+                Sign in and create recovery key
               </Button>
             </>
           )}

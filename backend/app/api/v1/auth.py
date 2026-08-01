@@ -10,7 +10,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core import runtime_settings
-from app.core.security import get_current_user
+from app.core.security import (
+    get_current_user,
+    require_root_admin,
+    require_root_recent_reauth,
+)
 from app.core.sessions import (
     _coarse_user_agent,
     create_session,
@@ -192,6 +196,7 @@ def exchange_code_for_session(
         user_agent=request.headers.get("user-agent"),
         accept_language=request.headers.get("accept-language"),
         is_privileged=is_privileged,
+        reauthenticated=True,
     )
     _set_session_cookie(
         response,
@@ -270,6 +275,22 @@ def get_me(
             db,
         ),
     )
+
+
+@router.get("/root-access")
+def root_access(current_user: User = Depends(require_root_admin)):
+    """Authorise HTTP delivery of a root-only frontend route."""
+
+    return {"status": "ok"}
+
+
+@router.get("/recovery-key-access")
+def recovery_key_access(
+    current_user: User = Depends(require_root_recent_reauth),
+):
+    """Unlock the browser-local recovery-key generator after root WebAuthn."""
+
+    return {"status": "ok"}
 
 
 @router.get("/sessions", response_model=List[SessionResponse])

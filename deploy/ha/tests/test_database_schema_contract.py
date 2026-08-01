@@ -64,6 +64,7 @@ class DatabaseSchemaContractTests(unittest.TestCase):
             "ha_cluster_state.generation_check",
             "ha_cluster_state.maintenance_defaults_false",
             "ha_cluster_state.updated_at_defaults_to_current_time",
+            "audit_log.ip_hash_accepts_versioned_hmac",
         ):
             self.assertIn(invariant, report)
         self.assertIn("PASS   %s", validator)
