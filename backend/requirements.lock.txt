@@ -55,5 +55,5 @@ uvloop==0.22.1
 watchfiles==1.2.0
 webauthn==2.7.1
 websockets==16.1.1
-wrapt==2.2.2
+wrapt==2.3.0
 yarl==1.24.5
