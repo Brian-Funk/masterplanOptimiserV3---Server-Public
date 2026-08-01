@@ -1,10 +1,11 @@
 FROM node:25-alpine
 
-ARG WRANGLER_VERSION=4.114.0
+ARG WRANGLER_VERSION=4.115.0
 
 # This signed, immutable release image is used only while commissioning the
 # Cloudflare witness. No Node.js or npm installation is required on a VPS.
-RUN npm install --global "wrangler@${WRANGLER_VERSION}" \
+RUN apk upgrade --no-cache \
+    && npm install --global "wrangler@${WRANGLER_VERSION}" \
     && npm cache clean --force \
     && rm -rf \
         /root/.npm \

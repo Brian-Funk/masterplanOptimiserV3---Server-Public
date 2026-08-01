@@ -92,6 +92,8 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
         self.assertIn("go install github.com/tianon/gosu@${GOSU_VERSION}", postgres)
         self.assertIn("FROM postgres:18-alpine", postgres)
         self.assertIn("FROM node:25-alpine", tools)
+        self.assertIn("ARG WRANGLER_VERSION=4.115.0", tools)
+        self.assertIn("RUN apk upgrade --no-cache", tools)
         self.assertNotIn("ENTRYPOINT", postgres)
         self.assertIn('npm install --global "wrangler@${WRANGLER_VERSION}"', tools)
         self.assertIn("/usr/local/lib/node_modules/npm", tools)
