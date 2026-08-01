@@ -16,7 +16,7 @@ webauthn==3.0.0
 slowapi>=0.1.9
 
 # Database
-psycopg2-binary==2.9.10
+psycopg2-binary==2.9.12
 
 # HTTP client used by current Starlette/FastAPI TestClient
 httpx2==2.9.1

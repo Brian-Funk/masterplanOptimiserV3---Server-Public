@@ -39,9 +39,9 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | packaging | 26.2 | Apache-2.0 OR BSD-2-Clause | https://pypi.org/project/packaging/ |
 | pillow | 12.3.0 | MIT-CMU | https://pypi.org/project/pillow/ |
 | propcache | 0.5.2 | Apache-2.0 | https://pypi.org/project/propcache/ |
-| psycopg2-binary | 2.9.10 | LGPL with exceptions | https://pypi.org/project/psycopg2-binary/ |
+| psycopg2-binary | 2.9.12 | LGPL with exceptions | https://pypi.org/project/psycopg2-binary/ |
 | py-vapid | 1.9.4 | MPL-2.0 | https://pypi.org/project/py-vapid/ |
-| pyasn1-modules | 0.4.2 | BSD-2-Clause | https://pypi.org/project/pyasn1-modules/ |
+| pyasn1-modules | 0.4.2 | BSD-3-Clause | https://pypi.org/project/pyasn1-modules/ |
 | pyasn1 | 0.6.4 | BSD-2-Clause | https://pypi.org/project/pyasn1/ |
 | pycparser | 3.0 | BSD-3-Clause | https://pypi.org/project/pycparser/ |
 | pydantic-core | 2.46.4 | MIT | https://pypi.org/project/pydantic_core/ |

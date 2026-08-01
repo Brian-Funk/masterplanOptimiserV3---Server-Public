@@ -120,7 +120,7 @@
       "license": "Apache-2.0",
       "project_url": "https://pypi.org/project/propcache/"
     },
-    "psycopg2-binary==2.9.10": {
+    "psycopg2-binary==2.9.12": {
       "license": "LGPL with exceptions",
       "project_url": "https://pypi.org/project/psycopg2-binary/"
     },
@@ -128,13 +128,13 @@
       "license": "MPL-2.0",
       "project_url": "https://pypi.org/project/py-vapid/"
     },
+    "pyasn1-modules==0.4.2": {
+      "license": "BSD-3-Clause",
+      "project_url": "https://pypi.org/project/pyasn1-modules/"
+    },
     "pyasn1==0.6.4": {
       "license": "BSD-2-Clause",
       "project_url": "https://pypi.org/project/pyasn1/"
-    },
-    "pyasn1-modules==0.4.2": {
-      "license": "BSD-2-Clause",
-      "project_url": "https://pypi.org/project/pyasn1-modules/"
     },
     "pycparser==3.0": {
       "license": "BSD-3-Clause",
