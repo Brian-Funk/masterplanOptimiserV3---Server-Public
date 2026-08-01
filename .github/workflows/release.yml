@@ -3,6 +3,10 @@ name: Signed production release
 on:
   workflow_dispatch:
     inputs:
+      release_tag:
+        description: Existing signed release tag to recover, for example v3.8.0
+        required: false
+        type: string
       rebuild_all:
         description: Rebuild every service instead of reusing unchanged signed digests
         required: true
@@ -28,6 +32,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ inputs.release_tag || github.ref }}
       - uses: docker/setup-buildx-action@v3
       - uses: sigstore/cosign-installer@v3
       - uses: actions/setup-node@v5
@@ -36,13 +41,13 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Verify immutable release preconditions
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-          REF_TYPE: ${{ github.ref_type }}
+          TAG: ${{ inputs.release_tag || github.ref_name }}
+          RECOVERY_TAG: ${{ inputs.release_tag }}
         run: |
           set -Eeuo pipefail
-          [[ "$REF_TYPE" == tag ]]
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           ! grep -Fxq "$TAG" deploy/release/retired-tags.txt
           expected_version="${TAG#v}"
@@ -53,24 +58,41 @@ jobs:
           python deploy/security/publication_audit.py --history
           python deploy/licensing/generate_third_party_notices.py --check
           git fetch origin main --quiet
-          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
-          [[ "$(git rev-parse "$TAG^{commit}")" == "$GITHUB_SHA" ]]
+          tag_commit="$(git rev-parse "$TAG^{commit}")"
+          [[ "$(git rev-parse HEAD)" == "$tag_commit" ]]
+          if [[ -n "$RECOVERY_TAG" ]]; then
+            [[ "$GITHUB_REF" == refs/heads/main ]]
+            [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+            git merge-base --is-ancestor "$tag_commit" origin/main
+          else
+            [[ "$GITHUB_REF" == refs/tags/v* ]]
+            [[ "$tag_commit" == "$GITHUB_SHA" ]]
+            [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          fi
           [[ -z "$(gh release view "$TAG" --json id --jq .id 2>/dev/null || true)" ]]
-          check="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
+          tag_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}")"
+          tag_object="$(jq -er '.object.sha' <<< "$tag_ref")"
+          tag_record="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}")"
+          jq -e --arg commit "$tag_commit" \
+            '.verification.verified == true and .object.type == "commit" and .object.sha == $commit' \
+            <<< "$tag_record" >/dev/null
+          check="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag_commit}/check-runs" \
             --jq '([.check_runs[] | select(.name == "server-ci-result")] | sort_by(.id) | last) // {}')"
           status="$(jq -r '.status // "missing"' <<< "$check")"
           conclusion="$(jq -r '.conclusion // "missing"' <<< "$check")"
           [[ "$status" == completed && "$conclusion" == success ]] \
-            || { echo "server-ci-result is $status/$conclusion for $GITHUB_SHA" >&2; exit 1; }
+            || { echo "server-ci-result is $status/$conclusion for $tag_commit" >&2; exit 1; }
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "release_commit=$tag_commit" >> "$GITHUB_OUTPUT"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "RELEASE_COMMIT=$tag_commit" >> "$GITHUB_ENV"
       - name: Verify public source distribution
-        env:
-          TAG: ${{ github.ref_name }}
         run: |
           set -Eeuo pipefail
           repository="$(env -u GH_TOKEN -u GITHUB_TOKEN \
             curl --fail --silent --show-error \
               "https://api.github.com/repos/${GITHUB_REPOSITORY}")"
-          jq -e '.private == false && .visibility == "public"' <<< "$repository" >/dev/null \
+          jq -e '.private == false and .visibility == "public"' <<< "$repository" >/dev/null \
             || { echo "The Server repository must be public before a production release is built." >&2; exit 1; }
           env -u GH_TOKEN -u GITHUB_TOKEN \
             curl --fail --location --silent --show-error \
@@ -98,10 +120,10 @@ jobs:
               --pattern release-manifest.json --pattern release-manifest.bundle
             cosign verify-blob --bundle /tmp/previous-release/release-manifest.bundle \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-              --certificate-identity-regexp '^https://github\.com/Brian-Funk/MasterplanOptimiserV3---Server/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
+              --certificate-identity-regexp '^https://github\.com/Brian-Funk/masterplanOptimiserV3---Server-Public/\.github/workflows/release\.yml@refs/(tags/v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$' \
               /tmp/previous-release/release-manifest.json
             previous_commit="$(jq -r .commit /tmp/previous-release/release-manifest.json)"
-            plan="$(python3 deploy/test_deployment.py classify --repo . --base "$previous_commit" --target "$GITHUB_SHA")"
+            plan="$(python3 deploy/test_deployment.py classify --repo . --base "$previous_commit" --target "$RELEASE_COMMIT")"
             components="$(jq -c .components <<< "$plan")"
             previous_manifest=/tmp/previous-release/release-manifest.json
             jq . <<< "$plan"
@@ -113,7 +135,6 @@ jobs:
         id: images
         env:
           REGISTRY: ghcr.io/brian-funk/masterplanoptimiserv3---server
-          TAG: ${{ github.ref_name }}
           COMPONENTS: ${{ steps.plan.outputs.components }}
           PREVIOUS_MANIFEST: ${{ steps.plan.outputs.previous_manifest }}
           REBUILD_ALL: ${{ inputs.rebuild_all }}
@@ -155,8 +176,8 @@ jobs:
         working-directory: web
         env:
           MP_PUBLIC_SOURCE_REPOSITORY_URL: https://github.com/${{ github.repository }}
-          MP_PUBLIC_SOURCE_REVISION: ${{ github.sha }}
-          MP_PUBLIC_SOURCE_URL: https://github.com/${{ github.repository }}/tree/${{ github.sha }}
+          MP_PUBLIC_SOURCE_REVISION: ${{ steps.release.outputs.release_commit }}
+          MP_PUBLIC_SOURCE_URL: https://github.com/${{ github.repository }}/tree/${{ steps.release.outputs.release_commit }}
         run: |
           python ../deploy/licensing/generate_third_party_notices.py --check
           npm ci --no-audit
@@ -193,7 +214,6 @@ jobs:
           done
       - name: Create and sign release manifest
         env:
-          TAG: ${{ github.ref_name }}
           BACKEND: ${{ steps.images.outputs.backend }}
           CADDY: ${{ steps.images.outputs.caddy }}
           POSTGRES: ${{ steps.images.outputs.postgres }}
@@ -205,7 +225,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p runtime
-          python3 deploy/stamp_service_worker.py web/out/sw.js "$GITHUB_SHA"
+          python3 deploy/stamp_service_worker.py web/out/sw.js "$RELEASE_COMMIT"
           python3 deploy/generate_frontend_csp.py web/out --output runtime/frontend-csp.caddy
           tar -czf web-out.tar.gz web/out runtime/frontend-csp.caddy
           tar -czf operations.tar.gz manage.sh configure-production.sh deploy infra
@@ -218,7 +238,7 @@ jobs:
           sbom_caddy_sha="$(sha256sum sbom-caddy.cdx.json | awk '{print $1}')"
           sbom_postgres_sha="$(sha256sum sbom-postgres.cdx.json | awk '{print $1}')"
           sbom_tools_sha="$(sha256sum sbom-tools.cdx.json | awk '{print $1}')"
-          jq -n --arg tag "$TAG" --arg commit "$GITHUB_SHA" \
+          jq -n --arg tag "$TAG" --arg commit "$RELEASE_COMMIT" \
             --arg backend "$BACKEND" --arg caddy "$CADDY" --arg postgres "$POSTGRES" --arg tools "$TOOLS" \
             --arg bp "$BACKEND_PROVENANCE" --arg cp "$CADDY_PROVENANCE" --arg pp "$POSTGRES_PROVENANCE" --arg tp "$TOOLS_PROVENANCE" \
             --arg frontend_sha "$frontend_sha" --arg operations_sha "$operations_sha" --arg bootstrap_sha "$bootstrap_sha" \
@@ -240,7 +260,6 @@ jobs:
       - name: Publish immutable GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: |
           set -Eeuo pipefail
           gh release create "$TAG" release-manifest.json release-manifest.bundle web-out.tar.gz operations.tar.gz mp-opt-setup.sh sbom-*.cdx.json \
@@ -248,7 +267,6 @@ jobs:
           [[ "$(gh release view "$TAG" --json name,tagName --jq '.name + " " + .tagName')" == "$TAG $TAG" ]]
       - name: Verify anonymous public release
         env:
-          TAG: ${{ github.ref_name }}
           BACKEND: ${{ steps.images.outputs.backend }}
           CADDY: ${{ steps.images.outputs.caddy }}
           POSTGRES: ${{ steps.images.outputs.postgres }}
@@ -256,7 +274,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           unset GH_TOKEN GITHUB_TOKEN
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"
+          identity="https://github.com/${GITHUB_WORKFLOW_REF}"
           release="$(curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
           jq -e --arg tag "$TAG" '.tag_name == $tag && .name == $tag && .draft == false && .prerelease == false' \
@@ -275,7 +293,7 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-identity "$identity" \
             release-manifest.json
-          jq -e --arg tag "$TAG" --arg commit "$GITHUB_SHA" \
+          jq -e --arg tag "$TAG" --arg commit "$RELEASE_COMMIT" \
             '.format == "mp-opt-release-v1" and .tag == $tag and .commit == $commit' \
             release-manifest.json >/dev/null
           verify_asset() {
