@@ -34,7 +34,7 @@ psycopg2-binary==2.9.10
 py-vapid==1.9.4
 pyasn1==0.6.4
 pycparser==3.0
-pydantic==2.9.2
+pydantic==2.13.4
 pydantic-settings==2.6.0
 pydantic_core==2.23.4
 pyOpenSSL==26.3.0
