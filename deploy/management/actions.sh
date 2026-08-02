@@ -1726,7 +1726,7 @@ mp_collect_recovery_evidence_interactive() {
 
 # Validate Compose, Caddy, health and protected file permissions.
 mp_validate_installation() {
-    local report failed=0 mode
+    local report failed=0
     report="$(mktemp "${MP_STATE}/validation.XXXXXX")"
     {
         printf 'MP-OPT_SERVER installation validation\n\n'
@@ -1738,10 +1738,7 @@ mp_validate_installation() {
         if curl -fsS --max-time 5 "https://$(mp_env_get DOMAIN)/health" >/dev/null; then printf 'healthy\n'; else printf 'UNAVAILABLE\n'; failed=1; fi
         printf '\nProtected files\n'
         mp_permissions_report
-        while IFS= read -r file; do
-            mode="$(stat -c '%a' "$file")"
-            if [ "$mode" != "600" ]; then printf 'UNSAFE MODE: %s is %s\n' "$file" "$mode"; failed=1; fi
-        done < <(find "$MP_ROOT/secrets" -maxdepth 1 -type f -print; printf '%s\n' "$MP_ROOT/.env")
+        mp_validate_protected_file_modes || failed=1
     } > "$report"
     ui_text_file "Installation validation" "$report"
     rm -f "$report"

@@ -738,6 +738,42 @@ mp_prepare_backend_secret_permissions() {
     done
 }
 
+# Return the expected mode for a protected operator file. Runtime secrets are
+# deliberately group-readable by the fixed, unprivileged backend identity;
+# every other protected file remains owner-only.
+mp_expected_protected_file_mode() {
+    local file="$1"
+    case "$file" in
+        "$MP_ROOT/secrets/database_password"|
+        "$MP_ROOT/secrets/ip_hmac_key"|
+        "$MP_ROOT/secrets/secret_key"|
+        "$MP_ROOT/secrets/vapid_private_key"|
+        "$MP_ROOT/secrets/root_bootstrap_token"|
+        "$MP_ROOT/secrets/smtp_token"|
+        "$MP_ROOT/secrets/evidence_signing_key"|
+        "$MP_ROOT/secrets/evidence_github_fine_grained_token")
+            printf '640\n'
+            ;;
+        *)
+            printf '600\n'
+            ;;
+    esac
+}
+
+# Validate protected file modes against the deployment permission contract.
+mp_validate_protected_file_modes() {
+    local file mode expected failed=0
+    while IFS= read -r file; do
+        mode="$(stat -c '%a' "$file")" || { failed=1; continue; }
+        expected="$(mp_expected_protected_file_mode "$file")"
+        if [ "$mode" != "$expected" ]; then
+            printf 'UNSAFE MODE: %s is %s (expected %s)\n' "$file" "$mode" "$expected"
+            failed=1
+        fi
+    done < <(find "$MP_ROOT/secrets" -maxdepth 1 -type f -print; printf '%s\n' "$MP_ROOT/.env")
+    return "$failed"
+}
+
 # Build the exact production Compose command, including the local override.
 mp_compose_init() {
     mp_load_ha_config || return 1

@@ -124,6 +124,23 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
                 for line in chowns
             ))
 
+    def test_installation_validation_uses_the_backend_secret_permission_contract(self) -> None:
+        validation = function_body(ACTIONS_SOURCE, "mp_validate_installation")
+        expected_mode = function_body(COMMON_SOURCE, "mp_expected_protected_file_mode")
+        mode_validation = function_body(COMMON_SOURCE, "mp_validate_protected_file_modes")
+
+        self.assertIn("mp_validate_protected_file_modes || failed=1", validation)
+        self.assertNotIn('[ "$mode" != "600" ]', validation)
+        for name in (
+            "database_password", "ip_hmac_key", "secret_key",
+            "vapid_private_key", "root_bootstrap_token", "smtp_token",
+            "evidence_signing_key", "evidence_github_fine_grained_token",
+        ):
+            self.assertIn(f'"$MP_ROOT/secrets/{name}"', expected_mode)
+        self.assertIn("printf '640\\n'", expected_mode)
+        self.assertIn("printf '600\\n'", expected_mode)
+        self.assertIn('expected="$(mp_expected_protected_file_mode "$file")"', mode_validation)
+
     def test_snapshot_payload_permissions_do_not_depend_on_operator_umask(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
