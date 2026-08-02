@@ -744,14 +744,7 @@ mp_prepare_backend_secret_permissions() {
 mp_expected_protected_file_mode() {
     local file="$1"
     case "$file" in
-        "$MP_ROOT/secrets/database_password"|
-        "$MP_ROOT/secrets/ip_hmac_key"|
-        "$MP_ROOT/secrets/secret_key"|
-        "$MP_ROOT/secrets/vapid_private_key"|
-        "$MP_ROOT/secrets/root_bootstrap_token"|
-        "$MP_ROOT/secrets/smtp_token"|
-        "$MP_ROOT/secrets/evidence_signing_key"|
-        "$MP_ROOT/secrets/evidence_github_fine_grained_token")
+        "$MP_ROOT/secrets/database_password"|"$MP_ROOT/secrets/ip_hmac_key"|"$MP_ROOT/secrets/secret_key"|"$MP_ROOT/secrets/vapid_private_key"|"$MP_ROOT/secrets/root_bootstrap_token"|"$MP_ROOT/secrets/smtp_token"|"$MP_ROOT/secrets/evidence_signing_key"|"$MP_ROOT/secrets/evidence_github_fine_grained_token")
             printf '640\n'
             ;;
         *)
