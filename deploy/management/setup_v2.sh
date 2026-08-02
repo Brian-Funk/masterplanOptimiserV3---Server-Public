@@ -991,13 +991,13 @@ mp_setup_restore_full_loss() {
 }
 
 mp_setup_v2() {
-    local choice mode state role
+    local choice mode state role completed_state=false
     if [ -f "$MP_SETUP_V2_STATE" ]; then
         state="$(jq -r '.state // "invalid"' "$MP_SETUP_V2_STATE" 2>/dev/null || printf invalid)"
         mode="$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE" 2>/dev/null || true)"
         if [ "$state" = complete ]; then
-            ui_message "Commissioning" "The previous ${mode} workflow completed successfully. Starting another workflow will archive its checkpoint."
-            mp_setup_state_clear_completed
+            ui_message "Commissioning" "The previous ${mode} workflow completed successfully. Selecting another workflow will archive its checkpoint; cancelling will preserve it."
+            completed_state=true
             mode=""
         elif [ "$state" != in_progress ]; then
             ui_error "The setup checkpoint is invalid. Inspect $MP_SETUP_V2_STATE before continuing."
@@ -1023,6 +1023,12 @@ mp_setup_v2() {
                 "cancel" "Return without changing anything")" || return 0
         fi
         mode="$choice"
+    fi
+    if [ "$completed_state" = true ]; then
+        case "$mode" in
+            cancel|"") return 0 ;;
+        esac
+        mp_setup_state_clear_completed || return 1
     fi
     case "$mode" in
         standalone-new) mp_setup_standalone ;;

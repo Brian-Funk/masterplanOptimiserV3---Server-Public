@@ -189,6 +189,44 @@ class PairingCodeTests(unittest.TestCase):
             self.assertIn("Replace the lost peer", ha)
             self.assertNotIn("Fresh two-node HA", ha)
 
+    def test_cancelling_after_completed_commissioning_preserves_the_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            state.mkdir()
+            checkpoint = state / "setup-state.json"
+            checkpoint.write_text(
+                json.dumps({
+                    "format": "mp-opt-setup-state-v1",
+                    "mode": "standalone-new",
+                    "state": "complete",
+                    "completed": ["validated", "smtp_verified"],
+                }),
+                encoding="utf-8",
+            )
+            (root / ".env").write_text("DOMAIN=example.test\n", encoding="utf-8")
+            script = r'''
+                export MP_ROOT="$1" MP_STATE="$2"
+                export MP_SETUP_V2_STATE="$2/setup-state.json"
+                source "$3/deploy/management/setup_v2.sh"
+                ui_menu() { printf 'cancel\n'; }
+                ui_message() { :; }
+                ui_error() { return 1; }
+                mp_ha_role() { printf 'standalone\n'; }
+                mp_setup_v2
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash",
+                 str(root), str(state), str(ROOT)],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(checkpoint.is_file())
+            self.assertEqual(
+                json.loads(checkpoint.read_text(encoding="utf-8"))["state"],
+                "complete",
+            )
+
     def test_every_supported_setup_has_guarded_checkpoint_order(self) -> None:
         standalone = shell_function(SETUP, "mp_setup_standalone")
         for earlier, later in (
