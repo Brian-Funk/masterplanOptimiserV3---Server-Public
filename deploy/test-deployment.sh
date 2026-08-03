@@ -202,9 +202,21 @@ sync_frontend() {
     install -m 0644 "$source/runtime/frontend-csp.caddy" "$MP_ROOT/runtime/frontend-csp.caddy"
 }
 
+prepare_runtime_from_installed_sources() {
+    # Operations files are synchronised during this process. Run the helper in
+    # a fresh shell so this deployment uses the just-installed common.sh, not
+    # the function definitions that were loaded when the previous SHA started
+    # the script.
+    env MP_ROOT="$MP_ROOT" bash -c '
+        set -Eeuo pipefail
+        source "$MP_ROOT/deploy/management/common.sh"
+        mp_prepare_frontend_csp_runtime
+    '
+}
+
 compose_activate() {
     local components="$1"
-    mp_prepare_frontend_csp_runtime
+    prepare_runtime_from_installed_sources
     mp_prepare_backend_secret_permissions
     mp_compose_init
     mp_compose_validate
@@ -224,6 +236,10 @@ compose_activate() {
         "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate caddy
     fi
     mp_wait_for_health 45
+    [ "$(stat -c %a "$MP_ROOT/runtime")" = 711 ] || {
+        ui_error "Runtime traversal permissions were not preserved during activation."
+        return 1
+    }
 }
 
 write_state() {

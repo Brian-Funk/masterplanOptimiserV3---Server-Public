@@ -166,6 +166,18 @@ def test_backend_runs_unprivileged_and_database_examples_fail_closed():
     assert 'chmod 0711 "$runtime_dir"' in common
 
 
+def test_unsigned_activation_uses_newly_installed_runtime_permission_helper():
+    """An operations update must take effect during its own exact-SHA deployment."""
+    script = (_server_root() / "deploy" / "test-deployment.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "prepare_runtime_from_installed_sources" in script
+    assert "source \"$MP_ROOT/deploy/management/common.sh\"" in script
+    assert 'stat -c %a "$MP_ROOT/runtime"' in script
+    assert "Runtime traversal permissions were not preserved" in script
+
+
 def test_database_and_ip_secrets_have_guarded_lifecycle_paths():
     root = _server_root()
     deploy_script = (root / "deploy" / "deploy.sh").read_text(encoding="utf-8")
