@@ -275,6 +275,7 @@ mp_portable_mark_export_required() {
 
 mp_snapshot_export_portable_interactive() {
     local selected style transfer host local_path ticket directory output result report package_id package_hash package_size
+    local compliance_receipts="" compliance_note=""
     mp_require_commands python3 jq sha256sum || return 1
     mp_portable_initialise || return 1
     selected="$(mp_snapshot_select "Choose a v2 snapshot to export")" || return 1
@@ -324,10 +325,18 @@ mp_snapshot_export_portable_interactive() {
             return 1
         fi
         if declare -F mp_compliance_emit_backup_receipts >/dev/null; then
-            mp_compliance_emit_backup_receipts "$selected" || true
+            compliance_receipts="$(mp_compliance_emit_backup_receipts "$selected")" || {
+                ui_error "The workstation export was verified, but pending deletion recovery receipts could not be recorded. The export remains valid; retry Deep verify after checking the evidence-signing configuration."
+                return 1
+            }
+            if [ -n "$compliance_receipts" ]; then
+                compliance_note="\n\nPending deletion recovery receipts were recorded. The web page will detect them automatically."
+            elif find "$MP_ROOT/runtime/compliance-requests" -maxdepth 1 -type f -name '*.json' -print -quit 2>/dev/null | grep -q .; then
+                compliance_note="\n\nA deletion workflow is still waiting. Deep-verify this snapshot now; MP-OPT will then record the recovery receipt."
+            fi
         fi
         ui_message "Portable snapshot exported" \
-            "The workstation copy was operator-confirmed and its public recovery receipt was recorded.\n\nPackage ID: ${package_id}\nPackage SHA-256: ${package_hash}\n\nThe temporary VPS export was removed."
+            "The workstation copy was operator-confirmed and its public recovery receipt was recorded.\n\nPackage ID: ${package_id}\nPackage SHA-256: ${package_hash}\n\nThe temporary VPS export was removed.${compliance_note}"
     else
         mp_audit "snapshot.portable-export" "pending" "$(basename "$selected"):sha256:${package_hash}"
         ui_message "Portable export retained" "The protected VPS copy remains for 24 hours so the transfer can be retried."

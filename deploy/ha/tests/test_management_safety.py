@@ -81,6 +81,16 @@ class TerminalExitSafetyTests(unittest.TestCase):
 
 
 class SnapshotServiceSafetyTests(unittest.TestCase):
+    def test_deep_verify_retries_pending_deletion_recovery_receipts(self) -> None:
+        verify = function_body(SNAPSHOT_SOURCE, "mp_snapshot_verify_interactive")
+        export = function_body(PORTABLE_SOURCE, "mp_snapshot_export_portable_interactive")
+        self.assertIn('mp_compliance_emit_backup_receipts "$selected"', verify)
+        self.assertIn("Pending deletion recovery receipts were recorded", verify)
+        self.assertIn("Export this verified snapshot", verify)
+        self.assertIn('mp_compliance_emit_backup_receipts "$selected"', export)
+        self.assertNotIn('mp_compliance_emit_backup_receipts "$selected" || true', export)
+        self.assertIn("Deep-verify this snapshot now", export)
+
     def test_backend_secret_contract_is_group_readable_without_broadening_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

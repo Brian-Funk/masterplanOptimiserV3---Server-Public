@@ -728,7 +728,7 @@ mp_snapshot_create_interactive() {
 
 # Deep-verify a selected snapshot using a transient private age identity.
 mp_snapshot_verify_interactive() {
-    local selected identity expected_recipient
+    local selected identity expected_recipient compliance_receipts="" compliance_note=""
     selected="$(mp_snapshot_select "Choose a snapshot to verify")" || return 1
     expected_recipient="$(jq -r '.encryption.recipient // empty' "$selected/receipt.json" 2>/dev/null || true)"
     if [ -n "$expected_recipient" ]; then
@@ -738,7 +738,18 @@ mp_snapshot_verify_interactive() {
     fi
     if mp_snapshot_verify_path "$selected" "$identity"; then
         mp_remove_identity_file "$identity"
-        ui_message "Snapshot verified" "The recovery identity, archive hash, payload hashes, file sizes and database catalogue all match."
+        if declare -F mp_compliance_emit_backup_receipts >/dev/null; then
+            compliance_receipts="$(mp_compliance_emit_backup_receipts "$selected")" || {
+                ui_error "The snapshot was verified, but pending deletion recovery receipts could not be recorded. The verified snapshot was retained; retry Deep verify after checking the evidence-signing configuration."
+                return 1
+            }
+            if [ -n "$compliance_receipts" ]; then
+                compliance_note="\n\nPending deletion recovery receipts were recorded. The web page will detect them automatically."
+            elif find "$MP_ROOT/runtime/compliance-requests" -maxdepth 1 -type f -name '*.json' -print -quit 2>/dev/null | grep -q .; then
+                compliance_note="\n\nA deletion workflow is still waiting. Export this verified snapshot to the workstation and confirm its SHA-256; MP-OPT will then record the recovery receipt."
+            fi
+        fi
+        ui_message "Snapshot verified" "The recovery identity, archive hash, payload hashes, file sizes and database catalogue all match.${compliance_note}"
     else
         mp_remove_identity_file "$identity"
         ui_error "Deep verification failed. The snapshot was not modified or restored."
