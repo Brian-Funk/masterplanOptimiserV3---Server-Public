@@ -132,10 +132,24 @@ def atomic_write(path: Path, raw: bytes) -> None:
 
 
 def sign_receipt(path: Path, instance_key: Path) -> None:
-    """Sign through a private 0600 copy without changing the shared source key."""
+    """Sign without changing the shared source key or weakening key permissions."""
 
     if instance_key.is_symlink() or not instance_key.is_file() or instance_key.stat().st_size > 64 * 1024:
         raise ValueError("Compliance signing key is unsafe")
+    if not hasattr(os, "fchmod"):
+        # Windows OpenSSH protects generated keys with ACLs that chmod cannot
+        # reproduce on a copied file. The management runtime is POSIX-only,
+        # but its qualification tests can safely sign with the protected
+        # source key without changing it.
+        result = subprocess.run(
+            ["ssh-keygen", "-Y", "sign", "-f", str(instance_key), "-n", "mp-opt-evidence-v1", str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise ValueError("Compliance receipt signing failed")
+        return
     descriptor, name = tempfile.mkstemp(prefix="mp-opt-compliance-signing-key-")
     temporary = Path(name)
     try:
