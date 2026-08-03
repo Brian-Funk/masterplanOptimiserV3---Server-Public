@@ -514,12 +514,11 @@ export default function AdminPage() {
             <ThemeToggle />
             <button
               onClick={() => router.push("/account/security")}
-              className="inline-flex items-center gap-2 rounded-lg px-2.5 py-2 text-gray-500 transition-colors hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
+              className="rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
               aria-label="Account security"
               title="Account security"
             >
               <Shield size={18} />
-              <span className="hidden text-sm font-medium lg:inline">Account security</span>
             </button>
             {user?.is_root_admin && (
               <button
