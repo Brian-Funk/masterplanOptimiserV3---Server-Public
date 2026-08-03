@@ -212,9 +212,15 @@ def _paragraphs(value: object | None) -> str:
     return "".join(f"<p>{_text(line)}</p>" for line in lines)
 
 
-@public_router.get("/public/{section}.html", response_class=HTMLResponse)
-def public_governance_html(section: str, db: Session = Depends(get_db)):
-    """Render the current controller notice without requiring JavaScript."""
+def _render_governance_html(
+    section: str,
+    *,
+    notice: dict[str, object] | None,
+    version: int | None = None,
+    published_at: datetime | None = None,
+    preview: bool = False,
+) -> HTMLResponse:
+    """Render one public or root-only preview legal-centre section."""
 
     if section not in PUBLIC_SECTIONS:
         raise HTTPException(status_code=404, detail="Legal-centre section not found")
@@ -227,18 +233,19 @@ def public_governance_html(section: str, db: Session = Depends(get_db)):
         "rights": "Your data-protection rights",
         "processors": "Processors and service providers",
     }
-    publication = db.query(GovernancePublication).order_by(
-        GovernancePublication.version.desc()
-    ).first()
     body: list[str] = [f"<h1>{headings[section]}</h1>"]
-    if publication is None:
+    if preview:
+        body.append(
+            "<p><strong>Private draft preview — not published.</strong> "
+            "Preview markers and publication metadata are not part of the final public notice.</p>"
+        )
+    if notice is None:
         body.extend([
             "<h2>Notice not configured</h2>",
             "<p>This self-hosted instance has not published its controller notice yet.</p>",
             "<p>Contact the instance operator. Generic project information is not the privacy notice for this deployment.</p>",
         ])
     else:
-        notice = json.loads(publication.content_json)
         if section in {"privacy", "legal"}:
             body.extend([
                 "<h2>Controller</h2>",
@@ -319,22 +326,51 @@ def public_governance_html(section: str, db: Session = Depends(get_db)):
                 "<h2>Supervisory authority</h2>",
                 f"<p><a href=\"{_text(notice.get('supervisory_authority_url'))}\" rel=\"noopener noreferrer\">{_text(notice.get('supervisory_authority_name'))}</a></p>",
             ])
+        if preview:
+            body.append("<p>Private draft preview. No policy version or publication time has been assigned.</p>")
+        else:
+            body.append(
+                f"<p>Published policy version {version} on {_text(published_at.date() if published_at else '')}.</p>"
+            )
+    if preview:
+        preview_base = "/api/v1/admin/governance/preview"
         body.append(
-            f"<p>Published policy version {publication.version} on {_text(publication.published_at.date())}.</p>"
+            f'<nav aria-label="Draft legal centre"><a href="{preview_base}/privacy.html">Privacy</a> | '
+            f'<a href="{preview_base}/legal.html">Legal</a> | <a href="{preview_base}/terms.html">Terms</a> | '
+            f'<a href="{preview_base}/data-policy.html">Permitted data</a> | '
+            f'<a href="{preview_base}/retention.html">Retention</a> | <a href="{preview_base}/rights.html">Rights</a> | '
+            f'<a href="{preview_base}/processors.html">Processors</a></nav>'
         )
-    body.append(
-        '<nav aria-label="Legal centre"><a href="/privacy">Privacy</a> | '
-        '<a href="/legal">Legal</a> | <a href="/terms">Terms</a> | <a href="/data-policy">Permitted data</a> | '
-        '<a href="/retention">Retention</a> | <a href="/rights">Rights</a> | '
-        '<a href="/processors">Processors</a> | <a href="/licence">Licence</a></nav>'
-    )
+    else:
+        body.append(
+            '<nav aria-label="Legal centre"><a href="/privacy">Privacy</a> | '
+            '<a href="/legal">Legal</a> | <a href="/terms">Terms</a> | <a href="/data-policy">Permitted data</a> | '
+            '<a href="/retention">Retention</a> | <a href="/rights">Rights</a> | '
+            '<a href="/processors">Processors</a> | <a href="/licence">Licence</a></nav>'
+        )
     document = (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         f"<title>{headings[section]} | Masterplan Optimiser</title></head>"
         f"<body><main>{''.join(body)}</main></body></html>"
     )
-    return HTMLResponse(document, headers={"Cache-Control": "no-cache"})
+    headers = {"Cache-Control": "private, no-store", "X-Robots-Tag": "noindex, nofollow"} if preview else {"Cache-Control": "no-cache"}
+    return HTMLResponse(document, headers=headers)
+
+
+@public_router.get("/public/{section}.html", response_class=HTMLResponse)
+def public_governance_html(section: str, db: Session = Depends(get_db)):
+    """Render the current controller notice without requiring JavaScript."""
+
+    publication = db.query(GovernancePublication).order_by(
+        GovernancePublication.version.desc()
+    ).first()
+    return _render_governance_html(
+        section,
+        notice=json.loads(publication.content_json) if publication else None,
+        version=publication.version if publication else None,
+        published_at=publication.published_at if publication else None,
+    )
 
 
 @public_router.get("/public/versions/{version}/{section}.html", response_class=HTMLResponse)
@@ -433,6 +469,20 @@ def preview_governance(
         "diff": publication_diff(json.loads(previous.content_json) if previous else None, payload),
         "published_version": previous.version if previous else None,
     }
+
+
+@admin_router.get("/preview/{section}.html", response_class=HTMLResponse)
+def preview_governance_html(
+    section: str,
+    _root: User = Depends(require_root_admin_read_only),
+    db: Session = Depends(get_db),
+):
+    """Render the saved private draft for root review without publishing it."""
+
+    profile = db.get(InstanceGovernanceProfile, 1)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Governance draft not found")
+    return _render_governance_html(section, notice=_profile_payload(profile), preview=True)
 
 
 @admin_router.get("/versions")

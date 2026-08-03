@@ -120,4 +120,35 @@ describe("governance configuration import and export", () => {
     expect(screen.getByLabelText("Legal name")).toHaveValue("");
     expect(mockApiFetch).toHaveBeenCalledTimes(2);
   });
+
+  it("opens root-only saved-draft documents after a successful exact preview", async () => {
+    const user = userEvent.setup();
+    mockApiFetch.mockImplementation((url: string) => {
+      if (url === "/api/v1/admin/governance") {
+        return Promise.resolve(jsonResponse({
+          runtime_features: { smtp_enabled: true, push_enabled: false, ha_enabled: false, dns_mode: "dns_only" },
+          draft: null,
+          published_version: null,
+          preflight: { checks: [], ready: false },
+        }));
+      }
+      if (url === "/api/v1/admin/settings") return Promise.resolve(jsonResponse({}));
+      if (url === "/api/v1/admin/governance/preview") {
+        return Promise.resolve(jsonResponse({
+          preflight: { checks: [{ code: "controller", status: "ready", message: "Ready" }], ready: true },
+          diff: { changes: [{ path: "controller_legal_name" }], material_change: true },
+          published_version: null,
+        }));
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    render(<GovernanceAdminPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Generate exact preview and diff" }));
+
+    const privacy = await screen.findByRole("link", { name: "Privacy draft preview" });
+    expect(privacy).toHaveAttribute("href", "/api/v1/admin/governance/preview/privacy.html");
+    expect(privacy).toHaveAttribute("target", "_blank");
+    expect(screen.getByRole("status")).toHaveTextContent(/review every public page before publishing/i);
+  });
 });

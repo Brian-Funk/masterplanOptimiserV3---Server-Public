@@ -190,6 +190,28 @@ def test_public_legal_notice_is_readable_without_javascript_and_escapes_controll
     assert "sessionStorage" in response.text
 
 
+def test_root_can_review_saved_draft_as_private_html_before_publication(db):
+    client, _root = _root_with_reauth(db)
+    profile = {**PROFILE, "controller_legal_name": "Draft <script>alert(1)</script> Controller"}
+    assert client.put("/api/v1/admin/governance", json=profile).status_code == 200
+
+    response = client.get("/api/v1/admin/governance/preview/privacy.html")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-robots-tag"] == "noindex, nofollow"
+    assert "Private draft preview" in response.text
+    assert "Draft &lt;script&gt;alert(1)&lt;/script&gt; Controller" in response.text
+    assert "<script>" not in response.text
+    assert "/api/v1/admin/governance/preview/rights.html" in response.text
+    assert "Published policy version" not in response.text
+    assert client.get("/api/v1/governance/public").json()["configured"] is False
+
+    participant = create_test_user(db, username="governance.preview.denied")
+    denied = _make_client(db, participant).get("/api/v1/admin/governance/preview/privacy.html")
+    assert denied.status_code == 403
+
+
 def test_preview_classifies_material_changes_and_export_contains_only_published_snapshot(db):
     client, _root = _root_with_reauth(db)
     saved = client.put("/api/v1/admin/governance", json=PROFILE)

@@ -84,6 +84,7 @@ export default function GovernanceAdminPage() {
   const [checks, setChecks] = useState<PreflightCheck[]>([]);
   const [changes, setChanges] = useState<Array<{ path: string }>>([]);
   const [materialChange, setMaterialChange] = useState(false);
+  const [previewReady, setPreviewReady] = useState(false);
   const [confirmations, setConfirmations] = useState<Record<ConfirmationKey, boolean>>({
     authorised_to_configure: false,
     reviewed_generated_documents: false,
@@ -152,6 +153,7 @@ export default function GovernanceAdminPage() {
       setChecks([]);
       setChanges([]);
       setMaterialChange(false);
+      setPreviewReady(false);
       setConfirmations((current) => Object.fromEntries(Object.keys(current).map((key) => [key, false])) as Record<ConfirmationKey, boolean>);
       setStatus("Configuration imported into an unsaved draft. Review every section, then select Save private draft. SMTP, push, HA and DNS runtime facts were kept from this deployment.");
       setStatusKind("success");
@@ -169,7 +171,7 @@ export default function GovernanceAdminPage() {
       body: JSON.stringify({ ...form, privacy_contact_phone: form.privacy_contact_phone || null, dpo_contact: form.dpo_contact || null, structured }),
     }));
     const data = await response.json().catch(() => ({}));
-    if (response.ok) { setChecks(data.preflight.checks || []); setStatus("Draft saved locally. It remains private until publication."); setStatusKind("success"); }
+    if (response.ok) { setChecks(data.preflight.checks || []); setPreviewReady(false); setStatus("Draft saved locally. It remains private until publication."); setStatusKind("success"); }
     else { setStatus(responseMessage(data, "Draft validation failed")); setStatusKind("error"); }
   };
 
@@ -178,7 +180,7 @@ export default function GovernanceAdminPage() {
     const response = await apiFetch("/api/v1/admin/governance/preview");
     const data = await response.json().catch(() => ({}));
     if (!response.ok) { setStatus(responseMessage(data, "Preview failed")); setStatusKind("error"); return; }
-    setChecks(data.preflight.checks || []); setChanges(data.diff?.changes || []); setMaterialChange(Boolean(data.diff?.material_change));
+    setChecks(data.preflight.checks || []); setChanges(data.diff?.changes || []); setMaterialChange(Boolean(data.diff?.material_change)); setPreviewReady(Boolean(data.preflight.ready));
     setStatus(data.preflight.ready ? "Exact preview is ready. Review every public page before publishing." : "Preview found blocking items. Resolve them and save again.");
     setStatusKind(data.preflight.ready ? "success" : "error");
   };
@@ -254,7 +256,7 @@ export default function GovernanceAdminPage() {
         <Button variant="outline" type="button" onClick={preview}>Generate exact preview and diff</Button>
         <ul className="space-y-2">{checks.map((check) => <li key={check.code} className={`flex items-start gap-2 rounded-lg p-3 text-sm ${check.status === "ready" ? "bg-green-50 text-green-800 dark:bg-green-950/40 dark:text-green-200" : check.status === "externally_unverifiable" ? "bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-200" : "bg-red-50 text-red-800 dark:bg-red-950/40 dark:text-red-200"}`}>{check.status === "ready" ? <CheckCircle2 size={17} className="mt-0.5 shrink-0" /> : <AlertTriangle size={17} className="mt-0.5 shrink-0" />}<span><strong>{check.status.replaceAll("_", " ")}</strong>: {check.message}</span></li>)}</ul>
         {changes.length > 0 && <div><h3 className="font-semibold">Draft changes {materialChange ? "(material)" : "(non-material)"}</h3><ul className="mt-2 list-disc pl-6 text-sm">{changes.slice(0, 50).map((change) => <li key={change.path}>{change.path}</li>)}</ul>{changes.length > 50 && <p className="text-sm">Plus {changes.length - 50} additional changed paths.</p>}</div>}
-        <nav aria-label="Governance preview pages" className="flex flex-wrap gap-2 text-sm">{[["/privacy", "Privacy"], ["/legal", "Legal"], ["/terms", "Terms"], ["/data-policy", "Permitted data"], ["/retention", "Retention"], ["/rights", "Rights"], ["/processors", "Processors"]].map(([href, label]) => <Link key={href} className="rounded-lg border border-gray-300 bg-white px-3 py-2 font-medium text-blue-700 hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-900 dark:text-blue-300" href={href}>{label}</Link>)}</nav>
+        {previewReady && <nav aria-label="Governance draft preview pages" className="flex flex-wrap gap-2 text-sm">{[["privacy", "Privacy"], ["legal", "Legal"], ["terms", "Terms"], ["data-policy", "Permitted data"], ["retention", "Retention"], ["rights", "Rights"], ["processors", "Processors"]].map(([section, label]) => <a key={section} className="rounded-lg border border-gray-300 bg-white px-3 py-2 font-medium text-blue-700 hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-900 dark:text-blue-300" href={`/api/v1/admin/governance/preview/${section}.html`} target="_blank" rel="noreferrer">{label} draft preview</a>)}</nav>}
       </Card>
 
       <Card className="space-y-4 p-5" aria-labelledby="publish-heading">
