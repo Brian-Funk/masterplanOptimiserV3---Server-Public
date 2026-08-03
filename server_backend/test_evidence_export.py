@@ -11,7 +11,7 @@ from app.services import evidence_export
 
 def test_complete_export_uses_fixed_tool_arguments_and_cleans_up(monkeypatch, tmp_path):
     evidence_home = tmp_path / "evidence"
-    evidence_home.mkdir()
+    evidence_home.mkdir(exist_ok=True)
     monkeypatch.setattr(settings, "EVIDENCE_HOME", str(evidence_home))
     monkeypatch.setattr(evidence_export, "EXPORT_TOOL", tmp_path / "evidence_bundle.py")
     instance_id = "11111111-1111-4111-8111-111111111111"
