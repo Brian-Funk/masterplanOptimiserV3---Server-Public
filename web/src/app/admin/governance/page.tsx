@@ -1,8 +1,8 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, CheckCircle2, FileText, Info, ShieldCheck } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Download, FileText, Info, ShieldCheck, Upload } from "lucide-react";
 
 import { GovernanceEditor } from "@/components/GovernanceEditor";
 import { Logo } from "@/components/Logo";
@@ -18,24 +18,14 @@ import {
   RuntimeSettings,
 } from "@/lib/governanceDraft";
 import { apiFetch } from "@/lib/api";
+import {
+  GOVERNANCE_CONFIGURATION_MAX_BYTES,
+  type GovernanceFormState,
+  governanceConfigurationFilename,
+  parseGovernanceConfiguration,
+  serializeGovernanceConfiguration,
+} from "@/lib/governanceConfig";
 import { withReauth } from "@/lib/reauth";
-
-type FormState = {
-  controller_type: "organisation" | "individual";
-  controller_legal_name: string;
-  controller_postal_address: string;
-  controller_country: string;
-  privacy_contact_email: string;
-  privacy_contact_phone: string;
-  dpo_contact: string;
-  supervisory_authority_name: string;
-  supervisory_authority_url: string;
-  default_locale: string;
-  processor_summary: string;
-  retention_summary: string;
-  rights_summary: string;
-  terms_summary: string;
-};
 
 type PreflightCheck = {
   code: string;
@@ -45,7 +35,7 @@ type PreflightCheck = {
 
 const runtimeFallback: RuntimeFeatures = { smtp_enabled: false, push_enabled: false, ha_enabled: false, dns_mode: "dns_only" };
 
-const empty: FormState = {
+const empty: GovernanceFormState = {
   controller_type: "organisation",
   controller_legal_name: "",
   controller_postal_address: "",
@@ -83,7 +73,8 @@ function Field({ label, value, onChange, multiline = false, type = "text", place
 /** Root-only guided governance editor, exact preview and immutable publication gate. */
 export default function GovernanceAdminPage() {
   const { user, isLoading } = useAuth();
-  const [form, setForm] = useState<FormState>(empty);
+  const importInput = useRef<HTMLInputElement>(null);
+  const [form, setForm] = useState<GovernanceFormState>(empty);
   const [structured, setStructured] = useState<GovernanceStructured>(() => createInitialStructured(runtimeFallback, {}));
   const [status, setStatus] = useState("Loading local governance settings...");
   const [statusKind, setStatusKind] = useState<"info" | "success" | "error">("info");
@@ -127,7 +118,46 @@ export default function GovernanceAdminPage() {
   if (isLoading) return <main className="flex min-h-screen items-center justify-center bg-gray-50 dark:bg-gray-900"><p>Loading governance...</p></main>;
   if (!user?.is_root_admin) return <main className="flex min-h-screen items-center justify-center bg-gray-50 p-8 dark:bg-gray-900"><Card className="max-w-md p-6"><h1 className="text-xl font-semibold">Root access required</h1><p className="mt-2 text-sm text-gray-500">Only the root administrator can edit and publish controller governance.</p></Card></main>;
 
-  const update = <Key extends keyof FormState>(key: Key, value: FormState[Key]) => setForm((current) => ({ ...current, [key]: value }));
+  const update = <Key extends keyof GovernanceFormState>(key: Key, value: GovernanceFormState[Key]) => setForm((current) => ({ ...current, [key]: value }));
+
+  const exportConfiguration = () => {
+    const contents = serializeGovernanceConfiguration(form, structured);
+    const url = URL.createObjectURL(new Blob([contents], { type: "application/json" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = governanceConfigurationFilename(structured.instance_name);
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    setStatus("Downloaded the current editor entries as a governance JSON draft. No key, signature, publication approval or passkey material is included.");
+    setStatusKind("success");
+  };
+
+  const importConfiguration = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.size > GOVERNANCE_CONFIGURATION_MAX_BYTES) {
+      setStatus("The governance configuration is larger than 1 MiB and was not opened.");
+      setStatusKind("error");
+      return;
+    }
+    try {
+      const imported = parseGovernanceConfiguration(await file.text(), structured);
+      setForm(imported.form);
+      setStructured(imported.structured);
+      setChecks([]);
+      setChanges([]);
+      setMaterialChange(false);
+      setConfirmations((current) => Object.fromEntries(Object.keys(current).map((key) => [key, false])) as Record<ConfirmationKey, boolean>);
+      setStatus("Configuration imported into an unsaved draft. Review every section, then select Save private draft. SMTP, push, HA and DNS runtime facts were kept from this deployment.");
+      setStatusKind("success");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "The governance configuration could not be imported.");
+      setStatusKind("error");
+    }
+  };
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
@@ -173,12 +203,23 @@ export default function GovernanceAdminPage() {
 
       <Guidance title="How to use this page">Work from top to bottom. Blue information boxes explain what belongs in each section. Suggested text begins with <strong>TODO</strong> and cannot pass publication preflight until reviewed and replaced. Deployment settings are linked where they affect the notice.</Guidance>
 
+      <Card className="space-y-4 p-5" aria-labelledby="configuration-file-heading">
+        <div><h2 id="configuration-file-heading" className="text-lg font-semibold">Governance configuration file</h2><p className="mt-1 text-sm text-gray-500 dark:text-gray-400">Reuse controller-reviewed entries between test runs or similar deployments without publishing them automatically.</p></div>
+        <Guidance title="Import is reviewable and never publishes">JSON import replaces only the entries currently shown in this editor. It remains unsaved until you select <strong>Save private draft</strong>. Deployment-derived SMTP, push, HA and DNS facts remain local. Files can contain controller contact information, so store them appropriately.</Guidance>
+        <div className="flex flex-wrap gap-3">
+          <Button type="button" variant="outline" onClick={exportConfiguration}><Download size={18} />Export current entries</Button>
+          <Button type="button" variant="outline" onClick={() => importInput.current?.click()}><Upload size={18} />Import configuration</Button>
+          <input ref={importInput} className="sr-only" type="file" accept="application/json,.json" aria-label="Choose governance configuration JSON" onChange={importConfiguration} />
+        </div>
+        <p className="text-xs text-gray-500 dark:text-gray-400">Format: versioned JSON, maximum 1 MiB. Excludes private keys, signatures, publication history, passkeys and publication acknowledgements.</p>
+      </Card>
+
       <form onSubmit={save} className="space-y-5">
         <Card className="space-y-4 p-5">
           <div><h2 className="text-lg font-semibold">1. Controller and privacy contact</h2><p className="mt-1 text-sm text-gray-500 dark:text-gray-400">Identify the organisation or individual that determines why and how this deployment processes data.</p></div>
           <Guidance title="Public controller identity">Use the controller&apos;s legal identity and an address where data-protection requests can actually be received. Do not enter the software maintainer unless the maintainer is genuinely the controller of this deployment.</Guidance>
           <div className="grid gap-4 md:grid-cols-2">
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200">Controller type<select value={form.controller_type} onChange={(event) => update("controller_type", event.target.value as FormState["controller_type"])} className="mt-1 block min-h-11 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-900"><option value="organisation">Organisation</option><option value="individual">Individual</option></select></label>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200">Controller type<select value={form.controller_type} onChange={(event) => update("controller_type", event.target.value as GovernanceFormState["controller_type"])} className="mt-1 block min-h-11 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-900"><option value="organisation">Organisation</option><option value="individual">Individual</option></select></label>
             <Field label="Legal name" placeholder="Controller's registered or legal name" value={form.controller_legal_name} onChange={(value) => update("controller_legal_name", value)} />
             <Field label="Postal address" placeholder="Complete service address" value={form.controller_postal_address} onChange={(value) => update("controller_postal_address", value)} multiline />
             <Field label="Country code" placeholder="For example CH or DE" helper="Two-letter code chosen by the controller; this does not declare hosting location." value={form.controller_country} onChange={(value) => update("controller_country", value.toUpperCase())} />
