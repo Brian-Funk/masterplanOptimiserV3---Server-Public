@@ -237,6 +237,60 @@ describe("Admin users", () => {
     expect(screen.getByRole("button", { name: "Remove or delete account" })).toBeInTheDocument();
   });
 
+  it("automatically starts signed deletion when a used account cannot be removed directly", async () => {
+    const managedUser = {
+      ...issuerUser,
+      id: 23,
+      username: "unassigned",
+      display_name: "Unassigned",
+      email: "unassigned@example.test",
+      is_issuer: false,
+      event_id: null,
+      tags: [],
+      is_active: true,
+      is_activated: true,
+    };
+    mockApiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      if (path === "/api/v1/admin/users") return jsonResponse([managedUser]);
+      if (path === "/api/v1/admin/users/23" && init?.method === "DELETE") {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            detail: {
+              code: "SIGNED_DELETION_REQUIRED",
+              message: "Signed deletion required",
+            },
+          }),
+        } as Response;
+      }
+      if (path === "/api/v1/admin/users/23/gdpr-delete") {
+        return jsonResponse({
+          request_id: "del-account-example-1",
+          state: "ready_for_live_purge",
+          message: "Access was revoked; this server-only account is ready for live-data deletion.",
+        });
+      }
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+    await user.click(await screen.findByRole("button", { name: "Users" }));
+    await user.click(await screen.findByTitle("Account details"));
+    await user.click(screen.getByRole("button", { name: "Remove or delete account" }));
+    await user.click(screen.getByRole("button", { name: "Continue with deletion" }));
+
+    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledWith(
+      "/api/v1/admin/users/23/gdpr-delete",
+      { method: "DELETE", body: JSON.stringify({}) },
+    ));
+    expect(await screen.findByText("Accountable deletion started for Unassigned.")).toBeInTheDocument();
+    expect(screen.getByText("del-account-example-1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open Privacy evidence" })).toBeInTheDocument();
+  });
+
   it("shows the stored expiry for an individually generated activation link", async () => {
     const managedUser = {
       ...rootUser,

@@ -70,6 +70,45 @@ def test_gdpr_anonymise_server_only_user_is_ready_for_live_purge(db, reauth_admi
     ).first() is None
 
 
+def test_gdpr_anonymise_activated_unassigned_account_uses_instance_scope(
+    db, reauth_admin_client,
+):
+    """An activated account without an event can still enter signed erasure."""
+    import uuid
+
+    from app.models.deletion import DeletionCase, DesktopDeletionWorkOrder
+    from app.models.user import User
+
+    user = create_test_user(db, username="unassigned.used", event_id=None)
+
+    response = reauth_admin_client.delete(
+        f"/api/v1/admin/users/{user.id}/gdpr-delete"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "ready_for_live_purge"
+    case = db.query(DeletionCase).filter_by(
+        request_id=response.json()["request_id"]
+    ).one()
+    assert uuid.UUID(case.event_evidence_id)
+    assert case.event_evidence_id != case.subject_evidence_id
+    assert case.desktop_deletion_required is False
+    assert db.query(DesktopDeletionWorkOrder).filter_by(case_id=case.id).count() == 0
+    retained = db.query(User).filter(User.id == user.id).one()
+    assert retained.is_active is False
+
+
+def test_unassigned_account_can_submit_own_signed_deletion_request(db):
+    """Self-service deletion does not require an artificial event assignment."""
+    user = create_test_user(db, username="unassigned.self", event_id=None)
+    client = _make_client(db, user, reauth=True)
+
+    response = client.post("/api/v1/user/deletion-requests")
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "submitted"
+
+
 def test_gdpr_anonymise_removes_event_linked_identity_and_audit_name(db, reauth_admin_client):
     """Deletion removes duplicated participant identity rather than only unlinking it."""
     import json

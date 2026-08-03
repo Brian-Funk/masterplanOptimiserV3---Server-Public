@@ -690,6 +690,7 @@ export default function AdminPage() {
             selectedEventId={selectedEvent}
             isIssuerOnly={!!isIssuerOnly}
             isRootAdmin={!!user?.is_root_admin}
+            onOpenPrivacy={() => setTab("privacy")}
           />
         )}
         {tab === "announcements" && (
@@ -1392,6 +1393,7 @@ function UsersTab({
   selectedEventId,
   isIssuerOnly,
   isRootAdmin,
+  onOpenPrivacy,
 }: {
   users: AdminUser[];
   events: Event[];
@@ -1399,6 +1401,7 @@ function UsersTab({
   selectedEventId: number | "";
   isIssuerOnly: boolean;
   isRootAdmin: boolean;
+  onOpenPrivacy: () => void;
 }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newUser, setNewUser] = useState({
@@ -1460,6 +1463,12 @@ function UsersTab({
     useState<ActivationDeliverySettings | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [removalError, setRemovalError] = useState<string | null>(null);
+  const [removalBusyId, setRemovalBusyId] = useState<number | null>(null);
+  const [accountDeletionCase, setAccountDeletionCase] = useState<{
+    requestId: string;
+    displayName: string;
+    message: string;
+  } | null>(null);
   const [tagInput, setTagInput] = useState<Record<number, string>>({});
   const [filterTag, setFilterTag] = useState<string>("");
   const [searchQuery, setSearchQuery] = useState<string>("");
@@ -1778,20 +1787,43 @@ function UsersTab({
     }
   };
 
-  const handleDeleteUser = async (userId: number) => {
+  const handleDeleteUser = async (userId: number, displayName: string) => {
     setRemovalError(null);
+    setRemovalBusyId(userId);
     try {
-      const res = await withReauth(() =>
-        apiFetch(`/api/v1/admin/users/${userId}`, {
+      const res = await withReauth(async () => {
+        const directRemoval = await apiFetch(`/api/v1/admin/users/${userId}`, {
           method: "DELETE",
           body: JSON.stringify({}),
-        }),
-      );
+        });
+        if (directRemoval.status !== 409) return directRemoval;
+        const conflict = await directRemoval.json().catch(() => ({}));
+        if (conflict?.detail?.code !== "SIGNED_DELETION_REQUIRED") {
+          return new Response(JSON.stringify(conflict), {
+            status: directRemoval.status,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return apiFetch(`/api/v1/admin/users/${userId}/gdpr-delete`, {
+          method: "DELETE",
+          body: JSON.stringify({}),
+        });
+      });
+      const data = await res.json().catch(() => ({}));
       if (res.ok) {
         setConfirmDeleteId(null);
+        if (typeof data?.request_id === "string") {
+          setAccountDeletionCase({
+            requestId: data.request_id,
+            displayName,
+            message:
+              typeof data?.message === "string"
+                ? data.message
+                : "The accountable deletion case is ready for its verified steps.",
+          });
+        }
         onRefresh();
       } else {
-        const data = await res.json().catch(() => ({}));
         const detail = data?.detail;
         setRemovalError(
           typeof detail === "object" && typeof detail?.message === "string"
@@ -1799,8 +1831,14 @@ function UsersTab({
             : responseMessage(data, "The account could not be removed."),
         );
       }
-    } catch {
-      // User cancelled passkey prompt or re-auth failed
+    } catch (cause) {
+      setRemovalError(
+        cause instanceof Error
+          ? cause.message
+          : "Deletion was cancelled or passkey authorization failed.",
+      );
+    } finally {
+      setRemovalBusyId(null);
     }
   };
 
@@ -2533,6 +2571,24 @@ function UsersTab({
           </Button>
         </div>
       </div>
+
+      {accountDeletionCase && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-900/30">
+          <p className="text-sm font-medium text-blue-900 dark:text-blue-100">
+            Accountable deletion started for {accountDeletionCase.displayName}.
+          </p>
+          <p className="mt-1 break-all font-mono text-xs text-blue-800 dark:text-blue-200">
+            {accountDeletionCase.requestId}
+          </p>
+          <p className="mt-2 text-xs text-blue-800 dark:text-blue-200">
+            {accountDeletionCase.message} Continue the verified live-data,
+            backup, checklist, and approval steps in Privacy evidence.
+          </p>
+          <Button className="mt-3" size="sm" variant="outline" onClick={onOpenPrivacy}>
+            Open Privacy evidence
+          </Button>
+        </div>
+      )}
 
       {/* Create form */}
       {showCreate && (
@@ -3973,24 +4029,31 @@ function UsersTab({
               {confirmDeleteId === u.id && (
                 <div className="mt-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg p-4">
                   <p className="text-sm text-red-800 dark:text-red-200 mb-3">
-                    Remove <strong>{u.display_name}</strong>? Only an account
-                    that was never activated, linked, or used can be removed
-                    immediately. Accounts with history must use the signed
-                    deletion-evidence workflow.
+                    Delete <strong>{u.display_name}</strong>&apos;s account? An
+                    unused invitation will be removed immediately. If the
+                    account has identity or operational history, Masterplan
+                    will start the accountable deletion case automatically.
+                  </p>
+                  <p className="mb-3 text-xs text-red-700 dark:text-red-300">
+                    Your administrator passkey authorizes the action. You do
+                    not need to handle a signing key or open a separate
+                    endpoint. Evidence approvals remain explicit before the
+                    case can be completed.
                   </p>
                   {removalError && (
                     <p className="mb-3 text-sm text-red-700 dark:text-red-300">
                       {removalError}
                     </p>
                   )}
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <Button
                       variant="primary"
                       size="sm"
-                      onClick={() => handleDeleteUser(u.id)}
+                      onClick={() => handleDeleteUser(u.id, u.display_name)}
+                      disabled={removalBusyId === u.id}
                       className="!bg-red-600 hover:!bg-red-700"
                     >
-                      Remove unused account
+                      {removalBusyId === u.id ? "Authorizing..." : "Continue with deletion"}
                     </Button>
                     <Button
                       variant="outline"

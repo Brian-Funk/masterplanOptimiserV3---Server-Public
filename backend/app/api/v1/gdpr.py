@@ -295,14 +295,19 @@ def _job_detail(job: DeletionCase, db: Session | None = None) -> dict:
 
 
 def _new_deletion_job(db: Session, user: User, *, state: str = "submitted") -> DeletionCase:
-    if user.event_id is None:
+    instance_id = stable_instance_id(db)
+    event = (
+        db.query(Event).filter(Event.id == user.event_id).first()
+        if user.event_id is not None
+        else None
+    )
+    if user.event_id is not None and event is None:
+        raise HTTPException(status_code=409, detail="The account's event data scope no longer exists")
+    if event is None and user.linked_person_id is not None:
         raise HTTPException(
             status_code=409,
-            detail="The account has no event data scope. Contact the instance controller.",
+            detail="The account has a stale desktop person link. Clear it before deletion.",
         )
-    event = db.query(Event).filter(Event.id == user.event_id).first()
-    if event is None:
-        raise HTTPException(status_code=409, detail="The account's event data scope no longer exists")
     published_person = None
     if user.linked_person_id is not None:
         published_person = db.query(PublishedPerson).filter(
@@ -316,9 +321,21 @@ def _new_deletion_job(db: Session, user: User, *, state: str = "submitted") -> D
             )
         user.evidence_subject_id = published_person.evidence_subject_id
     now = datetime.now(timezone.utc)
+    # Activated accounts can legitimately exist before an event assignment.
+    # Give those server-only identities a stable, pseudonymous instance scope
+    # so they can use the same signed evidence workflow without inventing an
+    # event or creating an inapplicable Desktop work order.
+    event_ref = (
+        event.evidence_id
+        if event is not None
+        else str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"urn:masterplan:{instance_id}:server-only-accounts",
+        ))
+    )
     job = DeletionCase(
-        instance_id=stable_instance_id(db),
-        event_evidence_id=event.evidence_id,
+        instance_id=instance_id,
+        event_evidence_id=event_ref,
         subject_evidence_id=user.evidence_subject_id,
         desktop_deletion_required=published_person is not None,
         user_id=user.id,
@@ -467,8 +484,8 @@ def gdpr_delete_user(
         deletion_job = _new_deletion_job(db, user)
     try:
         accept_subject_request(db, deletion_job, user)
-        event = db.query(Event).filter(Event.id == user.event_id).one()
         if deletion_job.desktop_deletion_required:
+            event = db.query(Event).filter(Event.id == user.event_id).one()
             ensure_desktop_work_order(
                 db,
                 deletion_job,
@@ -624,8 +641,8 @@ def accept_deletion_request(
     require_user_management_access(user, admin)
     try:
         accept_subject_request(db, job, user)
-        event = db.query(Event).filter(Event.id == user.event_id).one()
         if job.desktop_deletion_required:
+            event = db.query(Event).filter(Event.id == user.event_id).one()
             ensure_desktop_work_order(
                 db,
                 job,
