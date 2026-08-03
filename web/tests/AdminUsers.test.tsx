@@ -149,6 +149,61 @@ describe("Admin users", () => {
     expect(eventContext).toHaveValue("");
   });
 
+  it("starts an accountable event deletion case instead of calling direct deletion", async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      if (path === "/api/v1/admin/deletion-requests/events/7") {
+        return jsonResponse({ request_id: "del-event-example-1", state: "awaiting_desktop_report" });
+      }
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Events" }));
+    await user.click(await screen.findByTitle("Start accountable event deletion"));
+    expect(
+      screen.getByText('Start an accountable deletion case for "OWIII"?'),
+    ).toBeInTheDocument();
+    await user.click(screen.getByLabelText(/Require a separate processor approval/));
+    await user.click(screen.getByRole("button", { name: "Start deletion case" }));
+
+    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledWith(
+      "/api/v1/admin/deletion-requests/events/7",
+      {
+        method: "POST",
+        body: JSON.stringify({ processor_approval_required: true }),
+      },
+    ));
+    expect(await screen.findByText("Deletion case started for OWIII.")).toBeInTheDocument();
+    expect(screen.getByText("del-event-example-1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open Privacy evidence" })).toBeInTheDocument();
+  });
+
+  it("shows the server reason when an event deletion case is rejected", async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      if (path === "/api/v1/admin/deletion-requests/events/7") {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({ detail: "Signed evidence is not available." }),
+        } as Response;
+      }
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+    await user.click(await screen.findByRole("button", { name: "Events" }));
+    await user.click(await screen.findByTitle("Start accountable event deletion"));
+    await user.click(screen.getByRole("button", { name: "Start deletion case" }));
+
+    expect(await screen.findByText("Signed evidence is not available.")).toBeInTheDocument();
+    expect(screen.queryByText(/Deletion case started/)).not.toBeInTheDocument();
+  });
+
   it("shows one calm account-settings area without repeating summary details", async () => {
     const managedUser = {
       ...rootUser,

@@ -675,7 +675,12 @@ export default function AdminPage() {
 
         {/* Tab content */}
         {tab === "events" && (
-          <EventsTab events={events} onRefresh={fetchData} />
+          <EventsTab
+            events={events}
+            onRefresh={fetchData}
+            isRootAdmin={!!user?.is_root_admin}
+            onOpenPrivacy={() => setTab("privacy")}
+          />
         )}
         {tab === "users" && (
           <UsersTab
@@ -772,9 +777,13 @@ export default function AdminPage() {
 function EventsTab({
   events,
   onRefresh,
+  isRootAdmin,
+  onOpenPrivacy,
 }: {
   events: Event[];
   onRefresh: () => void;
+  isRootAdmin: boolean;
+  onOpenPrivacy: () => void;
 }) {
   const [showCreate, setShowCreate] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -799,6 +808,12 @@ function EventsTab({
     Record<number, string>
   >({});
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const [processorApprovalRequired, setProcessorApprovalRequired] = useState(false);
+  const [startingDeletion, setStartingDeletion] = useState(false);
+  const [deletionCase, setDeletionCase] = useState<{
+    requestId: string;
+    eventName: string;
+  } | null>(null);
   const [importResult, setImportResult] = useState<{
     secret: string;
     users: { id: number; display_name: string; activation_url: string }[];
@@ -897,17 +912,43 @@ function EventsTab({
     navigator.clipboard.writeText(text);
   };
 
-  const handleDeleteEvent = async (eventId: number) => {
+  const handleStartEventDeletion = async (eventId: number, eventName: string) => {
+    setEventError("");
+    setStartingDeletion(true);
     try {
       const res = await withReauth(() =>
-        apiFetch(`/api/v1/admin/events/${eventId}`, { method: "DELETE" }),
+        apiFetch(`/api/v1/admin/deletion-requests/events/${eventId}`, {
+          method: "POST",
+          body: JSON.stringify({
+            processor_approval_required: processorApprovalRequired,
+          }),
+        }),
       );
-      if (res.ok) {
-        setConfirmDeleteId(null);
-        onRefresh();
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        setEventError(
+          responseMessage(
+            data,
+            `The deletion case could not be started (${res.status}).`,
+          ),
+        );
+        return;
       }
-    } catch {
-      // User cancelled passkey prompt or re-auth failed
+      const requestId = data && typeof data.request_id === "string"
+        ? data.request_id
+        : "Case created (identifier unavailable)";
+      setDeletionCase({ requestId, eventName });
+      setConfirmDeleteId(null);
+      setProcessorApprovalRequired(false);
+      onRefresh();
+    } catch (cause) {
+      setEventError(
+        cause instanceof Error
+          ? cause.message
+          : "The deletion case was cancelled or reauthentication failed.",
+      );
+    } finally {
+      setStartingDeletion(false);
     }
   };
 
@@ -996,6 +1037,24 @@ function EventsTab({
           <p className="text-sm text-red-800 dark:text-red-200">
             {eventError}
           </p>
+        </div>
+      )}
+
+      {deletionCase && (
+        <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-3 dark:border-blue-800 dark:bg-blue-900/30">
+          <p className="text-sm font-medium text-blue-900 dark:text-blue-100">
+            Deletion case started for {deletionCase.eventName}.
+          </p>
+          <p className="mt-1 break-all font-mono text-xs text-blue-800 dark:text-blue-200">
+            {deletionCase.requestId}
+          </p>
+          <p className="mt-2 text-xs text-blue-800 dark:text-blue-200">
+            No immediate cascade deletion was performed. Complete the accountable
+            Desktop, Server, backup, checklist, and approval steps in Privacy evidence.
+          </p>
+          <Button className="mt-3" size="sm" variant="outline" onClick={onOpenPrivacy}>
+            Open Privacy evidence
+          </Button>
         </div>
       )}
 
@@ -1233,35 +1292,63 @@ function EventsTab({
                   >
                     <Key size={16} />
                   </button>
-                  <button
-                    onClick={() => setConfirmDeleteId(ev.id)}
-                    className="p-1.5 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-                    title="Delete event"
-                  >
-                    <Trash2 size={16} />
-                  </button>
+                  {isRootAdmin && !ev.purge_case_request_id && (
+                    <button
+                      onClick={() => {
+                        setEventError("");
+                        setProcessorApprovalRequired(false);
+                        setConfirmDeleteId(ev.id);
+                      }}
+                      className="p-1.5 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                      title="Start accountable event deletion"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  )}
                 </div>
               </div>
-              {/* Delete confirmation */}
+              {/* Accountable deletion-case confirmation */}
               {confirmDeleteId === ev.id && (
                 <div className="mt-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded p-3">
                   <p className="text-sm text-red-800 dark:text-red-200 mb-2">
-                    Delete &quot;{ev.name}&quot; and <strong>all</strong>{" "}
-                    associated users, tasks, and edits? This cannot be undone.
+                    Start an accountable deletion case for &quot;{ev.name}&quot;?
                   </p>
+                  <p className="mb-3 text-xs text-red-700 dark:text-red-300">
+                    This revokes access and creates the controlled Desktop work order.
+                    It does not immediately erase the event or claim deletion from
+                    systems outside this deployment. Each destructive step remains
+                    separately confirmed and evidenced.
+                  </p>
+                  <label className="mb-3 flex items-start gap-2 text-xs text-red-800 dark:text-red-200">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={processorApprovalRequired}
+                      onChange={(event) => setProcessorApprovalRequired(event.target.checked)}
+                    />
+                    <span>
+                      Require a separate processor approval on the final deletion
+                      checklist for this case.
+                    </span>
+                  </label>
                   <div className="flex gap-2">
                     <Button
                       variant="primary"
                       size="sm"
-                      onClick={() => handleDeleteEvent(ev.id)}
+                      onClick={() => handleStartEventDeletion(ev.id, ev.name)}
                       className="!bg-red-600 hover:!bg-red-700"
+                      disabled={startingDeletion}
                     >
-                      Delete
+                      {startingDeletion ? "Starting case..." : "Start deletion case"}
                     </Button>
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setConfirmDeleteId(null)}
+                      onClick={() => {
+                        setConfirmDeleteId(null);
+                        setProcessorApprovalRequired(false);
+                      }}
+                      disabled={startingDeletion}
                     >
                       Cancel
                     </Button>
