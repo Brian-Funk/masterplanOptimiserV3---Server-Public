@@ -60,6 +60,14 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("if mp_has_terminal", dimensions)
         self.assertNotIn("</dev/tty", dimensions)
 
+    def test_snapshot_anchor_uses_the_accessible_copied_ledger(self) -> None:
+        snapshots = (ROOT / "deploy/management/snapshots.sh").read_text(encoding="utf-8")
+        anchor = snapshots.split("mp_snapshot_write_evidence_anchor()", 1)[1].split(
+            "mp_snapshot_normalise_payload_permissions()", 1,
+        )[0]
+        self.assertIn('$payload/evidence/ledger/chain-head.json', anchor)
+        self.assertIn('sudo -n cat "$head"', anchor)
+
     def test_accepts_only_exact_lowercase_commits_and_canonical_tags(self) -> None:
         commit = "a" * 40
         self.assertEqual(MODULE.require_commit(commit), commit)

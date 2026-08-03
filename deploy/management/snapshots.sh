@@ -121,17 +121,23 @@ mp_snapshot_dump_database() {
 # Bind a database-bearing snapshot to the exact signed ledger state captured
 # while application writes are paused. This contains no personal data.
 mp_snapshot_write_evidence_anchor() {
-    local payload="$1" head
+    local payload="$1" head copied_head
     mkdir -p "$payload/metadata" || return 1
     head="$MP_ROOT/state/evidence/ledger/chain-head.json"
-    if [ -s "$head" ] && [ ! -L "$head" ]; then
+    copied_head="$payload/evidence/ledger/chain-head.json"
+    if [ -s "$copied_head" ] && [ ! -L "$copied_head" ]; then
         jq -e '{format:"mp-opt-snapshot-evidence-anchor-v1", instance_id, chain_id,
-            records, head_sha256}' "$head" > "$payload/metadata/evidence-anchor.json" \
+            records, head_sha256}' "$copied_head" > "$payload/metadata/evidence-anchor.json" \
             || return 1
-        chmod 600 "$payload/metadata/evidence-anchor.json" || return 1
+    elif sudo -n test -s "$head" && sudo -n test ! -L "$head"; then
+        sudo -n cat "$head" \
+            | jq -e '{format:"mp-opt-snapshot-evidence-anchor-v1", instance_id, chain_id,
+                records, head_sha256}' > "$payload/metadata/evidence-anchor.json" \
+            || return 1
     else
         return 1
     fi
+    chmod 600 "$payload/metadata/evidence-anchor.json" || return 1
 }
 
 # Make encrypted payload permissions independent of the invoking shell's
