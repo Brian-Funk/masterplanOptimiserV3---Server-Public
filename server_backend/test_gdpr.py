@@ -4,6 +4,26 @@ from server_backend.conftest import (
 )
 
 
+def _activate_processor(db, event):
+    from datetime import datetime, timezone
+    from app.models.evidence import EvidenceKey, ProcessorIdentity
+
+    key = EvidenceKey(
+        key_id="ek-1234567890abcdef", public_key="ssh-ed25519 " + "A" * 44,
+        public_key_sha256="f" * 64,
+        instance_id="11111111-1111-4111-8111-111111111111",
+        entity_id="prc-synthetic0001", role="processor",
+        activated_at=datetime.now(timezone.utc),
+    )
+    identity = ProcessorIdentity(
+        instance_id=key.instance_id, entity_id=key.entity_id, event_id=event.id,
+        event_evidence_id=event.evidence_id, event_display_name=event.name,
+        status="active", active_key_id=key.key_id,
+        activated_at=datetime.now(timezone.utc),
+    )
+    db.add_all([key, identity]); db.flush()
+
+
 # ── GET /admin/users/{id}/export ──
 
 
@@ -122,7 +142,7 @@ def test_event_erasure_detail_includes_temporary_operator_label(db):
 
     response = client.post(
         f"/api/v1/admin/deletion-requests/events/{event.id}",
-        json={"processor_approval_required": False},
+        json={},
     )
 
     assert response.status_code == 202
@@ -182,6 +202,7 @@ def test_gdpr_anonymise_removes_event_linked_identity_and_audit_name(db, reauth_
     )
 
     event, _ = create_test_event(db, name="Deletion Event")
+    _activate_processor(db, event)
     person = PublishedPerson(
         event_id=event.id, external_person_id=77,
         first_name="Personal", last_name="Name", email="personal@example.test",
@@ -241,7 +262,13 @@ def test_gdpr_anonymise_removes_event_linked_identity_and_audit_name(db, reauth_
         work_order,
         claim_capability=capability,
         report={
-            "version": 1,
+            "format": "mp-opt-desktop-deletion-receipt-v2",
+            "instance_id": "11111111-1111-4111-8111-111111111111",
+            "entity_id": work_order.processor_entity_id,
+            "key_id": work_order.processor_key_id,
+            "role": "processor",
+            "algorithm": "Ed25519",
+            "public_key_sha256": "f" * 64,
             "work_order_id": work_order.work_order_id,
             "event_ref": event.evidence_id,
             "subject_ref": user.evidence_subject_id,
@@ -263,6 +290,9 @@ def test_gdpr_anonymise_removes_event_linked_identity_and_audit_name(db, reauth_
             "outstanding_actions": [],
             "completed_at": "2026-07-28T10:30:00+00:00",
         },
+        signature_sha256="a" * 64,
+        completed_key_id=work_order.processor_key_id,
+        completed_public_key_sha256="f" * 64,
     )
     purge_subject_live_data(db, case, user)
     db.commit()

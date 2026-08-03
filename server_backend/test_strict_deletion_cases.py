@@ -12,9 +12,10 @@ from app.core import deletion_cases, deletion_workflow
 from app.models.deletion import (
     DeletionCase,
     DeletionChecklistApproval,
+    DeletionRequiredProcessor,
     DeletionSubjectScope,
 )
-from app.models.evidence import BackupInventoryRecord
+from app.models.evidence import BackupInventoryRecord, EvidenceKey, ProcessorIdentity
 from app.models.published import PublishedPerson
 from app.models.user import User
 from deploy.evidence.evidence_manifest import RECORD_TYPES, _validate_payload
@@ -36,9 +37,51 @@ def _case(db, event, *, case_type="personal_data_erasure", subject_ref=None):
     return case
 
 
+def _activate_processor(db, event, *, entity_id="prc-synthetic0001"):
+    alternate = entity_id != "prc-synthetic0001"
+    key = EvidenceKey(
+        key_id="ek-fedcba0987654321" if alternate else "ek-1234567890abcdef",
+        public_key="ssh-ed25519 " + ("B" if alternate else "A") * 44,
+        public_key_sha256=("e" if alternate else "f") * 64,
+        instance_id="11111111-1111-4111-8111-111111111111",
+        entity_id=entity_id, role="processor", activated_at=datetime.now(timezone.utc),
+    )
+    identity = ProcessorIdentity(
+        instance_id=key.instance_id, entity_id=entity_id, event_id=event.id,
+        event_evidence_id=event.evidence_id, event_display_name=event.name,
+        display_label="Synthetic workstation", status="active", active_key_id=key.key_id,
+        activated_at=datetime.now(timezone.utc),
+    )
+    db.add_all([key, identity])
+    db.flush()
+    return identity, key
+
+
+def test_processor_assignments_are_snapshotted_per_event(db):
+    event, _ = create_test_event(db)
+    _activate_processor(db, event)
+    _activate_processor(db, event, entity_id="prc-synthetic0002")
+    case = _case(db, event, case_type="event_erasure")
+
+    work_orders = deletion_cases.ensure_desktop_work_order(db, case, event=event, subject_ref=None)
+
+    assert {row.processor_entity_id for row in work_orders} == {"prc-synthetic0001", "prc-synthetic0002"}
+    requirements = db.query(DeletionRequiredProcessor).filter_by(case_id=case.id).all()
+    assert {row.processor_entity_id for row in requirements} == {"prc-synthetic0001", "prc-synthetic0002"}
+    for row in requirements:
+        assert row.state == "awaiting_desktop"
+        assert row.snapshotted_key_id
+
+
 def _report(work_order, *, outstanding=None):
     return {
-        "version": 1,
+        "format": "mp-opt-desktop-deletion-receipt-v2",
+        "instance_id": "11111111-1111-4111-8111-111111111111",
+        "entity_id": work_order.processor_entity_id,
+        "key_id": work_order.processor_key_id,
+        "role": "processor",
+        "algorithm": "Ed25519",
+        "public_key_sha256": "f" * 64,
         "work_order_id": work_order.work_order_id,
         "event_ref": work_order.event_ref,
         "subject_ref": work_order.subject_ref,
@@ -82,33 +125,42 @@ def test_desktop_report_is_capability_authorised_exact_and_idempotent(db):
     """Only the claimed current contract may advance a case."""
 
     event, _ = create_test_event(db)
+    _activate_processor(db, event)
     subject_ref = "22222222-2222-4222-8222-222222222222"
     case = _case(db, event, subject_ref=subject_ref)
     work_order = deletion_cases.ensure_desktop_work_order(
         db, case, event=event, subject_ref=subject_ref,
-    )
+    )[0]
     capability = deletion_cases.claim_work_order(work_order)
     report = _report(work_order)
 
     with pytest.raises(ValueError, match="claim"):
         deletion_cases.apply_desktop_report(
             db, case, work_order, claim_capability="wrong", report=report,
+            signature_sha256="a" * 64, completed_key_id=work_order.processor_key_id,
+            completed_public_key_sha256="f" * 64,
         )
 
     digest = deletion_cases.apply_desktop_report(
         db, case, work_order, claim_capability=capability, report=report,
+        signature_sha256="a" * 64, completed_key_id=work_order.processor_key_id,
+        completed_public_key_sha256="f" * 64,
     )
     assert case.state == "ready_for_live_purge"
     assert work_order.state == "report_received"
     assert work_order.claim_capability_sha256 is None
     assert deletion_cases.apply_desktop_report(
         db, case, work_order, claim_capability="", report=report,
+        signature_sha256="a" * 64, completed_key_id=work_order.processor_key_id,
+        completed_public_key_sha256="f" * 64,
     ) == digest
 
     changed = dict(report, outcome="not_deleted")
     with pytest.raises(ValueError, match="different report"):
         deletion_cases.apply_desktop_report(
             db, case, work_order, claim_capability="", report=changed,
+            signature_sha256="a" * 64, completed_key_id=work_order.processor_key_id,
+            completed_public_key_sha256="f" * 64,
         )
 
 
@@ -116,11 +168,12 @@ def test_expired_desktop_claim_can_be_reissued_without_replaying_old_capability(
     """An abandoned desktop claim may be retried, but its bearer token stays dead."""
 
     event, _ = create_test_event(db)
+    _activate_processor(db, event)
     subject_ref = "77777777-7777-4777-8777-777777777777"
     case = _case(db, event, subject_ref=subject_ref)
     work_order = deletion_cases.ensure_desktop_work_order(
         db, case, event=event, subject_ref=subject_ref,
-    )
+    )[0]
     expired_capability = deletion_cases.claim_work_order(work_order)
     with pytest.raises(ValueError, match="active claim"):
         deletion_cases.claim_work_order(work_order)
@@ -136,6 +189,9 @@ def test_expired_desktop_claim_can_be_reissued_without_replaying_old_capability(
             work_order,
             claim_capability=expired_capability,
             report=report,
+            signature_sha256="a" * 64,
+            completed_key_id=work_order.processor_key_id,
+            completed_public_key_sha256="f" * 64,
         )
     deletion_cases.apply_desktop_report(
         db,
@@ -143,6 +199,9 @@ def test_expired_desktop_claim_can_be_reissued_without_replaying_old_capability(
         work_order,
         claim_capability=replacement_capability,
         report=report,
+        signature_sha256="a" * 64,
+        completed_key_id=work_order.processor_key_id,
+        completed_public_key_sha256="f" * 64,
     )
     assert work_order.state == "report_received"
 
@@ -151,10 +210,11 @@ def test_unknown_report_fields_and_external_copies_fail_closed(db):
     """Unknown payloads are rejected and known external copies restrict the case."""
 
     event, _ = create_test_event(db)
+    _activate_processor(db, event)
     case = _case(db, event, case_type="event_erasure")
     work_order = deletion_cases.ensure_desktop_work_order(
         db, case, event=event, subject_ref=None,
-    )
+    )[0]
     report = _report(work_order)
     report["private_note"] = "must never be accepted"
     with pytest.raises(ValueError, match="unknown fields"):
@@ -165,6 +225,8 @@ def test_unknown_report_fields_and_external_copies_fail_closed(db):
     capability = deletion_cases.claim_work_order(work_order)
     deletion_cases.apply_desktop_report(
         db, case, work_order, claim_capability=capability, report=report,
+        signature_sha256="a" * 64, completed_key_id=work_order.processor_key_id,
+        completed_public_key_sha256="f" * 64,
     )
     assert case.state == "ready_for_live_purge"
     assert case.retention_reason_code == "external_desktop_copy_unresolved"
@@ -175,24 +237,21 @@ def test_unknown_report_fields_and_external_copies_fail_closed(db):
     assert case.retention_reason_code is None
 
 
-def test_already_absent_desktop_copy_is_an_explicit_idempotent_path(db):
-    """A controller can resolve a genuinely absent Desktop copy without fake data."""
+def test_root_cannot_substitute_for_an_event_processor(db):
+    """A required Desktop receipt cannot be replaced by root confirmation."""
 
     event, _ = create_test_event(db)
+    _activate_processor(db, event)
     case = _case(db, event, case_type="event_erasure")
     work_order = deletion_cases.ensure_desktop_work_order(
         db, case, event=event, subject_ref=None,
-    )
+    )[0]
     deletion_cases.claim_work_order(work_order)
 
-    receipt = deletion_cases.confirm_desktop_already_absent(db, case)
-
-    assert len(receipt) == 64
-    assert case.state == "ready_for_live_purge"
-    assert case.desktop_report_sha256 is None
-    assert case.desktop_absence_receipt_sha256 == receipt
-    assert work_order.state == "cancelled"
-    assert "desktop_report" not in deletion_cases.checklist_prerequisites(case, db)
+    with pytest.raises(ValueError, match="cannot replace required processor receipts"):
+        deletion_cases.confirm_desktop_already_absent(db, case)
+    assert case.state == "awaiting_desktop_report"
+    assert work_order.state == "claimed"
 
 
 def test_no_backup_path_requires_explicit_confirmation_and_empty_inventory(db):
@@ -201,7 +260,7 @@ def test_no_backup_path_requires_explicit_confirmation_and_empty_inventory(db):
     event, _ = create_test_event(db)
     case = _case(db, event, case_type="event_erasure")
     deletion_cases.ensure_case_scope(db, case, event=event, subject_ref=None)
-    case.desktop_absence_receipt_sha256 = "a" * 64
+    case.desktop_deletion_required = False
     case.live_purge_receipt_sha256 = "b" * 64
     case.outstanding_actions_json = "[]"
 
@@ -210,7 +269,7 @@ def test_no_backup_path_requires_explicit_confirmation_and_empty_inventory(db):
     assert len(receipt) == 64
     assert case.state == "awaiting_checklist"
     checklist = deletion_cases.build_checklist(case, db)
-    assert checklist["version"] == 2
+    assert checklist["version"] == 3
     assert checklist["receipts"]["backup_not_applicable_sha256"] == receipt
 
 
@@ -234,12 +293,12 @@ def test_checklist_is_content_bound_and_requires_all_approvals(db):
 
     event, _ = create_test_event(db)
     case = _case(db, event, subject_ref="33333333-3333-4333-8333-333333333333")
+    case.desktop_deletion_required = False
     deletion_cases.ensure_case_scope(
         db, case, event=event, subject_ref=case.subject_evidence_id,
     )
     with pytest.raises(ValueError, match="required actions remain"):
         deletion_cases.build_checklist(case, db)
-    case.desktop_report_sha256 = "a" * 64
     case.live_purge_receipt_sha256 = "b" * 64
     case.replacement_package_sha256 = "c" * 64
     case.outstanding_actions_json = "[]"
@@ -251,10 +310,6 @@ def test_checklist_is_content_bound_and_requires_all_approvals(db):
     deletion_cases.record_checklist_approval(
         db, case, role="executor", user_id=None, credential_sha256="d" * 64,
     )
-    assert case.state == "awaiting_approvals"
-    deletion_cases.record_checklist_approval(
-        db, case, role="controller", user_id=None, credential_sha256="e" * 64,
-    )
     assert case.state == "ready_for_completion"
     assert deletion_cases.complete_case(case, db)
     assert case.state == "complete"
@@ -263,32 +318,29 @@ def test_checklist_is_content_bound_and_requires_all_approvals(db):
     assert scope.state == "complete"
 
 
-def test_processor_approval_is_required_only_when_declared(db):
-    """Cases involving a processor cannot complete with controller approval alone."""
+def test_non_root_completion_approvals_are_rejected(db):
+    """Processor receipts are automatic; only root confirms Server closure."""
 
     event, _ = create_test_event(db)
     case = _case(db, event, subject_ref="88888888-8888-4888-8888-888888888888")
+    case.desktop_deletion_required = False
     deletion_cases.ensure_case_scope(
         db, case, event=event, subject_ref=case.subject_evidence_id,
     )
-    case.desktop_report_sha256 = "a" * 64
     case.live_purge_receipt_sha256 = "b" * 64
     case.replacement_package_sha256 = "c" * 64
     case.outstanding_actions_json = "[]"
-    case.processor_approval_required = True
     deletion_cases.build_checklist(case, db)
 
     deletion_cases.record_checklist_approval(
         db, case, role="executor", user_id=None, credential_sha256="d" * 64,
     )
-    deletion_cases.record_checklist_approval(
-        db, case, role="controller", user_id=None, credential_sha256="e" * 64,
-    )
-    assert case.state == "awaiting_approvals"
-    deletion_cases.record_checklist_approval(
-        db, case, role="processor", user_id=None, credential_sha256="f" * 64,
-    )
     assert case.state == "ready_for_completion"
+    for role in ("controller", "processor"):
+        with pytest.raises(ValueError, match="Only the root executor"):
+            deletion_cases.record_checklist_approval(
+                db, case, role=role, user_id=None, credential_sha256="e" * 64,
+            )
 
 
 def test_completion_revalidates_checklist_content_and_approval_rows(db):
@@ -296,10 +348,10 @@ def test_completion_revalidates_checklist_content_and_approval_rows(db):
 
     event, _ = create_test_event(db)
     case = _case(db, event, subject_ref="99999999-9999-4999-8999-999999999999")
+    case.desktop_deletion_required = False
     deletion_cases.ensure_case_scope(
         db, case, event=event, subject_ref=case.subject_evidence_id,
     )
-    case.desktop_report_sha256 = "a" * 64
     case.live_purge_receipt_sha256 = "b" * 64
     case.replacement_package_sha256 = "c" * 64
     case.outstanding_actions_json = "[]"
@@ -307,21 +359,18 @@ def test_completion_revalidates_checklist_content_and_approval_rows(db):
     deletion_cases.record_checklist_approval(
         db, case, role="executor", user_id=None, credential_sha256="d" * 64,
     )
-    deletion_cases.record_checklist_approval(
-        db, case, role="controller", user_id=None, credential_sha256="e" * 64,
-    )
 
     case.replacement_package_sha256 = "f" * 64
     with pytest.raises(ValueError, match="no longer matches"):
         deletion_cases.complete_case(case, db)
     case.replacement_package_sha256 = "c" * 64
 
-    controller_approval = db.query(DeletionChecklistApproval).filter_by(
+    executor_approval = db.query(DeletionChecklistApproval).filter_by(
         case_id=case.id,
         checklist_sha256=case.checklist_sha256,
-        role="controller",
+        role="executor",
     ).one()
-    db.delete(controller_approval)
+    db.delete(executor_approval)
     db.flush()
     with pytest.raises(ValueError, match="approvals are incomplete"):
         deletion_cases.complete_case(case, db)
@@ -346,6 +395,7 @@ def test_server_account_binds_to_the_desktop_subject_identity(db):
     """A linked account must produce a work order the desktop can resolve."""
 
     event, _ = create_test_event(db)
+    _activate_processor(db, event)
     subject_ref = "44444444-4444-4444-8444-444444444444"
     user = User(
         username="linked.person",
@@ -371,7 +421,7 @@ def test_server_account_binds_to_the_desktop_subject_identity(db):
     case = _case(db, event, subject_ref=user.evidence_subject_id)
     work_order = deletion_cases.ensure_desktop_work_order(
         db, case, event=event, subject_ref=case.subject_evidence_id,
-    )
+    )[0]
     assert work_order.subject_ref == person.evidence_subject_id
 
 

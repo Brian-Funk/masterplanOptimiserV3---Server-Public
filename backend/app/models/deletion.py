@@ -87,7 +87,6 @@ class DeletionCase(Base):
     clean_backup_job_id = Column(String(36), nullable=True)
     clean_backup_receipt_id = Column(String(36), nullable=True)
     backup_resolution_sha256 = Column(String(64), nullable=True)
-    controller_approval_sha256 = Column(String(64), nullable=True)
     desktop_report_sha256 = Column(String(64), nullable=True)
     desktop_absence_receipt_sha256 = Column(String(64), nullable=True)
     desktop_deletion_required = Column(Boolean, nullable=False, default=True)
@@ -96,9 +95,7 @@ class DeletionCase(Base):
     checklist_json = Column(Text, nullable=True)
     checklist_sha256 = Column(String(64), nullable=True, unique=True)
     checklist_created_at = Column(DateTime(timezone=True), nullable=True)
-    processor_approval_required = Column(Boolean, nullable=False, default=False)
     executor_approval_sha256 = Column(String(64), nullable=True)
-    processor_approval_sha256 = Column(String(64), nullable=True)
     status_capability_sha256 = Column(String(64), nullable=True, unique=True)
     status_capability_expires_at = Column(DateTime(timezone=True), nullable=True)
     retention_reason_code = Column(String(64), nullable=True)
@@ -144,7 +141,10 @@ class DesktopDeletionWorkOrder(Base):
 
     __tablename__ = "desktop_deletion_work_orders"
     __table_args__ = (
-        UniqueConstraint("case_id", "event_ref", "subject_ref", name="uq_desktop_work_order_scope"),
+        UniqueConstraint(
+            "case_id", "event_ref", "subject_ref", "processor_entity_id",
+            name="uq_desktop_work_order_scope",
+        ),
         CheckConstraint(
             "state IN ('open','claimed','report_received','cancelled','failed')",
             name="ck_desktop_work_order_state",
@@ -166,6 +166,8 @@ class DesktopDeletionWorkOrder(Base):
     event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True)
     event_ref = Column(String(36), nullable=False, index=True)
     subject_ref = Column(String(36), nullable=True, index=True)
+    processor_entity_id = Column(String(64), nullable=False, index=True)
+    processor_key_id = Column(String(19), nullable=False, index=True)
     operation = Column(String(24), nullable=False)
     state = Column(String(24), nullable=False, default="open", index=True)
     claim_capability_sha256 = Column(String(64), nullable=True, unique=True)
@@ -173,9 +175,43 @@ class DesktopDeletionWorkOrder(Base):
     claimed_at = Column(DateTime(timezone=True), nullable=True)
     report_json = Column(Text, nullable=True)
     report_sha256 = Column(String(64), nullable=True, unique=True)
+    report_signature_sha256 = Column(String(64), nullable=True, unique=True)
+    copy_resolution_sha256 = Column(String(64), nullable=True, unique=True)
+    copy_resolution_signature_sha256 = Column(String(64), nullable=True, unique=True)
     reported_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class DeletionRequiredProcessor(Base):
+    """Immutable processor assignment captured when a case is accepted."""
+
+    __tablename__ = "deletion_required_processors"
+    __table_args__ = (
+        UniqueConstraint(
+            "case_id", "event_ref", "processor_entity_id",
+            name="uq_deletion_required_processor",
+        ),
+        CheckConstraint(
+            "state IN ('awaiting_desktop','deletion_received','complete','blocked')",
+            name="ck_deletion_required_processor_state",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    requirement_id = Column(String(36), nullable=False, unique=True, default=lambda: str(uuid.uuid4()))
+    case_id = Column(Integer, ForeignKey("deletion_cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    event_ref = Column(String(36), nullable=False, index=True)
+    processor_entity_id = Column(String(64), nullable=False, index=True)
+    snapshotted_key_id = Column(String(19), nullable=False)
+    snapshotted_public_key_sha256 = Column(String(64), nullable=False)
+    deletion_receipt_sha256 = Column(String(64), nullable=True)
+    copy_resolution_sha256 = Column(String(64), nullable=True)
+    completed_key_id = Column(String(19), nullable=True)
+    completed_public_key_sha256 = Column(String(64), nullable=True)
+    state = Column(String(24), nullable=False, default="awaiting_desktop", index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class DeletionChecklistApproval(Base):

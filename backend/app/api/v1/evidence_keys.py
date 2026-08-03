@@ -33,6 +33,7 @@ from app.core.operator_evidence import (
     key_id,
     public_key_sha256,
     validate_entity,
+    validate_processor_event_registration,
     validate_registration_document,
     validate_role_statement,
     verify_signature,
@@ -43,6 +44,7 @@ from app.db.database import get_db
 from app.models.evidence import (
     EvidenceKey,
     EvidenceKeyRegistrationChallenge,
+    ProcessorIdentity,
     RootActionAuthorisation,
 )
 from app.models.user import User, WebAuthnCredential
@@ -56,7 +58,7 @@ class BeginTrustKeyChallenge(BaseModel):
     """Public material for one controller or processor registration."""
     model_config = ConfigDict(extra="forbid")
     public_key: str = Field(min_length=32, max_length=2048)
-    role: Literal["controller", "processor"]
+    role: Literal["controller"]
     entity_id: str = Field(min_length=12, max_length=64)
     supersedes_key_id: str | None = Field(default=None, pattern=r"^ek-[0-9a-f]{16}$")
     reason: Literal["routine", "lost", "compromised"] | None = None
@@ -89,7 +91,7 @@ def _reject(exc: Exception) -> HTTPException:
     return HTTPException(status_code=409, detail={"code": "TRUST_EVIDENCE_REJECTED", "message": str(exc)})
 
 
-def _public_key_row(row: EvidenceKey) -> dict[str, Any]:
+def _public_key_row(row: EvidenceKey, identity: ProcessorIdentity | None = None) -> dict[str, Any]:
     return {
         "instance_id": row.instance_id,
         "entity_id": row.entity_id,
@@ -109,11 +111,17 @@ def _public_key_row(row: EvidenceKey) -> dict[str, Any]:
         "revocation_reason": row.revocation_reason,
         "root_action_sha256": row.root_action_sha256,
         "trust_declaration_sha256": row.trust_declaration_sha256,
+        "event_ref": identity.event_evidence_id if identity else None,
+        "event_name": identity.event_display_name if identity else None,
+        "display_label": identity.display_label if identity else None,
     }
 
 
 def _load_challenge(db: Session, document: dict[str, Any]) -> EvidenceKeyRegistrationChallenge:
-    validate_registration_document(document)
+    if document.get("format") == "mp-opt-processor-event-registration-v1":
+        validate_processor_event_registration(document)
+    else:
+        validate_registration_document(document)
     rendered = canonical_json(document)
     row = db.query(EvidenceKeyRegistrationChallenge).filter(
         EvidenceKeyRegistrationChallenge.challenge_id == document["challenge_id"],
@@ -137,7 +145,32 @@ def _load_challenge(db: Session, document: dict[str, Any]) -> EvidenceKeyRegistr
 
 @router.get("/trust-keys")
 def list_trust_keys(_root: User = Depends(require_root_admin), db: Session = Depends(get_db)):
-    return [_public_key_row(row) for row in db.query(EvidenceKey).order_by(EvidenceKey.registered_at, EvidenceKey.id).all()]
+    identities = {row.entity_id: row for row in db.query(ProcessorIdentity).all()}
+    return [_public_key_row(row, identities.get(row.entity_id)) for row in db.query(EvidenceKey).order_by(EvidenceKey.registered_at, EvidenceKey.id).all()]
+
+
+@router.get("/trust-keys/pending-enrolments")
+def list_pending_processor_enrolments(
+    _root: User = Depends(require_root_admin), db: Session = Depends(get_db),
+):
+    rows = db.query(EvidenceKeyRegistrationChallenge).filter(
+        EvidenceKeyRegistrationChallenge.role == "processor",
+        EvidenceKeyRegistrationChallenge.event_evidence_id.isnot(None),
+        EvidenceKeyRegistrationChallenge.possession_proof_sha256.isnot(None),
+        EvidenceKeyRegistrationChallenge.used_at.is_(None),
+        EvidenceKeyRegistrationChallenge.expires_at >= datetime.now(timezone.utc),
+    ).order_by(EvidenceKeyRegistrationChallenge.created_at).all()
+    return [{
+        "challenge_id": row.challenge_id,
+        "event_ref": row.event_evidence_id,
+        "event_name": row.event_display_name,
+        "entity_id": row.entity_id,
+        "display_label": row.display_label,
+        "key_id": row.key_id,
+        "public_key_sha256": row.public_key_sha256,
+        "purpose": row.purpose,
+        "expires_at": row.expires_at,
+    } for row in rows]
 
 
 @router.post("/trust-keys/challenges")
@@ -283,6 +316,7 @@ def begin_root_authorisation(
         "challenge_sha256": challenge.challenge_sha256,
         "instance_id": challenge.instance_id,
         "entity_id": challenge.entity_id,
+        "event_ref": challenge.event_evidence_id,
         "key_id": challenge.key_id,
         "role": challenge.role,
         "algorithm": "Ed25519",
@@ -379,6 +413,24 @@ def complete_root_authorisation(
         activated_at=now,
     )
     db.add(row)
+    processor_identity = None
+    if challenge.role == "processor" and challenge.event_evidence_id:
+        processor_identity = db.query(ProcessorIdentity).filter(
+            ProcessorIdentity.instance_id == challenge.instance_id,
+            ProcessorIdentity.entity_id == challenge.entity_id,
+        ).first()
+        if processor_identity is None:
+            processor_identity = ProcessorIdentity(
+                instance_id=challenge.instance_id,
+                entity_id=challenge.entity_id,
+                event_id=challenge.event_id,
+                event_evidence_id=challenge.event_evidence_id,
+                event_display_name=challenge.event_display_name,
+                display_label=challenge.display_label,
+            )
+            db.add(processor_identity)
+        elif processor_identity.event_evidence_id != challenge.event_evidence_id:
+            raise _reject(TrustEvidenceError("the processor identity is assigned to another event"))
     previous = None
     record_type = "trust_key.registered"
     operation = "registered"
@@ -395,6 +447,11 @@ def complete_root_authorisation(
         previous.revocation_reason = "retired" if challenge.rotation_reason == "routine" else challenge.rotation_reason
         previous.superseded_by_key_id = row.key_id
         record_type = "trust_key.rotated"; operation = "rotated"
+    if processor_identity is not None:
+        processor_identity.status = "active"
+        processor_identity.active_key_id = row.key_id
+        processor_identity.activated_at = now
+    db.flush()
     challenge.used_at = now
     payload: dict[str, Any] = {
         "instance_id": row.instance_id, "entity_id": row.entity_id,
@@ -409,6 +466,11 @@ def complete_root_authorisation(
         "ledger_signer_role": "instance",
         "status": operation,
     }
+    if processor_identity is not None:
+        payload.update({
+            "event_ref": processor_identity.event_evidence_id,
+            "processor_assignment_id": processor_identity.assignment_id,
+        })
     if previous:
         payload.update({"previous_key_id": previous.key_id, "new_key_id": row.key_id, "reason_code": challenge.rotation_reason})
         if challenge.previous_proof_sha256: payload["previous_proof_sha256"] = challenge.previous_proof_sha256
@@ -423,7 +485,7 @@ def complete_root_authorisation(
     audit(db, user=root, action=lifecycle_action, resource_type="evidence", request=request,
           detail=json.dumps({"schema_version": 1, "role": challenge.role}))
     db.commit()
-    return {"key": _public_key_row(row), "root_authorisation": {"role": "root_passkey", "credential_id_sha256": credential_digest, "action_sha256": ceremony.action_sha256, "server_verified_at": now}, "instance_record_sha256": digest}
+    return {"key": _public_key_row(row, processor_identity), "root_authorisation": {"role": "root_passkey", "credential_id_sha256": credential_digest, "action_sha256": ceremony.action_sha256, "server_verified_at": now}, "instance_record_sha256": digest}
 
 
 @router.post("/trust-keys/{trust_key_id}/statements/import")
@@ -437,7 +499,7 @@ def import_role_statement(
     """Accept a typed statement only from its active role and entity key."""
     try:
         row = db.query(EvidenceKey).filter(EvidenceKey.key_id == trust_key_id, EvidenceKey.revoked_at.is_(None), EvidenceKey.activated_at.isnot(None)).first()
-        if row is None or row.role not in {"controller", "processor"}: raise TrustEvidenceError("the trust key is not active")
+        if row is None or row.role != "controller": raise TrustEvidenceError("the controller trust key is not active")
         validate_role_statement(body.document, role=row.role, entity_id=row.entity_id, instance_id=row.instance_id, row_key_id=row.key_id, fingerprint=row.public_key_sha256)
         proof_digest = verify_signature(body.document, body.proof, row.public_key)
         if row.role == "controller" and body.document["statement_type"] == "initial_trust_declaration":
@@ -473,6 +535,14 @@ def revoke_trust_key(
         row = db.query(EvidenceKey).filter(EvidenceKey.key_id == trust_key_id, EvidenceKey.role.in_(("controller", "processor")), EvidenceKey.revoked_at.is_(None)).first()
         if row is None: raise TrustEvidenceError("the trust key is unavailable or already revoked")
         row.revoked_at = datetime.now(timezone.utc); row.revocation_reason = body.reason_code
+        if row.role == "processor":
+            identity = db.query(ProcessorIdentity).filter(
+                ProcessorIdentity.entity_id == row.entity_id,
+                ProcessorIdentity.active_key_id == row.key_id,
+            ).first()
+            if identity is not None:
+                identity.status = "revoked"
+                identity.revoked_at = row.revoked_at
         digest = append_record(
             db, workflow_type="trust_key", workflow_id=row.key_id,
             operation_type="revoked", record_type="trust_key.revoked",

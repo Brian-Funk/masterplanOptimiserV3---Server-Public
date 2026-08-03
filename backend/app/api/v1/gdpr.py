@@ -35,7 +35,6 @@ from app.core.deletion_workflow import (
 )
 from app.core.deletion_cases import (
     build_checklist,
-    confirm_desktop_already_absent,
     confirm_no_controlled_backups,
     controlled_snapshot_count,
     complete_case,
@@ -66,10 +65,11 @@ from app.models.deletion import (
     DeletionApprovalChallenge,
     DeletionChecklistApproval,
     DeletionCase,
+    DeletionRequiredProcessor,
     DeletionSubjectScope,
     DesktopDeletionWorkOrder,
 )
-from app.models.evidence import BackupInventoryRecord
+from app.models.evidence import BackupInventoryRecord, ProcessorIdentity
 from app.models.event import Event
 from app.models.notification import PushSubscription
 from app.models.published import (
@@ -145,7 +145,7 @@ class ChecklistApprovalBeginIn(BaseModel):
 class EventErasureRequestIn(BaseModel):
     """Root-authorised request to erase one complete event scope."""
 
-    processor_approval_required: bool = False
+    model_config = ConfigDict(extra="forbid")
 
 
 _OPEN_DELETION_STATES = {
@@ -247,8 +247,6 @@ def _job_detail(job: DeletionCase, db: Session | None = None) -> dict:
             "backup_not_applicable": job.backup_not_applicable_sha256,
             "backup_resolution": job.backup_resolution_sha256,
             "executor_approval": job.executor_approval_sha256,
-            "controller_approval": job.controller_approval_sha256,
-            "processor_approval": job.processor_approval_sha256,
             "checklist": job.checklist_sha256,
             "final": job.final_receipt_sha256,
         },
@@ -262,7 +260,6 @@ def _job_detail(job: DeletionCase, db: Session | None = None) -> dict:
             "version": job.checklist_version,
             "sha256": job.checklist_sha256,
             "created_at": job.checklist_created_at,
-            "processor_approval_required": job.processor_approval_required,
         },
     }
     if db is not None:
@@ -285,6 +282,10 @@ def _job_detail(job: DeletionCase, db: Session | None = None) -> dict:
                 "operation": work_order.operation,
                 "state": work_order.state,
                 "report_sha256": work_order.report_sha256,
+                "processor_entity_id": work_order.processor_entity_id,
+                "processor_key_id": work_order.processor_key_id,
+                "report_signature_sha256": work_order.report_signature_sha256,
+                "copy_resolution_sha256": work_order.copy_resolution_sha256,
             }
             for work_order in db.query(DesktopDeletionWorkOrder).filter(
                 DesktopDeletionWorkOrder.case_id == job.id,
@@ -300,6 +301,28 @@ def _job_detail(job: DeletionCase, db: Session | None = None) -> dict:
                 DeletionChecklistApproval.case_id == job.id,
             ).order_by(DeletionChecklistApproval.id).all()
         ]
+        required_processors = db.query(DeletionRequiredProcessor).filter(
+            DeletionRequiredProcessor.case_id == job.id,
+        ).order_by(DeletionRequiredProcessor.event_ref, DeletionRequiredProcessor.processor_entity_id).all()
+        processor_identities = {
+            (row.event_evidence_id, row.entity_id): row
+            for row in db.query(ProcessorIdentity).filter(
+                ProcessorIdentity.entity_id.in_([item.processor_entity_id for item in required_processors]),
+            ).all()
+        } if required_processors else {}
+        detail["required_processors"] = [{
+            "event_ref": row.event_ref,
+            "event_name": processor_identities.get((row.event_ref, row.processor_entity_id)).event_display_name
+            if processor_identities.get((row.event_ref, row.processor_entity_id)) else None,
+            "processor_entity_id": row.processor_entity_id,
+            "display_label": processor_identities.get((row.event_ref, row.processor_entity_id)).display_label
+            if processor_identities.get((row.event_ref, row.processor_entity_id)) else None,
+            "processor_key_id": row.completed_key_id or row.snapshotted_key_id,
+            "processor_public_key_sha256": row.completed_public_key_sha256 or row.snapshotted_public_key_sha256,
+            "deletion_receipt_sha256": row.deletion_receipt_sha256,
+            "copy_resolution_sha256": row.copy_resolution_sha256,
+            "state": row.state,
+        } for row in required_processors]
     return detail
 
 
@@ -574,7 +597,6 @@ def create_event_erasure_request(
         job = create_event_erasure_case(
             db,
             event,
-            processor_approval_required=body.processor_approval_required,
             initiation_reason="manual_root",
         )
         event.purge_case_request_id = job.request_id
@@ -719,30 +741,6 @@ def purge_deletion_request_live_data(
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     audit(db, user=admin, action="gdpr.purge_live", resource_type="deletion_request",
-          detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
-    db.commit()
-    return _job_detail(job, db)
-
-
-@admin_router.post("/deletion-requests/{request_id}/desktop-already-absent")
-def confirm_deletion_desktop_absent(
-    request_id: str,
-    request: Request,
-    admin: User = Depends(require_admin_recent_reauth),
-    db: Session = Depends(get_db),
-):
-    """Confirm the exceptional case where the relevant Desktop copy is already gone."""
-
-    if not admin.is_root_admin:
-        raise HTTPException(status_code=403, detail="Root admin access required")
-    job = _admin_deletion_job(db, request_id)
-    try:
-        confirm_desktop_already_absent(db, job)
-    except (EvidenceUnavailable, ValueError) as exc:
-        db.rollback()
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    audit(db, user=admin, action="gdpr.desktop_absence_confirmed",
-          resource_type="deletion_request",
           detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
     db.commit()
     return _job_detail(job, db)
@@ -1150,10 +1148,8 @@ def begin_deletion_checklist_approval(
     job = _admin_deletion_job(db, request_id)
     if not job.checklist_sha256 or job.state not in {"awaiting_approvals", "ready_for_completion"}:
         raise HTTPException(status_code=409, detail="The case has no checklist awaiting approval")
-    if body.role in {"controller", "processor"} and not admin.is_root_admin:
-        raise HTTPException(status_code=403, detail="Root admin access required for this approval role")
-    if body.role == "processor" and not job.processor_approval_required:
-        raise HTTPException(status_code=409, detail="This case does not require processor approval")
+    if body.role != "executor" or not admin.is_root_admin:
+        raise HTTPException(status_code=403, detail="Only root may authorise Server completion")
     auth_session = getattr(admin, "_auth_session", None)
     if auth_session is None:
         raise HTTPException(status_code=401, detail="Session expired or invalid")
@@ -1298,12 +1294,7 @@ def complete_deletion_completion_confirmation(
             db, job, role="executor", user_id=admin.id,
             credential_sha256=credential_sha256,
         )
-        record_checklist_approval(
-            db, job, role="controller", user_id=admin.id,
-            credential_sha256=credential_sha256,
-        )
-        if not job.processor_approval_required:
-            complete_case(job, db)
+        complete_case(job, db)
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail="Completion confirmation failed") from exc

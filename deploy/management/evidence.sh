@@ -25,8 +25,8 @@ mp_instance_key_status() {
 }
 
 mp_trust_key_guidance() {
-    ui_message "Controller and processor key ceremonies" \
-        "Open the root accountability screen in the Server web interface.\n\nController: generate and sign only with tools/controller_custody.py on a controller-controlled workstation.\n\nProcessor: generate and sign only in Masterplan Desktop using the declared processor ID.\n\nServer accepts public material and proof packages only. Root then authorises the exact activation with WebAuthn. The instance key signs the durable verification record. Controller and processor private keys must never enter this VPS."
+    ui_message "Trust and key status" \
+        "Open Governance > Trust & keys in the root Server web interface.\n\nController: generate and sign only with tools/controller_custody.py on a controller-controlled workstation.\n\nProcessor: link the event in Masterplan Desktop, then generate locally or import an encrypted processor-key package. Desktop submits public material and proof automatically.\n\nRoot authorises each exact event assignment with the passkey. The instance key seals durable verification records. Controller and processor private keys must never enter this VPS."
 }
 
 mp_evidence_verify() {

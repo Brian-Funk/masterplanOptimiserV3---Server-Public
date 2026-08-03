@@ -18,10 +18,10 @@ from webauthn.helpers import bytes_to_base64url
 from app.api.v1 import evidence_keys as trust_api
 from app.core.config import settings
 from app.core.operator_evidence import TRUST_NAMESPACE, canonical_json, key_id, signature_envelope
-from app.models.evidence import EvidenceKey, EvidenceKeyRegistrationChallenge, RootActionAuthorisation
+from app.models.evidence import EvidenceKey, EvidenceKeyRegistrationChallenge, ProcessorIdentity, RootActionAuthorisation
 from app.models.user import WebAuthnCredential
 from deploy.management.instance_key import InstanceKeyError, commission, compare, verify
-from server_backend.conftest import _make_client, create_test_user
+from server_backend.conftest import _make_client, create_test_event, create_test_user
 from server_backend.test_governance import PROFILE, PUBLICATION_CONFIRMATION
 from tools.controller_custody import generate as generate_controller, sign as controller_sign
 
@@ -99,8 +99,8 @@ def test_controller_and_processor_challenges_are_entity_instance_action_and_role
         "key_id": controller["key_id"], "role": controller["role"], "algorithm": controller["algorithm"],
         "public_key_sha256": controller["public_key_sha256"], "supersedes_key_id": None, "reason": None,
     })).hexdigest()
-    invalid = client.post(f"{BASE}/trust-keys/challenges", json={"public_key": public, "role": "processor", "entity_id": "ctl-synthetic0001"})
-    assert invalid.status_code == 409
+    invalid = client.post(f"{BASE}/trust-keys/challenges", json={"public_key": public, "role": "processor", "entity_id": "prc-synthetic0001"})
+    assert invalid.status_code == 422
     private_key_marker = "-----BEGIN " + "PRIVATE KEY-----"
     private_input = client.post(f"{BASE}/trust-keys/challenges", json={"public_key": public, "role": "controller", "entity_id": "ctl-synthetic0001", "private_key": private_key_marker})
     assert private_input.status_code == 422
@@ -124,7 +124,7 @@ def test_proof_precedes_single_use_exact_root_passkey_activation(db, monkeypatch
 def test_wrong_proof_expired_challenge_and_changed_instance_are_rejected(db):
     client, _root_user, _credential = _root(db)
     private, public = _keypair(); wrong, _ = _keypair()
-    challenge = _begin(client, public, "processor", "prc-synthetic0001")
+    challenge = _begin(client, public, "controller", "ctl-synthetic0001")
     denied = client.post(f"{BASE}/trust-keys/proofs", json={"challenge": challenge, "proof": _proof(wrong, challenge)})
     assert denied.status_code == 409
     changed = challenge | {"instance_id": str(uuid.uuid4())}
@@ -136,21 +136,52 @@ def test_wrong_proof_expired_challenge_and_changed_instance_are_rejected(db):
     assert expired.status_code == 409
 
 
-def test_separate_organisations_and_same_organisation_use_separate_role_keys(db, monkeypatch):
-    controller = _activate(db, monkeypatch, role="controller", entity_id="ctl-organisation01")
-    processor = _activate(db, monkeypatch, role="processor", entity_id="prc-organisation02")
-    same_org_processor = _activate(db, monkeypatch, role="processor", entity_id="prc-organisation01")
-    assert len({controller["key"]["key_id"], processor["key"]["key_id"], same_org_processor["key"]["key_id"]}) == 3
-    assert controller["key"]["role"] != same_org_processor["key"]["role"]
+def test_event_processor_enrolment_is_publish_secret_bound_and_root_activated(db, monkeypatch):
+    event, publish_secret = create_test_event(db, name="Processor event")
+    private, public = _keypair()
+    fingerprint = hashlib.sha256(public.encode("ascii")).hexdigest()
+    package = {
+        "format": "mp-opt-processor-public-key-v1", "instance_id": None,
+        "entity_id": "prc-organisation01", "key_id": key_id(public),
+        "role": "processor", "algorithm": "Ed25519", "public_key": public,
+        "public_key_sha256": fingerprint, "supersedes_key_id": None,
+        "rotation_reason": None, "display_label": "Main workstation",
+        "created_at": "2026-08-03T20:00:00Z", "signature_namespace": TRUST_NAMESPACE,
+    }
+    client, root, credential_id = _root(db)
+    denied = client.post("/api/v1/publish/processor-keys/enrolments", json=package, headers={"Authorization": "Bearer wrong"})
+    assert denied.status_code == 401
+    started = client.post("/api/v1/publish/processor-keys/enrolments", json=package, headers={"Authorization": f"Bearer {publish_secret}"})
+    assert started.status_code == 202, started.text
+    challenge = started.json()["challenge"]
+    assert challenge["event_ref"] == event.evidence_id
+    submitted = client.post(
+        f"/api/v1/publish/processor-keys/enrolments/{challenge['challenge_id']}/proof",
+        json={"challenge": challenge, "proof": _proof(private, challenge), "previous_proof": None},
+        headers={"Authorization": f"Bearer {publish_secret}"},
+    )
+    assert submitted.status_code == 202, submitted.text
+    assert db.query(ProcessorIdentity).count() == 0
+    begin = client.post(f"{BASE}/trust-keys/{challenge['challenge_id']}/root-authorisation/begin", json={})
+    _install_passkey_success(monkeypatch)
+    completed = client.post(
+        f"{BASE}/trust-keys/{challenge['challenge_id']}/root-authorisation/complete",
+        json=_auth_body(credential_id, root.id, begin.json()["ceremony_id"]),
+    )
+    assert completed.status_code == 200, completed.text
+    identity = db.query(ProcessorIdentity).one()
+    assert identity.event_evidence_id == event.evidence_id
+    assert identity.entity_id == package["entity_id"]
+    assert identity.status == "active"
 
 
 def test_routine_rotation_requires_old_and_new_proof_and_history_is_preserved(db, monkeypatch):
-    previous = _activate(db, monkeypatch, role="processor", entity_id="prc-rotation0001")
+    previous = _activate(db, monkeypatch, role="controller", entity_id="ctl-rotation0001")
     client, _root_user, _credential = _root(db); new_private, new_public = _keypair()
-    challenge = _begin(client, new_public, "processor", "prc-rotation0001", supersedes_key_id=previous["key"]["key_id"], reason="routine")
+    challenge = _begin(client, new_public, "controller", "ctl-rotation0001", supersedes_key_id=previous["key"]["key_id"], reason="routine")
     missing = client.post(f"{BASE}/trust-keys/proofs", json={"challenge": challenge, "proof": _proof(new_private, challenge)})
     assert missing.status_code == 409
-    successor = _activate(db, monkeypatch, role="processor", entity_id="prc-rotation0001", previous=previous, reason="routine")
+    successor = _activate(db, monkeypatch, role="controller", entity_id="ctl-rotation0001", previous=previous, reason="routine")
     historic = db.query(EvidenceKey).filter(EvidenceKey.key_id == previous["key"]["key_id"]).one()
     assert historic.revocation_reason == "retired"
     assert historic.superseded_by_key_id == successor["key"]["key_id"]
