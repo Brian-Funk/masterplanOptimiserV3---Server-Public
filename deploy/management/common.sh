@@ -215,7 +215,10 @@ mp_ui_size_profile() {
 # Print the current terminal height and width with safe non-TTY fallbacks.
 mp_terminal_dimensions() {
     local dimensions rows columns
-    dimensions="$(stty size </dev/tty 2>/dev/null || true)"
+    dimensions=""
+    if mp_has_terminal; then
+        dimensions="$(stty size 2>/dev/null || true)"
+    fi
     read -r rows columns <<< "$dimensions"
     [[ "$rows" =~ ^[0-9]+$ ]] && [ "$rows" -gt 0 ] || rows="${LINES:-30}"
     [[ "$columns" =~ ^[0-9]+$ ]] && [ "$columns" -gt 0 ] || columns="${COLUMNS:-120}"

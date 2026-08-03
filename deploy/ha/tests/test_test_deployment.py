@@ -48,6 +48,18 @@ class TestDeploymentPlannerTests(unittest.TestCase):
             SUPERVISOR,
         )
 
+    def test_migration_snapshot_reuses_the_deployment_management_lock(self) -> None:
+        self.assertIn(
+            'MP_MANAGEMENT_LOCK_HELD=1 mp_snapshot_create full "test-deploy-${target:0:12}"',
+            SUPERVISOR,
+        )
+
+    def test_terminal_dimensions_have_a_non_tty_fallback(self) -> None:
+        common = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
+        dimensions = common.split("mp_terminal_dimensions()", 1)[1].split("}", 1)[0]
+        self.assertIn("if mp_has_terminal", dimensions)
+        self.assertNotIn("</dev/tty", dimensions)
+
     def test_accepts_only_exact_lowercase_commits_and_canonical_tags(self) -> None:
         commit = "a" * 40
         self.assertEqual(MODULE.require_commit(commit), commit)

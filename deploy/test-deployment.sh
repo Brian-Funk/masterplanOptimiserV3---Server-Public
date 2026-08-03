@@ -363,7 +363,7 @@ apply_commit() {
         if [ "$fresh_commissioning" = true ]; then
             require_fresh_commissioning_database
         else
-            snapshot="$(mp_snapshot_create full "test-deploy-${target:0:12}")"
+            snapshot="$(MP_MANAGEMENT_LOCK_HELD=1 mp_snapshot_create full "test-deploy-${target:0:12}")"
             [ -n "$snapshot" ]
         fi
     fi
