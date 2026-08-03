@@ -52,6 +52,9 @@ class DeletionCase(Base):
     event_purge_key = Column(String(36), nullable=True, unique=True, index=True)
     instance_id = Column(String(36), nullable=False, index=True)
     event_evidence_id = Column(String(36), nullable=False, index=True)
+    # Operator convenience only. It is excluded from signed evidence and
+    # cleared when the case completes.
+    event_display_name = Column(String(128), nullable=True)
     subject_evidence_id = Column(String(36), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     request_type = Column(String(32), nullable=False, default="full_erasure")

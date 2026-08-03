@@ -25,6 +25,7 @@ def _case(db, event, *, case_type="personal_data_erasure", subject_ref=None):
         case_type=case_type,
         instance_id="11111111-1111-4111-8111-111111111111",
         event_evidence_id=event.evidence_id,
+        event_display_name=event.name,
         subject_evidence_id=subject_ref or event.evidence_id,
         state="awaiting_desktop_report",
         normal_response_due_at=datetime(2026, 8, 27, tzinfo=timezone.utc),
@@ -202,6 +203,7 @@ def test_checklist_is_content_bound_and_requires_all_approvals(db):
     assert case.state == "ready_for_completion"
     assert deletion_cases.complete_case(case, db)
     assert case.state == "complete"
+    assert case.event_display_name is None
     scope = db.query(DeletionSubjectScope).filter_by(case_id=case.id).one()
     assert scope.state == "complete"
 

@@ -67,6 +67,7 @@ def create_event_erasure_case(
         event_purge_key=event.evidence_id,
         instance_id=stable_instance_id(db),
         event_evidence_id=event.evidence_id,
+        event_display_name=event.name,
         subject_evidence_id=event.evidence_id,
         user_id=None,
         state="submitted",
@@ -646,4 +647,5 @@ def complete_case(case: DeletionCase, db: Session) -> str:
         scope.completed_at = now
     case.completed_at = now
     case.state = "complete"
+    case.event_display_name = None
     return case.state

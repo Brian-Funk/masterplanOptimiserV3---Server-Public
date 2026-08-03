@@ -15,6 +15,37 @@ from app.core.evidence import EvidenceUnavailable, public_key_id
 from app.models.evidence import EvidenceKey
 
 
+def test_missing_host_receipt_is_reported_as_pending(db, monkeypatch, tmp_path):
+    """A queued job normally has no receipt until the TUI finishes its work."""
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    monkeypatch.setattr(
+        compliance_receipts.settings, "COMPLIANCE_RECEIPT_DIR", str(receipts)
+    )
+
+    with pytest.raises(EvidenceUnavailable, match="not available yet"):
+        compliance_receipts.verified_clean_backup_receipt(
+            db, job_id=str(uuid.uuid4()), expected={}
+        )
+
+
+def test_non_file_host_receipt_path_remains_unsafe(db, monkeypatch, tmp_path):
+    """Normal pending state must not weaken rejection of substituted paths."""
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    job_id = str(uuid.uuid4())
+    (receipts / f"{job_id}.json").mkdir()
+    (receipts / f"{job_id}.json.sig").write_text("signature", encoding="utf-8")
+    monkeypatch.setattr(
+        compliance_receipts.settings, "COMPLIANCE_RECEIPT_DIR", str(receipts)
+    )
+
+    with pytest.raises(EvidenceUnavailable, match="path is unsafe"):
+        compliance_receipts.verified_clean_backup_receipt(
+            db, job_id=job_id, expected={}
+        )
+
+
 def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_path):
     requests = tmp_path / "requests"
     receipts = tmp_path / "receipts"

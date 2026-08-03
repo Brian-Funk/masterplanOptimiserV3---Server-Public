@@ -214,6 +214,7 @@ def _job_detail(job: DeletionCase, db: Session | None = None) -> dict:
         "live_data_purged_at": job.live_data_purged_at,
         "completed_at": job.completed_at,
         "event_ref": job.event_evidence_id,
+        "event_name": job.event_display_name,
         "subject_ref": job.subject_evidence_id,
         "desktop_deletion_required": bool(job.desktop_deletion_required),
         "topology": "two_node_ha" if settings.HA_MODE == "ha" else "single_node",
@@ -336,6 +337,7 @@ def _new_deletion_job(db: Session, user: User, *, state: str = "submitted") -> D
     job = DeletionCase(
         instance_id=instance_id,
         event_evidence_id=event_ref,
+        event_display_name=event.name if event is not None else None,
         subject_evidence_id=user.evidence_subject_id,
         desktop_deletion_required=published_person is not None,
         user_id=user.id,

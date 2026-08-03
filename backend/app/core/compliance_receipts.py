@@ -140,10 +140,12 @@ def verified_clean_backup_receipt(
     path = Path(settings.COMPLIANCE_RECEIPT_DIR) / f"{job_id}.json"
     signature_path = Path(str(path) + ".sig")
     try:
+        if path.is_symlink() or signature_path.is_symlink():
+            raise EvidenceUnavailable("The compliance receipt path is unsafe")
+        if not path.exists() or not signature_path.exists():
+            raise EvidenceUnavailable("The verified host receipt is not available yet")
         if (
-            path.is_symlink()
-            or signature_path.is_symlink()
-            or not path.is_file()
+            not path.is_file()
             or not signature_path.is_file()
             or signature_path.stat().st_size > 16 * 1024
         ):

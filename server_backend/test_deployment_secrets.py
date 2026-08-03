@@ -178,6 +178,20 @@ def test_unsigned_activation_uses_newly_installed_runtime_permission_helper():
     assert "Runtime traversal permissions were not preserved" in script
 
 
+def test_deletion_case_label_migration_is_bounded_to_open_cases():
+    """Operator labels are backfilled for open cases and removed at completion."""
+    migration = (
+        _server_root()
+        / "deploy"
+        / "migrations"
+        / "20260803_deletion_case_event_labels.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "ADD COLUMN IF NOT EXISTS event_display_name VARCHAR(128)" in migration
+    assert "deletion_case.state <> 'complete'" in migration
+    assert "SET event_display_name = NULL" in migration
+
+
 def test_database_and_ip_secrets_have_guarded_lifecycle_paths():
     root = _server_root()
     deploy_script = (root / "deploy" / "deploy.sh").read_text(encoding="utf-8")

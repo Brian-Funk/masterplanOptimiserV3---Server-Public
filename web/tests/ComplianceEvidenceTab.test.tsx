@@ -17,6 +17,7 @@ const workflow = {
   case_type: "event_erasure",
   state: "ready_for_live_purge",
   event_ref: "event-example",
+  event_name: "Synthetic Event",
   subject_ref: "",
   topology: "single_node",
   live_data_purged_at: null,
@@ -49,6 +50,7 @@ describe("ComplianceEvidenceTab", () => {
     expect(await screen.findByText("What a signed deletion record proves")).toBeInTheDocument();
     expect(screen.getByText(/does not prove physical deletion/i)).toBeInTheDocument();
     expect(await screen.findByText("Whole-event erasure")).toBeInTheDocument();
+    expect(screen.getAllByText("Synthetic Event")).toHaveLength(2);
     expect(screen.getByText("Next required step")).toBeInTheDocument();
     expect(screen.getByText(/Run the controlled Server live-data purge/i)).toBeInTheDocument();
     expect(screen.getByText("Desktop report recorded")).toBeInTheDocument();

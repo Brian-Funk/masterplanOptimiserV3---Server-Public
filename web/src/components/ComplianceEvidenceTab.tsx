@@ -22,6 +22,7 @@ type Workflow = {
   case_type: "personal_data_erasure" | "event_erasure";
   state: string;
   event_ref: string;
+  event_name: string | null;
   subject_ref: string;
   topology: "single_node" | "two_node_ha";
   live_data_purged_at: string | null;
@@ -496,6 +497,9 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
               <div>
                 <p className="font-mono text-xs text-gray-500 break-all">{item.request_id}</p>
                 <p className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">{item.case_type === "event_erasure" ? "Whole-event erasure" : "Personal-data erasure"}</p>
+                <p className="mt-1 text-sm text-gray-700 dark:text-gray-300">
+                  Event: <strong>{item.event_name || (item.case_type === "personal_data_erasure" ? "No event assigned" : "Name unavailable for this earlier case")}</strong>
+                </p>
               </div>
               <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${item.state === "complete" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300" : item.state === "restricted_retention" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300" : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"}`}>{item.state.replaceAll("_", " ")}</span>
             </div>

@@ -70,6 +70,27 @@ def test_gdpr_anonymise_server_only_user_is_ready_for_live_purge(db, reauth_admi
     ).first() is None
 
 
+def test_event_erasure_detail_includes_temporary_operator_label(db):
+    """The root UI can identify an open event case without signing its name."""
+    event, _ = create_test_event(db, name="Readable Deletion Event")
+    root = create_test_user(
+        db,
+        username="event.label.root",
+        is_root_admin=True,
+        is_admin=True,
+        event_id=None,
+    )
+    client = _make_client(db, root, reauth=True)
+
+    response = client.post(
+        f"/api/v1/admin/deletion-requests/events/{event.id}",
+        json={"processor_approval_required": False},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["event_name"] == "Readable Deletion Event"
+
+
 def test_gdpr_anonymise_activated_unassigned_account_uses_instance_scope(
     db, reauth_admin_client,
 ):
