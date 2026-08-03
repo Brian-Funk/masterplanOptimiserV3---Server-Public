@@ -1316,6 +1316,7 @@ function UsersTab({
     usernameTouched: false,
   });
   const [createdLink, setCreatedLink] = useState("");
+  const [createdLinkExpiresAt, setCreatedLinkExpiresAt] = useState("");
   const [createdUserId, setCreatedUserId] = useState<number | null>(null);
   const [createdUserName, setCreatedUserName] = useState("");
   const [creating, setCreating] = useState(false);
@@ -1325,6 +1326,9 @@ function UsersTab({
   >({});
   const [activationLinkPurposes, setActivationLinkPurposes] = useState<
     Record<number, ActivationPurpose>
+  >({});
+  const [activationLinkExpiries, setActivationLinkExpiries] = useState<
+    Record<number, string>
   >({});
   const [linkInfo, setLinkInfo] = useState<
     Record<
@@ -1382,6 +1386,7 @@ function UsersTab({
       username: string;
       display_name: string;
       activation_url: string;
+      expires_at: string;
     }>
   >([]);
   const [batchLoading, setBatchLoading] = useState(false);
@@ -1512,6 +1517,7 @@ function UsersTab({
       const data = await res.json().catch(() => null);
       if (res.ok) {
         setCreatedLink(window.location.origin + data.activation_url);
+        setCreatedLinkExpiresAt(data.expires_at || "");
         setCreatedUserId(data.user.id);
         setCreatedUserName(data.user.display_name || "New user");
         setNewUser({
@@ -1561,6 +1567,10 @@ function UsersTab({
           ...current,
           [userId]: data.purpose || purpose || "initial_setup",
         }));
+        setActivationLinkExpiries((current) => ({
+          ...current,
+          [userId]: data.expires_at || "",
+        }));
         return true;
       }
     } catch {
@@ -1579,6 +1589,11 @@ function UsersTab({
     if (activationLinks[userId]) {
       // Collapse: remove the link from state
       setActivationLinks((prev) => {
+        const next = { ...prev };
+        delete next[userId];
+        return next;
+      });
+      setActivationLinkExpiries((prev) => {
         const next = { ...prev };
         delete next[userId];
         return next;
@@ -2539,7 +2554,10 @@ function UsersTab({
             </div>
             <button
               type="button"
-              onClick={() => setCreatedLink("")}
+              onClick={() => {
+                setCreatedLink("");
+                setCreatedLinkExpiresAt("");
+              }}
               className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-green-800 hover:bg-green-100 dark:text-green-200 dark:hover:bg-green-900/50"
             >
               Dismiss
@@ -2548,6 +2566,11 @@ function UsersTab({
           <code className="mt-3 block max-h-24 overflow-y-auto rounded-lg border border-green-200 bg-white/80 px-3 py-2 text-xs break-all text-green-950 dark:border-green-800 dark:bg-gray-950/30 dark:text-green-100">
               {createdLink}
           </code>
+          {createdLinkExpiresAt && (
+            <p className="mt-2 text-xs font-medium text-green-800 dark:text-green-200">
+              Expires {fmtDateTime(createdLinkExpiresAt)} (your local time).
+            </p>
+          )}
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
@@ -3112,6 +3135,9 @@ function UsersTab({
                     >
                       <span className="font-medium text-gray-900 dark:text-gray-100 truncate mr-3">
                         {l.display_name}
+                        <span className="block text-xs font-normal text-gray-500 dark:text-gray-400">
+                          Expires {fmtDateTime(l.expires_at)} (your local time)
+                        </span>
                       </span>
                       <div className="flex items-center gap-1 shrink-0">
                         <button
@@ -4061,6 +4087,11 @@ function UsersTab({
                       <RefreshCw size={14} />
                     </button>
                   </div>
+                  {activationLinkExpiries[u.id] && (
+                    <p className="mt-2 text-xs text-blue-700 dark:text-blue-300">
+                      Expires {fmtDateTime(activationLinkExpiries[u.id])} (your local time).
+                    </p>
+                  )}
                 </div>
               )}
 

@@ -160,6 +160,45 @@ describe("Admin users", () => {
     expect(screen.getByRole("button", { name: "Remove or delete account" })).toBeInTheDocument();
   });
 
+  it("shows the stored expiry for an individually generated activation link", async () => {
+    const managedUser = {
+      ...rootUser,
+      id: 23,
+      username: "pending.user",
+      display_name: "Pending User",
+      is_root_admin: false,
+      is_admin: false,
+      event_id: 7,
+      is_active: true,
+      is_activated: false,
+      has_valid_email: false,
+    };
+    mockApiFetch.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      if (path === "/api/v1/admin/users" && !options?.method) {
+        return jsonResponse([managedUser]);
+      }
+      if (
+        path === "/api/v1/admin/users/23/activation-link" &&
+        options?.method === "POST"
+      ) {
+        return jsonResponse({
+          activation_url: "/activate#token=pending-token",
+          expires_at: "2030-12-31T23:59:00Z",
+          purpose: "initial_setup",
+        });
+      }
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+    await user.click(await screen.findByRole("button", { name: "Users" }));
+    await user.click(await screen.findByTitle("Generate activation link"));
+
+    expect(await screen.findByText(/Expires .*your local time/)).toBeInTheDocument();
+  });
+
   it("lets an issuer create a user without sending an event id", async () => {
     mockUseAuth.mockReturnValue({
       user: issuerUser,
@@ -185,6 +224,7 @@ describe("Admin users", () => {
               deletion_requested_at: null,
             },
             activation_url: "/activate#token=abc",
+            expires_at: "2030-12-31T23:59:00Z",
           });
         }
         return jsonResponse([]);
@@ -213,6 +253,7 @@ describe("Admin users", () => {
     expect(await screen.findByText("Activation link ready")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy link" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show QR code" })).toBeInTheDocument();
+    expect(screen.getByText(/Expires .*your local time/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByText("Activation link ready")).not.toBeInTheDocument();
   });

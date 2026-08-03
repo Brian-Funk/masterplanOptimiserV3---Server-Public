@@ -414,6 +414,7 @@ class UserCreateResponse(BaseModel):
 
     user: UserOut
     activation_url: str  # One-time link for passkey setup
+    expires_at: datetime
 
 
 class BulkUserCreateError(BaseModel):
@@ -1089,7 +1090,11 @@ def create_user(
 
     activation_url = f"/activate#token={raw_token}"
 
-    return UserCreateResponse(user=_user_out(user), activation_url=activation_url)
+    return UserCreateResponse(
+        user=_user_out(user),
+        activation_url=activation_url,
+        expires_at=_ensure_aware_utc(_link.expires_at),
+    )
 
 
 @router.post("/users/bulk", response_model=BulkUserCreateResponse)
@@ -1554,6 +1559,7 @@ class BatchActivationLinkItem(BaseModel):
     username: str
     display_name: str
     activation_url: str
+    expires_at: datetime
     purpose: Literal["initial_setup"] = "initial_setup"
 
 
@@ -1605,6 +1611,7 @@ class ActivationLinkOut(BaseModel):
     """One manually distributed link and its resolved registration purpose."""
 
     activation_url: str
+    expires_at: datetime
     purpose: Literal["initial_setup", "additional_passkey", "credential_reset"]
 
 
@@ -2062,6 +2069,7 @@ def batch_activation_links(
             "username": u.username,
             "display_name": u.display_name,
             "activation_url": f"/activate#token={raw_token}",
+            "expires_at": _ensure_aware_utc(_link.expires_at),
         })
     audit(
         db,
@@ -2486,6 +2494,7 @@ def create_user_activation_link(
 
     return ActivationLinkOut(
         activation_url=f"/activate#token={raw_token}",
+        expires_at=_ensure_aware_utc(_link.expires_at),
         purpose=purpose,
     )
 

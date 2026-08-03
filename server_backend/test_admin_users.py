@@ -24,6 +24,7 @@ def test_create_user_happy_path(db, admin_client):
     assert data["user"]["username"] == "new.user"
     assert data["user"]["is_activated"] is False
     assert "/activate#token=" in data["activation_url"]
+    assert data["expires_at"]
 
 
 def test_create_user_duplicate_username(db, admin_client):
