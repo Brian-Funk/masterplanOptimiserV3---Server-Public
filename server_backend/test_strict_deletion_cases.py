@@ -213,6 +213,21 @@ def test_no_backup_path_requires_explicit_confirmation_and_empty_inventory(db):
     assert checklist["receipts"]["backup_not_applicable_sha256"] == receipt
 
 
+def test_no_backup_confirmation_rejects_recorded_host_snapshots(db, monkeypatch, tmp_path):
+    event, _ = create_test_event(db)
+    case = _case(db, event, case_type="event_erasure")
+    case.live_purge_receipt_sha256 = "b" * 64
+    status = tmp_path / "snapshot-status.json"
+    status.write_text(
+        '{"format":"mp-opt-ha-snapshot-status-v1","local_snapshot_count":1}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(deletion_cases.settings, "HA_SNAPSHOT_STATUS_PATH", str(status))
+
+    with pytest.raises(ValueError, match="snapshots are recorded"):
+        deletion_cases.confirm_no_controlled_backups(db, case)
+
+
 def test_checklist_is_content_bound_and_requires_all_approvals(db):
     """A frozen checklist cannot complete before its required passkey approvals."""
 

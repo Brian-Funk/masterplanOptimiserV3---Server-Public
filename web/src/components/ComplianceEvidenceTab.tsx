@@ -40,7 +40,11 @@ type Workflow = {
   };
   desktop_work_orders: WorkOrder[];
   approvals: Approval[];
-  clean_backup_bridge: { job_id: string | null; receipt_id: string | null };
+  clean_backup_bridge: {
+    job_id: string | null;
+    receipt_id: string | null;
+    local_snapshot_count: number | null;
+  };
 };
 type BackupRecord = {
   package_id: string;
@@ -346,9 +350,11 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
     if (item.live_data_purged_at && item.topology === "two_node_ha" && !item.evidence.peer) {
       buttons.push(<Button key="peer" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-peer`, `${prefix}/peer-replication`)} disabled={!!busy}>Verify the other server</Button>);
     }
-    if (item.live_data_purged_at && (item.topology === "single_node" || item.evidence.peer) && !item.evidence.clean_backup && !item.evidence.backup_not_applicable && !item.clean_backup_bridge.job_id) {
-      buttons.push(<Button key="backup" size="sm" onClick={() => mutate(`${item.request_id}-backup`, `${prefix}/clean-backup-request`)} disabled={!!busy}>Create a recovery snapshot</Button>);
-      if (backups.length === 0) {
+    if (item.live_data_purged_at && (item.topology === "single_node" || item.evidence.peer) && !item.evidence.clean_backup && !item.evidence.backup_not_applicable) {
+      if (!item.clean_backup_bridge.job_id) {
+        buttons.push(<Button key="backup" size="sm" onClick={() => mutate(`${item.request_id}-backup`, `${prefix}/clean-backup-request`)} disabled={!!busy}>Create a recovery snapshot</Button>);
+      }
+      if (backups.length === 0 && (item.clean_backup_bridge.local_snapshot_count ?? 0) === 0) {
         buttons.push(<Button key="no-backup" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-no-backup`, `${prefix}/no-controlled-backups`)} disabled={!!busy}>No recovery backups are used</Button>);
       }
     }
@@ -398,7 +404,9 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
     if (item.state === "ready_for_live_purge") return "Deleting the controlled Server copy now.";
     if (item.retention.outstanding_actions.length > 0) return "Record the outcome of each named external action. Confirm only actions the controller has actually verified.";
     if (item.live_data_purged_at && item.topology === "two_node_ha" && !item.evidence.peer) return "Verify that the deletion reached the other server.";
-    if (item.clean_backup_bridge.job_id && !item.evidence.clean_backup) return "Finish the recovery snapshot in mp-opt. This page will detect it automatically.";
+    if (item.clean_backup_bridge.job_id && !item.evidence.clean_backup) return item.clean_backup_bridge.local_snapshot_count
+      ? "Finish the recovery snapshot in mp-opt. This page will detect it automatically."
+      : "Finish the recovery snapshot in mp-opt, or confirm that this deployment uses no recovery backups.";
     if (item.live_data_purged_at && (item.topology === "single_node" || item.evidence.peer) && !item.evidence.clean_backup && !item.evidence.backup_not_applicable) return "Choose whether this deployment uses recovery backups.";
     if (item.evidence.clean_backup && unresolvedPackages.length > 0 && !item.evidence.backup_resolution) return "Resolve the listed superseded backup packages only after their deletion has been verified.";
     if ((item.evidence.clean_backup || item.evidence.backup_not_applicable) && unresolvedPackages.length === 0 && !item.checklist.sha256) return "Preparing the final review now.";

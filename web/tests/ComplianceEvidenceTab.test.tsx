@@ -29,7 +29,7 @@ const workflow = {
   checklist: { sha256: null, processor_approval_required: false },
   desktop_work_orders: [{ work_order_id: "work-1", operation: "delete_event", state: "completed", report_sha256: "report-sha" }],
   approvals: [],
-  clean_backup_bridge: { job_id: null, receipt_id: null },
+  clean_backup_bridge: { job_id: null, receipt_id: null, local_snapshot_count: 0 },
 };
 
 describe("ComplianceEvidenceTab", () => {

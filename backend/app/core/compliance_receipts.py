@@ -130,6 +130,25 @@ def queue_clean_backup_request(
         raise EvidenceUnavailable("The host compliance agent is unavailable") from exc
 
 
+def cancel_pending_clean_backup_request(*, job_id: str) -> None:
+    """Cancel only a request that has not produced any host receipt."""
+
+    _uuid(job_id, "job_id")
+    request_path = Path(settings.COMPLIANCE_REQUEST_DIR) / f"{job_id}.json"
+    receipt_path = Path(settings.COMPLIANCE_RECEIPT_DIR) / f"{job_id}.json"
+    signature_path = Path(str(receipt_path) + ".sig")
+    try:
+        if any(path.is_symlink() for path in (request_path, receipt_path, signature_path)):
+            raise EvidenceUnavailable("The compliance path is unsafe")
+        if receipt_path.exists() or signature_path.exists():
+            raise EvidenceUnavailable("The recovery snapshot has already produced a receipt")
+        if request_path.exists() and not request_path.is_file():
+            raise EvidenceUnavailable("The compliance request path is unsafe")
+        request_path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise EvidenceUnavailable("The host compliance agent is unavailable") from exc
+
+
 def verified_clean_backup_receipt(
     db: Session,
     *,

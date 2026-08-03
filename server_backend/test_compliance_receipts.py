@@ -46,6 +46,25 @@ def test_non_file_host_receipt_path_remains_unsafe(db, monkeypatch, tmp_path):
         )
 
 
+def test_pending_clean_backup_request_can_be_cancelled_before_a_receipt(monkeypatch, tmp_path):
+    requests = tmp_path / "requests"
+    receipts = tmp_path / "receipts"
+    requests.mkdir()
+    receipts.mkdir()
+    job_id = str(uuid.uuid4())
+    request_path = requests / f"{job_id}.json"
+    request_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(compliance_receipts.settings, "COMPLIANCE_REQUEST_DIR", str(requests))
+    monkeypatch.setattr(compliance_receipts.settings, "COMPLIANCE_RECEIPT_DIR", str(receipts))
+
+    compliance_receipts.cancel_pending_clean_backup_request(job_id=job_id)
+    assert not request_path.exists()
+
+    (receipts / f"{job_id}.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(EvidenceUnavailable, match="already produced"):
+        compliance_receipts.cancel_pending_clean_backup_request(job_id=job_id)
+
+
 def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_path):
     requests = tmp_path / "requests"
     receipts = tmp_path / "receipts"

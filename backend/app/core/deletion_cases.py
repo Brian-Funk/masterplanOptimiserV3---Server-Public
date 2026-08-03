@@ -6,6 +6,7 @@ import hashlib
 import json
 import secrets
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -450,6 +451,9 @@ def confirm_no_controlled_backups(db: Session, case: DeletionCase) -> str:
         raise ValueError("Peer replication must be verified first")
     if db.query(BackupInventoryRecord).count() > 0:
         raise ValueError("Recovery packages are recorded; create a clean snapshot instead")
+    snapshot_count = controlled_snapshot_count()
+    if snapshot_count is not None and snapshot_count > 0:
+        raise ValueError("Controlled recovery snapshots are recorded; create a clean snapshot instead")
     evidence_payload = {
         "case_id": case.request_id,
         "event_ref": case.event_evidence_id,
@@ -472,6 +476,26 @@ def confirm_no_controlled_backups(db: Session, case: DeletionCase) -> str:
     case.retention_reason_code = None
     case.retention_review_at = None
     return case.backup_not_applicable_sha256
+
+
+def controlled_snapshot_count() -> int | None:
+    """Return the bounded host snapshot count, or unknown when no status exists."""
+
+    path = Path(settings.HA_SNAPSHOT_STATUS_PATH)
+    try:
+        if not path.exists():
+            return None
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024:
+            return None
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    count = document.get("local_snapshot_count")
+    if document.get("format") != "mp-opt-ha-snapshot-status-v1" or type(count) is not int or count < 0:
+        return None
+    return count
 
 
 def _backup_inventory_resolved(db: Session) -> bool:

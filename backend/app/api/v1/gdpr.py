@@ -21,6 +21,7 @@ from app.core.audit import audit
 from app.core.config import settings
 from app.core.evidence import EvidenceUnavailable, append_record as append_evidence_record
 from app.core.compliance_receipts import (
+    cancel_pending_clean_backup_request,
     queue_clean_backup_request,
     verified_clean_backup_receipt,
 )
@@ -36,6 +37,7 @@ from app.core.deletion_cases import (
     build_checklist,
     confirm_desktop_already_absent,
     confirm_no_controlled_backups,
+    controlled_snapshot_count,
     complete_case,
     create_event_erasure_case,
     ensure_desktop_work_order,
@@ -231,6 +233,7 @@ def _job_detail(job: DeletionCase, db: Session | None = None) -> dict:
         "clean_backup_bridge": {
             "job_id": job.clean_backup_job_id,
             "receipt_id": job.clean_backup_receipt_id,
+            "local_snapshot_count": controlled_snapshot_count(),
         },
         "evidence": {
             "request": job.request_manifest_sha256,
@@ -758,6 +761,9 @@ def confirm_deletion_has_no_controlled_backups(
         raise HTTPException(status_code=403, detail="Root admin access required")
     job = _admin_deletion_job(db, request_id)
     try:
+        if job.clean_backup_job_id:
+            cancel_pending_clean_backup_request(job_id=job.clean_backup_job_id)
+            job.clean_backup_job_id = None
         confirm_no_controlled_backups(db, job)
     except (EvidenceUnavailable, ValueError) as exc:
         db.rollback()
