@@ -220,12 +220,24 @@ interface BatchActivationLinkSkipped {
   message: string;
 }
 
-function responseMessage(data: unknown, fallback: string): string {
+export function responseMessage(data: unknown, fallback: string): string {
   if (!data || typeof data !== "object") return fallback;
   const record = data as Record<string, unknown>;
   if (typeof record.message === "string") return record.message;
   if (typeof record.detail === "string") return record.detail;
   if (record.detail && typeof record.detail === "object") {
+    if (Array.isArray(record.detail)) {
+      const validation = record.detail.find(
+        (item): item is Record<string, unknown> =>
+          Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).msg === "string",
+      );
+      if (validation) {
+        const location = Array.isArray(validation.loc) ? validation.loc : [];
+        const field = location.length > 0 ? String(location[location.length - 1]) : "Input";
+        const label = field.replaceAll("_", " ").replace(/^./, (value) => value.toUpperCase());
+        return `${label}: ${String(validation.msg)}`;
+      }
+    }
     const detail = record.detail as Record<string, unknown>;
     if (typeof detail.message === "string") return detail.message;
   }
@@ -1300,6 +1312,7 @@ function UsersTab({
   const [createdUserId, setCreatedUserId] = useState<number | null>(null);
   const [createdUserName, setCreatedUserName] = useState("");
   const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState("");
   const [activationLinks, setActivationLinks] = useState<
     Record<number, string>
   >({});
@@ -1468,10 +1481,11 @@ function UsersTab({
     if (
       !newUser.username.trim() ||
       !newUser.display_name.trim() ||
-      (!isIssuerOnly && !newUser.event_id)
+      (!isIssuerOnly && !isRootAdmin && !newUser.event_id)
     )
       return;
     setCreating(true);
+    setCreateError("");
     try {
       const payload: Record<string, unknown> = {
         username: newUser.username,
@@ -1488,8 +1502,8 @@ function UsersTab({
         method: "POST",
         body: JSON.stringify(payload),
       });
+      const data = await res.json().catch(() => null);
       if (res.ok) {
-        const data = await res.json();
         setCreatedLink(window.location.origin + data.activation_url);
         setCreatedUserId(data.user.id);
         setCreatedUserName(data.user.display_name || "New user");
@@ -1504,7 +1518,11 @@ function UsersTab({
         });
         setShowCreate(false);
         onRefresh();
+      } else {
+        setCreateError(responseMessage(data, `The user could not be created (${res.status}).`));
       }
+    } catch {
+      setCreateError("The user could not be created. Please try again.");
     } finally {
       setCreating(false);
     }
@@ -2465,6 +2483,11 @@ function UsersTab({
               placeholder="team, role, shift"
             />
           </div>
+          {createError && (
+            <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-800 dark:bg-red-900/20 dark:text-red-200">
+              {createError}
+            </div>
+          )}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
               <input
