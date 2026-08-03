@@ -127,6 +127,39 @@ describe("Admin users", () => {
     expect(eventContext).toHaveValue("");
   });
 
+  it("shows one calm account-settings area without repeating summary details", async () => {
+    const managedUser = {
+      ...rootUser,
+      id: 22,
+      username: "participant.a",
+      display_name: "Participant A",
+      email: "participant-a@example.com",
+      is_root_admin: false,
+      is_admin: false,
+      can_edit: true,
+      event_id: 7,
+      tags: ["phase3"],
+      is_active: true,
+      is_activated: false,
+    };
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      if (path === "/api/v1/admin/users") return jsonResponse([managedUser]);
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+    await user.click(await screen.findByRole("button", { name: "Users" }));
+    await user.click(await screen.findByTitle("Account details"));
+
+    expect(screen.getByText("Account settings")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("participant-a@example.com")).toBeInTheDocument();
+    expect(screen.queryByTitle("Show people tagged phase3")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export user data" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove or delete account" })).toBeInTheDocument();
+  });
+
   it("lets an issuer create a user without sending an event id", async () => {
     mockUseAuth.mockReturnValue({
       user: issuerUser,

@@ -3496,9 +3496,9 @@ function UsersTab({
                   </div>
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
                     @{u.username}
-                    {u.email && ` · ${u.email}`}
+                    {expandedDetailsUser !== u.id && u.email && ` · ${u.email}`}
                   </p>
-                  {(u.tags || []).length > 0 && (
+                  {expandedDetailsUser !== u.id && (u.tags || []).length > 0 && (
                     <div className="mt-1 flex flex-wrap gap-1">
                       {(u.tags || []).map((tag) => (
                         <button key={tag} type="button" onClick={() => setFilterTag(tag)} className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${tagColour(tag)}`} title={`Show people tagged ${tag}`}>{tag}</button>
@@ -3645,37 +3645,24 @@ function UsersTab({
                   >
                     <MoreHorizontal size={16} />
                   </button>
-                  {expandedDetailsUser === u.id && (
-                    <>
-                  {!isIssuerOnly && (
-                    <button
-                      onClick={() => handleGdprExport(u.id, u.display_name)}
-                      disabled={gdprBusy[u.id]}
-                      className="p-2 rounded-lg text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors disabled:opacity-50"
-                      title="Export user data (GDPR)"
-                    >
-                      <Download size={16} />
-                    </button>
-                  )}
-                  <button
-                    onClick={() => {
-                      setRemovalError(null);
-                      setConfirmDeleteId(u.id);
-                    }}
-                    className="p-2 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-                    title="Remove unused invitation or start evidence deletion"
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                    </>
-                  )}
                 </div>
               </div>
 
+              {expandedDetailsUser === u.id && (
+                <div className="mt-3">
+                  <h4 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                    Account settings
+                  </h4>
+                  <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                    Edit contact, assignment, permissions, and tags in one place.
+                  </p>
+                </div>
+              )}
+
               {/* Settings row: person link + can-edit */}
               {expandedDetailsUser === u.id && u.is_active && (
-                <div className="mt-3 border-t border-gray-100 pt-3 dark:border-gray-700">
-                  <label className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                <div className="mt-3">
+                  <label className="text-xs font-medium text-gray-600 dark:text-gray-300">
                     Email address
                   </label>
                   <div className="mt-1.5 flex flex-col gap-2 sm:flex-row">
@@ -3706,8 +3693,8 @@ function UsersTab({
                 </div>
               )}
               {expandedDetailsUser === u.id && u.is_active && isRootAdmin && !u.is_root_admin && (
-                <div className="mt-3 border-t border-gray-100 pt-3 dark:border-gray-700">
-                  <label className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                <div className="mt-3">
+                  <label className="text-xs font-medium text-gray-600 dark:text-gray-300">
                     Event assignment
                   </label>
                   <select
@@ -3729,8 +3716,10 @@ function UsersTab({
                 </div>
               )}
               {expandedDetailsUser === u.id && u.event_id && u.is_active && (
-                <div className="mt-3 pt-3 border-t border-gray-100 dark:border-gray-700 flex flex-wrap items-center gap-x-6 gap-y-2">
-                  <div className="flex items-center gap-2">
+                <div className="mt-3 flex flex-wrap items-end gap-x-6 gap-y-3">
+                  <div>
+                    <p className="mb-1.5 text-xs font-medium text-gray-600 dark:text-gray-300">Schedule person</p>
+                    <div className="flex items-center gap-2">
                     <Users size={14} className="text-gray-400 shrink-0" />
                     <select
                       value={u.linked_person_id ?? ""}
@@ -3752,8 +3741,9 @@ function UsersTab({
                         </option>
                       ))}
                     </select>
+                    </div>
                   </div>
-                  <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 cursor-pointer select-none">
+                  <label className="flex items-center gap-2 pb-1.5 text-sm text-gray-600 dark:text-gray-400 cursor-pointer select-none">
                     <input
                       type="checkbox"
                       checked={u.can_edit}
@@ -3762,10 +3752,10 @@ function UsersTab({
                       }
                       className="rounded"
                     />
-                    Can edit
+                    Can edit schedules
                   </label>
                   {isRootAdmin && !u.is_root_admin && (
-                    <label className="flex items-center gap-2 text-sm text-purple-600 dark:text-purple-400 cursor-pointer select-none">
+                    <label className="flex items-center gap-2 pb-1.5 text-sm text-gray-600 dark:text-gray-400 cursor-pointer select-none">
                       <input
                         type="checkbox"
                         checked={u.is_issuer}
@@ -3774,7 +3764,7 @@ function UsersTab({
                         }
                         className="rounded"
                       />
-                      Issuer
+                      Issuer access
                     </label>
                   )}
                 </div>
@@ -3782,7 +3772,8 @@ function UsersTab({
 
               {/* Tags */}
               {expandedDetailsUser === u.id && u.is_active && (
-                <div className="mt-3 pt-3 border-t border-gray-100 dark:border-gray-700 flex flex-wrap items-center gap-2">
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <span className="mr-1 text-xs font-medium text-gray-600 dark:text-gray-300">Tags</span>
                   {(u.tags || []).map((tag) => (
                     <span
                       key={tag}
@@ -3818,7 +3809,8 @@ function UsersTab({
                 </div>
               )}
               {expandedDetailsUser === u.id && !u.is_active && (u.tags || []).length > 0 && (
-                <div className="mt-3 pt-3 border-t border-gray-100 dark:border-gray-700 flex flex-wrap items-center gap-2">
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <span className="mr-1 text-xs font-medium text-gray-600 dark:text-gray-300">Tags</span>
                   {u.tags.map((tag) => (
                     <span
                       key={tag}
@@ -3827,6 +3819,32 @@ function UsersTab({
                       {tag}
                     </span>
                   ))}
+                </div>
+              )}
+
+              {expandedDetailsUser === u.id && (
+                <div className="mt-4 flex flex-wrap gap-2 border-t border-gray-100 pt-3 dark:border-gray-700">
+                  {!isIssuerOnly && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleGdprExport(u.id, u.display_name)}
+                      disabled={gdprBusy[u.id]}
+                    >
+                      <Download size={14} /> Export user data
+                    </Button>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setRemovalError(null);
+                      setConfirmDeleteId(u.id);
+                    }}
+                    className="text-red-600 hover:text-red-700 dark:text-red-400"
+                  >
+                    <Trash2 size={14} /> Remove or delete account
+                  </Button>
                 </div>
               )}
 
