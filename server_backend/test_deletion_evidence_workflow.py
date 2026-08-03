@@ -143,3 +143,21 @@ def test_event_purge_deletes_complete_non_root_event_scope(db, monkeypatch):
     assert db.query(User).filter_by(id=ordinary_id).first() is None
     assert case.live_data_purged_at is not None
     assert case.live_purge_receipt_sha256 == HASH
+
+
+def test_event_purge_accepts_explicit_already_absent_desktop_confirmation(db, monkeypatch):
+    """The event can continue when its Desktop copy was removed before the work order."""
+
+    _fake_evidence(monkeypatch)
+    event, _ = create_test_event(db, name="Already absent locally")
+    event_id = event.id
+    case = _case(db, event, case_type="event_erasure")
+    deletion_workflow.accept_event_request(db, case, event)
+    deletion_cases.ensure_desktop_work_order(db, case, event=event, subject_ref=None)
+    deletion_cases.confirm_desktop_already_absent(db, case)
+
+    deletion_workflow.purge_event_live_data(db, case, event)
+    db.commit()
+
+    assert db.query(Event).filter_by(id=event_id).first() is None
+    assert case.live_purge_receipt_sha256 == HASH

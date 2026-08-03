@@ -37,6 +37,8 @@ AUDIT_ACTIONS = frozenset({
     "evidence.git_anchor.import", "evidence.archive_retry",
     "gdpr.accept_deletion", "gdpr.accept_event_erasure", "gdpr.clean_backup_receipt_applied",
     "gdpr.clean_backup_requested", "gdpr.create_checklist", "gdpr.create_event_erasure",
+    "gdpr.advance_deletion", "gdpr.confirm_deletion_completion",
+    "gdpr.desktop_absence_confirmed", "gdpr.no_controlled_backups_confirmed",
     "gdpr.delete", "gdpr.dismiss_deletion", "gdpr.export", "gdpr.finalise_deletion",
     "gdpr.peer_replication_confirmed", "gdpr.peer_replication_requested",
     "gdpr.purge_event_live_data", "gdpr.purge_live", "gdpr.request_deletion",

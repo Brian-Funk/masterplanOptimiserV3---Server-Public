@@ -308,7 +308,9 @@ def purge_subject_live_data(db: Session, job: DeletionCase, user: User) -> None:
         return
     if job.state not in {"ready_for_live_purge", "live_purge_in_progress"}:
         raise ValueError("The deletion request is not ready for live-data purge")
-    if job.desktop_deletion_required and not job.desktop_report_sha256:
+    if job.desktop_deletion_required and not (
+        job.desktop_report_sha256 or job.desktop_absence_receipt_sha256
+    ):
         raise ValueError("A verified desktop deletion report is required before live-data purge")
     job.state = "live_purge_in_progress"
     linked_person_id = user.linked_person_id
@@ -532,7 +534,7 @@ def purge_event_live_data(db: Session, job: DeletionCase, event: Event) -> None:
         raise ValueError("The event erasure target no longer matches")
     if job.state not in {"ready_for_live_purge", "live_purge_in_progress"}:
         raise ValueError("The event erasure is not ready for live-data deletion")
-    if not job.desktop_report_sha256:
+    if not (job.desktop_report_sha256 or job.desktop_absence_receipt_sha256):
         raise ValueError("A verified desktop deletion report is required before live-data purge")
     job.state = "live_purge_in_progress"
     event_users = db.query(User).filter(

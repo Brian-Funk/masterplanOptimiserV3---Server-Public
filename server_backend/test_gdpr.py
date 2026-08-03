@@ -70,6 +70,44 @@ def test_gdpr_anonymise_server_only_user_is_ready_for_live_purge(db, reauth_admi
     ).first() is None
 
 
+def test_guided_deletion_advances_machine_steps_and_stops_for_backup_policy(db):
+    """The web workflow purges and prepares review without exposing internal buttons."""
+
+    from app.models.user import User
+
+    root = create_test_user(
+        db, username="guided.root", display_name="Guided Root",
+        is_root_admin=True, is_admin=True, event_id=None,
+    )
+    client = _make_client(db, root, reauth=True)
+    target = create_test_user(
+        db, username="guided.target", display_name="Guided Target", event_id=None,
+    )
+    target_id = target.id
+
+    started = client.delete(f"/api/v1/admin/users/{target.id}/gdpr-delete")
+    assert started.status_code == 200
+    request_id = started.json()["request_id"]
+
+    advanced = client.post(f"/api/v1/admin/deletion-requests/{request_id}/advance", json={})
+    assert advanced.status_code == 200
+    assert advanced.json()["advanced"] == ["live_data_purged"]
+    assert advanced.json()["state"] == "awaiting_clean_backup"
+    assert db.query(User).filter_by(id=target_id).first() is None
+
+    no_backups = client.post(
+        f"/api/v1/admin/deletion-requests/{request_id}/no-controlled-backups",
+        json={},
+    )
+    assert no_backups.status_code == 200
+    assert no_backups.json()["evidence"]["backup_not_applicable"]
+
+    prepared = client.post(f"/api/v1/admin/deletion-requests/{request_id}/advance", json={})
+    assert prepared.status_code == 200
+    assert prepared.json()["advanced"] == ["completion_review_prepared"]
+    assert prepared.json()["state"] == "awaiting_approvals"
+
+
 def test_event_erasure_detail_includes_temporary_operator_label(db):
     """The root UI can identify an open event case without signing its name."""
     event, _ = create_test_event(db, name="Readable Deletion Event")

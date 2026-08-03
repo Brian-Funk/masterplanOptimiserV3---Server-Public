@@ -55,6 +55,7 @@ class DeletionCase(Base):
     # Operator convenience only. It is excluded from signed evidence and
     # cleared when the case completes.
     event_display_name = Column(String(128), nullable=True)
+    subject_display_name = Column(String(128), nullable=True)
     subject_evidence_id = Column(String(36), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     request_type = Column(String(32), nullable=False, default="full_erasure")
@@ -88,7 +89,9 @@ class DeletionCase(Base):
     backup_resolution_sha256 = Column(String(64), nullable=True)
     controller_approval_sha256 = Column(String(64), nullable=True)
     desktop_report_sha256 = Column(String(64), nullable=True)
+    desktop_absence_receipt_sha256 = Column(String(64), nullable=True)
     desktop_deletion_required = Column(Boolean, nullable=False, default=True)
+    backup_not_applicable_sha256 = Column(String(64), nullable=True)
     checklist_version = Column(Integer, nullable=True)
     checklist_json = Column(Text, nullable=True)
     checklist_sha256 = Column(String(64), nullable=True, unique=True)

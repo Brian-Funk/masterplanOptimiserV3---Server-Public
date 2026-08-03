@@ -174,6 +174,45 @@ def test_unknown_report_fields_and_external_copies_fail_closed(db):
     assert case.retention_reason_code is None
 
 
+def test_already_absent_desktop_copy_is_an_explicit_idempotent_path(db):
+    """A controller can resolve a genuinely absent Desktop copy without fake data."""
+
+    event, _ = create_test_event(db)
+    case = _case(db, event, case_type="event_erasure")
+    work_order = deletion_cases.ensure_desktop_work_order(
+        db, case, event=event, subject_ref=None,
+    )
+    deletion_cases.claim_work_order(work_order)
+
+    receipt = deletion_cases.confirm_desktop_already_absent(db, case)
+
+    assert len(receipt) == 64
+    assert case.state == "ready_for_live_purge"
+    assert case.desktop_report_sha256 is None
+    assert case.desktop_absence_receipt_sha256 == receipt
+    assert work_order.state == "cancelled"
+    assert "desktop_report" not in deletion_cases.checklist_prerequisites(case, db)
+
+
+def test_no_backup_path_requires_explicit_confirmation_and_empty_inventory(db):
+    """An empty inventory is not treated as proof until the controller confirms it."""
+
+    event, _ = create_test_event(db)
+    case = _case(db, event, case_type="event_erasure")
+    deletion_cases.ensure_case_scope(db, case, event=event, subject_ref=None)
+    case.desktop_absence_receipt_sha256 = "a" * 64
+    case.live_purge_receipt_sha256 = "b" * 64
+    case.outstanding_actions_json = "[]"
+
+    assert "clean_backup_receipt" in deletion_cases.checklist_prerequisites(case, db)
+    receipt = deletion_cases.confirm_no_controlled_backups(db, case)
+    assert len(receipt) == 64
+    assert case.state == "awaiting_checklist"
+    checklist = deletion_cases.build_checklist(case, db)
+    assert checklist["version"] == 2
+    assert checklist["receipts"]["backup_not_applicable_sha256"] == receipt
+
+
 def test_checklist_is_content_bound_and_requires_all_approvals(db):
     """A frozen checklist cannot complete before its required passkey approvals."""
 

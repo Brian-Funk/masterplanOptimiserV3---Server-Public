@@ -23,7 +23,7 @@ from app.models.evidence import BackupInventoryRecord
 from app.models.event import Event
 
 
-CHECKLIST_VERSION = 1
+CHECKLIST_VERSION = 2
 CLAIM_TTL_MINUTES = 30
 STATUS_CAPABILITY_TTL_DAYS = 90
 _REPORT_COUNTERS = {
@@ -388,6 +388,92 @@ def resolve_outstanding_actions(
     return digest
 
 
+def confirm_desktop_already_absent(db: Session, case: DeletionCase) -> str:
+    """Record the controller's explicit confirmation that no Desktop copy remains."""
+
+    if not case.desktop_deletion_required:
+        raise ValueError("This case does not require Desktop deletion")
+    if case.desktop_report_sha256:
+        return case.desktop_report_sha256
+    if case.desktop_absence_receipt_sha256:
+        return case.desktop_absence_receipt_sha256
+    if case.state not in {"awaiting_desktop_report", "restricted_retention"}:
+        raise ValueError("Desktop absence cannot be confirmed from the current case state")
+    now = utc_now()
+    for work_order in db.query(DesktopDeletionWorkOrder).filter(
+        DesktopDeletionWorkOrder.case_id == case.id,
+        DesktopDeletionWorkOrder.state.in_({"open", "claimed"}),
+    ):
+        work_order.state = "cancelled"
+        work_order.claim_capability_sha256 = None
+        work_order.claim_expires_at = None
+    for scope in db.query(DeletionSubjectScope).filter(
+        DeletionSubjectScope.case_id == case.id,
+    ):
+        if scope.state == "pending":
+            scope.state = "desktop_deleted"
+    case.outstanding_actions_json = "[]"
+    case.retention_reason_code = None
+    case.retention_review_at = None
+    case.state = "ready_for_live_purge"
+    evidence_payload = {
+        "case_id": case.request_id,
+        "event_ref": case.event_evidence_id,
+        "verification_method": "controller_confirmation",
+        "outcome": "already_absent",
+        "status": case.state,
+        "completed_at": now.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if case.case_type != "event_erasure":
+        evidence_payload["subject_ref"] = case.subject_evidence_id
+    case.desktop_absence_receipt_sha256 = append_record(
+        db,
+        workflow_type="deletion_case",
+        workflow_id=case.request_id,
+        operation_type="desktop_absence_confirmed",
+        record_type="deletion.desktop_absence_confirmed",
+        payload=evidence_payload,
+    )
+    return case.desktop_absence_receipt_sha256
+
+
+def confirm_no_controlled_backups(db: Session, case: DeletionCase) -> str:
+    """Record an explicit no-backup assertion; never infer it from the empty inventory."""
+
+    if case.replacement_package_sha256:
+        raise ValueError("A clean recovery snapshot is already recorded")
+    if case.backup_not_applicable_sha256:
+        return case.backup_not_applicable_sha256
+    if not case.live_purge_receipt_sha256:
+        raise ValueError("Live data must be purged first")
+    if settings.HA_MODE == "ha" and not case.peer_confirmation_sha256:
+        raise ValueError("Peer replication must be verified first")
+    if db.query(BackupInventoryRecord).count() > 0:
+        raise ValueError("Recovery packages are recorded; create a clean snapshot instead")
+    evidence_payload = {
+        "case_id": case.request_id,
+        "event_ref": case.event_evidence_id,
+        "verification_method": "controller_confirmation",
+        "reason_code": "no_controlled_backups",
+        "outcome": "not_applicable",
+        "status": "awaiting_checklist",
+    }
+    if case.case_type != "event_erasure":
+        evidence_payload["subject_ref"] = case.subject_evidence_id
+    case.backup_not_applicable_sha256 = append_record(
+        db,
+        workflow_type="deletion_case",
+        workflow_id=case.request_id,
+        operation_type="backup_not_applicable",
+        record_type="deletion.backup_not_applicable",
+        payload=evidence_payload,
+    )
+    case.state = "awaiting_checklist"
+    case.retention_reason_code = None
+    case.retention_review_at = None
+    return case.backup_not_applicable_sha256
+
+
 def _backup_inventory_resolved(db: Session) -> bool:
     return db.query(BackupInventoryRecord).filter(
         BackupInventoryRecord.status == "superseded_pending_deletion",
@@ -398,13 +484,15 @@ def checklist_prerequisites(case: DeletionCase, db: Session) -> list[str]:
     """Return machine-verifiable prerequisites still missing from a case."""
 
     missing: list[str] = []
-    if case.desktop_deletion_required and not case.desktop_report_sha256:
+    if case.desktop_deletion_required and not (
+        case.desktop_report_sha256 or case.desktop_absence_receipt_sha256
+    ):
         missing.append("desktop_report")
     if not case.live_purge_receipt_sha256:
         missing.append("live_purge_receipt")
     if settings.HA_MODE == "ha" and not case.peer_confirmation_sha256:
         missing.append("peer_replication_receipt")
-    if not case.replacement_package_sha256:
+    if not (case.replacement_package_sha256 or case.backup_not_applicable_sha256):
         missing.append("clean_backup_receipt")
     if not _backup_inventory_resolved(db):
         missing.append("backup_inventory_resolution")
@@ -441,9 +529,11 @@ def build_checklist(case: DeletionCase, db: Session) -> dict[str, Any]:
         ],
         "receipts": {
             "desktop_report_sha256": case.desktop_report_sha256,
+            "desktop_absence_receipt_sha256": case.desktop_absence_receipt_sha256,
             "live_purge_receipt_sha256": case.live_purge_receipt_sha256,
             "peer_confirmation_sha256": case.peer_confirmation_sha256,
             "clean_backup_sha256": case.replacement_package_sha256,
+            "backup_not_applicable_sha256": case.backup_not_applicable_sha256,
         },
         "desktop_deletion_required": bool(case.desktop_deletion_required),
         "processor_approval_required": bool(case.processor_approval_required),
@@ -587,9 +677,11 @@ def complete_case(case: DeletionCase, db: Session) -> str:
         ],
         "receipts": {
             "desktop_report_sha256": case.desktop_report_sha256,
+            "desktop_absence_receipt_sha256": case.desktop_absence_receipt_sha256,
             "live_purge_receipt_sha256": case.live_purge_receipt_sha256,
             "peer_confirmation_sha256": case.peer_confirmation_sha256,
             "clean_backup_sha256": case.replacement_package_sha256,
+            "backup_not_applicable_sha256": case.backup_not_applicable_sha256,
         },
         "desktop_deletion_required": bool(case.desktop_deletion_required),
         "processor_approval_required": bool(case.processor_approval_required),
@@ -648,4 +740,5 @@ def complete_case(case: DeletionCase, db: Session) -> str:
     case.completed_at = now
     case.state = "complete"
     case.event_display_name = None
+    case.subject_display_name = None
     return case.state
