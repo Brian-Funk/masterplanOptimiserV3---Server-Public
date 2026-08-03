@@ -163,6 +163,7 @@ def test_backend_runs_unprivileged_and_database_examples_fail_closed():
     assert "cap_drop:\n      - ALL" in production_compose
     assert "no-new-privileges:true" in production_compose
     assert 'chmod 1733 "$request_dir"' in common
+    assert 'chmod 0711 "$runtime_dir"' in common
 
 
 def test_database_and_ip_secrets_have_guarded_lifecycle_paths():

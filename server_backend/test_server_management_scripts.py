@@ -293,6 +293,9 @@ def test_frontend_csp_runtime_repairs_only_empty_legacy_mount(tmp_path: Path):
     assert repaired.returncode == 0, repaired.stderr
     assert runtime.is_dir()
     assert not mistaken_mount.exists()
+    assert stat.S_IMODE(runtime.stat().st_mode) == 0o711
+    assert stat.S_IMODE((runtime / "compliance-requests").stat().st_mode) == 0o1733
+    assert stat.S_IMODE((runtime / "compliance-receipts").stat().st_mode) == 0o755
 
     mistaken_mount.mkdir()
     marker = mistaken_mount / "preserve.txt"

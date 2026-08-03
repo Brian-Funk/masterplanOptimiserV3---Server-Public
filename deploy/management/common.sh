@@ -863,6 +863,9 @@ mp_prepare_frontend_csp_runtime() {
         sudo -n chown "$owner" "$runtime_dir" || return 1
     fi
     [ -w "$runtime_dir" ]
+    # Containers run as dedicated non-host UIDs. Permit traversal to the
+    # deliberately mounted child paths without allowing directory listing.
+    chmod 0711 "$runtime_dir" || return 1
     mkdir -p "$request_dir" "$compliance_request_dir" "$compliance_receipt_dir" || return 1
     # The unprivileged API may enqueue opaque replication jobs without being
     # able to list or replace requests created by another process.
