@@ -8,9 +8,11 @@ import { serializeGovernanceConfiguration, type GovernanceFormState } from "@/li
 
 const mockApiFetch = vi.hoisted(() => vi.fn());
 const mockUseAuth = vi.hoisted(() => vi.fn());
+const mockRouterPush = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/api", () => ({ apiFetch: mockApiFetch }));
 vi.mock("@/contexts/AuthContext", () => ({ useAuth: mockUseAuth }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: mockRouterPush }) }));
 vi.mock("@/components/Logo", () => ({ Logo: () => <div>Logo</div> }));
 vi.mock("@/components/ThemeToggle", () => ({ ThemeToggle: () => null }));
 
@@ -52,6 +54,7 @@ describe("governance configuration import and export", () => {
   beforeEach(() => {
     mockApiFetch.mockReset();
     mockUseAuth.mockReturnValue({ user: root, isLoading: false });
+    mockRouterPush.mockReset();
     mockApiFetch.mockImplementation((url: string) => {
       if (url === "/api/v1/admin/governance") {
         return Promise.resolve(jsonResponse({
