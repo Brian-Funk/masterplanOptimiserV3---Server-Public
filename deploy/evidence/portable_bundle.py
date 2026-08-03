@@ -19,6 +19,7 @@ import stat
 import tarfile
 import tempfile
 import uuid
+import zipfile
 from typing import Any
 
 import evidence_git
@@ -27,7 +28,10 @@ import evidence_manifest
 
 FORMAT = "mp-opt-portable-evidence-bundle-v1"
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024
+MAX_EVIDENCE_ZIP_BYTES = MAX_BUNDLE_BYTES + (2 * 1024 * 1024)
 BUNDLE_NAMESPACE = uuid.UUID("8c36ce0a-ec6a-4b9b-981e-dfb7f891da70")
+PUBLIC_VERIFIER_URL = "https://brian-funk.github.io/masterplanOptimiserV3---Evidence-Public/verify-evidence/"
+ZIP_MEMBERS = ("accountability.evidence", "accountability.evidence.sha256", "VERIFYING.txt")
 LIMIT_TEXT = (
     "A valid signature proves that the identified key signed the exact statement shown. "
     "It does not prove physical deletion, absence of copies outside controlled systems, "
@@ -282,6 +286,116 @@ def create_from_local(
         return create_bundle(repository, instance_id, output)
 
 
+def _zip_instructions(summary: dict[str, Any], bundle_sha256: str) -> bytes:
+    return (
+        "Masterplan Optimiser accountability evidence\n"
+        "==============================================\n\n"
+        "This ZIP contains one canonical signed evidence bundle and its SHA-256 receipt.\n"
+        "No private signing, passkey, recovery or application secret is included.\n\n"
+        "Browser verification (the files stay on your device):\n"
+        f"{PUBLIC_VERIFIER_URL}\n\n"
+        "Offline command-line verification:\n"
+        "1. Extract accountability.evidence.\n"
+        "2. Copy the protected verifier from a trusted Server or Evidence-Public checkout.\n"
+        "3. Run: python portable_bundle.py verify --bundle accountability.evidence\n\n"
+        f"Bundle SHA-256: {bundle_sha256}\n"
+        f"Controller ID: {summary['controller_id']}\n"
+        f"Instance ID: {summary['instance_id']}\n"
+        f"Chain ID: {summary['chain_id']}\n"
+        f"Chain head SHA-256: {summary['chain_head_sha256']}\n"
+        f"Record count: {summary['record_count']}\n\n"
+        f"{LIMIT_TEXT}\n"
+    ).encode("utf-8")
+
+
+def _zip_info(name: str) -> zipfile.ZipInfo:
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_STORED
+    info.create_system = 3
+    info.external_attr = 0o600 << 16
+    return info
+
+
+def create_evidence_zip(bundle: Path, output: Path) -> dict[str, Any]:
+    """Wrap one verified canonical bundle in a deterministic three-file ZIP."""
+
+    if output.exists() or output.is_symlink():
+        raise PortableBundleError("Evidence ZIP output already exists")
+    summary = verify_bundle(bundle)
+    bundle_raw = _regular_bytes(bundle, limit=MAX_BUNDLE_BYTES)
+    bundle_sha256 = hashlib.sha256(bundle_raw).hexdigest()
+    members = {
+        "accountability.evidence": bundle_raw,
+        "accountability.evidence.sha256": f"{bundle_sha256}  accountability.evidence\n".encode("ascii"),
+        "VERIFYING.txt": _zip_instructions(summary, bundle_sha256),
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=output.name + ".", suffix=".partial", dir=output.parent)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        with zipfile.ZipFile(temporary, "w", allowZip64=False) as archive:
+            for name in ZIP_MEMBERS:
+                archive.writestr(_zip_info(name), members[name])
+        os.chmod(temporary, 0o600)
+        verified = verify_evidence_zip(temporary)
+        os.replace(temporary, output)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    return verified | {"path": str(output)}
+
+
+def create_zip_from_local(
+    evidence_home: Path,
+    trust_repository: Path,
+    instance_id: str,
+    output: Path,
+) -> dict[str, Any]:
+    """Verify the local chain, create its canonical bundle, then wrap it as a ZIP."""
+
+    with tempfile.TemporaryDirectory(prefix="mp-opt-evidence-export.") as directory_name:
+        bundle = Path(directory_name) / "accountability.evidence"
+        create_from_local(evidence_home, trust_repository, instance_id, bundle)
+        return create_evidence_zip(bundle, output)
+
+
+def verify_evidence_zip(path: Path) -> dict[str, Any]:
+    """Verify the exact three-file export without trusting carried instructions."""
+
+    metadata = path.lstat()
+    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_EVIDENCE_ZIP_BYTES:
+        raise PortableBundleError("Evidence ZIP is unavailable, unsafe or too large")
+    with zipfile.ZipFile(path, "r") as archive:
+        members = archive.infolist()
+        if tuple(member.filename for member in members) != ZIP_MEMBERS:
+            raise PortableBundleError("Evidence ZIP must contain exactly the three documented files")
+        if any(
+            member.is_dir()
+            or member.flag_bits & 0x1
+            or member.compress_type != zipfile.ZIP_STORED
+            or member.date_time != (1980, 1, 1, 0, 0, 0)
+            or member.create_system != 3
+            or (member.external_attr >> 16) & 0o777 != 0o600
+            or member.file_size > MAX_BUNDLE_BYTES
+            for member in members
+        ):
+            raise PortableBundleError("Evidence ZIP contains an unsafe member")
+        bundle_raw = archive.read("accountability.evidence")
+        receipt = archive.read("accountability.evidence.sha256")
+        instructions = archive.read("VERIFYING.txt")
+    bundle_sha256 = hashlib.sha256(bundle_raw).hexdigest()
+    if receipt != f"{bundle_sha256}  accountability.evidence\n".encode("ascii"):
+        raise PortableBundleError("Evidence ZIP checksum receipt does not match")
+    with tempfile.TemporaryDirectory(prefix="mp-opt-evidence-zip-verify.") as directory_name:
+        bundle = Path(directory_name) / "accountability.evidence"
+        bundle.write_bytes(bundle_raw)
+        summary = verify_bundle(bundle)
+    if instructions != _zip_instructions(summary, bundle_sha256):
+        raise PortableBundleError("Evidence ZIP verification instructions were changed")
+    return summary | {"zip_sha256": sha256_file(path), "valid_zip": True}
+
+
 def _members(archive: tarfile.TarFile, bundle_size: int) -> dict[str, tarfile.TarInfo]:
     result: dict[str, tarfile.TarInfo] = {}
     total = 0
@@ -435,10 +549,17 @@ def parser() -> argparse.ArgumentParser:
     local.add_argument("--trust-repository", required=True, type=Path)
     local.add_argument("--instance-id", required=True)
     local.add_argument("--output", required=True, type=Path)
+    local_zip = commands.add_parser("create-local-zip")
+    local_zip.add_argument("--evidence-home", required=True, type=Path)
+    local_zip.add_argument("--trust-repository", required=True, type=Path)
+    local_zip.add_argument("--instance-id", required=True)
+    local_zip.add_argument("--output", required=True, type=Path)
     verify = commands.add_parser("verify")
     verify.add_argument("--bundle", required=True, type=Path)
     verify.add_argument("--controller-id")
     verify.add_argument("--instance-id")
+    verify_zip = commands.add_parser("verify-zip")
+    verify_zip.add_argument("--zip", required=True, type=Path)
     stage = commands.add_parser("stage-archive")
     stage.add_argument("--bundle", required=True, type=Path)
     stage.add_argument("--archive", required=True, type=Path)
@@ -457,17 +578,34 @@ def cli(argv: list[str] | None = None) -> int:
                 arguments.instance_id,
                 arguments.output,
             )
+        elif arguments.command == "create-local-zip":
+            result = create_zip_from_local(
+                arguments.evidence_home,
+                arguments.trust_repository,
+                arguments.instance_id,
+                arguments.output,
+            )
         elif arguments.command == "verify":
             result = verify_bundle(
                 arguments.bundle,
                 expected_controller_id=arguments.controller_id,
                 expected_instance_id=arguments.instance_id,
             )
+        elif arguments.command == "verify-zip":
+            result = verify_evidence_zip(arguments.zip)
         else:
             result = stage_archive(arguments.bundle, arguments.archive)
         print(json.dumps(result, sort_keys=True))
         return 0
-    except (PortableBundleError, evidence_git.EvidenceGitError, evidence_manifest.EvidenceError, OSError, tarfile.TarError) as exc:
+    except (
+        PortableBundleError,
+        evidence_git.EvidenceGitError,
+        evidence_manifest.EvidenceError,
+        OSError,
+        tarfile.TarError,
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+    ) as exc:
         parser().exit(1, f"portable evidence bundle error: {exc}\n")
 
 

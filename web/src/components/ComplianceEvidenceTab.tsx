@@ -6,7 +6,9 @@ import { apiFetch } from "@/lib/api";
 import { withReauth } from "@/lib/reauth";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { CheckCircle, Circle, FileCheck2, HardDrive, Info, KeyRound, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
+import { CheckCircle, Circle, Download, FileCheck2, HardDrive, Info, KeyRound, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
+
+const PUBLIC_EVIDENCE_VERIFIER = "https://brian-funk.github.io/masterplanOptimiserV3---Evidence-Public/verify-evidence/";
 
 type EventOption = { id: number; name: string };
 type EvidenceMap = Record<string, string | null>;
@@ -150,6 +152,7 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
   const [previousProofPackage, setPreviousProofPackage] = useState("");
   const [statementPackage, setStatementPackage] = useState("");
   const [chainVerification, setChainVerification] = useState<ChainVerification | null>(null);
+  const [exportStatus, setExportStatus] = useState("");
 
   const load = useCallback(async () => {
     setError("");
@@ -237,6 +240,39 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
       await load();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The evidence chain could not be verified.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function downloadCompleteEvidence() {
+    setBusy("download-evidence");
+    setError("");
+    setExportStatus("");
+    try {
+      const response = await withReauth(() => apiFetch(
+        "/api/v1/admin/evidence/export",
+        { method: "POST", body: "{}" },
+      ));
+      if (!response.ok) {
+        throw new Error(messageFrom(await response.json().catch(() => null)));
+      }
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+        || "accountability-evidence.zip";
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      const head = response.headers.get("X-Evidence-Chain-Head");
+      setExportStatus(head ? `Downloaded the verified chain at ${head}.` : "Downloaded the verified complete evidence ZIP.");
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The complete evidence ZIP could not be downloaded.");
     } finally {
       setBusy("");
     }
@@ -465,7 +501,7 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
       {error && <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-900/20 dark:text-red-300">{error}</p>}
       <Guidance title="What a signed deletion record proves" tone="amber">It records the actions and confirmations made inside the controlled workflow. It does not prove physical deletion from providers, recipient devices, external calendars or other systems outside the controller&apos;s verified control.</Guidance>
       <div className="grid gap-3 md:grid-cols-3">
-        <Card className="flex items-start gap-3 p-4"><FileCheck2 size={20} className="mt-0.5 text-blue-600" /><div className="min-w-0 flex-1"><p className="text-xs text-gray-500">Signed ledger</p><p className="mt-1 text-sm font-semibold">{evidence?.initialised ? "Ready" : "Unavailable"}</p>{evidence?.head_sha256 && <p className="mt-1 truncate font-mono text-xs text-gray-500" title={evidence.head_sha256}>Head {evidence.head_sha256.slice(0, 12)}…</p>}<Button className="mt-3" size="sm" variant="outline" onClick={() => void verifyCompleteChain()} disabled={!evidence?.initialised || !!busy}>{busy === "verify-complete-chain" ? "Verifying…" : "Verify complete chain"}</Button>{chainVerification && <p className="mt-2 text-xs text-green-700 dark:text-green-300">Verified {chainVerification.records} records at {formatCompletionDate(chainVerification.verified_at)}.<span className="mt-1 block truncate font-mono" title={chainVerification.head_sha256}>{chainVerification.head_sha256}</span></p>}</div></Card>
+        <Card className="flex items-start gap-3 p-4"><FileCheck2 size={20} className="mt-0.5 text-blue-600" /><div className="min-w-0 flex-1"><p className="text-xs text-gray-500">Signed ledger</p><p className="mt-1 text-sm font-semibold">{evidence?.initialised ? "Ready" : "Unavailable"}</p>{evidence?.head_sha256 && <p className="mt-1 truncate font-mono text-xs text-gray-500" title={evidence.head_sha256}>Head {evidence.head_sha256.slice(0, 12)}…</p>}<div className="mt-3 flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => void verifyCompleteChain()} disabled={!evidence?.initialised || !!busy}>{busy === "verify-complete-chain" ? "Verifying…" : "Verify complete chain"}</Button><Button size="sm" onClick={() => void downloadCompleteEvidence()} disabled={!evidence?.initialised || !!busy}><Download size={15} />{busy === "download-evidence" ? "Preparing…" : "Download evidence ZIP"}</Button></div>{chainVerification && <p className="mt-2 text-xs text-green-700 dark:text-green-300">Verified {chainVerification.records} records at {formatCompletionDate(chainVerification.verified_at)}.<span className="mt-1 block truncate font-mono" title={chainVerification.head_sha256}>{chainVerification.head_sha256}</span></p>}{exportStatus && <p className="mt-2 text-xs text-green-700 dark:text-green-300">{exportStatus}<a className="mt-1 block font-medium underline" href={PUBLIC_EVIDENCE_VERIFIER} target="_blank" rel="noreferrer">Open the local evidence verifier</a></p>}</div></Card>
         <Card className="flex items-start gap-3 p-4"><ShieldCheck size={20} className="mt-0.5 text-blue-600" /><div><p className="text-xs text-gray-500">Open cases</p><p className="mt-1 text-sm font-semibold">{openWorkflows.length}</p><p className="mt-1 text-xs text-gray-500">{completedWorkflows.length} completed</p></div></Card>
         <Card className="flex items-start gap-3 p-4"><HardDrive size={20} className="mt-0.5 text-blue-600" /><div><p className="text-xs text-gray-500">Evidence archive</p><p className="mt-1 text-sm font-semibold">{archive?.enabled ? "Enabled" : "Optional / disabled"}</p><p className="mt-1 text-xs text-gray-500">{archive?.pending_submission_count ?? 0} pending submission(s)</p></div></Card>
       </div>
@@ -494,7 +530,7 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
             `/api/v1/admin/evidence/archive/${archive.submission_id}/retry`,
           )} disabled={!!busy}>Retry safe failed submission</Button>
         )}
-        <p className="text-xs text-gray-500 dark:text-gray-400">No token value or secret path is available through this screen. Manual portable bundle export continues without a token.</p>
+        <p className="text-xs text-gray-500 dark:text-gray-400">No token value or secret path is available through this screen. Complete ZIP export continues without a token.</p>
       </Card>
 
       <Card className="space-y-4 p-4">

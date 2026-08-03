@@ -53,54 +53,50 @@ mp_evidence_verify() {
 }
 
 mp_evidence_export_bundle() {
-    local timestamp partial output result hash host copy_text partial_digest output_digest
+    local timestamp partial output result hash host copy_text
     timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
     mkdir -p "$MP_EVIDENCE_EXPORTS" && chmod 700 "$MP_EVIDENCE_EXPORTS" || return 1
-    output="$MP_EVIDENCE_EXPORTS/${timestamp}_accountability.evidence"
+    output="$MP_EVIDENCE_EXPORTS/${timestamp}_accountability-evidence.zip"
     partial="${output}.root"
-    partial_digest="${partial}.sha256"
-    output_digest="${output}.sha256"
     [ ! -e "$output" ] && [ ! -e "$partial" ] || return 1
-    if ! result="$(sudo -n python3 "$MP_EVIDENCE_BUNDLE_TOOL" create-local \
+    if ! result="$(sudo -n python3 "$MP_EVIDENCE_BUNDLE_TOOL" create-local-zip \
         --evidence-home "$MP_EVIDENCE_HOME" \
         --trust-repository "$MP_EVIDENCE_HOME/controller-trust" \
         --instance-id "$(mp_env_get MP_INSTANCE_ID)" \
         --output "$partial" 2>&1)"; then
-        sudo -n rm -f "$partial" "$partial_digest"
-        ui_error "Signed evidence verification or bundle creation failed. Nothing was exported.\n\n${result}"
+        sudo -n rm -f "$partial"
+        ui_error "Signed evidence verification or ZIP creation failed. Nothing was exported.\n\n${result}"
         return 1
     fi
-    sudo -n chown "$(id -u):$(id -g)" "$partial" "$partial_digest" || return 1
-    chmod 600 "$partial" "$partial_digest" || return 1
+    sudo -n chown "$(id -u):$(id -g)" "$partial" || return 1
+    chmod 600 "$partial" || return 1
     mv "$partial" "$output" || return 1
     hash="$(sha256sum "$output" | awk '{print $1}')"
-    printf '%s  %s\n' "$hash" "$(basename "$output")" > "$output_digest" || return 1
-    chmod 600 "$output_digest" || return 1
-    rm -f "$partial_digest"
-    python3 "$MP_EVIDENCE_BUNDLE_TOOL" verify --bundle "$output" >/dev/null || return 1
+    python3 "$MP_EVIDENCE_BUNDLE_TOOL" verify-zip --zip "$output" >/dev/null || return 1
     host="$(hostname -f 2>/dev/null || hostname)"
-    copy_text="Evidence bundle: $output
-SHA-256: $hash
+    copy_text="Complete evidence ZIP: $output
+ZIP SHA-256: $hash
 
 Run from a workstation terminal:
 
 scp deploy@${host}:$(printf '%q' "$output") .
 sha256sum $(printf '%q' "$(basename "$output")")
 
-The displayed SHA-256 must match exactly. The bundle contains signed records,
-    public verification keys and integrity anchors; it never contains a
-private signing or recovery key."
-    mp_audit "evidence.bundle-export" "success" "$(basename "$output"):sha256:${hash}"
-    ui_copyable_terminal_text "Accountability evidence exported" "$copy_text" \
+The displayed ZIP SHA-256 must match exactly. The ZIP contains
+accountability.evidence, accountability.evidence.sha256 and VERIFYING.txt.
+It contains public verification material but no private signing, passkey,
+recovery or application secret."
+    mp_audit "evidence.zip-export" "success" "$(basename "$output"):sha256:${hash}"
+    ui_copyable_terminal_text "Complete accountability evidence exported" "$copy_text" \
         "Copy and run the workstation commands. Press Enter here to return to MP-OPT_SERVER."
 }
 
 mp_evidence_git_guidance() {
-    local bundle body
+    local export_zip body
     mkdir -p "$MP_EVIDENCE_EXPORTS" && chmod 700 "$MP_EVIDENCE_EXPORTS" || return 1
-    bundle="$(find "$MP_EVIDENCE_EXPORTS" -maxdepth 1 -type f -name '*.evidence' -print | sort -r | head -n1)"
-    if [ -z "$bundle" ]; then
-        ui_error "Export and verify an accountability evidence bundle first."
+    export_zip="$(find "$MP_EVIDENCE_EXPORTS" -maxdepth 1 -type f -name '*accountability-evidence.zip' -print | sort -r | head -n1)"
+    if [ -z "$export_zip" ]; then
+        ui_error "Export and verify a complete accountability evidence ZIP first."
         return 1
     fi
     body="The Git archive repository is intentionally not created automatically.
@@ -108,8 +104,9 @@ Create an empty private repository only after the local evidence tests pass.
 
 After cloning that repository on a trusted workstation, stage the verified bundle with:
 
+unzip $(printf '%q' "$(basename "$export_zip")") accountability.evidence accountability.evidence.sha256 VERIFYING.txt
 python3 /absolute/path/to/trusted-server-source/deploy/evidence/portable_bundle.py stage-archive \\
-  --bundle /absolute/path/to/copied/$(printf '%q' "$(basename "$bundle")") \\
+  --bundle /absolute/path/to/copied/accountability.evidence \\
   --archive /absolute/path/to/cloned-evidence-repository
 
 The command uses the protected installed verifier and stages only the bundle

@@ -228,7 +228,7 @@ menu_accountability() {
             "instance-key" "Inspect and verify the instance signing fingerprint" \
             "trust-keys" "Show controller and processor registration boundaries" \
             "verify" "Verify the complete local signed chain" \
-            "export" "Create a self-contained portable bundle and show copy commands" \
+            "export" "Download-ready ZIP with evidence, checksum and verification guide" \
             "git-status" "Show non-secret automatic archive status" \
             "git-configure" "Configure or rotate a Fine-grained GitHub personal access token" \
             "git-test" "Test private repository access and readiness" \

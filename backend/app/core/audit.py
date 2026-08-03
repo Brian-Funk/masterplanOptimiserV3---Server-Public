@@ -29,7 +29,7 @@ AUDIT_ACTIONS = frozenset({
     "announcement.create", "announcement.delete", "auth.login", "auth.logout",
     "auth.reauth", "auth.reauth_failed", "auth.session_revoke", "calendar.commit",
     "calendar.task_edit", "calendar.task_revert", "event.create", "event.import_setup",
-    "event.regenerate_secret", "evidence.initialise", "evidence.verify",
+    "event.regenerate_secret", "evidence.export", "evidence.initialise", "evidence.verify",
     "evidence.trust_key.challenge", "evidence.trust_key.proof_verified",
     "evidence.trust_key.root_authorised", "evidence.trust_key.register",
     "evidence.trust_key.rotate", "evidence.trust_key.revoke",

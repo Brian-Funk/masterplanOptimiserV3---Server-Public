@@ -1,7 +1,11 @@
-"""Root-only status and verification for the required evidence chain."""
+"""Root-only status, export and verification for the required evidence chain."""
+
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
+from starlette.responses import FileResponse
 
 from app.core.audit import audit
 from app.core.evidence import EvidenceUnavailable, initialise, verify_local_chain
@@ -10,6 +14,7 @@ from app.db.database import get_db
 from app.models.evidence import BackupInventoryRecord, EvidenceChainState, EvidenceKey
 from app.models.user import User
 from app.services.evidence_archive import archive_status, retry_submission
+from app.services.evidence_export import create_complete_evidence_export, remove_complete_evidence_export
 
 
 router = APIRouter()
@@ -143,3 +148,63 @@ def verify_evidence(
     audit(db, user=root, action="evidence.verify", resource_type="evidence", request=request)
     db.commit()
     return result
+
+
+@router.post("/export")
+def export_evidence(
+    request: Request,
+    root: User = Depends(require_root_recent_reauth),
+    db: Session = Depends(get_db),
+):
+    """Verify the exact chain and return a short-lived complete evidence ZIP."""
+
+    output = None
+    try:
+        verified = verify_local_chain(db)
+        state = db.get(EvidenceChainState, 1)
+        if state is None:
+            raise EvidenceUnavailable("Evidence has not been initialised")
+        output, metadata = create_complete_evidence_export(state.instance_id)
+        if metadata.get("chain_head_sha256") != verified.get("head_sha256"):
+            remove_complete_evidence_export(output)
+            raise EvidenceUnavailable("The evidence chain changed while the export was created")
+    except EvidenceUnavailable as exc:
+        if output is not None:
+            remove_complete_evidence_export(output)
+        raise _unavailable(exc) from exc
+    try:
+        audit(
+            db,
+            user=root,
+            action="evidence.export",
+            resource_type="evidence",
+            detail=json.dumps(
+                {
+                    "bundle_id": metadata["bundle_id"],
+                    "chain_head_sha256": metadata["chain_head_sha256"],
+                    "record_count": metadata["record_count"],
+                    "zip_sha256": metadata["zip_sha256"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            request=request,
+        )
+        db.commit()
+    except Exception:
+        remove_complete_evidence_export(output)
+        raise
+    filename = f"accountability-evidence-{metadata['chain_head_sha256'][:12]}.zip"
+    return FileResponse(
+        output,
+        media_type="application/zip",
+        filename=filename,
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+            "X-Evidence-Chain-Head": metadata["chain_head_sha256"],
+            "X-Evidence-Zip-SHA256": metadata["zip_sha256"],
+        },
+        background=BackgroundTask(remove_complete_evidence_export, output),
+    )

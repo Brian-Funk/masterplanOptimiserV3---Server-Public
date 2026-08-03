@@ -35,11 +35,21 @@ const workflow = {
 describe("ComplianceEvidenceTab", () => {
   beforeEach(() => {
     mockApiFetch.mockReset();
+    URL.createObjectURL = vi.fn(() => "blob:evidence");
+    URL.revokeObjectURL = vi.fn();
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === "/api/v1/admin/deletion-requests") return json([workflow]);
       if (path === "/api/v1/admin/evidence/backups") return json([]);
       if (path === "/api/v1/admin/evidence") return json({ initialised: true, mode: "local", instance_id: "instance-1", head_sha256: "a".repeat(64) });
       if (path === "/api/v1/admin/evidence/verify") return json({ records: 23, head_sha256: "b".repeat(64) });
+      if (path === "/api/v1/admin/evidence/export") return new Response("zip", {
+        status: 200,
+        headers: {
+          "Content-Type": "application/zip",
+          "Content-Disposition": 'attachment; filename="accountability-evidence-example.zip"',
+          "X-Evidence-Chain-Head": "c".repeat(64),
+        },
+      });
       if (path === "/api/v1/admin/evidence/trust-keys") return json([]);
       if (path === "/api/v1/admin/evidence/archive") return json({ enabled: false, authentication: "Disabled", repository: null, default_branch: null, latest_local_chain_head: null, latest_bundled_chain_head: null, latest_archived_chain_head: null, pending_submission_count: 0, submission_id: null, state: null, pull_request_number: null, pull_request_head_sha: null, merge_commit_sha: null, failure_reason: null });
       throw new Error(`Unexpected path: ${path}`);
@@ -74,6 +84,23 @@ describe("ComplianceEvidenceTab", () => {
       { method: "POST", body: "{}" },
     ));
     expect(await screen.findByText(/Verified 23 records/)).toBeInTheDocument();
+  });
+
+  it("downloads the complete ZIP and reveals the optional local verifier", async () => {
+    const { ComplianceEvidenceTab } = await import("@/components/ComplianceEvidenceTab");
+    render(<ComplianceEvidenceTab events={[]} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Download evidence ZIP" }));
+
+    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledWith(
+      "/api/v1/admin/evidence/export",
+      { method: "POST", body: "{}" },
+    ));
+    expect(await screen.findByText(/Downloaded the verified chain/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open the local evidence verifier" })).toHaveAttribute(
+      "href",
+      "https://brian-funk.github.io/masterplanOptimiserV3---Evidence-Public/verify-evidence/",
+    );
   });
 
   it("collapses completed cases to type, completion date, and final receipt SHA", async () => {
