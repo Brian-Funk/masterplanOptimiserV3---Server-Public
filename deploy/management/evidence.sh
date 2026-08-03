@@ -2,6 +2,7 @@
 # Signed accountability evidence verification, export and copy guidance.
 
 MP_EVIDENCE_BUNDLE_TOOL="${MP_ROOT}/deploy/evidence/portable_bundle.py"
+MP_COMPLETE_EVIDENCE_TOOL="${MP_ROOT}/deploy/evidence/evidence_bundle.py"
 MP_EVIDENCE_EXPORTS="${MP_STATE}/evidence-exports"
 MP_EVIDENCE_GITHUB_CLIENT="${MP_ROOT}/deploy/evidence/github_token_client.py"
 MP_EVIDENCE_GITHUB_TOKEN="${MP_ROOT}/secrets/evidence_github_fine_grained_token"
@@ -59,10 +60,8 @@ mp_evidence_export_bundle() {
     output="$MP_EVIDENCE_EXPORTS/${timestamp}_accountability-evidence.zip"
     partial="${output}.root"
     [ ! -e "$output" ] && [ ! -e "$partial" ] || return 1
-    if ! result="$(sudo -n python3 "$MP_EVIDENCE_BUNDLE_TOOL" create-local-zip \
+    if ! result="$(sudo -n python3 "$MP_COMPLETE_EVIDENCE_TOOL" create-zip \
         --evidence-home "$MP_EVIDENCE_HOME" \
-        --trust-repository "$MP_EVIDENCE_HOME/controller-trust" \
-        --instance-id "$(mp_env_get MP_INSTANCE_ID)" \
         --output "$partial" 2>&1)"; then
         sudo -n rm -f "$partial"
         ui_error "Signed evidence verification or ZIP creation failed. Nothing was exported.\n\n${result}"
@@ -72,7 +71,7 @@ mp_evidence_export_bundle() {
     chmod 600 "$partial" || return 1
     mv "$partial" "$output" || return 1
     hash="$(sha256sum "$output" | awk '{print $1}')"
-    python3 "$MP_EVIDENCE_BUNDLE_TOOL" verify-zip --zip "$output" >/dev/null || return 1
+    python3 "$MP_COMPLETE_EVIDENCE_TOOL" verify-zip --zip "$output" >/dev/null || return 1
     host="$(hostname -f 2>/dev/null || hostname)"
     copy_text="Complete evidence ZIP: $output
 ZIP SHA-256: $hash
@@ -105,7 +104,7 @@ Create an empty private repository only after the local evidence tests pass.
 After cloning that repository on a trusted workstation, stage the verified bundle with:
 
 unzip $(printf '%q' "$(basename "$export_zip")") accountability.evidence accountability.evidence.sha256 VERIFYING.txt
-python3 /absolute/path/to/trusted-server-source/deploy/evidence/portable_bundle.py stage-archive \\
+python3 /absolute/path/to/trusted-server-source/deploy/evidence/evidence_bundle.py stage-git \\
   --bundle /absolute/path/to/copied/accountability.evidence \\
   --archive /absolute/path/to/cloned-evidence-repository
 

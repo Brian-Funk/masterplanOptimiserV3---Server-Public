@@ -11,12 +11,9 @@ from app.services import evidence_export
 
 def test_complete_export_uses_fixed_tool_arguments_and_cleans_up(monkeypatch, tmp_path):
     evidence_home = tmp_path / "evidence"
-    trust_root = evidence_home / "controller-trust"
     evidence_home.mkdir()
-    trust_root.mkdir()
     monkeypatch.setattr(settings, "EVIDENCE_HOME", str(evidence_home))
-    monkeypatch.setattr(settings, "EVIDENCE_TRUST_ROOT", str(trust_root))
-    monkeypatch.setattr(evidence_export, "EXPORT_TOOL", tmp_path / "portable_bundle.py")
+    monkeypatch.setattr(evidence_export, "EXPORT_TOOL", tmp_path / "evidence_bundle.py")
     instance_id = "11111111-1111-4111-8111-111111111111"
 
     def run(command, **kwargs):
@@ -31,8 +28,9 @@ def test_complete_export_uses_fixed_tool_arguments_and_cleans_up(monkeypatch, tm
             "record_count": 3,
             "zip_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
         }
-        assert command[2] == "create-local-zip"
-        assert command[command.index("--trust-repository") + 1] == str(trust_root)
+        assert command[2] == "create-zip"
+        assert command[command.index("--evidence-home") + 1] == str(evidence_home)
+        assert "--trust-repository" not in command
         assert kwargs == {"check": False, "capture_output": True, "text": True, "timeout": 120}
         return CompletedProcess(command, 0, json.dumps(metadata), "")
 

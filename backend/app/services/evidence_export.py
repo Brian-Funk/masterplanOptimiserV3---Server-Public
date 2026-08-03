@@ -9,11 +9,10 @@ import subprocess
 import sys
 import tempfile
 
-from app.core.config import settings
 from app.core.evidence import EvidenceUnavailable, evidence_home
 
 
-EXPORT_TOOL = Path("/app/evidence/portable_bundle.py")
+EXPORT_TOOL = Path("/app/evidence/evidence_bundle.py")
 
 
 def create_complete_evidence_export(instance_id: str) -> tuple[Path, dict]:
@@ -24,13 +23,9 @@ def create_complete_evidence_export(instance_id: str) -> tuple[Path, dict]:
     command = [
         sys.executable,
         str(EXPORT_TOOL),
-        "create-local-zip",
+        "create-zip",
         "--evidence-home",
         str(evidence_home()),
-        "--trust-repository",
-        settings.EVIDENCE_TRUST_ROOT,
-        "--instance-id",
-        instance_id,
         "--output",
         str(output),
     ]

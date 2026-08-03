@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +51,28 @@ def test_bundle_round_trip_and_idempotent_git_staging(tmp_path):
     assert verified["record_count"] == 1
     assert first["status"] == "staged"
     assert second["status"] == "already_staged"
+
+
+def test_complete_zip_is_deterministic_exact_and_verified(tmp_path):
+    home = _ledger(tmp_path)
+    first_bundle = tmp_path / "first.evidence"
+    second_bundle = tmp_path / "second.evidence"
+    first_zip = tmp_path / "first.zip"
+    second_zip = tmp_path / "second.zip"
+
+    evidence_bundle.create_bundle(home, first_bundle)
+    evidence_bundle.create_bundle(home, second_bundle)
+    evidence_bundle.create_evidence_zip(home, first_zip)
+    evidence_bundle.create_evidence_zip(home, second_zip)
+
+    assert first_bundle.read_bytes() == second_bundle.read_bytes()
+    assert first_zip.read_bytes() == second_zip.read_bytes()
+    result = evidence_bundle.verify_evidence_zip(first_zip)
+    assert result["valid"] is True
+    assert result["valid_zip"] is True
+    with zipfile.ZipFile(first_zip) as archive:
+        assert tuple(archive.namelist()) == evidence_bundle.ZIP_MEMBERS
+        assert evidence_bundle.PUBLIC_VERIFIER_URL.encode("ascii") in archive.read("VERIFYING.txt")
 
 
 def test_bundle_tampering_is_rejected(tmp_path):
