@@ -1050,11 +1050,11 @@ function EventsTab({
             {deletionCase.requestId}
           </p>
           <p className="mt-2 text-xs text-blue-800 dark:text-blue-200">
-            No immediate cascade deletion was performed. Complete the accountable
-            Desktop, Server, backup, checklist, and approval steps in Privacy evidence.
+            Masterplan will advance the controlled deletion steps and show only
+            the decisions that need you.
           </p>
           <Button className="mt-3" size="sm" variant="outline" onClick={onOpenPrivacy}>
-            Open Privacy evidence
+            Open deletion progress
           </Button>
         </div>
       )}
@@ -1835,7 +1835,7 @@ function UsersTab({
       setRemovalError(
         cause instanceof Error
           ? cause.message
-          : "Deletion was cancelled or passkey authorization failed.",
+          : "Deletion was cancelled or authorization failed.",
       );
     } finally {
       setRemovalBusyId(null);
@@ -2581,11 +2581,11 @@ function UsersTab({
             {accountDeletionCase.requestId}
           </p>
           <p className="mt-2 text-xs text-blue-800 dark:text-blue-200">
-            {accountDeletionCase.message} Continue the verified live-data,
-            backup, checklist, and approval steps in Privacy evidence.
+            {accountDeletionCase.message} Masterplan will advance the controlled
+            deletion steps and show only the decisions that need you.
           </p>
           <Button className="mt-3" size="sm" variant="outline" onClick={onOpenPrivacy}>
-            Open Privacy evidence
+            Open deletion progress
           </Button>
         </div>
       )}
@@ -4035,10 +4035,7 @@ function UsersTab({
                     will start the accountable deletion case automatically.
                   </p>
                   <p className="mb-3 text-xs text-red-700 dark:text-red-300">
-                    Your administrator passkey authorizes the action. You do
-                    not need to handle a signing key or open a separate
-                    endpoint. Evidence approvals remain explicit before the
-                    case can be completed.
+                    Confirm the action to start the guided deletion workflow.
                   </p>
                   {removalError && (
                     <p className="mb-3 text-sm text-red-700 dark:text-red-300">

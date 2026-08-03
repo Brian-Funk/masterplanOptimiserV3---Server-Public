@@ -18,7 +18,9 @@ const workflow = {
   state: "ready_for_live_purge",
   event_ref: "event-example",
   event_name: "Synthetic Event",
+  subject_name: null,
   subject_ref: "",
+  desktop_deletion_required: true,
   topology: "single_node",
   live_data_purged_at: null,
   completed_at: null,
@@ -52,11 +54,11 @@ describe("ComplianceEvidenceTab", () => {
     expect(await screen.findByText("Whole-event erasure")).toBeInTheDocument();
     expect(screen.getAllByText("Synthetic Event")).toHaveLength(2);
     expect(screen.getByText("Next required step")).toBeInTheDocument();
-    expect(screen.getByText(/Run the controlled Server live-data purge/i)).toBeInTheDocument();
+    expect(screen.getByText(/Deleting the controlled Server copy now/i)).toBeInTheDocument();
     expect(screen.getByText("Desktop report recorded")).toBeInTheDocument();
 
     const advanced = screen.getByText("Advanced evidence archive and signing-key administration").closest("details");
     expect(advanced).not.toHaveAttribute("open");
-    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledTimes(5));
+    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledTimes(6));
   });
 });

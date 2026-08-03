@@ -23,7 +23,9 @@ type Workflow = {
   state: string;
   event_ref: string;
   event_name: string | null;
+  subject_name: string | null;
   subject_ref: string;
+  desktop_deletion_required: boolean;
   topology: "single_node" | "two_node_ha";
   live_data_purged_at: string | null;
   completed_at: string | null;
@@ -143,7 +145,23 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
         apiFetch("/api/v1/admin/evidence/trust-keys"),
         apiFetch("/api/v1/admin/evidence/archive"),
       ]);
-      setWorkflows((await checked(casesResponse)) as Workflow[]);
+      let cases = (await checked(casesResponse)) as Workflow[];
+      const results = await Promise.all(cases
+        .filter((item) => item.state !== "complete")
+        .map(async (item) => {
+          try {
+            return await apiFetch(
+              `/api/v1/admin/deletion-requests/${item.request_id}/advance`,
+              { method: "POST", body: "{}" },
+            );
+          } catch {
+            return null;
+          }
+        }));
+      if (results.some((response) => response?.ok)) {
+        cases = (await checked(await apiFetch("/api/v1/admin/deletion-requests"))) as Workflow[];
+      }
+      setWorkflows(cases);
       setBackups((await checked(backupsResponse)) as BackupRecord[]);
       setEvidence((await checked(evidenceResponse)) as EvidenceStatus);
       setTrustKeys((await checked(keysResponse)) as TrustKey[]);
@@ -153,7 +171,11 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
     }
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+    const interval = window.setInterval(() => void load(), 15000);
+    return () => window.clearInterval(interval);
+  }, [load]);
 
   async function mutate(key: string, path: string, body: object = {}): Promise<boolean> {
     setBusy(key);
@@ -310,56 +332,79 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
       .filter((record) => record.status === "superseded_pending_deletion")
       .map((record) => record.package_id);
     const approved = new Set(item.approvals.map((approval) => approval.role));
+    const desktopComplete = !item.desktop_deletion_required
+      || Boolean(item.evidence.desktop_report || item.evidence.desktop_absence)
+      || item.desktop_work_orders.some((workOrder) => Boolean(workOrder.report_sha256));
     const buttons = [];
 
-    if (["submitted", "under_review"].includes(item.state)) {
-      buttons.push(<Button key="accept" size="sm" onClick={() => mutate(`${item.request_id}-accept`, `${prefix}/accept`)} disabled={!!busy}>Accept and revoke access</Button>);
-    }
-    if (item.state === "ready_for_live_purge") {
-      buttons.push(<Button key="purge" size="sm" variant="danger" onClick={() => mutate(`${item.request_id}-purge`, `${prefix}/purge-live`)} disabled={!!busy}>Delete server live data</Button>);
+    if (!desktopComplete) {
+      buttons.push(<Button key="desktop-absent" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-desktop-absent`, `${prefix}/desktop-already-absent`)} disabled={!!busy}>Desktop data is already gone</Button>);
     }
     if (outstanding.length > 0) {
       buttons.push(<Button key="external" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-external`, `${prefix}/resolve-outstanding-actions`, { actions: outstanding })} disabled={!!busy}>Confirm exact external actions</Button>);
     }
     if (item.live_data_purged_at && item.topology === "two_node_ha" && !item.evidence.peer) {
-      buttons.push(<Button key="peer" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-peer`, `${prefix}/peer-replication`)} disabled={!!busy}>Replicate and verify peer</Button>);
+      buttons.push(<Button key="peer" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-peer`, `${prefix}/peer-replication`)} disabled={!!busy}>Verify the other server</Button>);
     }
-    if (item.live_data_purged_at && (item.topology === "single_node" || item.evidence.peer) && !item.evidence.clean_backup) {
-      buttons.push(<Button key="backup" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-backup`, `${prefix}/${item.clean_backup_bridge.job_id ? "apply-clean-backup-receipt" : "clean-backup-request"}`)} disabled={!!busy}>{item.clean_backup_bridge.job_id ? "Apply verified snapshot receipt" : "Request clean recovery snapshot"}</Button>);
+    if (item.live_data_purged_at && (item.topology === "single_node" || item.evidence.peer) && !item.evidence.clean_backup && !item.evidence.backup_not_applicable && !item.clean_backup_bridge.job_id) {
+      buttons.push(<Button key="backup" size="sm" onClick={() => mutate(`${item.request_id}-backup`, `${prefix}/clean-backup-request`)} disabled={!!busy}>Create a recovery snapshot</Button>);
+      if (backups.length === 0) {
+        buttons.push(<Button key="no-backup" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-no-backup`, `${prefix}/no-controlled-backups`)} disabled={!!busy}>No recovery backups are used</Button>);
+      }
     }
     if (item.evidence.clean_backup && unresolvedPackages.length > 0 && !item.evidence.backup_resolution) {
       buttons.push(<Button key="old-backups" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-old-backups`, `${prefix}/resolve-backups`, { package_ids: unresolvedPackages })} disabled={!!busy}>Confirm superseded packages deleted</Button>);
     }
-    if (item.evidence.clean_backup && unresolvedPackages.length === 0 && !item.checklist.sha256) {
-      buttons.push(<Button key="checklist" size="sm" onClick={() => mutate(`${item.request_id}-checklist`, `${prefix}/checklist`)} disabled={!!busy}>Freeze deletion checklist</Button>);
-    }
     if (item.checklist.sha256) {
-      for (const role of ["executor", "controller"] as const) {
-        if (!approved.has(role)) buttons.push(<Button key={role} size="sm" variant="outline" onClick={() => approveChecklist(item, role)} disabled={!!busy}>Approve as {role}</Button>);
+      if (!approved.has("executor") || !approved.has("controller")) {
+        buttons.push(<Button key="completion" size="sm" onClick={() => confirmCompletion(item)} disabled={!!busy}>Confirm completion</Button>);
       }
       if (item.checklist.processor_approval_required && !approved.has("processor")) {
-        buttons.push(<Button key="processor" size="sm" variant="outline" onClick={() => approveChecklist(item, "processor")} disabled={!!busy}>Approve as processor</Button>);
+        buttons.push(<Button key="processor" size="sm" variant="outline" onClick={() => approveChecklist(item, "processor")} disabled={!!busy}>Confirm processor review</Button>);
       }
     }
-    if (item.state === "ready_for_completion") {
-      buttons.push(<Button key="complete" size="sm" onClick={() => mutate(`${item.request_id}-complete`, `${prefix}/finalise`)} disabled={!!busy}>Complete verified case</Button>);
-    }
     return buttons;
+  }
+
+  async function confirmCompletion(item: Workflow) {
+    const key = `${item.request_id}-confirm-completion`;
+    setBusy(key);
+    setError("");
+    try {
+      const begin = await checked(await apiFetch(
+        `/api/v1/admin/deletion-requests/${item.request_id}/completion-confirmation/begin`,
+        { method: "POST", body: "{}" },
+      )) as { options: string; ceremony_id: string };
+      const credential = await startAuthentication({ optionsJSON: JSON.parse(begin.options) });
+      await checked(await apiFetch(
+        `/api/v1/admin/deletion-requests/${item.request_id}/completion-confirmation/complete`,
+        { method: "POST", body: JSON.stringify({ ceremony_id: begin.ceremony_id, credential }) },
+      ));
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Completion confirmation failed.");
+    } finally {
+      setBusy("");
+    }
   }
 
   function nextStepSummary(item: Workflow): string {
     const unresolvedPackages = backups.filter((record) => record.status === "superseded_pending_deletion");
     const approved = new Set(item.approvals.map((approval) => approval.role));
-    if (["submitted", "under_review"].includes(item.state)) return "Review the request, accept it and revoke access before destructive work begins.";
-    if (item.state === "ready_for_live_purge") return "Run the controlled Server live-data purge. This does not claim deletion from systems outside this deployment.";
+    const desktopComplete = !item.desktop_deletion_required
+      || Boolean(item.evidence.desktop_report || item.evidence.desktop_absence)
+      || item.desktop_work_orders.some((workOrder) => Boolean(workOrder.report_sha256));
+    if (!desktopComplete) return "Open this event in Desktop and process its deletion request. If the local copy is already gone, confirm that here instead.";
+    if (item.state === "ready_for_live_purge") return "Deleting the controlled Server copy now.";
     if (item.retention.outstanding_actions.length > 0) return "Record the outcome of each named external action. Confirm only actions the controller has actually verified.";
-    if (item.live_data_purged_at && item.topology === "two_node_ha" && !item.evidence.peer) return "Replicate the purge to the peer and verify the controlled HA state.";
-    if (item.live_data_purged_at && (item.topology === "single_node" || item.evidence.peer) && !item.evidence.clean_backup) return "Create a clean recovery snapshot, or apply its independently verified receipt.";
+    if (item.live_data_purged_at && item.topology === "two_node_ha" && !item.evidence.peer) return "Verify that the deletion reached the other server.";
+    if (item.clean_backup_bridge.job_id && !item.evidence.clean_backup) return "Finish the recovery snapshot in mp-opt. This page will detect it automatically.";
+    if (item.live_data_purged_at && (item.topology === "single_node" || item.evidence.peer) && !item.evidence.clean_backup && !item.evidence.backup_not_applicable) return "Choose whether this deployment uses recovery backups.";
     if (item.evidence.clean_backup && unresolvedPackages.length > 0 && !item.evidence.backup_resolution) return "Resolve the listed superseded backup packages only after their deletion has been verified.";
-    if (item.evidence.clean_backup && unresolvedPackages.length === 0 && !item.checklist.sha256) return "Freeze the exact deletion checklist so the required roles can review the same immutable content.";
-    if (item.checklist.sha256 && (!approved.has("executor") || !approved.has("controller") || (item.checklist.processor_approval_required && !approved.has("processor")))) return "Collect each required passkey approval for the frozen checklist.";
-    if (item.state === "ready_for_completion") return "Complete the case and create its final signed record.";
-    if (item.state === "complete") return "No further workflow action is required. Retain the signed record according to the controller's declared policy.";
+    if ((item.evidence.clean_backup || item.evidence.backup_not_applicable) && unresolvedPackages.length === 0 && !item.checklist.sha256) return "Preparing the final review now.";
+    if (item.checklist.sha256 && (!approved.has("executor") || !approved.has("controller") || (item.checklist.processor_approval_required && !approved.has("processor")))) return "Review the completed actions and confirm the case.";
+    if (item.state === "ready_for_completion") return "Completing the case now.";
+    if (item.state === "complete") return "Deletion is complete. The accountability record remains under the declared retention policy.";
     return "Refresh the case after the outstanding Desktop or operator step is complete.";
   }
 
@@ -468,9 +513,9 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
       <Card className="space-y-3 p-4">
         <div>
           <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Start whole-event erasure</p>
-          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Use this only when the controller has authorised removal of the entire event. Starting a case revokes access and coordinates controlled Desktop, Server, HA and backup work; each destructive step still requires its own confirmation.</p>
+          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Use this only when the controller has authorised removal of the entire event. Masterplan will coordinate the controlled copies and stop only when it needs information from you.</p>
         </div>
-        <Guidance title="Before starting">Confirm that this is a whole-event request, not one person&apos;s erasure request. Select processor approval only when that separate role must sign the final checklist.</Guidance>
+        <Guidance title="Before starting">Confirm that this is a whole-event request, not one person&apos;s erasure request. Enable processor review only when a distinct processor must separately review completion.</Guidance>
         <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
           <label className="text-xs font-medium text-gray-600 dark:text-gray-300">Event to erase<select value={eventId} onChange={(event) => setEventId(event.target.value)} className="mt-1 block min-h-11 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800">
             <option value="">Choose event</option>
@@ -478,14 +523,14 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
           </select></label>
           <Button variant="danger" onClick={startEventErasure} disabled={!eventId || !!busy}>Start controlled erasure case</Button>
         </div>
-        <label className="flex items-start gap-2 rounded-lg border border-gray-200 p-3 text-xs text-gray-600 dark:border-gray-700 dark:text-gray-300"><input className="mt-0.5" type="checkbox" checked={processorApproval} onChange={(event) => setProcessorApproval(event.target.checked)} /><span><strong>Require a processor signature.</strong> Enable only when a distinct processor must approve the immutable final checklist.</span></label>
+        <label className="flex items-start gap-2 rounded-lg border border-gray-200 p-3 text-xs text-gray-600 dark:border-gray-700 dark:text-gray-300"><input className="mt-0.5" type="checkbox" checked={processorApproval} onChange={(event) => setProcessorApproval(event.target.checked)} /><span><strong>Require a separate processor review.</strong> Enable only when a distinct processor must confirm completion.</span></label>
       </Card>
 
       {workflows.map((item) => {
         const workOrder = item.desktop_work_orders[0];
         const actions = nextActions(item);
         const approved = new Set(item.approvals.map((approval) => approval.role));
-        const desktopRecorded = Boolean(workOrder?.report_sha256);
+        const desktopRecorded = Boolean(workOrder?.report_sha256 || item.evidence.desktop_absence || !item.desktop_deletion_required);
         const peerRecorded = item.topology === "single_node" || Boolean(item.evidence.peer);
         const approvalsComplete = Boolean(item.checklist.sha256)
           && approved.has("executor")
@@ -500,25 +545,19 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
                 <p className="mt-1 text-sm text-gray-700 dark:text-gray-300">
                   Event: <strong>{item.event_name || (item.case_type === "personal_data_erasure" ? "No event assigned" : "Name unavailable for this earlier case")}</strong>
                 </p>
+                {item.case_type === "personal_data_erasure" && <p className="mt-1 text-sm text-gray-700 dark:text-gray-300">Account: <strong>{item.subject_name || "Name unavailable for this earlier case"}</strong></p>}
               </div>
               <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${item.state === "complete" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300" : item.state === "restricted_retention" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300" : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"}`}>{item.state.replaceAll("_", " ")}</span>
             </div>
-            <div className="grid gap-2 rounded-lg bg-gray-50 p-3 text-xs text-gray-600 dark:bg-gray-900/50 dark:text-gray-300 sm:grid-cols-2">
-              <p>Event ref: <span className="font-mono break-all">{item.event_ref}</span></p>
-              {item.case_type === "personal_data_erasure" && <p>Subject ref: <span className="font-mono break-all">{item.subject_ref}</span></p>}
-              <p>Desktop: {workOrder?.state.replaceAll("_", " ") || "not issued"}</p>
-              <p>Controlled Server purge: {item.live_data_purged_at ? "recorded" : "pending"}</p>
-              <p>Signed phases: {Object.values(item.evidence).filter(Boolean).length}</p>
-              <p>Approvals: {item.approvals.map((approval) => approval.role).join(", ") || "pending"}</p>
-            </div>
+            <details className="rounded-lg bg-gray-50 p-3 text-xs text-gray-600 dark:bg-gray-900/50 dark:text-gray-300"><summary className="cursor-pointer font-medium">Technical details</summary><div className="mt-3 grid gap-2 sm:grid-cols-2"><p>Event reference: <span className="font-mono break-all">{item.event_ref}</span></p>{item.case_type === "personal_data_erasure" && <p>Account reference: <span className="font-mono break-all">{item.subject_ref}</span></p>}<p>Desktop status: {workOrder?.state.replaceAll("_", " ") || "not required"}</p><p>Recorded stages: {Object.values(item.evidence).filter(Boolean).length}</p></div></details>
             <div><p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Case progress</p><ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
               <CaseStep complete={!['submitted', 'under_review'].includes(item.state)} label="Request accepted" />
               <CaseStep complete={desktopRecorded} label="Desktop report recorded" />
               <CaseStep complete={Boolean(item.live_data_purged_at)} label="Server purge recorded" />
               <CaseStep complete={peerRecorded} label={item.topology === "two_node_ha" ? "HA peer verified" : "Single-node scope"} />
-              <CaseStep complete={Boolean(item.evidence.clean_backup)} label="Clean snapshot recorded" />
-              <CaseStep complete={Boolean(item.checklist.sha256)} label="Checklist frozen" />
-              <CaseStep complete={approvalsComplete} label="Required approvals" />
+              <CaseStep complete={Boolean(item.evidence.clean_backup || item.evidence.backup_not_applicable)} label="Recovery policy resolved" />
+              <CaseStep complete={Boolean(item.checklist.sha256)} label="Completion review ready" />
+              <CaseStep complete={approvalsComplete} label="Completion confirmed" />
               <CaseStep complete={item.state === "complete"} label="Case completed" />
             </ol></div>
             {item.retention.reason_code && <div className="flex items-start gap-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-800 dark:bg-amber-900/20 dark:text-amber-200"><TriangleAlert size={15} className="mt-0.5 shrink-0" /><span>Blocked: {item.retention.reason_code.replaceAll("_", " ")}</span></div>}

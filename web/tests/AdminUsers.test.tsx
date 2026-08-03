@@ -178,7 +178,7 @@ describe("Admin users", () => {
     ));
     expect(await screen.findByText("Deletion case started for OWIII.")).toBeInTheDocument();
     expect(screen.getByText("del-event-example-1")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open Privacy evidence" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open deletion progress" })).toBeInTheDocument();
   });
 
   it("shows the server reason when an event deletion case is rejected", async () => {
@@ -288,7 +288,7 @@ describe("Admin users", () => {
     ));
     expect(await screen.findByText("Accountable deletion started for Unassigned.")).toBeInTheDocument();
     expect(screen.getByText("del-account-example-1")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open Privacy evidence" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open deletion progress" })).toBeInTheDocument();
   });
 
   it("shows the stored expiry for an individually generated activation link", async () => {
