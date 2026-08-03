@@ -58,6 +58,11 @@ type EvidenceStatus = {
   instance_id: string | null;
   head_sha256: string | null;
 };
+type ChainVerification = {
+  records: number;
+  head_sha256: string;
+  verified_at: string;
+};
 type ArchiveStatus = {
   enabled: boolean;
   authentication: "Disabled" | "Fine-grained GitHub personal access token";
@@ -118,6 +123,12 @@ function CaseStep({ complete, label }: { complete: boolean; label: string }) {
   return <li className={`flex items-center gap-2 text-xs ${complete ? "text-green-700 dark:text-green-300" : "text-gray-500 dark:text-gray-400"}`}>{complete ? <CheckCircle size={15} aria-hidden="true" /> : <Circle size={15} aria-hidden="true" />}<span>{label}</span></li>;
 }
 
+function formatCompletionDate(value: string | null): string {
+  if (!value) return "Completion time unavailable";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
 /** Root-facing control for the strict deletion-case workflow. */
 export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
@@ -138,6 +149,7 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
   const [registrationPackage, setRegistrationPackage] = useState("");
   const [previousProofPackage, setPreviousProofPackage] = useState("");
   const [statementPackage, setStatementPackage] = useState("");
+  const [chainVerification, setChainVerification] = useState<ChainVerification | null>(null);
 
   const load = useCallback(async () => {
     setError("");
@@ -206,6 +218,27 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
     })) {
       setEventId("");
       setProcessorApproval(false);
+    }
+  }
+
+  async function verifyCompleteChain() {
+    setBusy("verify-complete-chain");
+    setError("");
+    try {
+      const result = await checked(await withReauth(() => apiFetch(
+        "/api/v1/admin/evidence/verify",
+        { method: "POST", body: "{}" },
+      ))) as { records: number; head_sha256: string };
+      setChainVerification({
+        records: result.records,
+        head_sha256: result.head_sha256,
+        verified_at: new Date().toISOString(),
+      });
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The evidence chain could not be verified.");
+    } finally {
+      setBusy("");
     }
   }
 
@@ -416,6 +449,9 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
     return "Refresh the case after the outstanding Desktop or operator step is complete.";
   }
 
+  const openWorkflows = workflows.filter((item) => item.state !== "complete");
+  const completedWorkflows = workflows.filter((item) => item.state === "complete");
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -429,8 +465,8 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
       {error && <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-900/20 dark:text-red-300">{error}</p>}
       <Guidance title="What a signed deletion record proves" tone="amber">It records the actions and confirmations made inside the controlled workflow. It does not prove physical deletion from providers, recipient devices, external calendars or other systems outside the controller&apos;s verified control.</Guidance>
       <div className="grid gap-3 md:grid-cols-3">
-        <Card className="flex items-start gap-3 p-4"><FileCheck2 size={20} className="mt-0.5 text-blue-600" /><div><p className="text-xs text-gray-500">Signed ledger</p><p className="mt-1 text-sm font-semibold">{evidence?.initialised ? "Ready" : "Unavailable"}</p>{evidence?.head_sha256 && <p className="mt-1 truncate font-mono text-xs text-gray-500" title={evidence.head_sha256}>Head {evidence.head_sha256.slice(0, 12)}…</p>}</div></Card>
-        <Card className="flex items-start gap-3 p-4"><ShieldCheck size={20} className="mt-0.5 text-blue-600" /><div><p className="text-xs text-gray-500">Open cases</p><p className="mt-1 text-sm font-semibold">{workflows.filter((item) => item.state !== "complete").length}</p><p className="mt-1 text-xs text-gray-500">{workflows.filter((item) => item.state === "complete").length} completed</p></div></Card>
+        <Card className="flex items-start gap-3 p-4"><FileCheck2 size={20} className="mt-0.5 text-blue-600" /><div className="min-w-0 flex-1"><p className="text-xs text-gray-500">Signed ledger</p><p className="mt-1 text-sm font-semibold">{evidence?.initialised ? "Ready" : "Unavailable"}</p>{evidence?.head_sha256 && <p className="mt-1 truncate font-mono text-xs text-gray-500" title={evidence.head_sha256}>Head {evidence.head_sha256.slice(0, 12)}…</p>}<Button className="mt-3" size="sm" variant="outline" onClick={() => void verifyCompleteChain()} disabled={!evidence?.initialised || !!busy}>{busy === "verify-complete-chain" ? "Verifying…" : "Verify complete chain"}</Button>{chainVerification && <p className="mt-2 text-xs text-green-700 dark:text-green-300">Verified {chainVerification.records} records at {formatCompletionDate(chainVerification.verified_at)}.<span className="mt-1 block truncate font-mono" title={chainVerification.head_sha256}>{chainVerification.head_sha256}</span></p>}</div></Card>
+        <Card className="flex items-start gap-3 p-4"><ShieldCheck size={20} className="mt-0.5 text-blue-600" /><div><p className="text-xs text-gray-500">Open cases</p><p className="mt-1 text-sm font-semibold">{openWorkflows.length}</p><p className="mt-1 text-xs text-gray-500">{completedWorkflows.length} completed</p></div></Card>
         <Card className="flex items-start gap-3 p-4"><HardDrive size={20} className="mt-0.5 text-blue-600" /><div><p className="text-xs text-gray-500">Evidence archive</p><p className="mt-1 text-sm font-semibold">{archive?.enabled ? "Enabled" : "Optional / disabled"}</p><p className="mt-1 text-xs text-gray-500">{archive?.pending_submission_count ?? 0} pending submission(s)</p></div></Card>
       </div>
 
@@ -534,7 +570,7 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
         <label className="flex items-start gap-2 rounded-lg border border-gray-200 p-3 text-xs text-gray-600 dark:border-gray-700 dark:text-gray-300"><input className="mt-0.5" type="checkbox" checked={processorApproval} onChange={(event) => setProcessorApproval(event.target.checked)} /><span><strong>Require a separate processor review.</strong> Enable only when a distinct processor must confirm completion.</span></label>
       </Card>
 
-      {workflows.map((item) => {
+      {openWorkflows.map((item) => {
         const workOrder = item.desktop_work_orders[0];
         const actions = nextActions(item);
         const approved = new Set(item.approvals.map((approval) => approval.role));
@@ -573,6 +609,21 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
           </Card>
         );
       })}
+
+      {completedWorkflows.length > 0 && (
+        <details className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
+          <summary className="cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100">Completed cases ({completedWorkflows.length})</summary>
+          <div className="mt-3 divide-y divide-gray-200 dark:divide-gray-700">
+            {completedWorkflows.map((item) => (
+              <div key={item.request_id} className="grid gap-2 py-3 text-sm md:grid-cols-[minmax(0,0.7fr)_minmax(0,1fr)_minmax(0,2fr)] md:items-center">
+                <p className="font-medium text-gray-900 dark:text-gray-100">{item.case_type === "event_erasure" ? "Event erasure" : "User erasure"}</p>
+                <p className="text-gray-600 dark:text-gray-300">{formatCompletionDate(item.completed_at)}</p>
+                <p className="break-all font-mono text-xs text-gray-500" title={item.evidence.final || ""}>{item.evidence.final || "Final receipt SHA unavailable"}</p>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
 
       {workflows.length === 0 && <Card className="p-6 text-center text-sm text-gray-500"><CheckCircle className="mx-auto mb-2" />No deletion cases have been recorded.</Card>}
     </div>
