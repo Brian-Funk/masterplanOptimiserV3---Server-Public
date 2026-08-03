@@ -1047,12 +1047,18 @@ def create_user(
     if existing:
         raise HTTPException(status_code=409, detail="Username already taken")
 
-    # Validate event exists  -  event_id is mandatory for non-root users
+    # Root may prepare an ordinary account before deciding its event. Other
+    # operators remain event-scoped, and privileged roles must always have an
+    # event so they cannot acquire ambiguous global access.
     if not body.event_id:
-        raise HTTPException(status_code=422, detail="event_id is required")
-    event = db.query(Event).filter(Event.id == body.event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
+        if not admin.is_root_admin:
+            raise HTTPException(status_code=422, detail="event_id is required")
+        if body.is_admin or body.is_issuer:
+            raise HTTPException(status_code=422, detail="Privileged users require an event")
+    else:
+        event = db.query(Event).filter(Event.id == body.event_id).first()
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
 
     user = User(
         username=body.username,
@@ -1329,7 +1335,7 @@ def update_user(
             raise HTTPException(status_code=403, detail="Issuers cannot change admin status")
         if body.is_issuer is not None:
             raise HTTPException(status_code=403, detail="Issuers cannot change issuer status")
-        if body.event_id is not None and body.event_id != admin.event_id:
+        if "event_id" in body.model_fields_set and body.event_id != admin.event_id:
             raise HTTPException(status_code=403, detail="Issuers cannot reassign users to other events")
 
     # Only a recently re-authenticated root may change global roles.
@@ -1343,13 +1349,21 @@ def update_user(
     if body.is_active is not None and body.is_active != user.is_active:
         ensure_recent_reauth(admin, db)
 
-    if body.event_id is not None:
+    event_field_supplied = "event_id" in body.model_fields_set
+    if event_field_supplied and body.event_id is None:
+        if not admin.is_root_admin:
+            raise HTTPException(status_code=403, detail="Only root admin can unassign users")
+        if user.is_admin or user.is_issuer:
+            raise HTTPException(status_code=409, detail="Privileged users require an event")
+    if event_field_supplied and body.event_id is not None:
         event = db.query(Event).filter(Event.id == body.event_id).first()
         if event is None:
             raise HTTPException(status_code=404, detail="Event not found")
 
-    event_changed = body.event_id is not None and body.event_id != user.event_id
-    effective_event_id = body.event_id if body.event_id is not None else user.event_id
+    event_changed = event_field_supplied and body.event_id != user.event_id
+    if event_changed:
+        ensure_recent_reauth(admin, db)
+    effective_event_id = body.event_id if event_field_supplied else user.event_id
     linked_person = None
     if body.linked_person_id is not None:
         linked_person = (
@@ -1391,7 +1405,7 @@ def update_user(
         user.linked_person_id = body.linked_person_id
         if linked_person is not None:
             user.evidence_subject_id = linked_person.evidence_subject_id
-    if body.event_id is not None:
+    if event_field_supplied:
         user.event_id = body.event_id
         if event_changed and "linked_person_id" not in body.model_fields_set:
             user.linked_person_id = None

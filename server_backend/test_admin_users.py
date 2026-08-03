@@ -244,6 +244,48 @@ def test_reauthenticated_root_can_set_issuer(db):
     assert response.json()["user"]["is_issuer"] is True
 
 
+def test_root_can_create_an_unassigned_ordinary_user(db, root_client):
+    response = root_client.post("/api/v1/admin/users", json={
+        "username": "awaiting.assignment",
+        "display_name": "Awaiting Assignment",
+        "event_id": None,
+    })
+
+    assert response.status_code == 200
+    assert response.json()["user"]["event_id"] is None
+
+
+def test_non_root_admin_cannot_create_an_unassigned_user(db, admin_client):
+    response = admin_client.post("/api/v1/admin/users", json={
+        "username": "unscoped.account",
+        "display_name": "Unscoped Account",
+        "event_id": None,
+    })
+
+    assert response.status_code == 422
+
+
+def test_reauthenticated_root_can_unassign_an_ordinary_user(db):
+    event, _ = create_test_event(db, name="Assignment Event")
+    root = create_test_user(db, username="assignment.root", is_root_admin=True, is_admin=True)
+    user = create_test_user(db, username="assigned.user", event_id=event.id)
+    client = _make_client(db, root, reauth=True)
+
+    response = client.put(f"/api/v1/admin/users/{user.id}", json={"event_id": None})
+
+    assert response.status_code == 200
+    assert response.json()["event_id"] is None
+
+
+def test_unassigning_a_user_requires_root_reauthentication(db, root_client):
+    event, _ = create_test_event(db, name="Protected Assignment Event")
+    user = create_test_user(db, username="protected.assignment", event_id=event.id)
+
+    response = root_client.put(f"/api/v1/admin/users/{user.id}", json={"event_id": None})
+
+    assert response.status_code == 403
+
+
 # ── GET /admin/users ──
 
 

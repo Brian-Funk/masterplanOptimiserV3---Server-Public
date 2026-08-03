@@ -112,7 +112,7 @@ export default function LoginPage() {
       } else if (user.event_id) {
         router.push(`/calendar?event=${user.event_id}`);
       } else {
-        router.push("/admin");
+        router.push("/unassigned");
       }
     }
   }, [user, isReady, router]);

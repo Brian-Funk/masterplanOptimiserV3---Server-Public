@@ -1482,7 +1482,7 @@ function UsersTab({
         tags: parseTagList(newUser.tags),
       };
       if (!isIssuerOnly) {
-        payload.event_id = Number(newUser.event_id);
+        payload.event_id = newUser.event_id ? Number(newUser.event_id) : null;
       }
       const res = await apiFetch("/api/v1/admin/users", {
         method: "POST",
@@ -1771,6 +1771,20 @@ function UsersTab({
       if (res.ok) onRefresh();
     } catch {
       // The passkey prompt was cancelled or re-authentication failed.
+    }
+  };
+
+  const handleUpdateUserEvent = async (userId: number, eventId: number | null) => {
+    try {
+      const response = await withReauth(() =>
+        apiFetch(`/api/v1/admin/users/${userId}`, {
+          method: "PUT",
+          body: JSON.stringify({ event_id: eventId }),
+        }),
+      );
+      if (response.ok) onRefresh();
+    } catch {
+      // User cancelled passkey re-authentication or the reassignment failed.
     }
   };
 
@@ -2433,7 +2447,9 @@ function UsersTab({
                   }
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-sm"
                 >
-                  <option value="">Select event...</option>
+                  <option value="">
+                    {isRootAdmin ? "No event yet (unassigned)" : "Select event..."}
+                  </option>
                   {events.map((ev) => (
                     <option key={ev.id} value={ev.id}>
                       {ev.name}
@@ -2469,7 +2485,7 @@ function UsersTab({
                 creating ||
                 !newUser.username.trim() ||
                 !newUser.display_name.trim() ||
-                (!isIssuerOnly && !newUser.event_id)
+                (!isIssuerOnly && !isRootAdmin && !newUser.event_id)
               }
             >
               {creating ? "Creating..." : "Create User"}
@@ -3650,6 +3666,29 @@ function UsersTab({
                       Save email
                     </Button>
                   </div>
+                </div>
+              )}
+              {expandedDetailsUser === u.id && u.is_active && isRootAdmin && !u.is_root_admin && (
+                <div className="mt-3 border-t border-gray-100 pt-3 dark:border-gray-700">
+                  <label className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                    Event assignment
+                  </label>
+                  <select
+                    value={u.event_id ?? ""}
+                    onChange={(event) => void handleUpdateUserEvent(
+                      u.id,
+                      event.target.value ? Number(event.target.value) : null,
+                    )}
+                    className="mt-1.5 min-h-11 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 sm:min-h-0"
+                  >
+                    <option value="">No event yet (unassigned)</option>
+                    {events.map((event) => (
+                      <option key={event.id} value={event.id}>{event.name}</option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    Changing the event requires your passkey again and revokes this user&apos;s active sessions.
+                  </p>
                 </div>
               )}
               {expandedDetailsUser === u.id && u.event_id && u.is_active && (
