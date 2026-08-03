@@ -26,6 +26,7 @@ import { SnapshotComparisonModal } from "@/components/SnapshotComparisonModal";
 import { MobileActionSheet } from "@/components/MobileActionSheet";
 import { MobileBottomNavigation } from "@/components/MobileBottomNavigation";
 import { ComplianceEvidenceTab } from "@/components/ComplianceEvidenceTab";
+import { AdminNavigation, type AdminTab } from "@/components/AdminNavigation";
 import { PermittedDataInputNotice } from "@/components/PermittedDataInputNotice";
 import {
   canManagePublicScheduleLinks,
@@ -73,7 +74,6 @@ import {
   Share2,
   CalendarDays,
   MoreHorizontal,
-  Activity,
   Server,
 } from "lucide-react";
 
@@ -292,17 +292,6 @@ function createBulkUserDraft(): BulkUserDraft {
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
-
-type AdminTab =
-  | "events"
-  | "users"
-  | "announcements"
-  | "history"
-  | "public-links"
-  | "security"
-  | "privacy"
-  | "ha"
-  | "audit";
 
 const ADMIN_TABS: AdminTab[] = [
   "events",
@@ -545,95 +534,13 @@ export default function AdminPage() {
       </header>
 
       <main className="max-w-6xl mx-auto px-4 sm:px-6 py-4 md:py-6 space-y-5 md:space-y-6">
-        {user?.is_root_admin && (
-          <Card className="flex flex-col gap-3 border-blue-200 bg-blue-50/60 p-4 dark:border-blue-800 dark:bg-blue-900/10 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="font-medium text-gray-900 dark:text-gray-100">
-                Instance governance and public legal notice
-              </p>
-              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                Configure and publish the real data controller before inviting
-                users. Publishing creates an immutable, signed policy version.
-              </p>
-            </div>
-            <Button
-              variant="outline"
-              onClick={() => router.push("/admin/governance")}
-            >
-              Review governance
-            </Button>
-          </Card>
-        )}
-        {/* Full-width tab bar */}
-        <div className={`${user?.is_root_admin ? "flex" : "hidden md:flex"} flex-wrap gap-1`}>
-          {(
-            [
-                { key: "events", icon: <Plus size={15} />, label: "Events" },
-                { key: "users", icon: <Users size={15} />, label: "Users" },
-                {
-                  key: "announcements",
-                  icon: <Megaphone size={15} />,
-                  label: "Announcements",
-                },
-                {
-                  key: "history",
-                  icon: <History size={15} />,
-                  label: "History",
-                },
-                {
-                  key: "public-links",
-                  icon: <Share2 size={15} />,
-                  label: "Public Links",
-                },
-                {
-                  key: "security",
-                  icon: <Shield size={15} />,
-                  label: "Security",
-                },
-                {
-                  key: "privacy",
-                  icon: <Shield size={15} />,
-                  label: "Deletion Evidence",
-                },
-                {
-                  key: "ha",
-                  icon: <Activity size={15} />,
-                  label: "High Availability",
-                },
-                {
-                  key: "audit",
-                  icon: <FileText size={15} />,
-                  label: "Audit Log",
-                },
-            ] as const
-          )
-            .filter((t) => {
-                if (isIssuerOnly) {
-                  return ["users", "announcements", "history", "public-links"].includes(t.key);
-                }
-                if (t.key === "public-links") {
-                  return canManagePublicScheduleLinks(user);
-                }
-                if (t.key === "security" || t.key === "privacy" || t.key === "ha") {
-                  return !!user?.is_root_admin;
-                }
-                return true;
-            })
-            .map((t) => (
-                <button
-                  key={t.key}
-                  onClick={() => setTab(t.key)}
-                  className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg whitespace-nowrap transition-colors ${
-                    tab === t.key
-                      ? "bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"
-                      : "text-gray-500 hover:text-gray-700 hover:bg-gray-100 dark:text-gray-400 dark:hover:text-gray-200 dark:hover:bg-gray-800"
-                  }`}
-                >
-                  {t.icon}
-                  {t.label}
-                </button>
-            ))}
-        </div>
+        <AdminNavigation
+          active={tab}
+          isRootAdmin={!!user?.is_root_admin}
+          isIssuerOnly={!!isIssuerOnly}
+          canManagePublicLinks={canManagePublicScheduleLinks(user)}
+          onSelect={setTab}
+        />
 
         {/* Event context is separate so it never compresses the root tab bar. */}
         {!isIssuerOnly && EVENT_SCOPED_TABS.includes(tab) &&

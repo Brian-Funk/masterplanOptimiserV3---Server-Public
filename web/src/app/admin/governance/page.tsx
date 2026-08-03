@@ -5,6 +5,7 @@ import Link from "next/link";
 import { AlertTriangle, CheckCircle2, Download, FileText, Info, ShieldCheck, Upload } from "lucide-react";
 
 import { GovernanceEditor } from "@/components/GovernanceEditor";
+import { AdminNavigation } from "@/components/AdminNavigation";
 import { Logo } from "@/components/Logo";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/Button";
@@ -198,7 +199,8 @@ export default function GovernanceAdminPage() {
   return <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100">
     <header className="border-b border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800"><div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3"><Logo height={32} href="https://info.mp-opt.net" /><ThemeToggle /></div></header>
     <main className="mx-auto max-w-6xl space-y-6 px-4 py-8">
-      <div><Link href="/admin" className="text-sm font-medium text-blue-700 hover:underline dark:text-blue-300">Back to administration</Link><div className="mt-3 flex items-start gap-3"><ShieldCheck size={30} className="mt-1 text-blue-600" aria-hidden="true" /><div><h1 className="text-3xl font-bold">Instance governance</h1><p className="mt-1 max-w-3xl text-sm text-gray-600 dark:text-gray-300">Build this deployment&apos;s controller-reviewed legal centre. Drafts stay local, and nothing is sent to the software maintainer.</p></div></div></div>
+      <AdminNavigation active="policies" isRootAdmin isIssuerOnly={false} canManagePublicLinks />
+      <div><div className="flex items-start gap-3"><ShieldCheck size={30} className="mt-1 text-blue-600" aria-hidden="true" /><div><h1 className="text-3xl font-bold">Policies &amp; notices</h1><p className="mt-1 max-w-3xl text-sm text-gray-600 dark:text-gray-300">Build this deployment&apos;s controller-reviewed legal centre. Drafts stay local, and nothing is sent to the software maintainer.</p></div></div></div>
       <div role={statusKind === "error" ? "alert" : "status"} className={`rounded-lg border px-4 py-3 text-sm ${statusClasses}`}><strong>{status}</strong><span className="mt-1 block">{publishedVersion ? `Current public version: ${publishedVersion}.` : "No policy is published."} {checks.length > 0 ? `${blockingCount} blocking preflight item(s).` : "Save a draft to run preflight."}</span></div>
 
       <Guidance title="How to use this page">Work from top to bottom. Blue information boxes explain what belongs in each section. Suggested text begins with <strong>TODO</strong> and cannot pass publication preflight until reviewed and replaced. Deployment settings are linked where they affect the notice.</Guidance>
