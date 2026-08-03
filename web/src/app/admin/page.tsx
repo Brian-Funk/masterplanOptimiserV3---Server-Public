@@ -2527,22 +2527,38 @@ function UsersTab({
 
       {/* Created activation link banner */}
       {createdLink && (
-        <div className="bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-800 rounded-lg p-4">
-          <p className="text-sm font-medium text-green-800 dark:text-green-200 mb-2">
-            Activation link (send or show QR code):
-          </p>
-          <div className="flex items-center gap-2">
-            <code className="flex-1 text-xs bg-green-100 dark:bg-green-900/50 px-3 py-1.5 rounded-lg break-all text-green-900 dark:text-green-100">
-              {createdLink}
-            </code>
+        <div className="rounded-xl border border-green-200 bg-green-50/70 p-4 dark:border-green-800 dark:bg-green-900/20">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-semibold text-green-900 dark:text-green-100">
+                Activation link ready
+              </p>
+              <p className="mt-0.5 text-xs text-green-800/80 dark:text-green-200/80">
+                Copy the link or open its printable QR code. Treat either as a temporary account secret.
+              </p>
+            </div>
             <button
-              onClick={() => copyToClipboard(createdLink)}
-              className="p-2 rounded-lg hover:bg-green-200 dark:hover:bg-green-800 transition-colors"
-              title="Copy link"
+              type="button"
+              onClick={() => setCreatedLink("")}
+              className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-green-800 hover:bg-green-100 dark:text-green-200 dark:hover:bg-green-900/50"
             >
-              <Copy size={16} />
+              Dismiss
             </button>
-            <button
+          </div>
+          <code className="mt-3 block max-h-24 overflow-y-auto rounded-lg border border-green-200 bg-white/80 px-3 py-2 text-xs break-all text-green-950 dark:border-green-800 dark:bg-gray-950/30 dark:text-green-100">
+              {createdLink}
+          </code>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => copyToClipboard(createdLink)}
+            >
+              <Copy size={14} /> Copy link
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={() => {
                 window.open(
                   activationQrPath(
@@ -2553,29 +2569,20 @@ function UsersTab({
                   "_blank",
                 );
               }}
-              className="p-2 rounded-lg hover:bg-green-200 dark:hover:bg-green-800 transition-colors"
-              title="Show QR code"
             >
-              <QrCode size={16} />
-            </button>
-          </div>
-          <button
-            onClick={() => setCreatedLink("")}
-            className="text-xs text-green-600 dark:text-green-400 mt-2 underline"
-          >
-            Dismiss
-          </button>
-          {createdUserId &&
-            deliverySettings?.configured &&
-            users.find((user) => user.id === createdUserId)?.has_valid_email && (
+              <QrCode size={14} /> Show QR code
+            </Button>
+            {createdUserId &&
+              deliverySettings?.configured &&
+              users.find((user) => user.id === createdUserId)?.has_valid_email && (
               <Button
                 size="sm"
-                className="mt-3"
                 onClick={() => setEmailConfirmUserId(createdUserId)}
               >
                 <Send size={14} /> Email link and QR
               </Button>
-            )}
+              )}
+          </div>
         </div>
       )}
 

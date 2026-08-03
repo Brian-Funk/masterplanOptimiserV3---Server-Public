@@ -176,6 +176,12 @@ describe("Admin users", () => {
         "event_id",
       );
     });
+
+    expect(await screen.findByText("Activation link ready")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy link" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show QR code" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByText("Activation link ready")).not.toBeInTheDocument();
   });
 
   it("bulk creates users with derived usernames and bulk tags", async () => {
