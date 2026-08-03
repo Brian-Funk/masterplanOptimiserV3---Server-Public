@@ -166,14 +166,13 @@ describe("Admin users", () => {
     expect(
       screen.getByText('Start an accountable deletion case for "OWIII"?'),
     ).toBeInTheDocument();
-    await user.click(screen.getByLabelText(/Require a separate processor approval/));
     await user.click(screen.getByRole("button", { name: "Start deletion case" }));
 
     await waitFor(() => expect(mockApiFetch).toHaveBeenCalledWith(
       "/api/v1/admin/deletion-requests/events/7",
       {
         method: "POST",
-        body: JSON.stringify({ processor_approval_required: true }),
+        body: "{}",
       },
     ));
     expect(await screen.findByText("Deletion case started for OWIII.")).toBeInTheDocument();

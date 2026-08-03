@@ -26,8 +26,9 @@ const workflow = {
   completed_at: null,
   evidence: {},
   retention: { reason_code: null, outstanding_actions: [] },
-  checklist: { sha256: null, processor_approval_required: false },
-  desktop_work_orders: [{ work_order_id: "work-1", operation: "delete_event", state: "completed", report_sha256: "report-sha" }],
+  checklist: { sha256: null },
+  desktop_work_orders: [{ work_order_id: "work-1", operation: "delete_event", state: "report_received", report_sha256: "report-sha", processor_entity_id: "prc-example0001", processor_key_id: "ek-1234567890abcdef", copy_resolution_sha256: "copy-sha" }],
+  required_processors: [{ processor_entity_id: "prc-example0001", event_ref: "event-example", event_name: "Synthetic Event", processor_key_id: "ek-1234567890abcdef", display_label: "Test workstation", state: "complete", deletion_receipt_sha256: "report-sha", copy_resolution_sha256: "copy-sha" }],
   approvals: [],
   clean_backup_bridge: { job_id: null, receipt_id: null, local_snapshot_count: 0 },
 };
@@ -63,13 +64,12 @@ describe("ComplianceEvidenceTab", () => {
     expect(await screen.findByText("What a signed deletion record proves")).toBeInTheDocument();
     expect(screen.getByText(/does not prove physical deletion/i)).toBeInTheDocument();
     expect(await screen.findByText("Whole-event erasure")).toBeInTheDocument();
-    expect(screen.getAllByText("Synthetic Event")).toHaveLength(2);
+    expect(screen.getAllByText("Synthetic Event")).toHaveLength(3);
     expect(screen.getByText("Next required step")).toBeInTheDocument();
     expect(screen.getByText(/Deleting the controlled Server copy now/i)).toBeInTheDocument();
     expect(screen.getByText("Desktop report recorded")).toBeInTheDocument();
 
-    const advanced = screen.getByText("Advanced evidence archive and signing-key administration").closest("details");
-    expect(advanced).not.toHaveAttribute("open");
+    expect(screen.queryByText("Advanced evidence archive and signing-key administration")).not.toBeInTheDocument();
     await waitFor(() => expect(mockApiFetch).toHaveBeenCalledTimes(6));
   });
 

@@ -1,13 +1,6 @@
 import type { Metadata } from "next";
-import { Source_Sans_3 } from "next/font/google";
 import "./globals.css";
 import ClientProviders from "./ClientProviders";
-
-const sourceSans = Source_Sans_3({
-  subsets: ["latin"],
-  display: "swap",
-  variable: "--font-source-sans",
-});
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://mp-opt.net"),
@@ -45,7 +38,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={sourceSans.variable} suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning>
       <body>
         <ClientProviders>{children}</ClientProviders>
       </body>

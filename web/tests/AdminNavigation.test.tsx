@@ -28,6 +28,7 @@ describe("AdminNavigation", () => {
     expect(screen.getAllByText("Governance").length).toBeGreaterThan(0);
     expect(screen.getAllByText("System").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Policies & notices").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Trust & keys").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Deletion evidence").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Audit log").length).toBeGreaterThan(0);
   });

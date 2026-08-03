@@ -17,6 +17,19 @@ type WorkOrder = {
   operation: "delete_subject" | "delete_event";
   state: string;
   report_sha256: string | null;
+  processor_entity_id: string;
+  processor_key_id: string | null;
+  copy_resolution_sha256: string | null;
+};
+type RequiredProcessor = {
+  processor_entity_id: string;
+  event_ref: string;
+  event_name: string | null;
+  processor_key_id: string;
+  display_label: string | null;
+  state: "awaiting_desktop" | "deletion_received" | "complete" | "blocked";
+  deletion_receipt_sha256: string | null;
+  copy_resolution_sha256: string | null;
 };
 type Approval = { role: "executor" | "controller" | "processor"; approval_sha256: string };
 type Workflow = {
@@ -38,9 +51,9 @@ type Workflow = {
   };
   checklist: {
     sha256: string | null;
-    processor_approval_required: boolean;
   };
   desktop_work_orders: WorkOrder[];
+  required_processors: RequiredProcessor[];
   approvals: Approval[];
   clean_backup_bridge: {
     job_id: string | null;
@@ -139,7 +152,6 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
   const [archive, setArchive] = useState<ArchiveStatus | null>(null);
   const [trustKeys, setTrustKeys] = useState<TrustKey[]>([]);
   const [eventId, setEventId] = useState("");
-  const [processorApproval, setProcessorApproval] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [trustPublicKey, setTrustPublicKey] = useState("");
@@ -216,11 +228,8 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
 
   async function startEventErasure() {
     if (!eventId) return;
-    if (await mutate("new-event-erasure", `/api/v1/admin/deletion-requests/events/${eventId}`, {
-      processor_approval_required: processorApproval,
-    })) {
+    if (await mutate("new-event-erasure", `/api/v1/admin/deletion-requests/events/${eventId}`)) {
       setEventId("");
-      setProcessorApproval(false);
     }
   }
 
@@ -373,31 +382,6 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
     }
   }
 
-  async function approveChecklist(item: Workflow, role: Approval["role"]) {
-    const key = `${item.request_id}-approve-${role}`;
-    setBusy(key);
-    setError("");
-    try {
-      const begin = await checked(await apiFetch(
-        `/api/v1/admin/deletion-requests/${item.request_id}/approvals/begin`,
-        { method: "POST", body: JSON.stringify({ role }) },
-      )) as { options: string; ceremony_id: string };
-      const credential = await startAuthentication({ optionsJSON: JSON.parse(begin.options) });
-      await checked(await apiFetch(
-        `/api/v1/admin/deletion-requests/${item.request_id}/approvals/${role}/complete`,
-        {
-          method: "POST",
-          body: JSON.stringify({ ceremony_id: begin.ceremony_id, credential }),
-        },
-      ));
-      await load();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Checklist approval failed.");
-    } finally {
-      setBusy("");
-    }
-  }
-
   function nextActions(item: Workflow) {
     const prefix = `/api/v1/admin/deletion-requests/${item.request_id}`;
     const outstanding = item.retention.outstanding_actions;
@@ -405,14 +389,8 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
       .filter((record) => record.status === "superseded_pending_deletion")
       .map((record) => record.package_id);
     const approved = new Set(item.approvals.map((approval) => approval.role));
-    const desktopComplete = !item.desktop_deletion_required
-      || Boolean(item.evidence.desktop_report || item.evidence.desktop_absence)
-      || item.desktop_work_orders.some((workOrder) => Boolean(workOrder.report_sha256));
     const buttons = [];
 
-    if (!desktopComplete) {
-      buttons.push(<Button key="desktop-absent" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-desktop-absent`, `${prefix}/desktop-already-absent`)} disabled={!!busy}>Desktop data is already gone</Button>);
-    }
     if (outstanding.length > 0) {
       buttons.push(<Button key="external" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-external`, `${prefix}/resolve-outstanding-actions`, { actions: outstanding })} disabled={!!busy}>Confirm exact external actions</Button>);
     }
@@ -431,11 +409,8 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
       buttons.push(<Button key="old-backups" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-old-backups`, `${prefix}/resolve-backups`, { package_ids: unresolvedPackages })} disabled={!!busy}>Confirm superseded packages deleted</Button>);
     }
     if (item.checklist.sha256) {
-      if (!approved.has("executor") || !approved.has("controller")) {
+      if (!approved.has("executor")) {
         buttons.push(<Button key="completion" size="sm" onClick={() => confirmCompletion(item)} disabled={!!busy}>Confirm completion</Button>);
-      }
-      if (item.checklist.processor_approval_required && !approved.has("processor")) {
-        buttons.push(<Button key="processor" size="sm" variant="outline" onClick={() => approveChecklist(item, "processor")} disabled={!!busy}>Confirm processor review</Button>);
       }
     }
     return buttons;
@@ -467,9 +442,8 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
     const unresolvedPackages = backups.filter((record) => record.status === "superseded_pending_deletion");
     const approved = new Set(item.approvals.map((approval) => approval.role));
     const desktopComplete = !item.desktop_deletion_required
-      || Boolean(item.evidence.desktop_report || item.evidence.desktop_absence)
-      || item.desktop_work_orders.some((workOrder) => Boolean(workOrder.report_sha256));
-    if (!desktopComplete) return "Open this event in Desktop and process its deletion request. If the local copy is already gone, confirm that here instead.";
+      || item.required_processors.every((processor) => processor.state === "complete");
+    if (!desktopComplete) return "Open each listed event processor in Desktop. Desktop records controlled data removal and resolves its local copies; root cannot substitute for a processor.";
     if (item.state === "ready_for_live_purge") return "Deleting the controlled Server copy now.";
     if (item.retention.outstanding_actions.length > 0) return "Record the outcome of each named external action. Confirm only actions the controller has actually verified.";
     if (item.live_data_purged_at && item.topology === "two_node_ha" && !item.evidence.peer) return "Verify that the deletion reached the other server.";
@@ -479,7 +453,7 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
     if (item.live_data_purged_at && (item.topology === "single_node" || item.evidence.peer) && !item.evidence.clean_backup && !item.evidence.backup_not_applicable) return "Choose whether this deployment uses recovery backups.";
     if (item.evidence.clean_backup && unresolvedPackages.length > 0 && !item.evidence.backup_resolution) return "Resolve the listed superseded backup packages only after their deletion has been verified.";
     if ((item.evidence.clean_backup || item.evidence.backup_not_applicable) && unresolvedPackages.length === 0 && !item.checklist.sha256) return "Preparing the final review now.";
-    if (item.checklist.sha256 && (!approved.has("executor") || !approved.has("controller") || (item.checklist.processor_approval_required && !approved.has("processor")))) return "Review the completed actions and confirm the case.";
+    if (item.checklist.sha256 && !approved.has("executor")) return "Review the completed Server and Desktop receipts, then confirm completion with the root passkey.";
     if (item.state === "ready_for_completion") return "Completing the case now.";
     if (item.state === "complete") return "Deletion is complete. The accountability record remains under the declared retention policy.";
     return "Refresh the case after the outstanding Desktop or operator step is complete.";
@@ -506,7 +480,7 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
         <Card className="flex items-start gap-3 p-4"><HardDrive size={20} className="mt-0.5 text-blue-600" /><div><p className="text-xs text-gray-500">Evidence archive</p><p className="mt-1 text-sm font-semibold">{archive?.enabled ? "Enabled" : "Optional / disabled"}</p><p className="mt-1 text-xs text-gray-500">{archive?.pending_submission_count ?? 0} pending submission(s)</p></div></Card>
       </div>
 
-      <details className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
+      {false && <details className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
         <summary className="flex cursor-pointer items-center gap-2 font-medium text-gray-900 dark:text-gray-100"><KeyRound size={18} />Advanced evidence archive and signing-key administration</summary>
         <div className="mt-4 space-y-4">
       <Card className="space-y-3 p-4 text-xs text-gray-600 dark:text-gray-300">
@@ -521,13 +495,13 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
           <p>Protected branch: <span className="font-mono">{archive?.default_branch || "not configured"}</span></p>
           <p>Durable state: <strong>{archive?.state || "No submission"}</strong></p>
           <p>Pending submissions: {archive?.pending_submission_count ?? 0}</p>
-          {archive?.pull_request_number && <p>Pull request: #{archive.pull_request_number}</p>}
-          {archive?.failure_reason && <p>Reason: <span className="font-mono">{archive.failure_reason}</span></p>}
+          {archive?.pull_request_number && <p>Pull request: #{archive?.pull_request_number}</p>}
+          {archive?.failure_reason && <p>Reason: <span className="font-mono">{archive?.failure_reason}</span></p>}
         </div>
-        {archive?.submission_id && archive.failure_reason && (
+        {archive?.submission_id && archive?.failure_reason && (
           <Button size="sm" variant="outline" onClick={() => mutate(
-            `archive-retry-${archive.submission_id}`,
-            `/api/v1/admin/evidence/archive/${archive.submission_id}/retry`,
+            `archive-retry-${archive?.submission_id}`,
+            `/api/v1/admin/evidence/archive/${archive?.submission_id}/retry`,
           )} disabled={!!busy}>Retry safe failed submission</Button>
         )}
         <p className="text-xs text-gray-500 dark:text-gray-400">No token value or secret path is available through this screen. Complete ZIP export continues without a token.</p>
@@ -588,14 +562,14 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
         <Button size="sm" variant="outline" onClick={importRoleStatement} disabled={!statementPackage || !!busy}>Verify and import role statement</Button>
       </Card>
         </div>
-      </details>
+      </details>}
 
       <Card className="space-y-3 p-4">
         <div>
           <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Start whole-event erasure</p>
           <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Use this only when the controller has authorised removal of the entire event. Masterplan will coordinate the controlled copies and stop only when it needs information from you.</p>
         </div>
-        <Guidance title="Before starting">Confirm that this is a whole-event request, not one person&apos;s erasure request. Enable processor review only when a distinct processor must separately review completion.</Guidance>
+        <Guidance title="Before starting">Confirm that this is a whole-event request, not one person&apos;s erasure request. Active Desktop processors assigned to the event are captured automatically.</Guidance>
         <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
           <label className="text-xs font-medium text-gray-600 dark:text-gray-300">Event to erase<select value={eventId} onChange={(event) => setEventId(event.target.value)} className="mt-1 block min-h-11 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800">
             <option value="">Choose event</option>
@@ -603,19 +577,16 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
           </select></label>
           <Button variant="danger" onClick={startEventErasure} disabled={!eventId || !!busy}>Start controlled erasure case</Button>
         </div>
-        <label className="flex items-start gap-2 rounded-lg border border-gray-200 p-3 text-xs text-gray-600 dark:border-gray-700 dark:text-gray-300"><input className="mt-0.5" type="checkbox" checked={processorApproval} onChange={(event) => setProcessorApproval(event.target.checked)} /><span><strong>Require a separate processor review.</strong> Enable only when a distinct processor must confirm completion.</span></label>
       </Card>
 
       {openWorkflows.map((item) => {
-        const workOrder = item.desktop_work_orders[0];
         const actions = nextActions(item);
         const approved = new Set(item.approvals.map((approval) => approval.role));
-        const desktopRecorded = Boolean(workOrder?.report_sha256 || item.evidence.desktop_absence || !item.desktop_deletion_required);
+        const desktopRecorded = !item.desktop_deletion_required
+          || item.required_processors.every((processor) => processor.state === "complete");
         const peerRecorded = item.topology === "single_node" || Boolean(item.evidence.peer);
         const approvalsComplete = Boolean(item.checklist.sha256)
-          && approved.has("executor")
-          && approved.has("controller")
-          && (!item.checklist.processor_approval_required || approved.has("processor"));
+          && approved.has("executor");
         return (
           <Card key={item.request_id} className="space-y-4 p-4">
             <div className="flex flex-wrap items-start justify-between gap-2">
@@ -629,7 +600,8 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
               </div>
               <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${item.state === "complete" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300" : item.state === "restricted_retention" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300" : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"}`}>{item.state.replaceAll("_", " ")}</span>
             </div>
-            <details className="rounded-lg bg-gray-50 p-3 text-xs text-gray-600 dark:bg-gray-900/50 dark:text-gray-300"><summary className="cursor-pointer font-medium">Technical details</summary><div className="mt-3 grid gap-2 sm:grid-cols-2"><p>Event reference: <span className="font-mono break-all">{item.event_ref}</span></p>{item.case_type === "personal_data_erasure" && <p>Account reference: <span className="font-mono break-all">{item.subject_ref}</span></p>}<p>Desktop status: {workOrder?.state.replaceAll("_", " ") || "not required"}</p><p>Recorded stages: {Object.values(item.evidence).filter(Boolean).length}</p></div></details>
+            {item.required_processors.length > 0 && <div className="grid gap-2 sm:grid-cols-2">{item.required_processors.map((processor) => <div key={`${item.request_id}-${processor.processor_entity_id}-${processor.event_ref}`} className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs dark:border-gray-700 dark:bg-gray-900/50"><div className="flex items-center justify-between gap-2"><p className="font-medium text-gray-900 dark:text-gray-100">{processor.display_label || processor.processor_entity_id}</p><span className={processor.state === "complete" ? "text-green-700 dark:text-green-300" : "text-amber-700 dark:text-amber-300"}>{processor.state.replaceAll("_", " ")}</span></div><p className="mt-1 text-gray-500">{processor.event_name || processor.event_ref}</p></div>)}</div>}
+            <details className="rounded-lg bg-gray-50 p-3 text-xs text-gray-600 dark:bg-gray-900/50 dark:text-gray-300"><summary className="cursor-pointer font-medium">Technical details</summary><div className="mt-3 grid gap-2 sm:grid-cols-2"><p>Event reference: <span className="font-mono break-all">{item.event_ref}</span></p>{item.case_type === "personal_data_erasure" && <p>Account reference: <span className="font-mono break-all">{item.subject_ref}</span></p>}<p>Processor assignments: {item.required_processors.length}</p><p>Recorded stages: {Object.values(item.evidence).filter(Boolean).length}</p></div></details>
             <div><p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Case progress</p><ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
               <CaseStep complete={!['submitted', 'under_review'].includes(item.state)} label="Request accepted" />
               <CaseStep complete={desktopRecorded} label="Desktop report recorded" />

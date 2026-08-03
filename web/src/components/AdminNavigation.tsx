@@ -6,6 +6,7 @@ import {
   FileCheck2,
   FileText,
   History,
+  KeyRound,
   Megaphone,
   Plus,
   Share2,
@@ -24,7 +25,7 @@ export type AdminTab =
   | "ha"
   | "audit";
 
-export type AdminDestination = AdminTab | "policies";
+export type AdminDestination = AdminTab | "policies" | "trust";
 
 type AdminGroup = "operations" | "publishing" | "governance" | "system";
 
@@ -52,6 +53,7 @@ const ITEMS: NavigationItem[] = [
   { key: "announcements", label: "Announcements", group: "publishing", icon: <Megaphone size={15} /> },
   { key: "public-links", label: "Public schedule links", group: "publishing", icon: <Share2 size={15} />, publicLinksPermission: true },
   { key: "policies", label: "Policies & notices", group: "governance", icon: <FileCheck2 size={15} />, rootOnly: true },
+  { key: "trust", label: "Trust & keys", group: "governance", icon: <KeyRound size={15} />, rootOnly: true },
   { key: "privacy", label: "Deletion evidence", group: "governance", icon: <Shield size={15} />, rootOnly: true },
   { key: "audit", label: "Audit log", group: "governance", icon: <FileText size={15} />, hiddenForIssuer: true },
   { key: "security", label: "Security", group: "system", icon: <Shield size={15} />, rootOnly: true },
@@ -59,7 +61,9 @@ const ITEMS: NavigationItem[] = [
 ];
 
 function destinationHref(destination: AdminDestination): string {
-  return destination === "policies" ? "/admin/governance" : `/admin?tab=${destination}`;
+  if (destination === "policies") return "/admin/governance";
+  if (destination === "trust") return "/admin/governance/trust";
+  return `/admin?tab=${destination}`;
 }
 
 export function AdminNavigation({
@@ -87,7 +91,7 @@ export function AdminNavigation({
   const secondaryItems = visibleItems.filter((item) => item.group === activeGroup);
 
   const navigate = (destination: AdminDestination) => {
-    if (destination !== "policies" && onSelect) {
+    if (destination !== "policies" && destination !== "trust" && onSelect) {
       onSelect(destination);
       return;
     }

@@ -693,7 +693,6 @@ function EventsTab({
     Record<number, string>
   >({});
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
-  const [processorApprovalRequired, setProcessorApprovalRequired] = useState(false);
   const [startingDeletion, setStartingDeletion] = useState(false);
   const [deletionCase, setDeletionCase] = useState<{
     requestId: string;
@@ -804,9 +803,7 @@ function EventsTab({
       const res = await withReauth(() =>
         apiFetch(`/api/v1/admin/deletion-requests/events/${eventId}`, {
           method: "POST",
-          body: JSON.stringify({
-            processor_approval_required: processorApprovalRequired,
-          }),
+          body: "{}",
         }),
       );
       const data = await res.json().catch(() => null);
@@ -824,7 +821,6 @@ function EventsTab({
         : "Case created (identifier unavailable)";
       setDeletionCase({ requestId, eventName });
       setConfirmDeleteId(null);
-      setProcessorApprovalRequired(false);
       onRefresh();
     } catch (cause) {
       setEventError(
@@ -1181,7 +1177,6 @@ function EventsTab({
                     <button
                       onClick={() => {
                         setEventError("");
-                        setProcessorApprovalRequired(false);
                         setConfirmDeleteId(ev.id);
                       }}
                       className="p-1.5 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
@@ -1204,18 +1199,6 @@ function EventsTab({
                     systems outside this deployment. Each destructive step remains
                     separately confirmed and evidenced.
                   </p>
-                  <label className="mb-3 flex items-start gap-2 text-xs text-red-800 dark:text-red-200">
-                    <input
-                      type="checkbox"
-                      className="mt-0.5"
-                      checked={processorApprovalRequired}
-                      onChange={(event) => setProcessorApprovalRequired(event.target.checked)}
-                    />
-                    <span>
-                      Require a separate processor approval on the final deletion
-                      checklist for this case.
-                    </span>
-                  </label>
                   <div className="flex gap-2">
                     <Button
                       variant="primary"
@@ -1231,7 +1214,6 @@ function EventsTab({
                       size="sm"
                       onClick={() => {
                         setConfirmDeleteId(null);
-                        setProcessorApprovalRequired(false);
                       }}
                       disabled={startingDeletion}
                     >

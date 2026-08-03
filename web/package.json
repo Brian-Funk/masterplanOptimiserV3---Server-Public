@@ -13,6 +13,7 @@
     "test:watch": "vitest --config vitest.config.ts"
   },
   "dependencies": {
+    "@fontsource/source-sans-3": "^5.2.9",
     "@simplewebauthn/browser": "^13.2.2",
     "lucide-react": "^0.555.0",
     "next": "16.2.11",
