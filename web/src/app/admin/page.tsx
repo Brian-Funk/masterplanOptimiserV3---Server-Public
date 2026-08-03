@@ -334,7 +334,13 @@ const ACTIVE_HA_SERVICE_STATES = new Set([
 
 export default function AdminPage() {
   const router = useRouter();
-  const { user, logout, isLoggingOut, isLoading: authLoading } = useAuth();
+  const {
+    user,
+    logout,
+    isLoggingOut,
+    isLoading: authLoading,
+    authStatus,
+  } = useAuth();
 
   const [events, setEvents] = useState<Event[]>([]);
   const [users, setUsers] = useState<AdminUser[]>([]);
@@ -354,13 +360,21 @@ export default function AdminPage() {
 
   // Auth guard  -  admin or issuer
   useEffect(() => {
+    if (!authLoading && authStatus === "unauthenticated") {
+      router.replace("/login");
+      return;
+    }
     if (
       !authLoading &&
-      (!user || (!user.is_admin && !user.is_root_admin && !user.is_issuer))
+      authStatus === "authenticated" &&
+      user &&
+      !user.is_admin &&
+      !user.is_root_admin &&
+      !user.is_issuer
     ) {
-      router.replace("/login");
+      router.replace(user.event_id ? `/calendar?event=${user.event_id}` : "/unassigned");
     }
-  }, [authLoading, user, router]);
+  }, [authLoading, authStatus, user, router]);
 
   const isIssuerOnly =
     user?.is_issuer && !user?.is_admin && !user?.is_root_admin;

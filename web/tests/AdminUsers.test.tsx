@@ -8,6 +8,7 @@ import { deriveUsernameFromDisplayName } from "@/lib/adminUsers";
 
 const mockApiFetch = vi.hoisted(() => vi.fn());
 const mockPush = vi.hoisted(() => vi.fn());
+const mockReplace = vi.hoisted(() => vi.fn());
 const mockUseAuth = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/api", () => ({
@@ -19,7 +20,7 @@ vi.mock("@/contexts/AuthContext", () => ({
 }));
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: mockPush }),
+  useRouter: () => ({ push: mockPush, replace: mockReplace }),
 }));
 
 vi.mock("@/components/PasskeyManager", () => ({
@@ -80,6 +81,7 @@ describe("Admin users", () => {
   beforeEach(() => {
     mockApiFetch.mockReset();
     mockPush.mockReset();
+    mockReplace.mockReset();
     mockUseAuth.mockReturnValue({
       user: rootUser,
       logout: vi.fn(),
@@ -92,6 +94,20 @@ describe("Admin users", () => {
     expect(deriveUsernameFromDisplayName("  Alpha   Tester  ")).toBe(
       "alpha.tester",
     );
+  });
+
+  it("does not redirect while authentication is being rechecked", () => {
+    mockUseAuth.mockReturnValue({
+      user: null,
+      logout: vi.fn(),
+      isLoggingOut: false,
+      isLoading: false,
+      authStatus: "checking",
+    });
+
+    render(<AdminPage />);
+
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 
   it("lets an issuer create a user without sending an event id", async () => {

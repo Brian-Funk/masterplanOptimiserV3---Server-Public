@@ -164,6 +164,46 @@ describe("LoginPage", () => {
     });
   });
 
+  it("does not redirect a retained admin while the session is being rechecked", async () => {
+    vi.mocked(useAuth).mockReturnValue({
+      user: {
+        id: 1,
+        username: "admin",
+        display_name: "Admin",
+        email: null,
+        is_root_admin: true,
+        is_admin: true,
+        is_issuer: false,
+        can_edit: false,
+        is_active: true,
+        is_activated: true,
+        linked_person_id: null,
+        event_id: null,
+        offline_access_ttl_hours: 24,
+      },
+      isAuthenticated: true,
+      isLoading: true,
+      authStatus: "checking",
+      offlineAccess: null,
+      offlineAccessExpired: false,
+      isLoggingOut: false,
+      logoutError: null,
+      logout: vi.fn(),
+      dismissLogoutError: vi.fn(),
+      refreshUser: vi.fn(),
+    });
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ needs_bootstrap: false }),
+    });
+
+    const { default: LoginPage } = await import("@/app/login/page");
+    render(<LoginPage />);
+
+    await waitFor(() => expect(mockFetch).toHaveBeenCalled());
+    expect(mockPush).not.toHaveBeenCalledWith("/admin");
+  });
+
   it("redirects issuer with event to /calendar", async () => {
     const { useAuth } = await import("@/contexts/AuthContext");
     vi.mocked(useAuth).mockReturnValue({
@@ -291,7 +331,7 @@ describe("LoginPage", () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("redirects user without event to /admin", async () => {
+  it("redirects an ordinary user without an event to the waiting room", async () => {
     const { useAuth } = await import("@/contexts/AuthContext");
     vi.mocked(useAuth).mockReturnValue({
       user: {
@@ -330,7 +370,7 @@ describe("LoginPage", () => {
     render(<LoginPage />);
 
     await waitFor(() => {
-      expect(mockPush).toHaveBeenCalledWith("/admin");
+      expect(mockPush).toHaveBeenCalledWith("/unassigned");
     });
   });
 

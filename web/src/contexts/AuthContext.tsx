@@ -100,12 +100,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const logoutPromise = useRef<Promise<boolean> | null>(null);
+  const userRequestSequence = useRef(0);
   const userIdRef = useRef<number | null>(null);
   const authenticatedUserRef = useRef<User | null>(null);
 
   const fetchUser = useCallback(async () => {
+    const sequence = ++userRequestSequence.current;
+    setIsLoading(true);
     if (!isReady) {
       const offlineState = await readOfflineAccessState();
+      if (sequence !== userRequestSequence.current) return;
       setOfflineAccess(offlineState.marker);
       setOfflineAccessExpired(offlineState.expired);
       setAuthStatus("offline");
@@ -120,14 +124,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setIsLoading(false);
       return;
     }
+    setAuthStatus("checking");
     try {
       const apiUrl = getApiUrl();
       const response = await fetch(`${apiUrl}/api/v1/auth/me`, {
         credentials: "include",
       });
+      if (sequence !== userRequestSequence.current) return;
 
       if (response.ok) {
         const userData = await response.json();
+        if (sequence !== userRequestSequence.current) return;
         authenticatedUserRef.current = userData;
         userIdRef.current = userData.id;
         setUser(userData);
@@ -156,8 +163,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         throw new TypeError(`Session check unavailable (${response.status})`);
       }
     } catch (err) {
+      if (sequence !== userRequestSequence.current) return;
       console.error("Failed to fetch user:", err);
       const offlineState = await readOfflineAccessState();
+      if (sequence !== userRequestSequence.current) return;
       setOfflineAccess(offlineState.marker);
       setOfflineAccessExpired(offlineState.expired);
       setAuthStatus("offline");
@@ -165,7 +174,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       userIdRef.current = null;
       setUser(null);
     } finally {
-      setIsLoading(false);
+      if (sequence === userRequestSequence.current) setIsLoading(false);
     }
   }, [isReady]);
 
@@ -177,6 +186,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (logoutPromise.current) return logoutPromise.current;
 
     const operation = (async () => {
+      // A session check that started before logout must never restore the user
+      // after the server has revoked the session.
+      userRequestSequence.current += 1;
       setIsLoggingOut(true);
       setLogoutError(null);
       try {

@@ -43,6 +43,14 @@ function renderWithAuth() {
   );
 }
 
+function deferredResponse() {
+  let resolve!: (response: Response) => void;
+  const promise = new Promise<Response>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
 const mockUser = {
   id: 1,
   username: "testadmin",
@@ -93,6 +101,47 @@ describe("AuthContext", () => {
     await waitFor(() => {
       expect(screen.getByText("Not authenticated")).toBeInTheDocument();
     });
+  });
+
+  it("ignores an older session response after a newer refresh succeeds", async () => {
+    const older = deferredResponse();
+    mockFetch
+      .mockReturnValueOnce(older.promise)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => mockUser,
+      });
+
+    function RefreshConsumer() {
+      const { user, refreshUser } = useAuth();
+      return (
+        <div>
+          <span data-testid="refreshed-user">{user?.username ?? "none"}</span>
+          <button type="button" onClick={() => void refreshUser()}>Refresh</button>
+        </div>
+      );
+    }
+
+    render(
+      <AuthProvider>
+        <RefreshConsumer />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      screen.getByRole("button", { name: "Refresh" }).click();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("refreshed-user")).toHaveTextContent("testadmin");
+    });
+
+    await act(async () => {
+      older.resolve({ ok: false, status: 401 } as Response);
+      await older.promise;
+    });
+    expect(screen.getByTestId("refreshed-user")).toHaveTextContent("testadmin");
   });
 
   it("handles fetch error gracefully", async () => {

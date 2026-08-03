@@ -70,7 +70,14 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const loginInFlightRef = useRef(false);
-  const { user, offlineAccess, offlineAccessExpired, refreshUser } = useAuth();
+  const {
+    user,
+    authStatus,
+    isLoading: authLoading,
+    offlineAccess,
+    offlineAccessExpired,
+    refreshUser,
+  } = useAuth();
   const { isReady } = useServiceAvailability();
   const router = useRouter();
 
@@ -98,7 +105,7 @@ export default function LoginPage() {
   }, [isReady, router]);
 
   useEffect(() => {
-    if (user && isReady) {
+    if (!authLoading && authStatus === "authenticated" && user && isReady) {
       if (user.is_admin || user.is_root_admin) {
         const requested = new URLSearchParams(window.location.search).get("next");
         router.push(
@@ -115,7 +122,7 @@ export default function LoginPage() {
         router.push("/unassigned");
       }
     }
-  }, [user, isReady, router]);
+  }, [authLoading, authStatus, user, isReady, router]);
 
   const handlePasskeyLogin = async () => {
     if (!isReady) return;
