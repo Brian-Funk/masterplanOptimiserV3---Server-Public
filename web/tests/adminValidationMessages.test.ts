@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { responseMessage } from "@/app/admin/page";
+import { responseMessage } from "@/lib/responseMessage";
 
 describe("admin validation messages", () => {
   it("renders a field-specific Pydantic validation error", () => {

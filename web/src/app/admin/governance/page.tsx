@@ -27,6 +27,7 @@ import {
   serializeGovernanceConfiguration,
 } from "@/lib/governanceConfig";
 import { withReauth } from "@/lib/reauth";
+import { responseMessage } from "@/lib/responseMessage";
 
 type PreflightCheck = {
   code: string;
@@ -169,14 +170,14 @@ export default function GovernanceAdminPage() {
     }));
     const data = await response.json().catch(() => ({}));
     if (response.ok) { setChecks(data.preflight.checks || []); setStatus("Draft saved locally. It remains private until publication."); setStatusKind("success"); }
-    else { setStatus(data.detail?.message || data.detail || "Draft validation failed"); setStatusKind("error"); }
+    else { setStatus(responseMessage(data, "Draft validation failed")); setStatusKind("error"); }
   };
 
   const preview = async () => {
     setStatus("Loading exact preview and policy diff..."); setStatusKind("info");
     const response = await apiFetch("/api/v1/admin/governance/preview");
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) { setStatus(data.detail || "Preview failed"); setStatusKind("error"); return; }
+    if (!response.ok) { setStatus(responseMessage(data, "Preview failed")); setStatusKind("error"); return; }
     setChecks(data.preflight.checks || []); setChanges(data.diff?.changes || []); setMaterialChange(Boolean(data.diff?.material_change));
     setStatus(data.preflight.ready ? "Exact preview is ready. Review every public page before publishing." : "Preview found blocking items. Resolve them and save again.");
     setStatusKind(data.preflight.ready ? "success" : "error");
@@ -191,7 +192,7 @@ export default function GovernanceAdminPage() {
       setPublishedVersion(data.version);
       setConfirmations((current) => Object.fromEntries(Object.keys(current).map((key) => [key, false])) as Record<ConfirmationKey, boolean>);
       setStatus(`Policy version ${data.version} is published with SHA-256 ${data.content_sha256}.`); setStatusKind("success");
-    } else { setStatus(data.detail?.code || data.detail || "Publication failed"); setStatusKind("error"); }
+    } else { setStatus(responseMessage(data, "Publication failed")); setStatusKind("error"); }
   };
 
   const statusClasses = statusKind === "error" ? "border-red-300 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200" : statusKind === "success" ? "border-green-300 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950 dark:text-green-200" : "border-blue-300 bg-blue-50 text-blue-800 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-200";
