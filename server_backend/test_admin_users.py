@@ -170,6 +170,12 @@ def test_bulk_create_users_rejects_invalid_email(db, admin_client):
     })
 
     assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, list)
+    assert detail[0]["loc"][-1] == "email"
+    assert "email" in detail[0]["msg"].lower()
+    assert "input" not in detail[0]
+    assert "not-an-email" not in response.text
     assert db.query(User).filter_by(username="invalid.email").first() is None
 
 

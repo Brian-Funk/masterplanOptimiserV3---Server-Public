@@ -110,11 +110,30 @@ if _is_production:
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """Return a sanitised validation error response."""
+    """Return actionable field errors without reflecting submitted values."""
+
+    detail = []
+    for error in exc.errors():
+        location = [
+            part
+            for part in error.get("loc", ())[:8]
+            if isinstance(part, (str, int))
+        ]
+        message = str(error.get("msg") or "Invalid value").strip()[:240]
+        error_type = str(error.get("type") or "value_error")[:80]
+        detail.append({
+            "type": error_type,
+            "loc": location,
+            "msg": message or "Invalid value",
+        })
 
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"detail": "Validation error"},
+        content={"detail": detail or [{
+            "type": "value_error",
+            "loc": ["body"],
+            "msg": "The submitted data is invalid",
+        }]},
     )
 
 
