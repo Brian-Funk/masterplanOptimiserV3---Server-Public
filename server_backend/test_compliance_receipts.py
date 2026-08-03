@@ -84,6 +84,7 @@ def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_p
         ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)],
         check=True,
     )
+    key.chmod(0o640)
     public = " ".join((tmp_path / "instance-key.pub").read_text().split()[:2])
     db.add(EvidenceKey(
         key_id=public_key_id(public),

@@ -131,6 +131,34 @@ def atomic_write(path: Path, raw: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def sign_receipt(path: Path, instance_key: Path) -> None:
+    """Sign through a private 0600 copy without changing the shared source key."""
+
+    if instance_key.is_symlink() or not instance_key.is_file() or instance_key.stat().st_size > 64 * 1024:
+        raise ValueError("Compliance signing key is unsafe")
+    descriptor, name = tempfile.mkstemp(prefix="mp-opt-compliance-signing-key-")
+    temporary = Path(name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        key_bytes = instance_key.read_bytes()
+        os.write(descriptor, key_bytes)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        result = subprocess.run(
+            ["ssh-keygen", "-Y", "sign", "-f", str(temporary), "-n", "mp-opt-evidence-v1", str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise ValueError("Compliance receipt signing failed")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
 def emit(args: argparse.Namespace) -> None:
     snapshot = load_regular(Path(args.snapshot_receipt))
     requests = Path(args.requests)
@@ -162,15 +190,11 @@ def emit(args: argparse.Namespace) -> None:
             **facts,
         }
         atomic_write(target, canonical(receipt))
-        result = subprocess.run(
-            ["ssh-keygen", "-Y", "sign", "-f", args.instance_key, "-n", "mp-opt-evidence-v1", str(target)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
+        try:
+            sign_receipt(target, Path(args.instance_key))
+        except ValueError:
             target.unlink(missing_ok=True)
-            raise ValueError("Compliance receipt signing failed")
+            raise
         os.chmod(str(target) + ".sig", 0o644)
         request_path.unlink(missing_ok=True)
         print(request["job_id"])
