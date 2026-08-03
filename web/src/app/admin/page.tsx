@@ -421,13 +421,6 @@ export default function AdminPage() {
     }
   }, [user, fetchData]);
 
-  // Auto-select event when there's only one
-  useEffect(() => {
-    if (events.length === 1 && !selectedEvent) {
-      setSelectedEvent(events[0].id);
-    }
-  }, [events, selectedEvent]);
-
   useEffect(() => {
     if (typeof window === "undefined" || selectedEvent) return;
     const eventParam = Number(new URLSearchParams(window.location.search).get("event"));

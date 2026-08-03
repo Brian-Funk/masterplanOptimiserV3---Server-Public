@@ -110,6 +110,23 @@ describe("Admin users", () => {
     expect(mockReplace).not.toHaveBeenCalled();
   });
 
+  it("keeps an explicit All events context when only one event exists", async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Users" }));
+    const eventContext = await screen.findByLabelText("Event context");
+    await user.selectOptions(eventContext, "7");
+    expect(eventContext).toHaveValue("7");
+    await user.selectOptions(eventContext, "");
+    expect(eventContext).toHaveValue("");
+  });
+
   it("lets an issuer create a user without sending an event id", async () => {
     mockUseAuth.mockReturnValue({
       user: issuerUser,
