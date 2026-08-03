@@ -422,7 +422,7 @@ def governance_draft(
         "configured": profile is not None,
         "draft": _draft_payload(profile) if profile else None,
         "published_version": current_policy_version(db),
-        "preflight": _preflight(profile),
+        "preflight": _preflight(profile, db),
         "runtime_features": runtime_feature_state(),
     }
 
@@ -447,8 +447,27 @@ def _draft_payload(profile: InstanceGovernanceProfile) -> dict[str, object]:
     }
 
 
-def _preflight(profile: InstanceGovernanceProfile | None) -> dict[str, object]:
-    return governance_preflight(profile)
+def _preflight(profile: InstanceGovernanceProfile | None, db: Session) -> dict[str, object]:
+    result = governance_preflight(profile)
+    if settings.KEY_SEPARATION_ENFORCED:
+        controller_key = db.query(EvidenceKey).filter(
+            EvidenceKey.role == "controller",
+            EvidenceKey.activated_at.isnot(None),
+            EvidenceKey.revoked_at.is_(None),
+            EvidenceKey.trust_declaration_sha256.isnot(None),
+        ).first()
+        result["checks"].append({
+            "code": "controller_trust",
+            "status": "ready" if controller_key else "missing",
+            "message": (
+                "External controller trust is active."
+                if controller_key
+                else "Register and activate an external controller key, then import its signed initial trust declaration before publication."
+            ),
+        })
+        if controller_key is None:
+            result["ready"] = False
+    return result
 
 
 @admin_router.get("/preview")
@@ -464,7 +483,7 @@ def preview_governance(
     payload = _profile_payload(profile)
     previous = db.query(GovernancePublication).order_by(GovernancePublication.version.desc()).first()
     return {
-        "preflight": _preflight(profile),
+        "preflight": _preflight(profile, db),
         "preview": payload,
         "diff": publication_diff(json.loads(previous.content_json) if previous else None, payload),
         "published_version": previous.version if previous else None,
@@ -563,7 +582,7 @@ def save_governance_draft(
         profile.structured_json = structured_json
     audit(db, user=root, action="governance.draft_saved", resource_type="instance", request=request)
     db.commit()
-    return {"status": "saved", "preflight": _preflight(profile)}
+    return {"status": "saved", "preflight": _preflight(profile, db)}
 
 
 class PublicationConfirmation(BaseModel):
@@ -599,7 +618,7 @@ def publish_governance(
                 },
             )
     profile = db.get(InstanceGovernanceProfile, 1)
-    preflight = _preflight(profile)
+    preflight = _preflight(profile, db)
     if not preflight["ready"] or profile is None:
         raise HTTPException(status_code=409, detail={"code": "governance_preflight_failed", **preflight})
     payload = _profile_payload(profile)

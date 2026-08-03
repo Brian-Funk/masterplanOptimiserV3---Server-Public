@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+from app.core.config import settings
 from server_backend.conftest import _make_client, create_test_event, create_test_user
 
 
@@ -166,6 +167,23 @@ def test_draft_is_private_and_publication_is_immutable(db):
     retry = client.post("/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION)
     assert retry.json()["status"] == "unchanged"
     assert retry.json()["version"] == 1
+
+
+def test_preflight_reports_required_controller_trust_before_publication(monkeypatch, db):
+    monkeypatch.setattr(settings, "KEY_SEPARATION_ENFORCED", True)
+    client, _root = _root_with_reauth(db)
+
+    saved = client.put("/api/v1/admin/governance", json=PROFILE)
+
+    assert saved.status_code == 200
+    trust_check = next(item for item in saved.json()["preflight"]["checks"] if item["code"] == "controller_trust")
+    assert trust_check["status"] == "missing"
+    assert saved.json()["preflight"]["ready"] is False
+    preview = client.get("/api/v1/admin/governance/preview").json()
+    assert preview["preflight"]["ready"] is False
+    blocked = client.post("/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION)
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "controller_trust_required"
 
 
 def test_public_legal_notice_is_readable_without_javascript_and_escapes_controller_text(db):

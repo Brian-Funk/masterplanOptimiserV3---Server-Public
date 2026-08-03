@@ -83,6 +83,7 @@ describe("governance configuration import and export", () => {
     expect(click).toHaveBeenCalledOnce();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:governance-draft");
     expect(screen.getByRole("status")).toHaveTextContent(/No key, signature, publication approval or passkey material is included/i);
+    expect(screen.getByRole("link", { name: "Open controller-key administration" })).toHaveAttribute("href", "/admin?tab=privacy");
   });
 
   it("imports all entries as an unsaved draft and does not call the save API", async () => {
