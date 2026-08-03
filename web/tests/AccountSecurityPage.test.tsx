@@ -20,6 +20,10 @@ vi.mock("next/navigation", () => ({
 }));
 vi.mock("@/components/Logo", () => ({ Logo: () => <div>Logo</div> }));
 vi.mock("@/components/ThemeToggle", () => ({ ThemeToggle: () => null }));
+vi.mock("@/components/PasskeyManager", () => ({
+  PasskeyManager: ({ open }: { open: boolean }) =>
+    open ? <div role="dialog">Passkey manager</div> : null,
+}));
 
 const account = {
   id: 7,
@@ -81,6 +85,16 @@ describe("Account security page", () => {
     expect(screen.getByText("Current")).toBeInTheDocument();
     expect(screen.getByText(/raw IP details are not shown/i)).toBeInTheDocument();
     expect(mockApiFetch).toHaveBeenCalledWith("/api/v1/auth/sessions");
+  });
+
+  it("exposes passkey management for every authenticated account", async () => {
+    const user = userEvent.setup();
+    render(<AccountSecurityPage />);
+
+    await screen.findByText("Chrome on Windows");
+    await user.click(screen.getByRole("button", { name: "Manage passkeys" }));
+
+    expect(screen.getByRole("dialog")).toHaveTextContent("Passkey manager");
   });
 
   it("revokes another session and removes it from the list", async () => {

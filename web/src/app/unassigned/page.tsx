@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { CalendarClock, RefreshCw } from "lucide-react";
+import { CalendarClock, RefreshCw, Shield } from "lucide-react";
 
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/Button";
@@ -48,14 +48,18 @@ export default function UnassignedPage() {
           <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
             Signed in as {user.display_name}.
           </p>
-          <Button
-            className="mt-6"
-            onClick={async () => {
-              if (await logout()) router.replace("/login");
-            }}
-          >
-            Sign out
-          </Button>
+          <div className="mt-6 flex flex-col justify-center gap-2 sm:flex-row">
+            <Button variant="outline" onClick={() => router.push("/account/security")}>
+              <Shield size={16} className="mr-1" /> Account security
+            </Button>
+            <Button
+              onClick={async () => {
+                if (await logout()) router.replace("/login");
+              }}
+            >
+              Sign out
+            </Button>
+          </div>
         </Card>
       </main>
     </div>

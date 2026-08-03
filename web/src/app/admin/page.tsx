@@ -21,7 +21,6 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Logo } from "@/components/Logo";
-import { PasskeyManager } from "@/components/PasskeyManager";
 import { ActivationCampaignCard } from "@/components/ActivationCampaignCard";
 import { SnapshotComparisonModal } from "@/components/SnapshotComparisonModal";
 import { MobileActionSheet } from "@/components/MobileActionSheet";
@@ -347,7 +346,6 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(true);
   const [tab, setTabState] = useState<AdminTab>("events");
   const [showMobileMore, setShowMobileMore] = useState(false);
-  const [showPasskeys, setShowPasskeys] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<number | "">("");
 
   const setTab = useCallback((nextTab: AdminTab) => {
@@ -451,6 +449,31 @@ export default function AdminPage() {
     if (await logout()) router.replace("/login");
   };
 
+  const hasManagementAccess = !!user &&
+    (user.is_admin || user.is_root_admin || user.is_issuer);
+
+  if (!authLoading && user && !hasManagementAccess) {
+    const returnHref = user.event_id
+      ? `/calendar?event=${user.event_id}`
+      : "/unassigned";
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-gray-50 px-4 dark:bg-gray-900">
+        <Card className="w-full max-w-md p-6 text-center sm:p-8">
+          <Shield className="mx-auto text-blue-600 dark:text-blue-400" size={32} aria-hidden="true" />
+          <h1 className="mt-4 text-xl font-semibold text-gray-900 dark:text-gray-100">
+            Administration is not available
+          </h1>
+          <p className="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-300">
+            This signed-in account does not have an administrative or issuer role.
+          </p>
+          <Button className="mt-5" onClick={() => router.replace(returnHref)}>
+            {user.event_id ? "Return to schedule" : "Return to account status"}
+          </Button>
+        </Card>
+      </main>
+    );
+  }
+
   if (authLoading || loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
@@ -491,22 +514,13 @@ export default function AdminPage() {
             <ThemeToggle />
             <button
               onClick={() => router.push("/account/security")}
-              className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700 transition-colors"
+              className="inline-flex items-center gap-2 rounded-lg px-2.5 py-2 text-gray-500 transition-colors hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
               aria-label="Account security"
               title="Account security"
             >
               <Shield size={18} />
+              <span className="hidden text-sm font-medium lg:inline">Account security</span>
             </button>
-            {!isIssuerOnly && (
-              <button
-                onClick={() => setShowPasskeys(true)}
-                className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700 transition-colors"
-                aria-label="Manage passkeys"
-                title="Manage passkeys"
-              >
-                <Key size={18} />
-              </button>
-            )}
             {user?.is_root_admin && (
               <button
                 onClick={() => router.push("/admin/governance")}
@@ -688,11 +702,6 @@ export default function AdminPage() {
         {tab === "ha" && user?.is_root_admin && <HighAvailabilityTab />}
         {tab === "audit" && <AuditTab />}
       </main>
-
-      <PasskeyManager
-        open={showPasskeys}
-        onClose={() => setShowPasskeys(false)}
-      />
 
       {!user?.is_root_admin && (
         <MobileBottomNavigation

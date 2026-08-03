@@ -110,6 +110,28 @@ describe("Admin users", () => {
     expect(mockReplace).not.toHaveBeenCalled();
   });
 
+  it("never strands a participant on the administration loading state", async () => {
+    mockUseAuth.mockReturnValue({
+      user: {
+        ...issuerUser,
+        is_issuer: false,
+        event_id: 7,
+      },
+      logout: vi.fn(),
+      isLoading: false,
+      authStatus: "authenticated",
+    });
+
+    render(<AdminPage />);
+
+    expect(
+      screen.getByRole("heading", { name: "Administration is not available" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mockReplace).toHaveBeenCalledWith("/calendar?event=7"),
+    );
+  });
+
   it("keeps an explicit All events context when only one event exists", async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === "/api/v1/admin/events") return jsonResponse([event]);

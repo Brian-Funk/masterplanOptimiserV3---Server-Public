@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import UnassignedPage from "@/app/unassigned/page";
 
 const replace = vi.fn();
+const push = vi.fn();
 const logout = vi.fn();
 const auth = vi.hoisted(() => ({
   user: {
@@ -25,7 +26,7 @@ const auth = vi.hoisted(() => ({
   isLoading: false,
 }));
 
-vi.mock("next/navigation", () => ({ useRouter: () => ({ replace }) }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ replace, push }) }));
 vi.mock("@/components/Logo", () => ({ Logo: () => <div>Masterplan</div> }));
 vi.mock("@/components/ThemeToggle", () => ({ ThemeToggle: () => <button>Theme</button> }));
 vi.mock("@/contexts/AuthContext", () => ({
@@ -35,6 +36,7 @@ vi.mock("@/contexts/AuthContext", () => ({
 describe("UnassignedPage", () => {
   beforeEach(() => {
     replace.mockReset();
+    push.mockReset();
     logout.mockReset();
     auth.user.event_id = null;
     auth.user.is_admin = false;
@@ -57,6 +59,14 @@ describe("UnassignedPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
 
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/login"));
+  });
+
+  it("exposes the signed-in account security controls", async () => {
+    render(<UnassignedPage />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Account security" }));
+
+    expect(push).toHaveBeenCalledWith("/account/security");
   });
 
   it("redirects an assigned user to their calendar", async () => {
