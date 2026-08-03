@@ -8,7 +8,7 @@ import json
 import secrets
 import uuid
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -72,6 +72,14 @@ def record_clean_backup(
     """Maintain the complete local inventory when a clean package is verified."""
 
     now = utc_now()
+    # Several deletion cases may consume the same freshly exported recovery
+    # package concurrently. Serialise registration by package ID so every
+    # transaction observes the first insert instead of racing the unique key.
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:scope), hashtext(:package_id))"),
+            {"scope": "mp-opt-backup-inventory", "package_id": package_id},
+        )
     existing = db.query(BackupInventoryRecord).filter(
         BackupInventoryRecord.package_id == package_id,
     ).first()

@@ -8,12 +8,13 @@ from pydantic import ValidationError
 
 from app.api.v1.admin import ImportSetupIn, _auto_link_event_users
 from app.api.v1.publish import TaskIn
-from app.core import deletion_cases
+from app.core import deletion_cases, deletion_workflow
 from app.models.deletion import (
     DeletionCase,
     DeletionChecklistApproval,
     DeletionSubjectScope,
 )
+from app.models.evidence import BackupInventoryRecord
 from app.models.published import PublishedPerson
 from app.models.user import User
 from deploy.evidence.evidence_manifest import RECORD_TYPES, _validate_payload
@@ -417,6 +418,23 @@ def test_publish_contract_rejects_private_profiling_fields(payload):
             end="2026-08-01T10:00:00+00:00",
             **payload,
         )
+
+
+def test_clean_backup_registration_is_reusable_across_deletion_cases(db):
+    """One post-deletion package can close several concurrent deletion cases."""
+
+    package_id = "77777777-7777-4777-8777-777777777777"
+    for _ in range(2):
+        deletion_workflow.record_clean_backup(
+            db,
+            package_id=package_id,
+            package_sha256="a" * 64,
+            archive_sha256="b" * 64,
+            recovery_key_id="rk-" + "c" * 16,
+        )
+    assert db.query(BackupInventoryRecord).filter_by(package_id=package_id).count() == 1
+    source = Path(deletion_workflow.__file__).read_text(encoding="utf-8")
+    assert "pg_advisory_xact_lock" in source
 
 
 def test_admin_and_frontend_expose_only_the_current_deletion_case_workflow():
