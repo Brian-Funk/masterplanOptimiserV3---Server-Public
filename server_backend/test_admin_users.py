@@ -483,7 +483,7 @@ def test_event_reassignment_clears_stale_person_link(db):
     target.linked_person_id = 42
     db.commit()
 
-    response = _make_client(db, actor).put(
+    response = _make_client(db, actor, reauth=True).put(
         f"/api/v1/admin/users/{target.id}",
         json={"event_id": second_event.id},
     )
@@ -491,6 +491,20 @@ def test_event_reassignment_clears_stale_person_link(db):
     assert response.status_code == 200
     assert response.json()["event_id"] == second_event.id
     assert response.json()["linked_person_id"] is None
+
+
+def test_event_reassignment_requires_reauthentication(db):
+    first_event, _ = create_test_event(db, name="Original Assignment")
+    second_event, _ = create_test_event(db, name="New Assignment")
+    actor = create_test_user(db, username="move.without.reauth", is_admin=True)
+    target = create_test_user(db, username="protected.move", event_id=first_event.id)
+
+    response = _make_client(db, actor).put(
+        f"/api/v1/admin/users/{target.id}",
+        json={"event_id": second_event.id},
+    )
+
+    assert response.status_code == 403
 
 
 def test_issuer_cannot_delete_another_issuer(db):
