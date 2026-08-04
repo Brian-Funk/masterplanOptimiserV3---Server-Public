@@ -1,5 +1,6 @@
 """Regression checks for the production dependency and image security policy."""
 
+import json
 from pathlib import Path
 import unittest
 
@@ -92,10 +93,29 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
         self.assertIn("go install github.com/tianon/gosu@${GOSU_VERSION}", postgres)
         self.assertIn("FROM postgres:16-alpine", postgres)
         self.assertIn("FROM node:25-alpine", tools)
-        self.assertIn("ARG WRANGLER_VERSION=4.115.0", tools)
         self.assertIn("RUN apk upgrade --no-cache", tools)
         self.assertNotIn("ENTRYPOINT", postgres)
-        self.assertIn('npm install --global "wrangler@${WRANGLER_VERSION}"', tools)
+        self.assertIn("infra/cloudflare-ha-witness/package-lock.json", tools)
+        self.assertIn("npm ci --omit=dev --no-audit --no-fund", tools)
+        self.assertIn(
+            "ln -s /opt/wrangler/node_modules/.bin/wrangler /usr/local/bin/wrangler",
+            tools,
+        )
+        witness_package = json.loads(
+            (ROOT / "infra/cloudflare-ha-witness/package.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        witness_lock = json.loads(
+            (ROOT / "infra/cloudflare-ha-witness/package-lock.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(witness_package["dependencies"]["wrangler"], "^4.118.0")
+        self.assertEqual(witness_package["overrides"]["undici"], "7.29.0")
+        self.assertEqual(
+            witness_lock["packages"]["node_modules/undici"]["version"], "7.29.0"
+        )
         self.assertIn("/usr/local/lib/node_modules/npm", tools)
         self.assertIn("/usr/local/lib/node_modules/corepack", tools)
         self.assertIn("/opt/yarn-v*", tools)

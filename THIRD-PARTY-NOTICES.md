@@ -96,11 +96,11 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | @bramus/specificity | 2.4.2 | MIT | `web/package-lock.json` |
 | @cloudflare/kv-asset-handler | 0.5.0 | MIT OR Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
 | @cloudflare/unenv-preset | 2.16.1 | MIT OR Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
-| @cloudflare/workerd-darwin-64 | 1.20260722.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
-| @cloudflare/workerd-darwin-arm64 | 1.20260722.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
-| @cloudflare/workerd-linux-64 | 1.20260722.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
-| @cloudflare/workerd-linux-arm64 | 1.20260722.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
-| @cloudflare/workerd-windows-64 | 1.20260722.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @cloudflare/workerd-darwin-64 | 1.20260730.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @cloudflare/workerd-darwin-arm64 | 1.20260730.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @cloudflare/workerd-linux-64 | 1.20260730.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @cloudflare/workerd-linux-arm64 | 1.20260730.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @cloudflare/workerd-windows-64 | 1.20260730.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
 | @cspotcode/source-map-support | 0.8.1 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
 | @csstools/color-helpers | 6.1.0 | MIT-0 | `web/package-lock.json` |
 | @csstools/css-calc | 3.3.0 | MIT | `web/package-lock.json` |
@@ -264,7 +264,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | @shikijs/vscode-textmate | 10.0.2 | MIT | `web/package-lock.json` |
 | @simplewebauthn/browser | 13.3.0 | MIT | `web/package-lock.json` |
 | @sindresorhus/is | 7.2.0 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
-| @speed-highlight/core | 1.2.19 | CC0-1.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| @speed-highlight/core | 1.2.23 | CC0-1.0 | `infra/cloudflare-ha-witness/package-lock.json` |
 | @standard-schema/spec | 1.1.0 | MIT | `web/package-lock.json` |
 | @swc/helpers | 0.5.15 | Apache-2.0 | `web/package-lock.json` |
 | @testing-library/dom | 10.4.1 | MIT | `web/package-lock.json` |
@@ -584,7 +584,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | merge2 | 1.4.1 | MIT | `web/package-lock.json` |
 | micromatch | 4.0.8 | MIT | `web/package-lock.json` |
 | min-indent | 1.0.1 | MIT | `web/package-lock.json` |
-| miniflare | 4.20260722.1 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
+| miniflare | 5.20260730.0-alpha | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
 | minimatch | 10.2.5 | BlueOak-1.0.0 | `web/package-lock.json` |
 | minimist | 1.2.8 | MIT | `web/package-lock.json` |
 | ms | 2.1.3 | MIT | `web/package-lock.json` |
@@ -724,7 +724,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | typescript-eslint | 8.65.0 | MIT | `web/package-lock.json` |
 | uc.micro | 2.1.0 | MIT | `web/package-lock.json` |
 | unbox-primitive | 1.1.0 | MIT | `web/package-lock.json` |
-| undici | 7.28.0 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
+| undici | 7.29.0 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
 | undici | 8.9.0 | MIT | `web/package-lock.json` |
 | undici-types | 6.21.0 | MIT | `web/package-lock.json` |
 | unenv | 2.0.0-rc.24 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
@@ -746,8 +746,8 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | which-typed-array | 1.1.22 | MIT | `web/package-lock.json` |
 | why-is-node-running | 2.3.0 | MIT | `web/package-lock.json` |
 | word-wrap | 1.2.5 | MIT | `web/package-lock.json` |
-| workerd | 1.20260722.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
-| wrangler | 4.115.0 | MIT OR Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| workerd | 1.20260730.1 | Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
+| wrangler | 4.118.0 | MIT OR Apache-2.0 | `infra/cloudflare-ha-witness/package-lock.json` |
 | ws | 8.21.0 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
 | xml-name-validator | 5.0.0 | Apache-2.0 | `web/package-lock.json` |
 | xmlchars | 2.2.0 | MIT | `web/package-lock.json` |
