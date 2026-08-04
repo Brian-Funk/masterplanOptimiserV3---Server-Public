@@ -380,8 +380,21 @@ def test_frontend_build_generates_and_reloads_build_specific_csp():
     assert "runtime/" in (root / ".gitignore").read_text(encoding="utf-8")
 
 
-def test_root_commissioning_migration_is_expand_first_for_signed_handoff():
-    """The signed stable backend must survive until exact campaign images start."""
+def test_published_root_commissioning_migrations_are_hash_pinned():
+    """Published expansion migrations must never be rewritten in place."""
+    expected = {
+        "20260804_root_commissioning.sql":
+            "f43a704fbb6a2a019935f162e93c14a4cc11b0135165f4c14ccfaf88dc323a51",
+        "20260805_signed_handoff_expansion.sql":
+            "f2003f65da37e9a70b02e4b6ec5e8a57ac71812c29db55c0a8f42a17b445790f",
+    }
+    migration_dir = _server_root() / "deploy" / "migrations"
+    for name, digest in expected.items():
+        assert hashlib.sha256((migration_dir / name).read_bytes()).hexdigest() == digest
+
+
+def test_root_commissioning_contract_follows_unchanged_expansion_migrations():
+    """The obsolete handoff column is removed only by a later migration."""
     commissioning = (
         _server_root()
         / "deploy"
@@ -394,7 +407,14 @@ def test_root_commissioning_migration_is_expand_first_for_signed_handoff():
         / "migrations"
         / "20260805_signed_handoff_expansion.sql"
     ).read_text(encoding="utf-8")
+    contract = (
+        _server_root()
+        / "deploy"
+        / "migrations"
+        / "20260806_controller_trust_handoff_contract.sql"
+    ).read_text(encoding="utf-8")
 
     assert "ADD COLUMN IF NOT EXISTS trust_establishment_sha256" in commissioning
     assert "ADD COLUMN IF NOT EXISTS trust_declaration_sha256" in handoff
     assert "DROP COLUMN" not in handoff
+    assert "DROP COLUMN IF EXISTS trust_declaration_sha256" in contract

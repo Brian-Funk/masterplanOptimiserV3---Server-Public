@@ -28,6 +28,34 @@ The status screen clearly labels these installations `MP-OPT UNSIGNED TEST
 BUILD` and records both the exact test commit and the signed baseline. The same
 menu provides rollback and an exact return to that signed baseline.
 
+### Fresh unsigned commissioning
+
+On a test-policy VPS, fresh commissioning captures the checkout's exact pushed
+HEAD once. The resumable v2 setup state records the `unsigned` lane, that
+40-character commit, and the verified signed release tag and commit used only
+as a rollback baseline. A branch name is never stored or followed after setup
+starts.
+
+The signed baseline application is not started. MP-OPT builds the backend,
+PostgreSQL, Caddy, tools and frontend from the pinned commit, creates the blank
+database with those exact images, applies ordered migrations after stopping any
+older backend, and writes an unsigned deployment receipt only after public
+health passes. Root commissioning is presented only after the receipt, active
+images, schema and public bootstrap endpoint agree.
+
+On resume, those facts are reconciled before any checkpoint is trusted. A
+matching receipt with stopped containers is recovered in place. A partial
+fresh deployment is retried idempotently. A mismatched lane or commit stops
+with a specific error and never falls back to the signed application. Closing
+SSH therefore pauses the current action without changing the deployment target.
+
+For fresh HA, Node A embeds the lane and pinned commit in the protected join
+payload. Node B must use the matching policy and fetch that exact object. Node A
+builds the images, verifies identical image identities on Node B, activates both
+nodes and requires matching deployment receipts before root commissioning.
+Witness publication remains conditional on an HA witness source change and the
+guarded Cloudflare-token action.
+
 ## Public distribution invariant
 
 The Server repository, stable GitHub Release assets, and the `backend`,

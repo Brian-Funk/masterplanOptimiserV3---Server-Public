@@ -43,6 +43,58 @@ def shell_function(source: str, name: str) -> str:
 
 
 class PairingCodeTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX shell state contract")
+    def test_unsigned_state_pins_first_pushed_head_and_ignores_moving_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            state = work / "state"
+            fake_bin = work / "bin"
+            state.mkdir()
+            fake_bin.mkdir()
+            head = work / "head"
+            head.write_text("a" * 40, encoding="ascii")
+            fake_git = fake_bin / "git"
+            fake_git.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"$*\" == *'rev-parse HEAD'* ]]; then cat \"$FAKE_HEAD\"; exit 0; fi\n"
+                "if [[ \"$*\" == *'fetch --no-tags --force origin'* ]]; then exit \"${FAKE_FETCH_STATUS:-0}\"; fi\n"
+                "if [[ \"$*\" == *'rev-parse FETCH_HEAD'* ]]; then cat \"$FAKE_HEAD\"; exit 0; fi\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake_git.chmod(0o755)
+            policy = work / "policy"
+            policy.write_text("test\n", encoding="ascii")
+            script = r'''
+                export MP_ROOT="$1" MP_STATE="$2" MP_SETUP_V2_STATE="$2/setup.json"
+                export MP_DEPLOYMENT_POLICY_FILE="$3" FAKE_HEAD="$4"
+                export PATH="$5:$PATH"
+                source "$6/deploy/management/setup_v2.sh"
+                ui_error() { printf '%s\n' "$*" >&2; }
+                mp_setup_state_begin standalone-new
+                printf '%s\n' "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")"
+                printf '%s' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' > "$FAKE_HEAD"
+                mp_setup_state_begin standalone-new
+                printf '%s\n' "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(work),
+                 str(state), str(policy), str(head), str(fake_bin), str(ROOT)],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), ["a" * 40, "a" * 40])
+
+    @unittest.skipIf(os.name == "nt", "POSIX shell state contract")
+    def test_unsigned_state_rejects_unpushed_or_uppercase_head(self) -> None:
+        state_begin = shell_function(SETUP, "mp_setup_state_begin")
+        self.assertIn("Push the exact commit before commissioning", state_begin)
+        self.assertIn(r"^[0-9a-f]{40}$", state_begin)
+        self.assertLess(
+            state_begin.index("fetch --no-tags --force origin"),
+            state_begin.index('format:"mp-opt-setup-state-v2"'),
+        )
+
     def test_operator_owned_values_have_neutral_examples_not_deployment_presets(self) -> None:
         guided = shell_function(ACTIONS, "mp_guided_initial_configuration")
         configure_smtp = shell_function(ACTIONS, "mp_configure_smtp")
@@ -81,12 +133,14 @@ class PairingCodeTests(unittest.TestCase):
 
     def test_round_trip_and_tamper_detection(self) -> None:
         document = {
-            "format": "mp-opt-ha-join-v1",
+            "format": "mp-opt-ha-join-v2",
             "cluster_id": "mp-opt-cluster-1234",
             "domain": "calendar.example.org",
             "witness_url": "https://witness.example.workers.dev",
             "pairing_secret": "a" * 48,
             "node_id": "node-b",
+            "deployment_lane": "unsigned",
+            "campaign_commit": "a" * 40,
         }
         encoded = pairing.encode_document(document)
         self.assertEqual(pairing.decode_code(encoded), document)
@@ -127,7 +181,10 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn("pending-witness-bootstrap.json", SETUP)
         self.assertIn("mp-opt-pending-witness-bootstrap-v1", SETUP)
         self.assertIn("pending-local-join.json", SETUP)
-        self.assertIn("mp-opt-pending-local-join-v1", SETUP)
+        self.assertIn("mp-opt-pending-local-join-v2", SETUP)
+        self.assertIn("mp-opt-ha-join-v2", SETUP)
+        self.assertIn("deployment_lane:$lane", SETUP)
+        self.assertIn("campaign_commit:", SETUP)
         self.assertLess(
             SETUP.index('mv "$bootstrap_tmp" "$MP_SETUP_V2_PENDING_BOOTSTRAP"'),
             SETUP.index('mp_setup_witness_call bootstrap'),
@@ -197,7 +254,7 @@ class PairingCodeTests(unittest.TestCase):
             checkpoint = state / "setup-state.json"
             checkpoint.write_text(
                 json.dumps({
-                    "format": "mp-opt-setup-state-v1",
+                    "format": "mp-opt-setup-state-v2",
                     "mode": "standalone-new",
                     "state": "complete",
                     "completed": ["validated", "smtp_verified"],
@@ -231,26 +288,21 @@ class PairingCodeTests(unittest.TestCase):
         standalone = shell_function(SETUP, "mp_setup_standalone")
         for earlier, later in (
             ("mp_guided_initial_configuration", "mp_setup_verify_standalone_dns"),
-            ("mp_setup_verify_standalone_dns", 'deploy/deploy.sh" --no-pull'),
-            ('deploy/deploy.sh" --no-pull', "mp_setup_apply_fresh_test_commit"),
-            ("mp_setup_apply_fresh_test_commit", "mp_setup_register_root_passkey"),
-            ("mp_setup_register_root_passkey", "mp_configure_recovery_recipient"),
+            ("mp_setup_verify_standalone_dns", "mp_setup_deploy_application"),
+            ("mp_setup_deploy_application", "mp_setup_register_root_passkey"),
+            ("mp_setup_register_root_passkey", "mp_validate_installation"),
             ("mp_validate_installation", "mp_setup_verify_smtp_and_dns"),
         ):
             self.assertLess(standalone.index(earlier), standalone.index(later))
 
         primary_resume = shell_function(SETUP, "mp_setup_primary_resume")
         self.assertLess(
-            primary_resume.index('deploy/deploy.sh" --no-pull'),
-            primary_resume.index("mp_setup_apply_fresh_test_commit"),
-        )
-        self.assertLess(
-            primary_resume.index("mp_setup_apply_fresh_test_commit"),
+            primary_resume.index("mp_setup_deploy_application"),
             primary_resume.index("mp_setup_register_root_passkey"),
         )
         self.assertLess(
             primary_resume.index("mp_setup_register_root_passkey"),
-            primary_resume.index("mp_configure_recovery_recipient"),
+            primary_resume.index("mp_ha_replicate_now"),
         )
 
         primary = shell_function(SETUP, "mp_setup_primary_create")
@@ -294,10 +346,33 @@ class PairingCodeTests(unittest.TestCase):
         )
         self.assertGreaterEqual(install.count("mp_setup_restore_test_management_checkout"), 2)
         self.assertIn('= test ] || return 0', restore)
-        self.assertIn('git -C "$MP_ROOT" rev-parse HEAD', restore)
+        self.assertIn(".campaign_commit // empty", restore)
         self.assertIn('restore --source="$commit" --', restore)
         self.assertIn("deploy manage.sh configure-production.sh", restore)
         self.assertIn("diff --quiet --ignore-submodules", restore)
+
+    def test_unsigned_setup_has_one_pinned_application_checkpoint(self) -> None:
+        state = shell_function(SETUP, "mp_setup_state_begin")
+        standalone = shell_function(SETUP, "mp_setup_standalone")
+        reconcile = shell_function(SETUP, "mp_setup_reconcile_unsigned_application")
+        self.assertIn('format:"mp-opt-setup-state-v2"', state)
+        self.assertIn('deployment_lane:$lane', state)
+        self.assertIn('campaign_commit:', state)
+        self.assertIn('fetch --no-tags --force origin "$commit"', state)
+        self.assertIn('rev-parse FETCH_HEAD', state)
+        self.assertNotIn("test_commit_deployed", SETUP)
+        self.assertNotIn("root_passkey_registered", SETUP)
+        self.assertIn("application_deployed", standalone)
+        self.assertIn("root_commissioning_complete", standalone)
+        self.assertIn("Recovering exact deployment", reconcile)
+        self.assertIn("mp_wait_for_health 45", reconcile)
+        self.assertIn("Automatic fallback is prohibited", reconcile)
+
+    def test_setup_failure_returns_to_menu_with_specific_resume_state(self) -> None:
+        setup = shell_function(SETUP, "mp_setup_v2")
+        self.assertIn("SETUP_ACTION_PAUSED", setup)
+        self.assertIn("The exact lane and commit remain pinned", setup)
+        self.assertIn('return 0', setup)
 
     def test_standalone_dns_wait_retries_at_thirty_second_intervals(self) -> None:
         script = r'''

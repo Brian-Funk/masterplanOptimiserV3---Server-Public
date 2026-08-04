@@ -25,23 +25,37 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("--fresh-commissioning", SUPERVISOR)
         self.assertIn("require_fresh_commissioning_database", SUPERVISOR)
         self.assertIn('.state == "in_progress"', SUPERVISOR)
+        self.assertIn('.format == "mp-opt-setup-state-v2"', SUPERVISOR)
+        self.assertIn('.deployment_lane == "unsigned"', SUPERVISOR)
+        self.assertIn('.campaign_commit == $target', SUPERVISOR)
         self.assertIn('.mode == "standalone-new"', SUPERVISOR)
         self.assertIn('.mode == "ha-primary-new"', SUPERVISOR)
         self.assertIn("NOT EXISTS (SELECT 1 FROM events)", SUPERVISOR)
         self.assertIn("NOT is_root_admin", SUPERVISOR)
-        self.assertIn("count(*) FROM users WHERE is_root_admin) = 1", SUPERVISOR)
-        self.assertIn("is_root_admin AND is_active AND is_activated", SUPERVISOR)
-        self.assertIn("is_root_admin AND is_active AND NOT is_activated", SUPERVISOR)
-        self.assertIn("count(*) FROM webauthn_credentials) = 1", SUPERVISOR)
-        self.assertIn("JOIN users root_user ON root_user.id = credential.user_id", SUPERVISOR)
-        self.assertIn("passkey_ceremonies WHERE consumed_at IS NULL", SUPERVISOR)
-        for table in (
-            "auth_sessions",
-            "exchange_codes",
-            "activation_links",
-            "passkey_challenges",
-        ):
-            self.assertIn(f"NOT EXISTS (SELECT 1 FROM {table})", SUPERVISOR)
+        self.assertIn("count(*) FROM users WHERE is_root_admin) <= 1", SUPERVISOR)
+        self.assertIn("root_commissioning_completed_at", SUPERVISOR)
+        self.assertIn("root_recovery_download_acknowledged_at", SUPERVISOR)
+
+    def test_fresh_commissioning_builds_every_exact_runtime_before_activation(self) -> None:
+        self.assertIn('["backend","frontend","caddy","database","tools","operations"]', SUPERVISOR)
+        for component in ("backend", "caddy", "database", "tools"):
+            self.assertIn(f'set_apply_stage "build-${{component}}"', SUPERVISOR)
+        self.assertLess(
+            SUPERVISOR.index('set_apply_stage stop-old-backend'),
+            SUPERVISOR.index('set_apply_stage migrations'),
+        )
+        self.assertIn('compose_activate "$components" "$fresh_commissioning"', SUPERVISOR)
+
+    def test_failure_is_staged_and_previous_exact_receipt_is_recovered(self) -> None:
+        self.assertIn("mp-opt-test-deployment-failure-v1", SUPERVISOR)
+        self.assertIn("record_apply_failure", SUPERVISOR)
+        self.assertIn("restore_verified_previous_deployment", SUPERVISOR)
+        self.assertIn("mp_wait_for_health 45", SUPERVISOR)
+
+    def test_ha_peer_receives_same_commit_and_writes_a_matching_receipt(self) -> None:
+        self.assertIn('internal-activate "$target" "$components" "$fresh_commissioning"', SUPERVISOR)
+        self.assertIn("Node B did not record the exact pinned deployment receipt", SUPERVISOR)
+        self.assertIn('write_state "$target" "" "$plan" ""', SUPERVISOR)
 
     def test_frontend_build_uses_host_resolved_exact_source_identity(self) -> None:
         common = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
