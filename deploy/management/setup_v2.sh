@@ -92,7 +92,7 @@ mp_setup_state_update() {
     shift
     temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")" || return 1
     jq "$@" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        "$filter | .updated_at=$now" "$MP_SETUP_V2_STATE" > "$temporary" \
+        "$filter | .updated_at=\$now" "$MP_SETUP_V2_STATE" > "$temporary" \
         || { rm -f "$temporary"; return 1; }
     chmod 600 "$temporary"
     mv "$temporary" "$MP_SETUP_V2_STATE"

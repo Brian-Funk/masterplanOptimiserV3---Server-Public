@@ -95,6 +95,41 @@ class PairingCodeTests(unittest.TestCase):
             state_begin.index('format:"mp-opt-setup-state-v2"'),
         )
 
+    def test_state_update_preserves_the_jq_now_variable_for_jq(self) -> None:
+        state_update = shell_function(SETUP, "mp_setup_state_update")
+        self.assertIn('"$filter | .updated_at=\\$now"', state_update)
+        self.assertNotIn('"$filter | .updated_at=$now"', state_update)
+
+    @unittest.skipIf(os.name == "nt", "POSIX shell state contract")
+    def test_state_update_executes_and_atomically_replaces_the_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            state = work / "setup.json"
+            state.write_text(
+                json.dumps({
+                    "format": "mp-opt-setup-state-v2",
+                    "completed": [],
+                    "updated_at": "before",
+                }),
+                encoding="utf-8",
+            )
+            script = r'''
+                export MP_ROOT="$1" MP_STATE="$2" MP_SETUP_V2_STATE="$3"
+                source "$1/deploy/management/setup_v2.sh"
+                mp_setup_state_update '.completed=["verified"]'
+                jq -r '.completed[0],.updated_at' "$MP_SETUP_V2_STATE"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(ROOT),
+                 str(work), str(state)],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            lines = result.stdout.splitlines()
+            self.assertEqual(lines[0], "verified")
+            self.assertRegex(lines[1], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+            self.assertEqual(list(work.glob("setup.*")), [])
+
     def test_operator_owned_values_have_neutral_examples_not_deployment_presets(self) -> None:
         guided = shell_function(ACTIONS, "mp_guided_initial_configuration")
         configure_smtp = shell_function(ACTIONS, "mp_configure_smtp")
