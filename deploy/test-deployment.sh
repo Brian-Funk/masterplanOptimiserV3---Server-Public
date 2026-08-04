@@ -263,9 +263,22 @@ prepare_runtime_from_installed_sources() {
     '
 }
 
+ensure_optional_compose_secret_sources() {
+    # Fresh unsigned commissioning intentionally bypasses deploy.sh, while
+    # Compose bind mounts still require optional secret paths to exist. Never
+    # overwrite a configured token; create only the absent disabled-state file.
+    mkdir -p "$MP_ROOT/secrets"
+    chmod 700 "$MP_ROOT/secrets"
+    if [ ! -e "$MP_ROOT/secrets/evidence_github_fine_grained_token" ]; then
+        install -m 0600 /dev/null \
+            "$MP_ROOT/secrets/evidence_github_fine_grained_token"
+    fi
+}
+
 compose_activate() {
     local components="$1" fresh_commissioning="${2:-false}" domain
     prepare_runtime_from_installed_sources
+    ensure_optional_compose_secret_sources
     mp_prepare_backend_secret_permissions
     mp_compose_init
     mp_compose_validate

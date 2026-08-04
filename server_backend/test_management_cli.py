@@ -567,6 +567,7 @@ def test_production_configurator_delegates_to_guarded_wizard():
     assert "Configure SMTP activation email now?" in actions
     assert "You can safely skip this" in actions
     assert 'printf \'%s\' "$smtp_token" > "$staging/secrets/smtp_token"' in actions
+    assert ': > "$staging/secrets/evidence_github_fine_grained_token"' in actions
     assert "SMTP_TOKEN=" not in _read(".env.example")
     assert "SECRET_KEY=" not in _read(".env.example")
     assert "ROOT_BOOTSTRAP_TOKEN=" not in _read(".env.example")
@@ -730,6 +731,8 @@ def test_initial_wizard_can_skip_smtp_without_putting_secrets_in_env(tmp_path: P
         test -s "$MP_ROOT/secrets/evidence_signing_key.pub"
         test -e "$MP_ROOT/secrets/smtp_token"
         test ! -s "$MP_ROOT/secrets/smtp_token"
+        test -e "$MP_ROOT/secrets/evidence_github_fine_grained_token"
+        test ! -s "$MP_ROOT/secrets/evidence_github_fine_grained_token"
         ! grep -Eq '^(DATABASE_URL|POSTGRES_PASSWORD|SECRET_KEY|IP_HMAC_KEY|ROOT_BOOTSTRAP_TOKEN|VAPID_PRIVATE_KEY|SMTP_TOKEN)=' "$MP_ROOT/.env"
         grep -Fxq 'SMTP_HOST=' "$MP_ROOT/.env"
         grep -Eq '^MP_INSTANCE_ID=[0-9a-f-]{36}$' "$MP_ROOT/.env"

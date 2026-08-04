@@ -107,6 +107,26 @@ def test_smtp_token_is_provisioned_as_an_optional_docker_secret():
     assert "SMTP_TOKEN=" not in example_env
 
 
+def test_fresh_commissioning_provisions_the_optional_evidence_token_source():
+    """Both configuration and exact-commit activation satisfy Compose mounts."""
+
+    root = _server_root()
+    actions = (root / "deploy" / "management" / "actions.sh").read_text(
+        encoding="utf-8"
+    )
+    test_deployment = (root / "deploy" / "test-deployment.sh").read_text(
+        encoding="utf-8"
+    )
+    secret = "evidence_github_fine_grained_token"
+
+    assert f': > "$staging/secrets/{secret}"' in actions
+    assert f'if [ ! -e "$MP_ROOT/secrets/{secret}" ]; then' in test_deployment
+    assert "install -m 0600 /dev/null" in test_deployment
+    assert test_deployment.index("ensure_optional_compose_secret_sources") < test_deployment.index(
+        "mp_prepare_backend_secret_permissions", test_deployment.index("compose_activate()")
+    )
+
+
 def test_activation_email_brand_and_qr_assets_are_packaged_predictably():
     """Production must use the approved mail identity and deterministic artwork."""
 

@@ -191,6 +191,9 @@ mp_guided_initial_configuration() {
     printf '%s' "$vapid" > "$staging/secrets/vapid_private_key"
     printf '%s' "$root_token" > "$staging/secrets/root_bootstrap_token"
     printf '%s' "$smtp_token" > "$staging/secrets/smtp_token"
+    # Evidence Git archival is optional. Compose still requires a protected
+    # bind source even when no repository token has been configured.
+    : > "$staging/secrets/evidence_github_fine_grained_token"
     python3 "$MP_ROOT/deploy/management/instance_key.py" commission \
         --secret-dir "$staging/secrets" --instance-id "$instance_id" >/dev/null \
         || { rm -rf "$staging"; return 1; }
@@ -207,6 +210,7 @@ mp_guided_initial_configuration() {
             "$MP_ROOT/secrets/vapid_private_key" \
             "$MP_ROOT/secrets/root_bootstrap_token" \
             "$MP_ROOT/secrets/smtp_token" \
+            "$MP_ROOT/secrets/evidence_github_fine_grained_token" \
             "$MP_ROOT/secrets/evidence_signing_key" \
             "$MP_ROOT/secrets/evidence_signing_key.pub"
         rm -rf "$staging"
@@ -222,6 +226,7 @@ mp_guided_initial_configuration() {
             "$MP_ROOT/secrets/vapid_private_key" \
             "$MP_ROOT/secrets/root_bootstrap_token" \
             "$MP_ROOT/secrets/smtp_token" \
+            "$MP_ROOT/secrets/evidence_github_fine_grained_token" \
             "$MP_ROOT/secrets/evidence_signing_key" \
             "$MP_ROOT/secrets/evidence_signing_key.pub"
         ui_error "Compose rejected the generated configuration. Generated files were removed without changing an existing installation."
