@@ -131,6 +131,15 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("aquasec/trivy:0.72.0", workflow)
+        self.assertIn("--ignorefile /work/trivyignore.yaml", workflow)
+        trivy_ignore = (ROOT / "deploy/security/trivyignore.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(trivy_ignore.count("CVE-"), 1)
+        self.assertIn("CVE-2026-69247", trivy_ignore)
+        self.assertIn("pkg:pypi/cryptography@49.0.0", trivy_ignore)
+        self.assertIn("expired_at: 2026-08-18", trivy_ignore)
+        self.assertIn("PKCS#7 EnvelopedData decrypt APIs are not used", trivy_ignore)
         self.assertIn("pull_with_retry()", workflow)
         self.assertIn('for attempt in 1 2 3; do', workflow)
         for image in (

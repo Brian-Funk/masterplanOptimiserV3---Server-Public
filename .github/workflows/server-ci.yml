@@ -150,7 +150,7 @@ jobs:
           if [[ "$CADDY" == true ]]; then docker build -f infra/Dockerfile.caddy -t mp-opt-caddy:ci .; images+=(mp-opt-caddy:ci); fi
           if [[ "$TOOLS" == true ]]; then docker build -f infra/Dockerfile.tools -t mp-opt-tools:ci .; images+=(mp-opt-tools:ci); fi
           for image in "${images[@]}"; do
-            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v mp-opt-ci-trivy-cache:/root/.cache/ aquasec/trivy:0.72.0 image --quiet --scanners vuln --severity HIGH,CRITICAL --exit-code 1 "$image"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/deploy/security/trivyignore.yaml:/work/trivyignore.yaml:ro" -v mp-opt-ci-trivy-cache:/root/.cache/ aquasec/trivy:0.72.0 image --quiet --scanners vuln --severity HIGH,CRITICAL --ignorefile /work/trivyignore.yaml --exit-code 1 "$image"
           done
           if [[ "$CADDY" == true ]]; then
             docker run --rm -v "$PWD/infra/Caddyfile:/etc/caddy/Caddyfile:ro" \
