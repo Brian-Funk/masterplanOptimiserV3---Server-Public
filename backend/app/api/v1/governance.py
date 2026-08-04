@@ -28,6 +28,7 @@ from app.core.governance_rendering import (
     runtime_feature_state,
 )
 from app.core.evidence import lock_evidence_transaction
+from app.core import runtime_settings
 from app.core.security import get_current_user, require_root_admin_read_only, require_root_recent_reauth
 from app.db.database import get_db
 from app.models.governance import (
@@ -424,6 +425,8 @@ def governance_draft(
         "published_version": current_policy_version(db),
         "preflight": _preflight(profile, db),
         "runtime_features": runtime_feature_state(),
+        "runtime_settings": runtime_settings.get_all(db),
+        "runtime_impact": runtime_settings.governance_impact(db),
     }
 
 
@@ -565,9 +568,10 @@ def save_governance_draft(
 
     profile = db.get(InstanceGovernanceProfile, 1)
     scalar = body.model_dump(mode="json", exclude={"structured"})
-    structured_json = json.dumps(
-        body.structured.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    structured, runtime_changes = runtime_settings.apply_governance_runtime_values(
+        body.structured.model_dump(mode="json"), db
     )
+    structured_json = json.dumps(structured, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     if profile is None:
         profile = InstanceGovernanceProfile(
             id=1,
@@ -582,7 +586,13 @@ def save_governance_draft(
         profile.structured_json = structured_json
     audit(db, user=root, action="governance.draft_saved", resource_type="instance", request=request)
     db.commit()
-    return {"status": "saved", "preflight": _preflight(profile, db)}
+    return {
+        "status": "saved",
+        "preflight": _preflight(profile, db),
+        "draft": _draft_payload(profile),
+        "runtime_enforced_changes": runtime_changes,
+        "runtime_impact": runtime_settings.governance_impact(db),
+    }
 
 
 class PublicationConfirmation(BaseModel):
@@ -668,6 +678,7 @@ def publish_governance(
         user_id=root.id, event_id=None, policy_version=version,
         policy_sha256=digest, scope="instance_root",
     ))
+    runtime_settings.clear_governance_impact(db)
     audit(db, user=root, action="governance.published", resource_type="governance_publication",
           resource_id=publication.id, detail=json.dumps({"version": version, "sha256": digest}), request=request)
     db.commit()

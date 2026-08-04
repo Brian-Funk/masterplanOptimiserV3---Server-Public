@@ -6,7 +6,9 @@ static values in ``config.py`` / hard-coded defaults.  Every public getter
 accepts an **optional** ``db`` session so callers that already have one can
 avoid opening a second connection.
 """
-from typing import Dict, Optional
+from datetime import datetime, timezone
+import json
+from typing import Any, Dict, Optional
 
 from sqlalchemy.orm import Session
 
@@ -37,6 +39,12 @@ TUNEABLE_SETTINGS: Dict[str, dict] = {
     "masterplan_pushes_per_minute":         {"default": 5,                                              "type": int, "label": "Masterplan pushes per minute", "unit": "pushes/minute", "min": 1, "max": 120},
     "public_schedule_pushes_per_minute":    {"default": 5,                                              "type": int, "label": "Public Schedule pushes per minute", "unit": "pushes/minute", "min": 1, "max": 120},
     "ha_replication_interval_minutes": {"default": 5, "type": int, "label": "Replication frequency", "unit": "minutes", "min": 5, "max": 1440},
+}
+
+GOVERNANCE_RUNTIME_FIELDS: dict[str, tuple[str, str]] = {
+    "event_purge_grace_days": ("event_grace_days", "Event purge grace"),
+    "audit_log_retention_days": ("audit_retention_days", "Audit-log retention"),
+    "offline_access_ttl_hours": ("browser_cache_expiry_hours", "Offline/browser access lifetime"),
 }
 
 
@@ -73,6 +81,8 @@ def get_all(db: Session) -> Dict[str, dict]:
             "unit": meta["unit"],
             "min": meta["min"],
             "max": meta["max"],
+            "governance_managed": key in GOVERNANCE_RUNTIME_FIELDS,
+            "governance_field": GOVERNANCE_RUNTIME_FIELDS.get(key, (None, None))[0],
         }
     return result
 
@@ -94,7 +104,93 @@ def get_int(key: str, db: Session) -> int:
     return meta["default"]
 
 
-def set_value(key: str, value: int, db: Session) -> None:
+def _set_internal(db: Session, key: str, value: str) -> None:
+    from app.models.server_setting import ServerSetting
+    row = db.query(ServerSetting).filter(ServerSetting.key == key).first()
+    if row:
+        row.value = value
+    else:
+        db.add(ServerSetting(key=key, value=value))
+
+
+def apply_governance_runtime_values(structured: dict[str, Any], db: Session) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Overlay only settings the Server actually enforces onto a draft."""
+    result = json.loads(json.dumps(structured))
+    retention = result.setdefault("retention", {})
+    changes: list[dict[str, Any]] = []
+    for setting_key, (field, label) in GOVERNANCE_RUNTIME_FIELDS.items():
+        effective = get_int(setting_key, db)
+        previous = retention.get(field)
+        retention[field] = effective
+        if previous != effective:
+            changes.append({
+                "setting": setting_key,
+                "governance_field": f"retention.{field}",
+                "label": label,
+                "previous": previous,
+                "current": effective,
+            })
+    return result, changes
+
+
+def _sync_governance_draft(db: Session) -> dict[str, Any]:
+    from app.models.governance import GovernancePublication, InstanceGovernanceProfile
+
+    profile = db.get(InstanceGovernanceProfile, 1)
+    if profile is None:
+        return {"draft_updated": False, "publication_required": False, "changes": []}
+    try:
+        structured = json.loads(profile.structured_json or "{}")
+    except json.JSONDecodeError:
+        structured = {}
+    updated, changes = apply_governance_runtime_values(structured, db)
+    if not changes:
+        return governance_impact(db) | {"draft_updated": False, "changes": []}
+    profile.structured_json = json.dumps(updated, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    existing_raw = _get_overrides(db).get("governance_runtime_changed_fields", "[]")
+    try:
+        existing = json.loads(existing_raw)
+    except json.JSONDecodeError:
+        existing = []
+    by_field = {item.get("governance_field"): item for item in existing if isinstance(item, dict)}
+    for change in changes:
+        original = by_field.get(change["governance_field"])
+        if original and "previous" in original:
+            change["previous"] = original["previous"]
+        by_field[change["governance_field"]] = change
+    changed_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    publication_required = db.query(GovernancePublication.id).first() is not None
+    _set_internal(db, "governance_runtime_draft_changed_at", changed_at)
+    _set_internal(db, "governance_runtime_changed_fields", json.dumps(list(by_field.values()), separators=(",", ":"), sort_keys=True))
+    _set_internal(db, "governance_runtime_publication_required", "true" if publication_required else "false")
+    return {
+        "draft_updated": True,
+        "publication_required": publication_required,
+        "changed_at": changed_at,
+        "changes": changes,
+    }
+
+
+def governance_impact(db: Session) -> dict[str, Any]:
+    values = _get_overrides(db)
+    try:
+        changes = json.loads(values.get("governance_runtime_changed_fields", "[]"))
+    except json.JSONDecodeError:
+        changes = []
+    return {
+        "draft_updated": bool(changes),
+        "publication_required": values.get("governance_runtime_publication_required") == "true",
+        "changed_at": values.get("governance_runtime_draft_changed_at"),
+        "changes": changes if isinstance(changes, list) else [],
+    }
+
+
+def clear_governance_impact(db: Session) -> None:
+    _set_internal(db, "governance_runtime_changed_fields", "[]")
+    _set_internal(db, "governance_runtime_publication_required", "false")
+
+
+def set_value(key: str, value: int, db: Session) -> dict[str, Any]:
     """Persist a runtime override (upsert)."""
     meta = TUNEABLE_SETTINGS.get(key)
     if meta is None:
@@ -107,4 +203,9 @@ def set_value(key: str, value: int, db: Session) -> None:
         row.value = str(value)
     else:
         db.add(ServerSetting(key=key, value=str(value)))
+    # The governance overlay must see this exact value even when the caller's
+    # session has not otherwise issued a flushing query yet.
+    db.flush()
+    impact = _sync_governance_draft(db) if key in GOVERNANCE_RUNTIME_FIELDS else governance_impact(db)
     db.commit()
+    return impact

@@ -2918,9 +2918,10 @@ def update_security_settings(
     """Update root-admin security settings after re-authentication."""
     updated = []
     errors = []
+    governance_impact = runtime_settings.governance_impact(db)
     for key, value in body.settings.items():
         try:
-            runtime_settings.set_value(key, int(value), db)
+            governance_impact = runtime_settings.set_value(key, int(value), db)
             updated.append(key)
         except (KeyError, ValueError, TypeError) as exc:
             errors.append({"key": key, "error": str(exc)})
@@ -2931,7 +2932,7 @@ def update_security_settings(
         db.commit()
         if "ha_replication_interval_minutes" in updated and settings.HA_MODE == "ha":
             _request_ha_replication("settings-change")
-    return {"updated": updated, "errors": errors}
+    return {"updated": updated, "errors": errors, "governance_impact": governance_impact}
 
 
 # ---------------------------------------------------------------------------

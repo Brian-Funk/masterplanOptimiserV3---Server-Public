@@ -1,6 +1,7 @@
 """Contracts for locally controlled, immutable governance publications."""
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 from app.core.config import settings
@@ -167,6 +168,49 @@ def test_draft_is_private_and_publication_is_immutable(db):
     retry = client.post("/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION)
     assert retry.json()["status"] == "unchanged"
     assert retry.json()["version"] == 1
+
+
+def test_runtime_retention_settings_are_authoritative_and_require_republication(db):
+    client, _root = _root_with_reauth(db)
+    imported = deepcopy(PROFILE)
+    imported["structured"]["retention"]["event_grace_days"] = 2
+    imported["structured"]["retention"]["audit_retention_days"] = 31
+    imported["structured"]["retention"]["browser_cache_expiry_hours"] = 3
+
+    saved = client.put("/api/v1/admin/governance", json=imported)
+    assert saved.status_code == 200, saved.json()
+    retained = saved.json()["draft"]["structured"]["retention"]
+    assert retained["event_grace_days"] == settings.EVENT_PURGE_GRACE_DAYS
+    assert retained["audit_retention_days"] == 90
+    assert retained["browser_cache_expiry_hours"] == 24
+    assert {item["governance_field"] for item in saved.json()["runtime_enforced_changes"]} == {
+        "retention.event_grace_days", "retention.audit_retention_days",
+        "retention.browser_cache_expiry_hours",
+    }
+
+    published = client.post("/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION)
+    assert published.status_code == 200, published.json()
+    original_public = client.get("/api/v1/governance/public").json()
+    assert original_public["retention"]["audit_retention_days"] == 90
+
+    changed = client.put("/api/v1/admin/settings", json={"settings": {"audit_log_retention_days": 120}})
+    assert changed.status_code == 200, changed.json()
+    assert changed.json()["governance_impact"]["draft_updated"] is True
+    assert changed.json()["governance_impact"]["publication_required"] is True
+    draft = client.get("/api/v1/admin/governance").json()
+    assert draft["draft"]["structured"]["retention"]["audit_retention_days"] == 120
+    assert draft["runtime_impact"]["publication_required"] is True
+    assert client.get("/api/v1/governance/public").json()["retention"]["audit_retention_days"] == 90
+    assert any(
+        item["path"] == "retention.audit_retention_days"
+        for item in client.get("/api/v1/admin/governance/preview").json()["diff"]["changes"]
+    )
+
+    republished = client.post("/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION)
+    assert republished.status_code == 200, republished.json()
+    assert republished.json()["version"] == 2
+    assert client.get("/api/v1/governance/public").json()["retention"]["audit_retention_days"] == 120
+    assert client.get("/api/v1/admin/governance").json()["runtime_impact"]["publication_required"] is False
 
 
 def test_preflight_reports_required_controller_trust_before_publication(monkeypatch, db):

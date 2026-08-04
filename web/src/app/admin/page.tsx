@@ -5791,6 +5791,8 @@ interface SettingMeta {
   unit: string;
   min: number;
   max: number;
+  governance_managed?: boolean;
+  governance_field?: string | null;
 }
 
 const SETTING_DESCRIPTIONS: Record<string, string> = {
@@ -5867,6 +5869,7 @@ function SecurityTab() {
     message: string;
   } | null>(null);
   const [expandedInfo, setExpandedInfo] = useState<Record<string, boolean>>({});
+  const [governanceReviewRequired, setGovernanceReviewRequired] = useState(false);
   const [mailSettings, setMailSettings] =
     useState<ActivationDeliverySettings | null>(null);
   const [testRecipient, setTestRecipient] = useState("");
@@ -5903,6 +5906,9 @@ function SecurityTab() {
 
   const hasChanges =
     settings && Object.keys(draft).some((k) => draft[k] !== settings[k]?.value);
+  const governanceChanges = settings ? Object.keys(draft).filter(
+    (key) => draft[key] !== settings[key]?.value && settings[key]?.governance_managed,
+  ) : [];
 
   const handleSave = async () => {
     if (!settings) return;
@@ -5924,7 +5930,15 @@ function SecurityTab() {
         }),
       );
       if (res.ok) {
-        setStatus({ type: "success", message: "Settings saved." });
+        const data = await res.json().catch(() => ({}));
+        const reviewRequired = Boolean(data.governance_impact?.draft_updated);
+        setGovernanceReviewRequired(reviewRequired);
+        setStatus({
+          type: "success",
+          message: reviewRequired
+            ? "Settings saved and the private Governance draft was updated. Review the exact legal-notice diff before publishing a new version."
+            : "Settings saved.",
+        });
         await fetchSettings();
       } else {
         const err = await res.json().catch(() => ({}));
@@ -6068,6 +6082,8 @@ function SecurityTab() {
         Configure runtime security parameters. Passkey re-authentication is
         required to save changes.
       </p>
+
+      {governanceChanges.length > 0 && <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100"><strong>This change affects published Governance wording.</strong><p className="mt-1">Saving will update the private Governance draft for {governanceChanges.map((key) => settings[key].label).join(", ")}. Your root passkey authorises the settings change; public notices remain unchanged until you review the exact diff and publish a new immutable version.</p></div>}
 
       <Card className="p-5">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -6231,7 +6247,7 @@ function SecurityTab() {
       <div className="flex items-center gap-3 pt-1">
         <Button onClick={handleSave} disabled={saving || !hasChanges}>
           <Shield size={15} />
-          {saving ? "Saving..." : "Save Security Settings"}
+          {saving ? "Saving..." : governanceChanges.length ? "Authorise settings and update Governance draft" : "Save Security Settings"}
         </Button>
         {status && (
           <span
@@ -6244,6 +6260,7 @@ function SecurityTab() {
             {status.message}
           </span>
         )}
+        {governanceReviewRequired && <a className="text-sm font-medium text-blue-700 underline dark:text-blue-300" href="/admin/governance">Review Governance draft</a>}
       </div>
     </div>
   );
