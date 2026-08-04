@@ -128,7 +128,9 @@ class PairingCodeTests(unittest.TestCase):
             lines = result.stdout.splitlines()
             self.assertEqual(lines[0], "verified")
             self.assertRegex(lines[1], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
-            self.assertEqual(list(work.glob("setup.*")), [])
+            # The authoritative setup.json must remain; only mktemp's
+            # setup.XXXXXX staging files must be absent after the atomic move.
+            self.assertEqual(list(work.glob("setup.??????")), [])
 
     def test_operator_owned_values_have_neutral_examples_not_deployment_presets(self) -> None:
         guided = shell_function(ACTIONS, "mp_guided_initial_configuration")
