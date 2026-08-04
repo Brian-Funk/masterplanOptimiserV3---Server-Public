@@ -382,12 +382,19 @@ def test_frontend_build_generates_and_reloads_build_specific_csp():
 
 def test_root_commissioning_migration_is_expand_first_for_signed_handoff():
     """The signed stable backend must survive until exact campaign images start."""
-    migration = (
+    commissioning = (
         _server_root()
         / "deploy"
         / "migrations"
         / "20260804_root_commissioning.sql"
     ).read_text(encoding="utf-8")
+    handoff = (
+        _server_root()
+        / "deploy"
+        / "migrations"
+        / "20260805_signed_handoff_expansion.sql"
+    ).read_text(encoding="utf-8")
 
-    assert "ADD COLUMN IF NOT EXISTS trust_establishment_sha256" in migration
-    assert "DROP COLUMN" not in migration
+    assert "ADD COLUMN IF NOT EXISTS trust_establishment_sha256" in commissioning
+    assert "ADD COLUMN IF NOT EXISTS trust_declaration_sha256" in handoff
+    assert "DROP COLUMN" not in handoff

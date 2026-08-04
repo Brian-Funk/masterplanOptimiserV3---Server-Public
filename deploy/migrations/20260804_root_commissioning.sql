@@ -1,6 +1,7 @@
--- Expand before contract: fresh test commissioning briefly runs the signed
--- stable backend before the exact campaign images are built. The old column
--- remains physically present for that handoff but is not read or written by
--- the campaign application; no declaration data or workflow is migrated.
+-- Clean-install campaign: obsolete trust declarations are deliberately not
+-- migrated into the controller registration trust model.
+ALTER TABLE evidence_keys
+    DROP COLUMN IF EXISTS trust_declaration_sha256;
+
 ALTER TABLE evidence_keys
     ADD COLUMN IF NOT EXISTS trust_establishment_sha256 VARCHAR(64);
