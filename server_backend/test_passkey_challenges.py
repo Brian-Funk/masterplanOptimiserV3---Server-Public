@@ -1,4 +1,5 @@
 """Security regressions for scoped, single-use WebAuthn ceremonies."""
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -150,10 +151,75 @@ def test_root_bootstrap_commits_credential_and_audit_with_production_ip_hash(
     assert complete.status_code == 200, complete.text
     assert db.query(WebAuthnCredential).filter_by(user_id=root.id).count() == 1
     assert db.query(AuditLog).filter_by(action="passkey.bootstrap").count() == 1
+    db.refresh(root)
+    assert root.is_activated is False
     assert db.query(ServerSetting).filter_by(
         key="root_bootstrap_disabled",
         value="true",
+    ).count() == 0
+    status = client.get("/api/v1/passkey/bootstrap-status")
+    assert status.json()["stage"] == "recovery"
+    assert status.json()["needs_bootstrap"] is True
+    _install_auth_success(monkeypatch)
+    blocked_begin = client.post("/api/v1/passkey/auth/begin").json()
+    blocked_login = client.post(
+        "/api/v1/passkey/auth/complete",
+        json=_auth_body(
+            "root-bootstrap-credential", root.id,
+            blocked_begin["ceremony_id"],
+        ),
+    )
+    assert blocked_login.status_code == 401
+
+    recipient = "age1" + "q" * 58
+    final = client.post(
+        "/api/v1/passkey/bootstrap/recovery/complete",
+        headers={"X-Bootstrap-Token": token},
+        json={"recipient": recipient, "download_acknowledged": True},
+    )
+    assert final.status_code == 200, final.text
+    db.refresh(root)
+    assert root.is_activated is True
+    assert db.query(ServerSetting).filter_by(
+        key="root_bootstrap_disabled", value="true",
     ).count() == 1
+    assert db.query(ServerSetting).filter_by(
+        key="root_recovery_recipient_sha256",
+        value=hashlib.sha256(recipient.encode("ascii")).hexdigest(),
+    ).count() == 1
+    assert db.query(AuditLog).filter_by(
+        action="recovery.bootstrap_download_confirmed",
+    ).count() == 1
+    allowed_begin = client.post("/api/v1/passkey/auth/begin").json()
+    allowed_login = client.post(
+        "/api/v1/passkey/auth/complete",
+        json=_auth_body(
+            "root-bootstrap-credential", root.id,
+            allowed_begin["ceremony_id"],
+        ),
+    )
+    assert allowed_login.status_code == 200
+
+
+def test_root_recovery_completion_rejects_missing_download_acknowledgement(db, monkeypatch):
+    token = "root-bootstrap-recovery-token-with-enough-entropy"
+    root = create_test_user(
+        db, username="recovery.pending", is_root_admin=True,
+        is_admin=True, is_activated=False,
+    )
+    _add_credential(db, root, "pending-recovery-credential")
+    monkeypatch.setattr(passkey_api.settings, "ROOT_BOOTSTRAP_TOKEN", token)
+    client = _raw_client()
+
+    response = client.post(
+        "/api/v1/passkey/bootstrap/recovery/complete",
+        headers={"X-Bootstrap-Token": token},
+        json={"recipient": "age1" + "q" * 58, "download_acknowledged": False},
+    )
+
+    assert response.status_code == 422
+    db.refresh(root)
+    assert root.is_activated is False
 
 
 def test_verified_reset_replaces_all_previous_passkeys(db):

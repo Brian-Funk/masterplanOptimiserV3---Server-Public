@@ -41,6 +41,11 @@ vi.mock("@simplewebauthn/browser", () => ({
   startRegistration: (...args: unknown[]) => mockStartRegistration(...args),
 }));
 
+const mockGenerateAgeRecoveryIdentity = vi.fn();
+vi.mock("@/lib/ageIdentity", () => ({
+  generateAgeRecoveryIdentity: () => mockGenerateAgeRecoveryIdentity(),
+}));
+
 // Mock fetch
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
@@ -51,6 +56,9 @@ beforeEach(() => {
   mockPush.mockReset();
   mockFetch.mockReset();
   mockStartRegistration.mockReset();
+  mockGenerateAgeRecoveryIdentity.mockReset();
+  Object.defineProperty(URL, "createObjectURL", { configurable: true, value: vi.fn(() => "blob:recovery") });
+  Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
 });
 
 describe("BootstrapPage", () => {
@@ -156,10 +164,10 @@ describe("BootstrapPage", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(/Root passkey registered successfully/),
+        screen.getByText(/normal login remains locked/i),
       ).toBeInTheDocument();
       expect(
-        screen.getByRole("button", { name: /sign in and create recovery key/i }),
+        screen.getByRole("button", { name: /^create recovery key$/i }),
       ).toBeInTheDocument();
     });
 
@@ -171,7 +179,7 @@ describe("BootstrapPage", () => {
     );
   });
 
-  it("navigates to login after successful registration", async () => {
+  it("enables login only after the recovery identity download is confirmed", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ needs_bootstrap: true }),
@@ -194,6 +202,10 @@ describe("BootstrapPage", () => {
       ok: true,
       json: async () => ({}),
     });
+    mockGenerateAgeRecoveryIdentity.mockResolvedValueOnce({
+      recipient: `age1${"q".repeat(58)}`,
+      identity: "AGE-SECRET-KEY-1SYNTHETICONLY",
+    });
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("checkbox", { name: /permitted-data boundary/i }));
@@ -204,14 +216,23 @@ describe("BootstrapPage", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: /sign in and create recovery key/i }),
+        screen.getByRole("button", { name: /^create recovery key$/i }),
       ).toBeInTheDocument();
     });
 
-    await user.click(
-      screen.getByRole("button", { name: /sign in and create recovery key/i }),
-    );
-    expect(mockPush).toHaveBeenCalledWith("/login?next=/recovery-key");
+    expect(screen.queryByRole("button", { name: /continue to login/i })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^create recovery key$/i }));
+    await user.click(await screen.findByRole("button", { name: /download private recovery key/i }));
+    await user.click(screen.getByRole("checkbox", { name: /was saved in a protected location/i }));
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ status: "ok" }) });
+    await user.click(screen.getByRole("button", { name: /finish secure setup/i }));
+    await user.click(await screen.findByRole("button", { name: /continue to login/i }));
+    expect(mockPush).toHaveBeenCalledWith("/login");
+    expect(mockFetch.mock.calls[3][0]).toContain("/bootstrap/recovery/complete");
+    expect(JSON.parse(mockFetch.mock.calls[3][1].body)).toEqual({
+      recipient: `age1${"q".repeat(58)}`,
+      download_acknowledged: true,
+    });
   });
 
   it("shows error when registration begin fails", async () => {

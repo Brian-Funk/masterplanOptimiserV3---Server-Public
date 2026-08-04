@@ -8,16 +8,21 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { Logo } from "@/components/Logo";
 import { getApiUrl } from "@/lib/environment";
 import { passkeyErrorMessage } from "@/lib/passkeyError";
+import { generateAgeRecoveryIdentity } from "@/lib/ageIdentity";
 import { startRegistration } from "@simplewebauthn/browser";
 
 export default function BootstrapPage() {
   const router = useRouter();
   const [status, setStatus] = useState<
-    "checking" | "ready" | "registering" | "done" | "already-done" | "error"
+    "checking" | "ready" | "registering" | "recovery" | "finalizing" | "complete" | "already-done" | "error"
   >("checking");
   const [error, setError] = useState("");
   const [bootstrapCode, setBootstrapCode] = useState("");
   const [policyAcknowledged, setPolicyAcknowledged] = useState(false);
+  const [recoveryRecipient, setRecoveryRecipient] = useState("");
+  const [recoveryIdentity, setRecoveryIdentity] = useState("");
+  const [recoveryDownloaded, setRecoveryDownloaded] = useState(false);
+  const [downloadConfirmed, setDownloadConfirmed] = useState(false);
   const [policyIdentity, setPolicyIdentity] = useState<{
     version: string;
     sha256: string;
@@ -42,7 +47,9 @@ export default function BootstrapPage() {
         sha256: data.policy_sha256,
         text: data.policy_text,
       });
-      if (data.needs_bootstrap) {
+      if (data.stage === "recovery") {
+        setStatus("recovery");
+      } else if (data.needs_bootstrap) {
         if (data.bootstrap_configured === false) {
           setError(
             "Root bootstrap is not configured on the server. Set ROOT_BOOTSTRAP_TOKEN and restart the service.",
@@ -111,7 +118,7 @@ export default function BootstrapPage() {
         );
       }
 
-      setStatus("done");
+      setStatus("recovery");
     } catch (err: unknown) {
       if (err instanceof Error && err.name === "NotAllowedError") {
         setStatus("ready");
@@ -119,6 +126,68 @@ export default function BootstrapPage() {
       }
       setError(err instanceof Error ? err.message : "Registration failed");
       setStatus("error");
+    }
+  };
+
+  const createRecoveryIdentity = async () => {
+    setError("");
+    try {
+      const generated = await generateAgeRecoveryIdentity();
+      setRecoveryRecipient(generated.recipient);
+      setRecoveryIdentity(generated.identity);
+      setRecoveryDownloaded(false);
+      setDownloadConfirmed(false);
+    } catch {
+      setError("This browser cannot create an X25519 recovery identity. Use a current Chrome, Edge, Firefox or Safari release.");
+    }
+  };
+
+  const downloadRecoveryIdentity = () => {
+    if (!recoveryIdentity || !recoveryRecipient) return;
+    const contents = [
+      "# MP-OPT snapshot recovery identity",
+      `# Public key: ${recoveryRecipient}`,
+      "# Store this file in a protected password manager and a second encrypted/offline location.",
+      recoveryIdentity,
+      "",
+    ].join("\n");
+    const url = URL.createObjectURL(new Blob([contents], { type: "text/plain" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "mp-opt-recovery.agekey";
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setRecoveryDownloaded(true);
+  };
+
+  const finishRecoverySetup = async () => {
+    if (!recoveryRecipient || !recoveryDownloaded || !downloadConfirmed) return;
+    setStatus("finalizing");
+    setError("");
+    try {
+      const apiUrl = getApiUrl();
+      const response = await fetch(`${apiUrl}/api/v1/passkey/bootstrap/recovery/complete`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Bootstrap-Token": bootstrapCode,
+        },
+        credentials: "include",
+        referrerPolicy: "no-referrer",
+        body: JSON.stringify({
+          recipient: recoveryRecipient,
+          download_acknowledged: true,
+        }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(passkeyErrorMessage(body, "Recovery setup could not be completed"));
+      }
+      setRecoveryIdentity("");
+      setStatus("complete");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Recovery setup could not be completed");
+      setStatus("recovery");
     }
   };
 
@@ -198,21 +267,43 @@ export default function BootstrapPage() {
             </p>
           )}
 
-          {status === "done" && (
+          {status === "recovery" && (
             <>
-              <div className="bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-800 text-green-700 dark:text-green-300 px-4 py-3 rounded-lg text-sm mb-6 text-center">
-                Root passkey registered successfully!
+              <div className="mb-5 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
+                The root passkey is registered, but normal login remains locked until the private recovery identity is downloaded and confirmed.
               </div>
+              <label htmlFor="recovery-bootstrap-code" className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Bootstrap code</label>
+              <input id="recovery-bootstrap-code" type="password" autoComplete="one-time-code" value={bootstrapCode}
+                onChange={(event) => setBootstrapCode(event.target.value)}
+                className="mb-4 w-full rounded border border-gray-300 bg-white px-3 py-2 text-gray-900 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100" />
               <Button
                 type="button"
                 variant="primary"
                 fullWidth
-                onClick={() => router.push("/login?next=/recovery-key")}
+                onClick={createRecoveryIdentity}
+                disabled={bootstrapCode.length < 32}
               >
-                Sign in and create recovery key
+                {recoveryIdentity ? "Create a different recovery key" : "Create recovery key"}
               </Button>
+              {recoveryIdentity && <div className="mt-5 space-y-4">
+                <p className="break-all rounded-lg bg-gray-100 p-3 font-mono text-xs dark:bg-gray-800">{recoveryRecipient}</p>
+                <Button type="button" variant="secondary" fullWidth onClick={downloadRecoveryIdentity}>Download private recovery key</Button>
+                {recoveryDownloaded && <label className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+                  <input type="checkbox" checked={downloadConfirmed} onChange={(event) => setDownloadConfirmed(event.target.checked)} className="mt-1" />
+                  <span>I confirm that <strong>mp-opt-recovery.agekey</strong> was saved in a protected location.</span>
+                </label>}
+                <Button type="button" variant="primary" fullWidth onClick={finishRecoverySetup}
+                  disabled={!recoveryDownloaded || !downloadConfirmed}>Finish secure setup</Button>
+              </div>}
             </>
           )}
+
+          {status === "finalizing" && <p className="text-center text-gray-600 dark:text-gray-400">Enabling root login...</p>}
+
+          {status === "complete" && <>
+            <div className="mb-6 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-center text-sm text-green-700 dark:border-green-800 dark:bg-green-900/30 dark:text-green-300">Secure root setup is complete.</div>
+            <Button type="button" variant="primary" fullWidth onClick={() => router.push("/login")}>Continue to login</Button>
+          </>}
 
           {status === "already-done" && (
             <>
