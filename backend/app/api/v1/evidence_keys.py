@@ -198,6 +198,19 @@ def begin_trust_key_challenge(
             ).first()
             if previous is None: raise TrustEvidenceError("the superseded key is not active for this role, entity, and instance")
         now = datetime.now(timezone.utc).replace(microsecond=0)
+        # A browser retry or an explicit restart must leave only one usable
+        # ceremony for an entity. Preserve the abandoned rows for audit, but
+        # make their signed challenges permanently unavailable before issuing
+        # the replacement. Any associated WebAuthn ceremony then fails closed
+        # when it attempts to reload the superseded trust challenge.
+        superseded_pending = db.query(EvidenceKeyRegistrationChallenge).filter(
+            EvidenceKeyRegistrationChallenge.instance_id == state.instance_id,
+            EvidenceKeyRegistrationChallenge.entity_id == body.entity_id,
+            EvidenceKeyRegistrationChallenge.role == body.role,
+            EvidenceKeyRegistrationChallenge.used_at.is_(None),
+        ).all()
+        for pending in superseded_pending:
+            pending.used_at = now
         expires = now + timedelta(minutes=10)
         document = {
             "format": "mp-opt-controller-trust-registration-v2",
@@ -233,7 +246,12 @@ def begin_trust_key_challenge(
         )
         db.add(challenge)
         audit(db, user=root, action="evidence.trust_key.challenge", resource_type="evidence", request=request,
-              detail=json.dumps({"schema_version": 1, "purpose": purpose, "role": body.role}))
+              detail=json.dumps({
+                  "schema_version": 1,
+                  "purpose": purpose,
+                  "role": body.role,
+                  "superseded_pending_challenges": len(superseded_pending),
+              }))
         db.commit()
         return {"challenge": document, "challenge_sha256": challenge.challenge_sha256}
     except (EvidenceUnavailable, TrustEvidenceError, ValueError) as exc:

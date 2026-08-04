@@ -139,6 +139,38 @@ def test_wrong_proof_expired_challenge_and_changed_instance_are_rejected(db):
     assert expired.status_code == 409
 
 
+def test_new_controller_attempt_invalidates_the_previous_pending_ceremony(db):
+    client, _root_user, _credential = _root(db)
+    private, public = _keypair()
+    first = _begin(client, public, "controller", "ctl-synthetic0001")
+    proof = client.post(
+        f"{BASE}/trust-keys/proofs",
+        json={"challenge": first, "proof": _proof(private, first)},
+    )
+    assert proof.status_code == 200, proof.text
+    authorisation = client.post(
+        f"{BASE}/trust-keys/{first['challenge_id']}/root-authorisation/begin",
+        json={},
+    )
+    assert authorisation.status_code == 200, authorisation.text
+
+    second = _begin(client, public, "controller", "ctl-synthetic0001")
+    first_row = db.query(EvidenceKeyRegistrationChallenge).filter(
+        EvidenceKeyRegistrationChallenge.challenge_id == first["challenge_id"]
+    ).one()
+    second_row = db.query(EvidenceKeyRegistrationChallenge).filter(
+        EvidenceKeyRegistrationChallenge.challenge_id == second["challenge_id"]
+    ).one()
+    assert first_row.used_at is not None
+    assert second_row.used_at is None
+
+    superseded = client.post(
+        f"{BASE}/trust-keys/{first['challenge_id']}/root-authorisation/begin",
+        json={},
+    )
+    assert superseded.status_code == 409
+
+
 def test_event_processor_enrolment_is_publish_secret_bound_and_root_activated(db, monkeypatch):
     event, publish_secret = create_test_event(db, name="Processor event")
     private, public = _keypair()
