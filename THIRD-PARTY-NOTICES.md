@@ -152,6 +152,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | @eslint/object-schema | 2.1.7 | Apache-2.0 | `web/package-lock.json` |
 | @eslint/plugin-kit | 0.4.1 | Apache-2.0 | `web/package-lock.json` |
 | @exodus/bytes | 1.15.1 | MIT | `web/package-lock.json` |
+| @fontsource/source-sans-3 | 5.2.9 | OFL-1.1 | `web/package-lock.json` |
 | @gerrit0/mini-shiki | 3.23.0 | MIT | `web/package-lock.json` |
 | @humanfs/core | 0.19.2 | Apache-2.0 | `web/package-lock.json` |
 | @humanfs/node | 0.16.8 | Apache-2.0 | `web/package-lock.json` |
