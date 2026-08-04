@@ -53,6 +53,8 @@
 	# hours can strand an installed desktop client on an obsolete HA state flow.
 	@serviceWorker path /sw.js
 	header @serviceWorker Cache-Control "no-cache, no-store, must-revalidate"
+	@authenticationShell path /login /login/ /login.html /bootstrap /bootstrap/ /bootstrap.html
+	header @authenticationShell Cache-Control "no-cache, no-store, must-revalidate"
 
 	handle {
 		root * /srv/static

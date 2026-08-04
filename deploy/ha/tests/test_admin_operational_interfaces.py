@@ -236,6 +236,10 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
                 'header @serviceWorker Cache-Control "no-cache, no-store, must-revalidate"',
                 caddyfile,
             )
+            self.assertIn(
+                'header @authenticationShell Cache-Control "no-cache, no-store, must-revalidate"',
+                caddyfile,
+            )
         self.assertIn("View saved schedule", SERVICE_PANEL)
         self.assertIn("w-[calc(100%_-_2rem)]", SERVICE_PANEL)
         self.assertNotIn("w-[calc(100%-", SERVICE_PANEL)

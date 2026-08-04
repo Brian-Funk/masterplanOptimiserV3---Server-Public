@@ -161,20 +161,42 @@ def test_root_bootstrap_commits_credential_and_audit_with_production_ip_hash(
     assert status.json()["stage"] == "recovery"
     assert status.json()["needs_bootstrap"] is True
     _install_auth_success(monkeypatch)
-    blocked_begin = client.post("/api/v1/passkey/auth/begin").json()
-    blocked_login = client.post(
+    restricted_begin = client.post("/api/v1/passkey/auth/begin").json()
+    restricted_login = client.post(
         "/api/v1/passkey/auth/complete",
         json=_auth_body(
             "root-bootstrap-credential", root.id,
-            blocked_begin["ceremony_id"],
+            restricted_begin["ceremony_id"],
         ),
     )
-    assert blocked_login.status_code == 401
+    assert restricted_login.status_code == 200
+    exchange = client.post(
+        "/api/v1/auth/exchange",
+        json={"code": restricted_login.json()["exchange_code"]},
+    )
+    assert exchange.status_code == 200, exchange.text
+    assert exchange.json()["recovery_setup_required"] is True
+    me = client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json()["recovery_setup_required"] is True
+    assert client.get("/api/v1/auth/root-access").status_code == 401
 
-    recipient = "age1" + "q" * 58
-    final = client.post(
+    bootstrap_token_only = _raw_client().post(
         "/api/v1/passkey/bootstrap/recovery/complete",
         headers={"X-Bootstrap-Token": token},
+        json={
+            "recipient": "age1" + "q" * 58,
+            "download_acknowledged": True,
+        },
+    )
+    assert bootstrap_token_only.status_code == 401
+
+    recipient = "age1" + "q" * 58
+    csrf = client.cookies.get(settings.CSRF_COOKIE_NAME)
+    assert csrf
+    final = client.post(
+        "/api/v1/passkey/bootstrap/recovery/complete",
+        headers={"X-CSRF-Token": csrf},
         json={"recipient": recipient, "download_acknowledged": True},
     )
     assert final.status_code == 200, final.text
@@ -190,6 +212,7 @@ def test_root_bootstrap_commits_credential_and_audit_with_production_ip_hash(
     assert db.query(AuditLog).filter_by(
         action="recovery.bootstrap_download_confirmed",
     ).count() == 1
+    assert client.get("/api/v1/auth/root-access").status_code == 200
     allowed_begin = client.post("/api/v1/passkey/auth/begin").json()
     allowed_login = client.post(
         "/api/v1/passkey/auth/complete",
@@ -202,18 +225,33 @@ def test_root_bootstrap_commits_credential_and_audit_with_production_ip_hash(
 
 
 def test_root_recovery_completion_rejects_missing_download_acknowledgement(db, monkeypatch):
-    token = "root-bootstrap-recovery-token-with-enough-entropy"
+    from app.core.config import settings
+
     root = create_test_user(
         db, username="recovery.pending", is_root_admin=True,
         is_admin=True, is_activated=False,
     )
     _add_credential(db, root, "pending-recovery-credential")
-    monkeypatch.setattr(passkey_api.settings, "ROOT_BOOTSTRAP_TOKEN", token)
+    _install_auth_success(monkeypatch)
     client = _raw_client()
+    begin = client.post("/api/v1/passkey/auth/begin").json()
+    login = client.post(
+        "/api/v1/passkey/auth/complete",
+        json=_auth_body(
+            "pending-recovery-credential", root.id, begin["ceremony_id"],
+        ),
+    )
+    exchange = client.post(
+        "/api/v1/auth/exchange",
+        json={"code": login.json()["exchange_code"]},
+    )
+    assert exchange.status_code == 200
+    csrf = client.cookies.get(settings.CSRF_COOKIE_NAME)
+    assert csrf
 
     response = client.post(
         "/api/v1/passkey/bootstrap/recovery/complete",
-        headers={"X-Bootstrap-Token": token},
+        headers={"X-CSRF-Token": csrf},
         json={"recipient": "age1" + "q" * 58, "download_acknowledged": False},
     )
 

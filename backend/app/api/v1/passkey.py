@@ -54,7 +54,11 @@ from app.core.rate_limit import (
     passkey_registration_rate_key,
     runtime_limit,
 )
-from app.core.security import ensure_recent_reauth, get_current_user
+from app.core.security import (
+    ensure_recent_reauth,
+    get_current_user,
+    get_current_user_for_root_recovery,
+)
 from app.core.sessions import revoke_all_user_sessions, validate_session
 from app.db.database import get_db
 from app.models.user import (
@@ -155,13 +159,23 @@ def _require_bootstrap_token(request: Request, db: Session) -> None:
         raise HTTPException(status_code=403, detail="Invalid root bootstrap code")
 
 
-def _active_user(user_id: int, db: Session, *, require_activated: bool = True) -> User:
+def _active_user(
+    user_id: int,
+    db: Session,
+    *,
+    require_activated: bool = True,
+    allow_root_recovery: bool = False,
+) -> User:
     """Load an account that is currently permitted to authenticate."""
     user = db.query(User).filter(User.id == user_id).first()
     if (
         user is None
         or not user.is_active
-        or (require_activated and not user.is_activated)
+        or (
+            require_activated
+            and not user.is_activated
+            and not (allow_root_recovery and user.is_root_admin)
+        )
     ):
         raise HTTPException(status_code=401, detail="Authentication failed")
     return user
@@ -388,8 +402,9 @@ def bootstrap_complete(
             user=root,
         )
         raise HTTPException(status_code=409, detail="Passkey is already registered") from exc
-    # Normal authentication remains blocked until the browser-local recovery
-    # identity has been downloaded and explicitly acknowledged.
+    # The root may authenticate into a restricted recovery-only session, but
+    # normal application access remains blocked until the browser-local
+    # recovery identity has been downloaded and explicitly acknowledged.
     root.is_activated = False
     setup_acknowledgement = {
         "governance_setup_ack_instance_id": stable_instance_id(db),
@@ -423,14 +438,17 @@ def bootstrap_complete(
 def bootstrap_recovery_complete(
     body: BootstrapRecoveryCompletion,
     request: Request,
+    current_user: User = Depends(get_current_user_for_root_recovery),
     db: Session = Depends(get_db),
 ):
-    """Activate root login only after the browser confirms the AGE download."""
+    """Lift the root-session fence after the AGE download is confirmed."""
 
-    _require_bootstrap_token(request, db)
+    if not current_user.is_root_admin:
+        raise HTTPException(status_code=403, detail="Root passkey authentication required")
+    ensure_recent_reauth(current_user, db)
     root = (
         db.query(User)
-        .filter(User.is_root_admin == True)  # noqa: E712
+        .filter(User.id == current_user.id, User.is_root_admin == True)  # noqa: E712
         .with_for_update()
         .first()
     )
@@ -465,7 +483,7 @@ def bootstrap_recovery_complete(
         request=request,
     )
     db.commit()
-    return {"status": "ok", "message": "Recovery identity saved; root login is now enabled"}
+    return {"status": "ok", "message": "Recovery identity saved; normal root access is now enabled"}
 
 
 @router.post("/register/begin")
@@ -804,7 +822,11 @@ def auth_complete(
         _record_verification_failure(db, request, action="passkey.auth_failed")
         raise HTTPException(status_code=400, detail="Authentication failed")
     try:
-        user = _active_user(stored_credential.user_id, db)
+        user = _active_user(
+            stored_credential.user_id,
+            db,
+            allow_root_recovery=True,
+        )
     except HTTPException as exc:
         denied_user = db.query(User).filter(User.id == stored_credential.user_id).first()
         _record_verification_failure(

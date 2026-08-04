@@ -24,7 +24,6 @@ ALWAYS_ALLOWED_WRITE_PATHS = {
     "/api/v1/auth/exchange",
     "/api/v1/passkey/bootstrap/begin",
     "/api/v1/passkey/bootstrap/complete",
-    "/api/v1/passkey/bootstrap/recovery/complete",
     "/api/v1/passkey/auth/begin",
     "/api/v1/passkey/auth/complete",
     "/api/v1/activation/validate",

@@ -8,8 +8,15 @@ import React from "react";
 
 // Mock next/navigation
 const mockPush = vi.fn();
+const { mockHardNavigate } = vi.hoisted(() => ({
+  mockHardNavigate: vi.fn(),
+}));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockPush }),
+}));
+
+vi.mock("@/lib/hardNavigation", () => ({
+  hardNavigate: mockHardNavigate,
 }));
 
 // Mock environment
@@ -54,6 +61,7 @@ import BootstrapPage from "@/app/bootstrap/page";
 
 beforeEach(() => {
   mockPush.mockReset();
+  mockHardNavigate.mockReset();
   mockFetch.mockReset();
   mockStartRegistration.mockReset();
   mockGenerateAgeRecoveryIdentity.mockReset();
@@ -99,6 +107,30 @@ describe("BootstrapPage", () => {
         screen.getByRole("button", { name: /go to login/i }),
       ).toBeInTheDocument();
     });
+  });
+
+  it("resumes recovery without offering another passkey registration", async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          needs_bootstrap: true,
+          bootstrap_configured: true,
+          stage: "recovery",
+          policy_version: "2026-07-30",
+          policy_sha256: "a".repeat(64),
+          policy_text: "Permitted test data only.",
+        }),
+      })
+      .mockResolvedValueOnce({ ok: false, status: 401 });
+
+    render(<BootstrapPage />);
+
+    expect(await screen.findByText(/only this recovery flow/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /sign in with root passkey/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /register root passkey/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^create recovery key$/i })).not.toBeInTheDocument();
+    expect(mockFetch.mock.calls[0][1]).toMatchObject({ cache: "no-store" });
   });
 
   it("shows error when bootstrap check fails", async () => {
@@ -164,10 +196,10 @@ describe("BootstrapPage", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(/normal login remains locked/i),
+        screen.getByText(/only this recovery flow/i),
       ).toBeInTheDocument();
       expect(
-        screen.getByRole("button", { name: /^create recovery key$/i }),
+        screen.getByRole("button", { name: /sign in with root passkey/i }),
       ).toBeInTheDocument();
     });
 
@@ -179,60 +211,49 @@ describe("BootstrapPage", () => {
     );
   });
 
-  it("enables login only after the recovery identity download is confirmed", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ needs_bootstrap: true }),
-    });
-
-    render(<BootstrapPage />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /register root passkey/i }),
-      ).toBeInTheDocument();
-    });
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ options: JSON.stringify({ challenge: "abc" }) }),
-    });
-    mockStartRegistration.mockResolvedValueOnce({ id: "cred-1" });
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({}),
-    });
+  it("unlocks normal access only after authenticated recovery download confirmation", async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          needs_bootstrap: true,
+          bootstrap_configured: true,
+          stage: "recovery",
+          policy_version: "2026-07-30",
+          policy_sha256: "a".repeat(64),
+          policy_text: "Permitted test data only.",
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          is_root_admin: true,
+          recovery_setup_required: true,
+        }),
+      });
     mockGenerateAgeRecoveryIdentity.mockResolvedValueOnce({
       recipient: `age1${"q".repeat(58)}`,
       identity: "AGE-SECRET-KEY-1SYNTHETICONLY",
     });
 
+    render(<BootstrapPage />);
+
     const user = userEvent.setup();
-    await user.click(screen.getByRole("checkbox", { name: /permitted-data boundary/i }));
-    await user.type(screen.getByLabelText(/bootstrap code/i), "b".repeat(32));
-    await user.click(
-      screen.getByRole("button", { name: /register root passkey/i }),
-    );
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /^create recovery key$/i }),
-      ).toBeInTheDocument();
-    });
-
-    expect(screen.queryByRole("button", { name: /continue to login/i })).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /^create recovery key$/i })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/bootstrap code/i)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /^create recovery key$/i }));
     await user.click(await screen.findByRole("button", { name: /download private recovery key/i }));
     await user.click(screen.getByRole("checkbox", { name: /was saved in a protected location/i }));
     mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ status: "ok" }) });
     await user.click(screen.getByRole("button", { name: /finish secure setup/i }));
-    await user.click(await screen.findByRole("button", { name: /continue to login/i }));
-    expect(mockPush).toHaveBeenCalledWith("/login");
-    expect(mockFetch.mock.calls[3][0]).toContain("/bootstrap/recovery/complete");
-    expect(JSON.parse(mockFetch.mock.calls[3][1].body)).toEqual({
+    await user.click(await screen.findByRole("button", { name: /continue to administration/i }));
+    expect(mockPush).toHaveBeenCalledWith("/admin");
+    expect(mockFetch.mock.calls[2][0]).toContain("/bootstrap/recovery/complete");
+    expect(JSON.parse(mockFetch.mock.calls[2][1].body)).toEqual({
       recipient: `age1${"q".repeat(58)}`,
       download_acknowledged: true,
     });
+    expect(mockFetch.mock.calls[2][1].headers["X-Bootstrap-Token"]).toBeUndefined();
   });
 
   it("shows error when registration begin fails", async () => {

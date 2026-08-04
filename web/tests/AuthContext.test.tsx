@@ -7,6 +7,13 @@ import React from "react";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { storeOfflineAccessForCalendar } from "@/lib/offlineAccess";
 
+const { mockHardNavigate } = vi.hoisted(() => ({
+  mockHardNavigate: vi.fn(),
+}));
+vi.mock("@/lib/hardNavigation", () => ({
+  hardNavigate: mockHardNavigate,
+}));
+
 vi.mock("@/contexts/ServiceAvailabilityContext", () => ({
   useServiceAvailability: () => ({
     state: "ready",
@@ -69,7 +76,9 @@ const mockUser = {
 
 beforeEach(() => {
   mockFetch.mockReset();
+  mockHardNavigate.mockReset();
   localStorage.clear();
+  window.history.replaceState({}, "", "/");
 });
 
 describe("AuthContext", () => {
@@ -101,6 +110,25 @@ describe("AuthContext", () => {
     await waitFor(() => {
       expect(screen.getByText("Not authenticated")).toBeInTheDocument();
     });
+  });
+
+  it("fences a recovery-pending root away from normal application pages", async () => {
+    window.history.replaceState({}, "", "/admin");
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        ...mockUser,
+        is_root_admin: true,
+        recovery_setup_required: true,
+      }),
+    });
+
+    renderWithAuth();
+
+    await waitFor(() => {
+      expect(mockHardNavigate).toHaveBeenCalledWith("/bootstrap");
+    });
+    expect(localStorage.getItem("mp_opt_offline_access")).toBeNull();
   });
 
   it("ignores an older session response after a newer refresh succeeds", async () => {

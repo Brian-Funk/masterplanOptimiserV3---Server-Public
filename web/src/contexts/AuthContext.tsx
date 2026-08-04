@@ -16,6 +16,7 @@ import {
   type OfflineAccessMarker,
 } from "@/lib/offlineAccess";
 import { useServiceAvailability } from "@/contexts/ServiceAvailabilityContext";
+import { hardNavigate } from "@/lib/hardNavigation";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,6 +36,7 @@ export interface User {
   linked_person_id: number | null;
   event_id: number | null;
   offline_access_ttl_hours: number;
+  recovery_setup_required?: boolean;
 }
 
 /** High-level authentication state, including offline session uncertainty. */
@@ -138,7 +140,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         authenticatedUserRef.current = userData;
         userIdRef.current = userData.id;
         setUser(userData);
-        setOfflineAccess(storeOfflineAccessForUser(userData));
+        if (userData.recovery_setup_required) {
+          setOfflineAccess(null);
+          const path = window.location.pathname;
+          if (path !== "/bootstrap" && path !== "/login") {
+            hardNavigate("/bootstrap");
+          }
+        } else {
+          setOfflineAccess(storeOfflineAccessForUser(userData));
+        }
         setOfflineAccessExpired(false);
         setAuthStatus("authenticated");
       } else if (response.status === 401 || response.status === 403) {

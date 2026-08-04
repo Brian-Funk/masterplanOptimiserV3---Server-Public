@@ -57,6 +57,8 @@
 	# ── Everything else - serve the static Next.js frontend ─────
 	@serviceWorker path /sw.js
 	header @serviceWorker Cache-Control "no-cache, no-store, must-revalidate"
+	@authenticationShell path /login /login/ /login.html /bootstrap /bootstrap/ /bootstrap.html
+	header @authenticationShell Cache-Control "no-cache, no-store, must-revalidate"
 
 	handle {
 		root * /srv/static

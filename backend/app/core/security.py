@@ -30,6 +30,7 @@ def _get_current_user(
     db: Session,
     *,
     update_last_seen: bool,
+    allow_root_recovery: bool = False,
 ) -> User:
     """Resolve an authenticated user with optional session activity tracking."""
     session_token = _get_session_token_from_request(request)
@@ -53,7 +54,14 @@ def _get_current_user(
         )
 
     user = db.query(User).filter(User.id == auth_session.user_id).first()
-    if user is None or not user.is_active or not user.is_activated:
+    if (
+        user is None
+        or not user.is_active
+        or (
+            not user.is_activated
+            and not (allow_root_recovery and user.is_root_admin)
+        )
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found, inactive, or not activated",
@@ -81,6 +89,20 @@ def get_current_user_read_only(
     """Authenticate without writing session activity to a fenced database."""
 
     return _get_current_user(request, db, update_last_seen=False)
+
+
+def get_current_user_for_root_recovery(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> User:
+    """Authenticate the restricted root session used only to finish recovery setup."""
+
+    return _get_current_user(
+        request,
+        db,
+        update_last_seen=True,
+        allow_root_recovery=True,
+    )
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:

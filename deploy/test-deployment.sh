@@ -66,16 +66,34 @@ require_fresh_commissioning_database() {
             NOT EXISTS (SELECT 1 FROM events)
             AND NOT EXISTS (SELECT 1 FROM users WHERE NOT is_root_admin)
             AND (SELECT count(*) FROM users WHERE is_root_admin) = 1
-            AND EXISTS (
-                SELECT 1 FROM users
-                WHERE is_root_admin AND is_active AND is_activated
+            AND (
+                (
+                    EXISTS (
+                        SELECT 1 FROM users
+                        WHERE is_root_admin AND is_active AND is_activated
+                    )
+                    AND NOT EXISTS (SELECT 1 FROM webauthn_credentials)
+                )
+                OR (
+                    EXISTS (
+                        SELECT 1 FROM users
+                        WHERE is_root_admin AND is_active AND NOT is_activated
+                    )
+                    AND (SELECT count(*) FROM webauthn_credentials) = 1
+                    AND EXISTS (
+                        SELECT 1 FROM webauthn_credentials credential
+                        JOIN users root_user ON root_user.id = credential.user_id
+                        WHERE root_user.is_root_admin
+                    )
+                )
             )
-            AND NOT EXISTS (SELECT 1 FROM webauthn_credentials)
             AND NOT EXISTS (SELECT 1 FROM auth_sessions)
             AND NOT EXISTS (SELECT 1 FROM exchange_codes)
             AND NOT EXISTS (SELECT 1 FROM activation_links)
             AND NOT EXISTS (SELECT 1 FROM passkey_challenges)
-            AND NOT EXISTS (SELECT 1 FROM passkey_ceremonies)" 2>/dev/null || true)"
+            AND NOT EXISTS (
+                SELECT 1 FROM passkey_ceremonies WHERE consumed_at IS NULL
+            )" 2>/dev/null || true)"
     [ "$safe" = t ] \
         || { ui_error "The database is not the narrow fresh root-only commissioning state."; return 1; }
 }

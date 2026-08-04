@@ -31,13 +31,15 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("NOT is_root_admin", SUPERVISOR)
         self.assertIn("count(*) FROM users WHERE is_root_admin) = 1", SUPERVISOR)
         self.assertIn("is_root_admin AND is_active AND is_activated", SUPERVISOR)
+        self.assertIn("is_root_admin AND is_active AND NOT is_activated", SUPERVISOR)
+        self.assertIn("count(*) FROM webauthn_credentials) = 1", SUPERVISOR)
+        self.assertIn("JOIN users root_user ON root_user.id = credential.user_id", SUPERVISOR)
+        self.assertIn("passkey_ceremonies WHERE consumed_at IS NULL", SUPERVISOR)
         for table in (
-            "webauthn_credentials",
             "auth_sessions",
             "exchange_codes",
             "activation_links",
             "passkey_challenges",
-            "passkey_ceremonies",
         ):
             self.assertIn(f"NOT EXISTS (SELECT 1 FROM {table})", SUPERVISOR)
 

@@ -7,6 +7,8 @@ import { Card } from "@/components/ui/Card";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Logo } from "@/components/Logo";
 import { getApiUrl } from "@/lib/environment";
+import { apiFetch } from "@/lib/api";
+import { hardNavigate } from "@/lib/hardNavigation";
 import { passkeyErrorMessage } from "@/lib/passkeyError";
 import { generateAgeRecoveryIdentity } from "@/lib/ageIdentity";
 import { startRegistration } from "@simplewebauthn/browser";
@@ -23,6 +25,7 @@ export default function BootstrapPage() {
   const [recoveryIdentity, setRecoveryIdentity] = useState("");
   const [recoveryDownloaded, setRecoveryDownloaded] = useState(false);
   const [downloadConfirmed, setDownloadConfirmed] = useState(false);
+  const [recoveryAuthenticated, setRecoveryAuthenticated] = useState(false);
   const [policyIdentity, setPolicyIdentity] = useState<{
     version: string;
     sha256: string;
@@ -38,6 +41,7 @@ export default function BootstrapPage() {
       const apiUrl = getApiUrl();
       const res = await fetch(`${apiUrl}/api/v1/passkey/bootstrap-status`, {
         credentials: "include",
+        cache: "no-store",
       });
       if (!res.ok) throw new Error("Failed to check bootstrap status");
 
@@ -48,6 +52,19 @@ export default function BootstrapPage() {
         text: data.policy_text,
       });
       if (data.stage === "recovery") {
+        const auth = await fetch(`${apiUrl}/api/v1/auth/me`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (auth.ok) {
+          const profile = await auth.json();
+          setRecoveryAuthenticated(
+            profile.is_root_admin === true
+              && profile.recovery_setup_required === true,
+          );
+        } else {
+          setRecoveryAuthenticated(false);
+        }
         setStatus("recovery");
       } else if (data.needs_bootstrap) {
         if (data.bootstrap_configured === false) {
@@ -119,6 +136,7 @@ export default function BootstrapPage() {
       }
 
       setStatus("recovery");
+      setRecoveryAuthenticated(false);
     } catch (err: unknown) {
       if (err instanceof Error && err.name === "NotAllowedError") {
         setStatus("ready");
@@ -165,14 +183,9 @@ export default function BootstrapPage() {
     setStatus("finalizing");
     setError("");
     try {
-      const apiUrl = getApiUrl();
-      const response = await fetch(`${apiUrl}/api/v1/passkey/bootstrap/recovery/complete`, {
+      const response = await apiFetch("/api/v1/passkey/bootstrap/recovery/complete", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Bootstrap-Token": bootstrapCode,
-        },
-        credentials: "include",
+        headers: { "Content-Type": "application/json" },
         referrerPolicy: "no-referrer",
         body: JSON.stringify({
           recipient: recoveryRecipient,
@@ -270,19 +283,13 @@ export default function BootstrapPage() {
           {status === "recovery" && (
             <>
               <div className="mb-5 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
-                The root passkey is registered, but normal login remains locked until the private recovery identity is downloaded and confirmed.
+                The root passkey is registered. Until the private recovery identity is downloaded and confirmed, this account can access only this recovery flow.
               </div>
-              <label htmlFor="recovery-bootstrap-code" className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Bootstrap code</label>
-              <input id="recovery-bootstrap-code" type="password" autoComplete="one-time-code" value={bootstrapCode}
-                onChange={(event) => setBootstrapCode(event.target.value)}
-                className="mb-4 w-full rounded border border-gray-300 bg-white px-3 py-2 text-gray-900 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100" />
-              <Button
-                type="button"
-                variant="primary"
-                fullWidth
-                onClick={createRecoveryIdentity}
-                disabled={bootstrapCode.length < 32}
-              >
+              {!recoveryAuthenticated ? <Button
+                type="button" variant="primary" fullWidth
+                onClick={() => hardNavigate("/login?next=/bootstrap")}
+              >Sign in with root passkey</Button> : <>
+              <Button type="button" variant="primary" fullWidth onClick={createRecoveryIdentity}>
                 {recoveryIdentity ? "Create a different recovery key" : "Create recovery key"}
               </Button>
               {recoveryIdentity && <div className="mt-5 space-y-4">
@@ -295,14 +302,15 @@ export default function BootstrapPage() {
                 <Button type="button" variant="primary" fullWidth onClick={finishRecoverySetup}
                   disabled={!recoveryDownloaded || !downloadConfirmed}>Finish secure setup</Button>
               </div>}
+              </>}
             </>
           )}
 
-          {status === "finalizing" && <p className="text-center text-gray-600 dark:text-gray-400">Enabling root login...</p>}
+          {status === "finalizing" && <p className="text-center text-gray-600 dark:text-gray-400">Enabling normal root access...</p>}
 
           {status === "complete" && <>
             <div className="mb-6 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-center text-sm text-green-700 dark:border-green-800 dark:bg-green-900/30 dark:text-green-300">Secure root setup is complete.</div>
-            <Button type="button" variant="primary" fullWidth onClick={() => router.push("/login")}>Continue to login</Button>
+            <Button type="button" variant="primary" fullWidth onClick={() => router.push("/admin")}>Continue to administration</Button>
           </>}
 
           {status === "already-done" && (

@@ -9,6 +9,7 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { Logo } from "@/components/Logo";
 import { Footer } from "@/components/Footer";
 import { getApiUrl } from "@/lib/environment";
+import { hardNavigate } from "@/lib/hardNavigation";
 import { passkeyErrorMessage } from "@/lib/passkeyError";
 import { startAuthentication } from "@simplewebauthn/browser";
 import { useServiceAvailability } from "@/contexts/ServiceAvailabilityContext";
@@ -89,11 +90,12 @@ export default function LoginPage() {
         const apiUrl = getApiUrl();
         const res = await fetch(`${apiUrl}/api/v1/passkey/bootstrap-status`, {
           credentials: "include",
+          cache: "no-store",
         });
         if (res.ok) {
           const data = await res.json();
-          if (data.needs_bootstrap) {
-            router.push("/bootstrap");
+          if (data.stage === "passkey") {
+            hardNavigate("/bootstrap");
             return;
           }
         }
@@ -106,7 +108,9 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (!authLoading && authStatus === "authenticated" && user && isReady) {
-      if (user.is_admin || user.is_root_admin) {
+      if (user.recovery_setup_required) {
+        hardNavigate("/bootstrap");
+      } else if (user.is_admin || user.is_root_admin) {
         const requested = new URLSearchParams(window.location.search).get("next");
         router.push(
           user.is_root_admin && requested === "/recovery-key"
@@ -191,6 +195,11 @@ export default function LoginPage() {
       if (!exchangeRes.ok) {
         const err = await exchangeRes.json().catch(() => ({}));
         throw new Error(passkeyErrorMessage(err, "Failed to establish session"));
+      }
+      const exchangeData = await exchangeRes.json();
+      if (exchangeData.recovery_setup_required) {
+        hardNavigate("/bootstrap");
+        return;
       }
 
       // Refresh the user from /me to populate AuthContext

@@ -8,9 +8,13 @@ import React from "react";
 
 // Mock next/navigation
 const mockPush = vi.fn();
+const mockHardNavigate = vi.fn();
 const mockUseServiceAvailability = vi.fn();
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockPush }),
+}));
+vi.mock("@/lib/hardNavigation", () => ({
+  hardNavigate: mockHardNavigate,
 }));
 
 vi.mock("@/contexts/ServiceAvailabilityContext", () => ({
@@ -61,6 +65,7 @@ function authBeginCalls() {
 
 beforeEach(() => {
   mockPush.mockReset();
+  mockHardNavigate.mockReset();
   mockFetch.mockReset();
   mockRefreshUser.mockReset();
   vi.mocked(startAuthentication).mockReset();
@@ -110,15 +115,78 @@ describe("LoginPage", () => {
   it("redirects to bootstrap when needed", async () => {
     mockFetch.mockResolvedValue({
       ok: true,
-      json: async () => ({ needs_bootstrap: true }),
+      json: async () => ({ needs_bootstrap: true, stage: "passkey" }),
     });
 
     const { default: LoginPage } = await import("@/app/login/page");
     render(<LoginPage />);
 
     await waitFor(() => {
-      expect(mockPush).toHaveBeenCalledWith("/bootstrap");
+      expect(mockHardNavigate).toHaveBeenCalledWith("/bootstrap");
     });
+    expect(mockFetch.mock.calls[0][1]).toMatchObject({ cache: "no-store" });
+  });
+
+  it("allows root passkey login while recovery setup is pending", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ needs_bootstrap: true, stage: "recovery" }),
+    });
+
+    const { default: LoginPage } = await import("@/app/login/page");
+    render(<LoginPage />);
+
+    await waitFor(() => expect(mockFetch).toHaveBeenCalled());
+    expect(mockHardNavigate).not.toHaveBeenCalledWith("/bootstrap");
+    expect(screen.getByRole("button", { name: /sign in with passkey/i })).toBeInTheDocument();
+  });
+
+  it("sends a restricted root session only to recovery after passkey login", async () => {
+    mockFetch.mockImplementation((url) => {
+      const value = String(url);
+      if (value.includes("/api/v1/passkey/bootstrap-status")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ needs_bootstrap: true, stage: "recovery" }),
+        });
+      }
+      if (value.includes("/api/v1/passkey/auth/begin")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+          options: JSON.stringify({ challenge: "auth-challenge" }),
+          ceremony_id: 19,
+        }),
+        });
+      }
+      if (value.includes("/api/v1/passkey/auth/complete")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ exchange_code: "restricted-code" }),
+        });
+      }
+      if (value.includes("/api/v1/auth/exchange")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ recovery_setup_required: true }),
+        });
+      }
+      throw new Error(`Unexpected request: ${value}`);
+    });
+    vi.mocked(startAuthentication).mockResolvedValueOnce({
+      id: "root-recovery-passkey",
+      rawId: "root-recovery-passkey",
+      response: {},
+      type: "public-key",
+    } as never);
+
+    const { default: LoginPage } = await import("@/app/login/page");
+    render(<LoginPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /sign in with passkey/i }));
+
+    await waitFor(() => expect(mockHardNavigate).toHaveBeenCalledWith("/bootstrap"));
+    expect(mockRefreshUser).not.toHaveBeenCalled();
   });
 
   it("redirects authenticated admin to /admin", async () => {
