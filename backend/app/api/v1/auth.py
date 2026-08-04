@@ -12,10 +12,11 @@ from app.core.config import settings
 from app.core import runtime_settings
 from app.core.security import (
     get_current_user,
-    get_current_user_for_root_recovery,
+    get_current_user_for_commissioning,
     require_root_admin,
     require_root_recent_reauth,
 )
+from app.core.commissioning import commissioning_required, commissioning_stage
 from app.core.sessions import (
     _coarse_user_agent,
     create_session,
@@ -56,7 +57,8 @@ class UserMeResponse(BaseModel):
     linked_person_id: Optional[int] = None
     event_id: Optional[int] = None
     offline_access_ttl_hours: int = 24
-    recovery_setup_required: bool = False
+    commissioning_required: bool = False
+    commissioning_stage: str = "complete"
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -69,7 +71,8 @@ class ExchangeResponse(BaseModel):
     display_name: str
     is_root_admin: bool
     is_admin: bool
-    recovery_setup_required: bool = False
+    commissioning_required: bool = False
+    commissioning_stage: str = "complete"
 
 
 class SessionResponse(BaseModel):
@@ -222,7 +225,8 @@ def exchange_code_for_session(
         display_name=user.display_name,
         is_root_admin=user.is_root_admin,
         is_admin=user.is_admin,
-        recovery_setup_required=user.is_root_admin and not user.is_activated,
+        commissioning_required=user.is_root_admin and commissioning_required(db),
+        commissioning_stage=commissioning_stage(db) if user.is_root_admin else "complete",
     )
 
 
@@ -258,7 +262,7 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
 
 @router.get("/me", response_model=UserMeResponse)
 def get_me(
-    current_user: User = Depends(get_current_user_for_root_recovery),
+    current_user: User = Depends(get_current_user_for_commissioning),
     db: Session = Depends(get_db),
 ):
     """Return the currently authenticated user."""
@@ -280,9 +284,8 @@ def get_me(
             "offline_access_ttl_hours",
             db,
         ),
-        recovery_setup_required=(
-            current_user.is_root_admin and not current_user.is_activated
-        ),
+        commissioning_required=(current_user.is_root_admin and commissioning_required(db)),
+        commissioning_stage=(commissioning_stage(db) if current_user.is_root_admin else "complete"),
     )
 
 

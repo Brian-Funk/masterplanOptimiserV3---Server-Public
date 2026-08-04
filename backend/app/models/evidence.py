@@ -46,7 +46,7 @@ class EvidenceKey(Base):
     root_credential_id_sha256 = Column(String(64), nullable=True)
     root_action_sha256 = Column(String(64), nullable=True)
     activated_at = Column(DateTime(timezone=True), nullable=True)
-    trust_declaration_sha256 = Column(String(64), nullable=True)
+    trust_establishment_sha256 = Column(String(64), nullable=True)
     registered_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 

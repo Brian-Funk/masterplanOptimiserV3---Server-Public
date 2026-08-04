@@ -113,8 +113,12 @@ def test_root_bootstrap_commits_credential_and_audit_with_production_ip_hash(
 ):
     """A valid first passkey must not roll back while writing its audit row."""
     from app.core.config import settings
+    from app.core.commissioning import commissioning_required
+    import app.core.security as security_module
     from app.core.governance import BOOTSTRAP_POLICY_SHA256, BOOTSTRAP_POLICY_VERSION
     from app.models.server_setting import ServerSetting
+
+    monkeypatch.setattr(security_module, "commissioning_required", commissioning_required)
 
     token = "root-bootstrap-regression-token-with-enough-entropy"
     root = create_test_user(
@@ -152,14 +156,14 @@ def test_root_bootstrap_commits_credential_and_audit_with_production_ip_hash(
     assert db.query(WebAuthnCredential).filter_by(user_id=root.id).count() == 1
     assert db.query(AuditLog).filter_by(action="passkey.bootstrap").count() == 1
     db.refresh(root)
-    assert root.is_activated is False
+    assert root.is_activated is True
     assert db.query(ServerSetting).filter_by(
         key="root_bootstrap_disabled",
         value="true",
-    ).count() == 0
+    ).count() == 1
     status = client.get("/api/v1/passkey/bootstrap-status")
-    assert status.json()["stage"] == "recovery"
-    assert status.json()["needs_bootstrap"] is True
+    assert status.json()["stage"] == "setup"
+    assert status.json()["needs_bootstrap"] is False
     _install_auth_success(monkeypatch)
     restricted_begin = client.post("/api/v1/passkey/auth/begin").json()
     restricted_login = client.post(
@@ -175,18 +179,21 @@ def test_root_bootstrap_commits_credential_and_audit_with_production_ip_hash(
         json={"code": restricted_login.json()["exchange_code"]},
     )
     assert exchange.status_code == 200, exchange.text
-    assert exchange.json()["recovery_setup_required"] is True
+    assert exchange.json()["commissioning_required"] is True
+    assert exchange.json()["commissioning_stage"] == "recovery"
     me = client.get("/api/v1/auth/me")
     assert me.status_code == 200
-    assert me.json()["recovery_setup_required"] is True
-    assert client.get("/api/v1/auth/root-access").status_code == 401
+    assert me.json()["commissioning_required"] is True
+    assert me.json()["commissioning_stage"] == "recovery"
+    assert client.get("/api/v1/auth/root-access").status_code == 423
 
     bootstrap_token_only = _raw_client().post(
-        "/api/v1/passkey/bootstrap/recovery/complete",
+        "/api/v1/setup/recovery/complete",
         headers={"X-Bootstrap-Token": token},
         json={
             "recipient": "age1" + "q" * 58,
             "download_acknowledged": True,
+            "local_reimport_verified": True,
         },
     )
     assert bootstrap_token_only.status_code == 401
@@ -195,9 +202,9 @@ def test_root_bootstrap_commits_credential_and_audit_with_production_ip_hash(
     csrf = client.cookies.get(settings.CSRF_COOKIE_NAME)
     assert csrf
     final = client.post(
-        "/api/v1/passkey/bootstrap/recovery/complete",
+        "/api/v1/setup/recovery/complete",
         headers={"X-CSRF-Token": csrf},
-        json={"recipient": recipient, "download_acknowledged": True},
+        json={"recipient": recipient, "download_acknowledged": True, "local_reimport_verified": True},
     )
     assert final.status_code == 200, final.text
     db.refresh(root)
@@ -209,10 +216,8 @@ def test_root_bootstrap_commits_credential_and_audit_with_production_ip_hash(
         key="root_recovery_recipient_sha256",
         value=hashlib.sha256(recipient.encode("ascii")).hexdigest(),
     ).count() == 1
-    assert db.query(AuditLog).filter_by(
-        action="recovery.bootstrap_download_confirmed",
-    ).count() == 1
-    assert client.get("/api/v1/auth/root-access").status_code == 200
+    assert db.query(AuditLog).filter_by(action="commissioning.recovery_completed").count() == 1
+    assert client.get("/api/v1/auth/root-access").status_code == 423
     allowed_begin = client.post("/api/v1/passkey/auth/begin").json()
     allowed_login = client.post(
         "/api/v1/passkey/auth/complete",
@@ -222,6 +227,12 @@ def test_root_bootstrap_commits_credential_and_audit_with_production_ip_hash(
         ),
     )
     assert allowed_login.status_code == 200
+    allowed_exchange = client.post(
+        "/api/v1/auth/exchange",
+        json={"code": allowed_login.json()["exchange_code"]},
+    )
+    assert allowed_exchange.json()["commissioning_required"] is True
+    assert allowed_exchange.json()["commissioning_stage"] == "controller"
 
 
 def test_root_recovery_completion_rejects_missing_download_acknowledgement(db, monkeypatch):
@@ -229,7 +240,7 @@ def test_root_recovery_completion_rejects_missing_download_acknowledgement(db, m
 
     root = create_test_user(
         db, username="recovery.pending", is_root_admin=True,
-        is_admin=True, is_activated=False,
+        is_admin=True, is_activated=True,
     )
     _add_credential(db, root, "pending-recovery-credential")
     _install_auth_success(monkeypatch)
@@ -250,14 +261,14 @@ def test_root_recovery_completion_rejects_missing_download_acknowledgement(db, m
     assert csrf
 
     response = client.post(
-        "/api/v1/passkey/bootstrap/recovery/complete",
+        "/api/v1/setup/recovery/complete",
         headers={"X-CSRF-Token": csrf},
-        json={"recipient": "age1" + "q" * 58, "download_acknowledged": False},
+        json={"recipient": "age1" + "q" * 58, "download_acknowledged": False, "local_reimport_verified": True},
     )
 
     assert response.status_code == 422
     db.refresh(root)
-    assert root.is_activated is False
+    assert root.is_activated is True
 
 
 def test_verified_reset_replaces_all_previous_passkeys(db):

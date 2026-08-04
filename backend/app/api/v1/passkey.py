@@ -57,8 +57,8 @@ from app.core.rate_limit import (
 from app.core.security import (
     ensure_recent_reauth,
     get_current_user,
-    get_current_user_for_root_recovery,
 )
+from app.core.commissioning import commissioning_stage
 from app.core.sessions import revoke_all_user_sessions, validate_session
 from app.db.database import get_db
 from app.models.user import (
@@ -80,7 +80,7 @@ class BootstrapStatusResponse(BaseModel):
     needs_bootstrap: bool
     bootstrap_configured: bool
     bootstrap_disabled: bool
-    stage: Literal["passkey", "recovery", "complete"]
+    stage: Literal["passkey", "setup", "complete"]
     policy_version: str
     policy_sha256: str
     policy_text: str
@@ -104,13 +104,6 @@ class CeremonyCompletion(BaseModel):
     policy_sha256: Optional[str] = Field(None, pattern=r"^[0-9a-f]{64}$")
 
 
-class BootstrapRecoveryCompletion(BaseModel):
-    """Browser acknowledgement after saving a locally generated AGE identity."""
-
-    recipient: str = Field(..., pattern=r"^age1[023456789acdefghjklmnpqrstuvwxyz]{58}$")
-    download_acknowledged: Literal[True]
-
-
 class CredentialRename(BaseModel):
     """New user-visible name for a passkey."""
 
@@ -124,10 +117,10 @@ def _root_needs_bootstrap(db: Session) -> bool:
     credential = db.query(WebAuthnCredential).filter(
         WebAuthnCredential.user_id == root.id
     ).first()
-    return credential is None or not root.is_activated
+    return credential is None
 
 
-def _bootstrap_stage(db: Session) -> Literal["passkey", "recovery", "complete"]:
+def _bootstrap_stage(db: Session) -> Literal["passkey", "setup", "complete"]:
     root = db.query(User).filter(User.is_root_admin == True).first()  # noqa: E712
     if root is None:
         return "passkey"
@@ -136,7 +129,7 @@ def _bootstrap_stage(db: Session) -> Literal["passkey", "recovery", "complete"]:
     ).first()
     if credential is None:
         return "passkey"
-    return "complete" if root.is_activated and _bootstrap_is_disabled(db) else "recovery"
+    return "complete" if commissioning_stage(db) == "complete" else "setup"
 
 
 def _bootstrap_is_disabled(db: Session) -> bool:
@@ -402,10 +395,9 @@ def bootstrap_complete(
             user=root,
         )
         raise HTTPException(status_code=409, detail="Passkey is already registered") from exc
-    # The root may authenticate into a restricted recovery-only session, but
-    # normal application access remains blocked until the browser-local
-    # recovery identity has been downloaded and explicitly acknowledged.
-    root.is_activated = False
+    # Authentication is available immediately; commissioning is enforced by
+    # authoritative deployment facts rather than the account activation flag.
+    root.is_activated = True
     setup_acknowledgement = {
         "governance_setup_ack_instance_id": stable_instance_id(db),
         "governance_setup_ack_root_user_id": str(root.id),
@@ -419,6 +411,12 @@ def bootstrap_complete(
             db.add(ServerSetting(key=key, value=value))
         else:
             row.value = value
+    disabled = db.query(ServerSetting).filter(ServerSetting.key == "root_bootstrap_disabled").first()
+    if disabled is None:
+        db.add(ServerSetting(key="root_bootstrap_disabled", value="true"))
+    else:
+        disabled.value = "true"
+    raw_code = _create_exchange_code(root.id, db)
     audit(
         db,
         user=root,
@@ -428,62 +426,11 @@ def bootstrap_complete(
     )
     db.commit()
     return {
-        "status": "recovery_required",
-        "message": "Root passkey registered. Save the private recovery identity to finish setup.",
+        "status": "commissioning_required",
+        "exchange_code": raw_code,
+        "setup_url": "/setup",
+        "message": "Root passkey registered. Continue the three-step commissioning wizard.",
     }
-
-
-@router.post("/bootstrap/recovery/complete")
-@limiter.limit("5/minute")
-def bootstrap_recovery_complete(
-    body: BootstrapRecoveryCompletion,
-    request: Request,
-    current_user: User = Depends(get_current_user_for_root_recovery),
-    db: Session = Depends(get_db),
-):
-    """Lift the root-session fence after the AGE download is confirmed."""
-
-    if not current_user.is_root_admin:
-        raise HTTPException(status_code=403, detail="Root passkey authentication required")
-    ensure_recent_reauth(current_user, db)
-    root = (
-        db.query(User)
-        .filter(User.id == current_user.id, User.is_root_admin == True)  # noqa: E712
-        .with_for_update()
-        .first()
-    )
-    if root is None:
-        raise HTTPException(status_code=500, detail="Root admin user not found")
-    credential = db.query(WebAuthnCredential).filter(
-        WebAuthnCredential.user_id == root.id
-    ).first()
-    if credential is None:
-        raise HTTPException(status_code=409, detail="Register the root passkey first")
-    if root.is_activated or _bootstrap_is_disabled(db):
-        raise HTTPException(status_code=409, detail="Root bootstrap is already complete")
-
-    now = datetime.now(timezone.utc).isoformat()
-    values = {
-        "root_recovery_recipient_sha256": hashlib.sha256(body.recipient.encode("ascii")).hexdigest(),
-        "root_recovery_download_acknowledged_at": now,
-        "root_bootstrap_disabled": "true",
-    }
-    for key, value in values.items():
-        row = db.query(ServerSetting).filter(ServerSetting.key == key).first()
-        if row is None:
-            db.add(ServerSetting(key=key, value=value))
-        else:
-            row.value = value
-    root.is_activated = True
-    audit(
-        db,
-        user=root,
-        action="recovery.bootstrap_download_confirmed",
-        resource_type="credential",
-        request=request,
-    )
-    db.commit()
-    return {"status": "ok", "message": "Recovery identity saved; normal root access is now enabled"}
 
 
 @router.post("/register/begin")

@@ -133,6 +133,18 @@ def _override_db(db: Session, monkeypatch):
     app.dependency_overrides.clear()
 
 
+@pytest.fixture(autouse=True)
+def _existing_feature_tests_use_a_commissioned_root(monkeypatch):
+    """Keep existing endpoint tests focused on their own contracts.
+
+    Dedicated commissioning tests restore the real predicate to exercise the
+    root fence and every setup stage.
+    """
+    import app.core.security as security_module
+
+    monkeypatch.setattr(security_module, "commissioning_required", lambda _db: False)
+
+
 # ── Factory helpers ──
 
 def create_test_event(
