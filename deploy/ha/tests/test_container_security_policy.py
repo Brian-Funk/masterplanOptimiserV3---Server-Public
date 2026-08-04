@@ -117,12 +117,15 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
         self.assertIn("mp_build_frontend_container", deploy)
         self.assertIn("node:22-alpine", common)
 
-    def test_ci_audits_dependencies_and_fails_on_any_serious_cve(self) -> None:
+    def test_ci_audits_dependencies_with_one_bounded_non_applicable_exception(self) -> None:
         workflow = (ROOT / ".github/workflows/server-ci.yml").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("python -m pip_audit -r requirements.lock.txt", workflow)
+        self.assertIn("--ignore-vuln CVE-2026-69247", workflow)
+        self.assertIn("does not call those APIs", workflow)
+        self.assertEqual(workflow.count("--ignore-vuln"), 1)
         self.assertIn(
             "pip install --constraint requirements.lock.txt -r requirements.txt",
             workflow,
