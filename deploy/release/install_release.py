@@ -163,6 +163,20 @@ def signed_asset(manifest: dict, name: str) -> tuple[str, str]:
     return asset, digest
 
 
+def release_environment(tag: str, commit: str, images: dict[str, str]) -> str:
+    """Return the non-secret immutable image metadata for one signed release."""
+
+    return "\n".join([
+        f"MP_RELEASE_TAG={tag}",
+        f"MP_RELEASE_COMMIT={commit}",
+        f"MP_BACKEND_IMAGE={images['backend']}",
+        f"MP_CADDY_IMAGE={images['caddy']}",
+        f"MP_POSTGRES_IMAGE={images['postgres']}",
+        f"MP_TOOLS_IMAGE={images['tools']}",
+        "",
+    ])
+
+
 def swap_with_previous(current: Path, previous: Path) -> None:
     """Atomically exchange one installed path with its retained predecessor."""
 
@@ -218,8 +232,18 @@ def main() -> int:
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--tag", default="latest")
     parser.add_argument("--rollback", action="store_true")
+    parser.add_argument(
+        "--baseline-only",
+        action="store_true",
+        help=(
+            "verify and cache a signed rollback baseline without replacing "
+            "the active checkout or application assets"
+        ),
+    )
     args = parser.parse_args()
     root = args.repo_root.resolve()
+    if args.rollback and args.baseline_only:
+        parser.error("--rollback and --baseline-only are mutually exclusive")
     if args.rollback:
         return rollback(root)
     if args.tag == "latest":
@@ -272,6 +296,17 @@ def main() -> int:
         extracted.mkdir()
         safe_extract(frontend_path, extracted, "frontend")
         safe_extract(operations_path, extracted, "operations")
+        if args.baseline_only:
+            # Unsigned commissioning needs verified immutable image references
+            # as a rollback anchor, but it must never activate signed release
+            # operations or frontend files. In particular, do not replace the
+            # campaign checkout and do not remove .test-deployment.env.
+            atomic_text(
+                root / ".release.env",
+                release_environment(tag, commit, images),
+            )
+            print(f"Verified signed rollback baseline {tag}")
+            return 0
         destination = root / "web/out"
         previous = root / "web/.out.previous"
         runtime = root / "runtime"
@@ -340,15 +375,7 @@ def main() -> int:
             shutil.copy2(extracted / "runtime/frontend-csp.caddy", policy)
             atomic_text(
                 root / ".release.env",
-                "\n".join([
-                    f"MP_RELEASE_TAG={tag}",
-                    f"MP_RELEASE_COMMIT={commit}",
-                    f"MP_BACKEND_IMAGE={images['backend']}",
-                    f"MP_CADDY_IMAGE={images['caddy']}",
-                    f"MP_POSTGRES_IMAGE={images['postgres']}",
-                    f"MP_TOOLS_IMAGE={images['tools']}",
-                    "",
-                ]),
+                release_environment(tag, commit, images),
             )
             (root / ".test-deployment.env").unlink(missing_ok=True)
         except Exception:

@@ -336,20 +336,13 @@ class PairingCodeTests(unittest.TestCase):
             replacement.index('mp_setup_state_begin replace-primary'),
         )
 
-    def test_test_policy_restores_exact_management_checkout_after_signed_baseline(self) -> None:
+    def test_test_policy_verifies_baseline_without_replacing_campaign_checkout(self) -> None:
         install = shell_function(SETUP, "mp_setup_install_signed_release")
-        restore = shell_function(SETUP, "mp_setup_restore_test_management_checkout")
-        installer = install.index("install_release.py")
-        self.assertGreater(
-            install.index("mp_setup_restore_test_management_checkout", installer),
-            installer,
-        )
-        self.assertGreaterEqual(install.count("mp_setup_restore_test_management_checkout"), 2)
-        self.assertIn('= test ] || return 0', restore)
-        self.assertIn(".campaign_commit // empty", restore)
-        self.assertIn('restore --source="$commit" --', restore)
-        self.assertIn("deploy manage.sh configure-production.sh", restore)
-        self.assertIn("diff --quiet --ignore-submodules", restore)
+        self.assertIn('.deployment_lane // "signed"', install)
+        self.assertIn("--baseline-only", install)
+        self.assertIn("without activating signed application files", install)
+        self.assertNotIn("git -C", install)
+        self.assertNotIn("restore --source", SETUP)
 
     def test_unsigned_setup_has_one_pinned_application_checkpoint(self) -> None:
         state = shell_function(SETUP, "mp_setup_state_begin")
@@ -552,6 +545,105 @@ class SignedReleaseTests(unittest.TestCase):
             install_release.COSIGN_IMAGE,
             r"^ghcr\.io/sigstore/cosign/cosign@sha256:[0-9a-f]{64}$",
         )
+
+    def test_baseline_only_returns_before_any_live_checkout_replacement(self) -> None:
+        baseline = INSTALL_RELEASE.index("if args.baseline_only:")
+        first_live_replacement = INSTALL_RELEASE.index('destination = root / "web/out"')
+        self.assertLess(baseline, first_live_replacement)
+        block = INSTALL_RELEASE[baseline:first_live_replacement]
+        self.assertIn('root / ".release.env"', block)
+        self.assertIn("Verified signed rollback baseline", block)
+        self.assertNotIn("unlink(", block)
+        self.assertNotIn("replace(", block)
+        self.assertNotIn("rmtree", block)
+
+    def test_release_environment_contains_only_public_immutable_metadata(self) -> None:
+        images = {
+            name: f"ghcr.io/example/{name}@sha256:{index * 64}"
+            for name, index in zip(("backend", "caddy", "postgres", "tools"), "1234")
+        }
+        contents = install_release.release_environment("v3.8.0", "a" * 40, images)
+        self.assertIn("MP_RELEASE_TAG=v3.8.0", contents)
+        self.assertIn(f"MP_RELEASE_COMMIT={'a' * 40}", contents)
+        self.assertNotIn("SECRET", contents)
+        self.assertNotIn("PASSWORD", contents)
+
+    def test_baseline_only_preserves_campaign_files_and_test_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sentinels = {
+                "deploy/campaign.txt": "campaign deploy\n",
+                "infra/campaign.txt": "campaign infra\n",
+                "web/out/campaign.txt": "campaign frontend\n",
+                "runtime/frontend-csp.caddy": "campaign csp\n",
+                "manage.sh": "campaign manage\n",
+                "configure-production.sh": "campaign configure\n",
+                ".test-deployment.env": "MP_TEST_COMMIT=" + "b" * 40 + "\n",
+            }
+            for relative, contents in sentinels.items():
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(contents, encoding="utf-8")
+
+            frontend = b"verified frontend archive"
+            operations = b"verified operations archive"
+            images = {
+                name: (
+                    "ghcr.io/brian-funk/masterplanoptimiserv3---server/"
+                    f"{name}@sha256:{index * 64}"
+                )
+                for name, index in zip(("backend", "caddy", "postgres", "tools"), "1234")
+            }
+            manifest = {
+                "format": "mp-opt-release-v1",
+                "tag": "v3.8.0",
+                "commit": "a" * 40,
+                "images": images,
+                "frontend": {
+                    "asset": "web-out.tar.gz",
+                    "sha256": install_release.hashlib.sha256(frontend).hexdigest(),
+                },
+                "operations": {
+                    "asset": "operations.tar.gz",
+                    "sha256": install_release.hashlib.sha256(operations).hexdigest(),
+                },
+            }
+
+            def fake_download(_url: str, target: Path, _limit: int) -> None:
+                payload = {
+                    "release-manifest.json": json.dumps(manifest).encode(),
+                    "release-manifest.bundle": b"verified bundle",
+                    "web-out.tar.gz": frontend,
+                    "operations.tar.gz": operations,
+                }[target.name]
+                target.write_bytes(payload)
+
+            with mock.patch.object(
+                install_release, "latest_stable_tag", return_value="v3.8.0"
+            ), mock.patch.object(
+                install_release, "download", side_effect=fake_download
+            ), mock.patch.object(
+                install_release, "run_cosign"
+            ), mock.patch.object(
+                install_release, "safe_extract"
+            ), mock.patch.object(
+                install_release.subprocess, "run"
+            ), mock.patch(
+                "sys.argv",
+                [
+                    "install_release.py", "--repo-root", str(root),
+                    "--baseline-only",
+                ],
+            ):
+                self.assertEqual(install_release.main(), 0)
+
+            for relative, contents in sentinels.items():
+                self.assertEqual((root / relative).read_text(encoding="utf-8"), contents)
+            self.assertFalse((root / ".deploy.previous").exists())
+            self.assertFalse((root / ".infra.previous").exists())
+            release_environment = (root / ".release.env").read_text(encoding="utf-8")
+            self.assertIn("MP_RELEASE_TAG=v3.8.0", release_environment)
+            self.assertIn("MP_TOOLS_IMAGE=", release_environment)
 
     def test_bootstrap_rejects_moving_refs_and_does_not_execute_remote_shell(self) -> None:
         self.assertNotIn("get.docker.com", BOOTSTRAP)
