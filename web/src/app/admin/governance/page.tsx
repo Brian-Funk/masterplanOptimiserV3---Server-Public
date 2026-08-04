@@ -35,6 +35,8 @@ type PreflightCheck = {
   message: string;
 };
 
+export type GovernanceSectionState = "unreviewed" | "ready" | "error";
+
 const runtimeFallback: RuntimeFeatures = { smtp_enabled: false, push_enabled: false, ha_enabled: false, dns_mode: "dns_only" };
 
 const empty: GovernanceFormState = {
@@ -67,10 +69,22 @@ function Guidance({ title, children, link }: { title: string; children: React.Re
   return <div className="flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900 dark:border-blue-800 dark:bg-blue-950/50 dark:text-blue-100"><Info size={18} className="mt-0.5 shrink-0" aria-hidden="true" /><div><p className="font-medium">{title}</p><div className="mt-1 text-blue-800 dark:text-blue-200">{children}</div>{link && <Link href={link.href} className="mt-2 inline-block font-medium underline">{link.label}</Link>}</div></div>;
 }
 
-function Field({ label, value, onChange, multiline = false, type = "text", placeholder, helper, required = true }: { label: string; value: string; onChange: (value: string) => void; multiline?: boolean; type?: string; placeholder?: string; helper?: string; required?: boolean }) {
-  const classes = "mt-1 block min-h-11 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-gray-900 placeholder:text-gray-400 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100";
-  return <label className="block text-sm font-medium text-gray-700 dark:text-gray-200">{label}{multiline ? <textarea required={required} rows={4} className={classes} placeholder={placeholder} value={value} onChange={(event) => onChange(event.target.value)} /> : <input required={required} type={type} className={classes} placeholder={placeholder} value={value} onChange={(event) => onChange(event.target.value)} />}{helper && <span className="mt-1 block text-xs font-normal text-gray-500 dark:text-gray-400">{helper}</span>}</label>;
+function RequirementBadge({ requirement }: { requirement: "required" | "conditional" | "optional" }) {
+  const label = requirement === "required" ? "Required" : requirement === "conditional" ? "Conditionally required" : "Optional";
+  return <span className="ml-2 rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-normal text-gray-600 dark:bg-gray-700 dark:text-gray-300">{label}</span>;
 }
+
+function Field({ label, value, onChange, multiline = false, type = "text", placeholder, helper, required = true, requirement }: { label: string; value: string; onChange: (value: string) => void; multiline?: boolean; type?: string; placeholder?: string; helper?: string; required?: boolean; requirement?: "required" | "conditional" | "optional" }) {
+  const classes = "mt-1 block min-h-11 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-gray-900 placeholder:text-gray-400 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100";
+  const effectiveRequirement = requirement ?? (required ? "required" : "optional");
+  return <label className="block text-sm font-medium text-gray-700 dark:text-gray-200"><span>{label}<RequirementBadge requirement={effectiveRequirement} /></span>{multiline ? <textarea aria-label={label} required={required} rows={4} className={classes} placeholder={placeholder} value={value} onChange={(event) => onChange(event.target.value)} /> : <input aria-label={label} required={required} type={type} className={classes} placeholder={placeholder} value={value} onChange={(event) => onChange(event.target.value)} />}{helper && <span className="mt-1 block text-xs font-normal text-gray-500 dark:text-gray-400">{helper}</span>}</label>;
+}
+
+const sectionBorder: Record<GovernanceSectionState, string> = {
+  unreviewed: "border-gray-200 dark:border-gray-700",
+  ready: "border-green-400 dark:border-green-700",
+  error: "border-red-400 dark:border-red-700",
+};
 
 /** Root-only guided governance editor, exact preview and immutable publication gate. */
 export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupMode?: boolean; onPublished?: () => void }) {
@@ -97,11 +111,10 @@ export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupM
     if (!user?.is_root_admin) return;
     (async () => {
       const governanceResponse = await apiFetch(governancePath);
-      const settingsResponse = setupMode ? null : await apiFetch("/api/v1/admin/settings");
       if (!governanceResponse.ok) throw new Error("Could not load governance settings");
       const data = await governanceResponse.json();
       const runtime = data.runtime_features as RuntimeFeatures;
-      const runtimeSettings = settingsResponse?.ok ? await settingsResponse.json() as RuntimeSettings : {};
+      const runtimeSettings = (data.runtime_settings || {}) as RuntimeSettings;
       if (data.draft) {
         const { structured: savedStructured, ...scalar } = data.draft;
         setForm({ ...empty, ...scalar, privacy_contact_phone: scalar.privacy_contact_phone || "", dpo_contact: scalar.dpo_contact || "" });
@@ -120,6 +133,22 @@ export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupM
   const ready = useMemo(() => checks.length > 0 && !checks.some((item) => ["missing", "contradiction", "requires_controller_decision"].includes(item.status)), [checks]);
   const confirmed = Object.values(confirmations).every(Boolean);
   const blockingCount = checks.filter((item) => ["missing", "contradiction", "requires_controller_decision"].includes(item.status)).length;
+  const checkState = (...codes: string[]): GovernanceSectionState => {
+    const relevant = checks.filter((item) => codes.includes(item.code));
+    if (relevant.length === 0) return "unreviewed";
+    return relevant.some((item) => ["missing", "contradiction", "requires_controller_decision"].includes(item.status)) ? "error" : "ready";
+  };
+  const sectionStates: Record<number, GovernanceSectionState> = {
+    1: checkState("controller_identity", "controller_address", "privacy_contact", "supervisory_authority"),
+    2: checkState("processor_summary", "retention_summary", "rights_summary", "instance_terms"),
+    3: checkState("instance_name", "jurisdiction_scope", "incident_contact", "hosting_countries"),
+    4: checkState("processing_purposes", "controller_basis_decisions"),
+    5: checkState("data_categories"),
+    6: checkState("processor_register", "enabled_feature_processors"),
+    7: checkState("retention_configuration", "smtp_enabled", "push_enabled", "ha_enabled", "dns_mode"),
+  };
+  const nonReadyChecks = checks.filter((item) => item.status !== "ready");
+  const readyCount = checks.filter((item) => item.status === "ready").length;
 
   if (isLoading) return <main className="flex min-h-screen items-center justify-center bg-gray-50 dark:bg-gray-900"><p>Loading governance...</p></main>;
   if (!user?.is_root_admin) return <main className="flex min-h-screen items-center justify-center bg-gray-50 p-8 dark:bg-gray-900"><Card className="max-w-md p-6"><h1 className="text-xl font-semibold">Root access required</h1><p className="mt-2 text-sm text-gray-500">Only the root administrator can edit and publish controller governance.</p></Card></main>;
@@ -175,7 +204,13 @@ export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupM
     });
     const response = setupMode ? await saveRequest() : await withReauth(saveRequest);
     const data = await response.json().catch(() => ({}));
-    if (response.ok) { setChecks(data.preflight.checks || []); setPreviewReady(false); setStatus("Draft saved locally. It remains private until publication."); setStatusKind("success"); }
+    if (response.ok) {
+      setChecks(data.preflight.checks || []);
+      if (data.draft?.structured) setStructured(data.draft.structured as GovernanceStructured);
+      setPreviewReady(false);
+      const enforced = data.runtime_enforced_changes?.length ? ` ${data.runtime_enforced_changes.length} runtime-managed value(s) were restored from Server settings.` : "";
+      setStatus(`Draft saved locally. It remains private until publication.${enforced}`); setStatusKind("success");
+    }
     else { setStatus(responseMessage(data, "Draft validation failed")); setStatusKind("error"); }
   };
 
@@ -213,6 +248,8 @@ export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupM
 
       <Guidance title="How to use this page">Work from top to bottom. Blue information boxes explain what belongs in each section. Suggested text begins with <strong>TODO</strong> and cannot pass publication preflight until reviewed and replaced. Deployment settings are linked where they affect the notice.</Guidance>
 
+      {publishedVersion && <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100"><strong>Published notices remain immutable.</strong> Runtime-backed changes update this private draft only. Review the exact diff and publish a new version before relying on changed public wording.</div>}
+
       <Card className="space-y-4 p-5" aria-labelledby="configuration-file-heading">
         <div><h2 id="configuration-file-heading" className="text-lg font-semibold">Governance configuration file</h2><p className="mt-1 text-sm text-gray-500 dark:text-gray-400">Reuse controller-reviewed entries between test runs or similar deployments without publishing them automatically.</p></div>
         <Guidance title="Import is reviewable and never publishes">JSON import replaces only the entries currently shown in this editor. It remains unsaved until you select <strong>Save private draft</strong>. Deployment-derived SMTP, push, HA and DNS facts remain local. Files can contain controller contact information, so store them appropriately.</Guidance>
@@ -225,11 +262,11 @@ export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupM
       </Card>
 
       <form onSubmit={save} className="space-y-5">
-        <Card className="space-y-4 p-5">
+        <Card className={`space-y-4 border-2 p-5 ${sectionBorder[sectionStates[1]]}`} data-validation-state={sectionStates[1]}>
           <div><h2 className="text-lg font-semibold">1. Controller and privacy contact</h2><p className="mt-1 text-sm text-gray-500 dark:text-gray-400">Identify the organisation or individual that determines why and how this deployment processes data.</p></div>
           <Guidance title="Public controller identity">Use the controller&apos;s legal identity and an address where data-protection requests can actually be received. Do not enter the software maintainer unless the maintainer is genuinely the controller of this deployment.</Guidance>
           <div className="grid gap-4 md:grid-cols-2">
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200">Controller type<select value={form.controller_type} onChange={(event) => update("controller_type", event.target.value as GovernanceFormState["controller_type"])} className="mt-1 block min-h-11 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-900"><option value="organisation">Organisation</option><option value="individual">Individual</option></select></label>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200"><span>Controller type<RequirementBadge requirement="required" /></span><select value={form.controller_type} onChange={(event) => update("controller_type", event.target.value as GovernanceFormState["controller_type"])} className="mt-1 block min-h-11 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-900"><option value="organisation">Organisation</option><option value="individual">Individual</option></select></label>
             <Field label="Legal name" placeholder="Controller's registered or legal name" value={form.controller_legal_name} onChange={(value) => update("controller_legal_name", value)} />
             <Field label="Postal address" placeholder="Complete service address" value={form.controller_postal_address} onChange={(value) => update("controller_postal_address", value)} multiline />
             <Field label="Country code" placeholder="For example CH or DE" helper="Two-letter code chosen by the controller; this does not declare hosting location." value={form.controller_country} onChange={(value) => update("controller_country", value.toUpperCase())} />
@@ -242,7 +279,7 @@ export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupM
           </div>
         </Card>
 
-        <Card className="space-y-4 p-5">
+        <Card className={`space-y-4 border-2 p-5 ${sectionBorder[sectionStates[2]]}`} data-validation-state={sectionStates[2]}>
           <div><h2 className="text-lg font-semibold">2. Controller-supplied public wording</h2><p className="mt-1 text-sm text-gray-500 dark:text-gray-400">Turn the structured facts into concise procedures people can understand.</p></div>
           <Guidance title="Suggested drafts are deliberately incomplete">Replace every TODO with reviewed deployment facts. Do not promise deletion from provider systems, external calendars or backups unless the controller controls and verifies that action.</Guidance>
           <Field label="Processors and service providers" helper="Include roles, services, countries, support access, transfers and relevant agreements." value={form.processor_summary} onChange={(value) => update("processor_summary", value)} multiline />
@@ -251,7 +288,7 @@ export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupM
           <Field label="Terms for authorised use" helper="Include the permitted-data boundary and account responsibilities." value={form.terms_summary} onChange={(value) => update("terms_summary", value)} multiline />
         </Card>
 
-        <GovernanceEditor value={structured} onChange={setStructured} />
+        <GovernanceEditor value={structured} onChange={setStructured} sectionStates={sectionStates} />
         <div className="sticky bottom-3 z-10 flex justify-end"><Button type="submit" size="lg"><FileText size={18} />Save private draft</Button></div>
       </form>
 
@@ -259,7 +296,8 @@ export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupM
         <div><h2 id="preflight-heading" className="text-xl font-semibold">8. Exact preview and technical preflight</h2><p className="mt-1 text-sm text-gray-500 dark:text-gray-400">Ready means the draft is internally consistent with known runtime features. External legal and provider evidence remains the controller&apos;s responsibility.</p></div>
         <Guidance title="Review the generated public result">Save first, then generate the exact preview. Open every linked page and compare it with contracts, provider facts and controller decisions before acknowledging publication.</Guidance>
         <Button variant="outline" type="button" onClick={preview}>Generate exact preview and diff</Button>
-        <ul className="space-y-2">{checks.map((check) => <li key={check.code} className={`flex items-start gap-2 rounded-lg p-3 text-sm ${check.status === "ready" ? "bg-green-50 text-green-800 dark:bg-green-950/40 dark:text-green-200" : check.status === "externally_unverifiable" ? "bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-200" : "bg-red-50 text-red-800 dark:bg-red-950/40 dark:text-red-200"}`}>{check.status === "ready" ? <CheckCircle2 size={17} className="mt-0.5 shrink-0" /> : <AlertTriangle size={17} className="mt-0.5 shrink-0" />}<span><strong>{check.status.replaceAll("_", " ")}</strong>: {check.message}</span></li>)}</ul>
+        {checks.length > 0 && <div className="flex flex-wrap gap-2 text-sm"><span className="inline-flex items-center gap-1 rounded-full bg-green-50 px-3 py-1 text-green-800 dark:bg-green-950/40 dark:text-green-200"><CheckCircle2 size={15} />{readyCount} checks passed</span><span className={`inline-flex items-center gap-1 rounded-full px-3 py-1 ${blockingCount ? "bg-red-50 text-red-800 dark:bg-red-950/40 dark:text-red-200" : "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-200"}`}><AlertTriangle size={15} />{blockingCount} blocking</span></div>}
+        {nonReadyChecks.length > 0 && <ul className="space-y-2">{nonReadyChecks.map((check) => <li key={check.code} className={`flex items-start gap-2 rounded-lg p-3 text-sm ${check.status === "externally_unverifiable" ? "bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-200" : "bg-red-50 text-red-800 dark:bg-red-950/40 dark:text-red-200"}`}><AlertTriangle size={17} className="mt-0.5 shrink-0" /><span><strong>{check.status.replaceAll("_", " ")}</strong>: {check.message}</span></li>)}</ul>}
         {changes.length > 0 && <div><h3 className="font-semibold">Draft changes {materialChange ? "(material)" : "(non-material)"}</h3><ul className="mt-2 list-disc pl-6 text-sm">{changes.slice(0, 50).map((change) => <li key={change.path}>{change.path}</li>)}</ul>{changes.length > 50 && <p className="text-sm">Plus {changes.length - 50} additional changed paths.</p>}</div>}
         {previewReady && <nav aria-label="Governance draft preview pages" className="flex flex-wrap gap-2 text-sm">{[["privacy", "Privacy"], ["legal", "Legal"], ["terms", "Terms"], ["data-policy", "Permitted data"], ["retention", "Retention"], ["rights", "Rights"], ["processors", "Processors"]].map(([section, label]) => <a key={section} className="rounded-lg border border-gray-300 bg-white px-3 py-2 font-medium text-blue-700 hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-900 dark:text-blue-300" href={`${governancePath}/preview/${section}.html`} target="_blank" rel="noreferrer">{label} draft preview</a>)}</nav>}
       </Card>

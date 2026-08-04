@@ -59,12 +59,12 @@ describe("governance configuration import and export", () => {
       if (url === "/api/v1/admin/governance") {
         return Promise.resolve(jsonResponse({
           runtime_features: { smtp_enabled: true, push_enabled: false, ha_enabled: false, dns_mode: "dns_only" },
+          runtime_settings: {},
           draft: null,
           published_version: null,
           preflight: { checks: [], ready: false },
         }));
       }
-      if (url === "/api/v1/admin/settings") return Promise.resolve(jsonResponse({}));
       throw new Error(`Unexpected request: ${url}`);
     });
   });
@@ -106,7 +106,7 @@ describe("governance configuration import and export", () => {
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(/imported into an unsaved draft/i));
     expect(screen.getByLabelText("Legal name")).toHaveValue("Imported Synthetic Controller");
     expect(screen.getByLabelText("Public instance name")).toHaveValue("Imported Synthetic Instance");
-    expect(mockApiFetch).toHaveBeenCalledTimes(2);
+    expect(mockApiFetch).toHaveBeenCalledTimes(1);
   });
 
   it("rejects malformed imports without replacing the editor", async () => {
@@ -119,7 +119,7 @@ describe("governance configuration import and export", () => {
 
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/not valid JSON/i));
     expect(screen.getByLabelText("Legal name")).toHaveValue("");
-    expect(mockApiFetch).toHaveBeenCalledTimes(2);
+    expect(mockApiFetch).toHaveBeenCalledTimes(1);
   });
 
   it("opens root-only saved-draft documents after a successful exact preview", async () => {
@@ -128,12 +128,12 @@ describe("governance configuration import and export", () => {
       if (url === "/api/v1/admin/governance") {
         return Promise.resolve(jsonResponse({
           runtime_features: { smtp_enabled: true, push_enabled: false, ha_enabled: false, dns_mode: "dns_only" },
+          runtime_settings: {},
           draft: null,
           published_version: null,
           preflight: { checks: [], ready: false },
         }));
       }
-      if (url === "/api/v1/admin/settings") return Promise.resolve(jsonResponse({}));
       if (url === "/api/v1/admin/governance/preview") {
         return Promise.resolve(jsonResponse({
           preflight: { checks: [{ code: "controller", status: "ready", message: "Ready" }], ready: true },
@@ -151,5 +151,34 @@ describe("governance configuration import and export", () => {
     expect(privacy).toHaveAttribute("href", "/api/v1/admin/governance/preview/privacy.html");
     expect(privacy).toHaveAttribute("target", "_blank");
     expect(screen.getByRole("status")).toHaveTextContent(/review every public page before publishing/i);
+  });
+
+  it("compresses successful preflight checks and marks sections by validation state", async () => {
+    const user = userEvent.setup();
+    mockApiFetch.mockImplementation((url: string) => {
+      if (url === "/api/v1/admin/governance") return Promise.resolve(jsonResponse({
+        runtime_features: { smtp_enabled: false, push_enabled: false, ha_enabled: false, dns_mode: "dns_only" },
+        runtime_settings: {}, draft: null, published_version: null,
+        preflight: { checks: [], ready: false },
+      }));
+      if (url === "/api/v1/admin/governance/preview") return Promise.resolve(jsonResponse({
+        preflight: { checks: [
+          { code: "controller_identity", status: "ready", message: "Controller recorded." },
+          { code: "controller_address", status: "missing", message: "Address is missing." },
+        ], ready: false },
+        diff: { changes: [], material_change: false }, published_version: null,
+      }));
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    render(<GovernanceAdminPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Generate exact preview and diff" }));
+
+    expect(await screen.findByText("1 checks passed")).toBeInTheDocument();
+    expect(screen.getByText("1 blocking")).toBeInTheDocument();
+    expect(screen.queryByText("Controller recorded.")).not.toBeInTheDocument();
+    expect(screen.getByRole("list")).toHaveTextContent("missing: Address is missing.");
+    expect(screen.getByRole("heading", { name: "1. Controller and privacy contact" }).closest("[data-validation-state]"))
+      .toHaveAttribute("data-validation-state", "error");
   });
 });

@@ -15,5 +15,10 @@ describe("GovernanceEditor", () => {
     expect(screen.getByRole("link", { name: /Administration.*Security settings/ })).toHaveAttribute("href", "/admin?tab=security");
     expect(screen.getByText(/software does not infer jurisdiction/i)).toBeInTheDocument();
     expect(screen.queryByText(/physical deletion/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/Event purge grace.*Required.*Server-managed/i)).toBeDisabled();
+    expect(screen.getByLabelText(/Audit retention.*Required.*Server-managed/i)).toBeDisabled();
+    expect(screen.getByLabelText(/Browser cache expiry.*Required.*Server-managed/i)).toBeDisabled();
+    expect(screen.getByLabelText(/Rights-request URL.*Optional/i)).toBeEnabled();
+    expect(screen.getByLabelText(/DPO name or role.*Conditionally required/i)).toBeEnabled();
   });
 });
