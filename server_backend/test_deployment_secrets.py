@@ -127,6 +127,27 @@ def test_fresh_commissioning_provisions_the_optional_evidence_token_source():
     )
 
 
+def test_exact_activation_prepares_the_unprivileged_evidence_store():
+    """Unsigned activation must match signed deployment's evidence ownership."""
+
+    root = _server_root()
+    common = (root / "deploy" / "management" / "common.sh").read_text(
+        encoding="utf-8"
+    )
+    deploy_script = (root / "deploy" / "deploy.sh").read_text(encoding="utf-8")
+    test_deployment = (root / "deploy" / "test-deployment.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "mp_prepare_evidence_store()" in common
+    assert '[ -L "$evidence" ]' in common
+    assert 'install -d -o 10001 -g 10001 -m 0700 "$evidence"' in common
+    assert 'install -d -o 10001 -g 10001 -m 0700 "$evidence/public"' in common
+    assert "mp_prepare_evidence_store" in deploy_script
+    activation = test_deployment[test_deployment.index("compose_activate()") :]
+    assert activation.index("mp_prepare_evidence_store") < activation.index("mp_compose_init")
+
+
 def test_activation_email_brand_and_qr_assets_are_packaged_predictably():
     """Production must use the approved mail identity and deterministic artwork."""
 

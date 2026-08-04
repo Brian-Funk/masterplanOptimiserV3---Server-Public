@@ -172,8 +172,7 @@ chmod 755 "$REPO_DIR/manage.sh" "$REPO_DIR/configure-production.sh" \
 chmod 755 "$REPO_DIR/deploy/ha/"*.sh
 if sudo -n true >/dev/null 2>&1; then
     sudo ln -sf "$REPO_DIR/manage.sh" /usr/local/bin/mp-opt
-    sudo install -d -o 10001 -g 10001 -m 0700 "$REPO_DIR/state/evidence"
-    sudo install -d -o 10001 -g 10001 -m 0700 "$REPO_DIR/state/evidence/public"
+    mp_prepare_evidence_store
     mp_publish_audit_head
 else
     echo "  ERROR: Passwordless sudo is required to prepare the protected evidence store."

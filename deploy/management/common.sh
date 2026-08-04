@@ -764,6 +764,19 @@ mp_prepare_backend_secret_permissions() {
     done
 }
 
+# Prepare the append-only evidence bind source for the fixed unprivileged
+# backend identity. Refuse symlinks so a privileged ownership change cannot be
+# redirected outside the installation.
+mp_prepare_evidence_store() {
+    local evidence="$MP_ROOT/state/evidence"
+    if [ -e "$evidence" ] && { [ ! -d "$evidence" ] || [ -L "$evidence" ]; }; then
+        printf 'Refusing unsafe evidence store path: %s\n' "$evidence" >&2
+        return 1
+    fi
+    sudo -n install -d -o 10001 -g 10001 -m 0700 "$evidence" || return 1
+    sudo -n install -d -o 10001 -g 10001 -m 0700 "$evidence/public"
+}
+
 # Return the expected mode for a protected operator file. Runtime secrets are
 # deliberately group-readable by the fixed, unprivileged backend identity;
 # every other protected file remains owner-only.

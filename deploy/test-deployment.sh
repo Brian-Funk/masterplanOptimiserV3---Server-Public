@@ -280,6 +280,7 @@ compose_activate() {
     prepare_runtime_from_installed_sources
     ensure_optional_compose_secret_sources
     mp_prepare_backend_secret_permissions
+    mp_prepare_evidence_store
     mp_compose_init
     mp_compose_validate
     if grep -qw database <<< "$components"; then
