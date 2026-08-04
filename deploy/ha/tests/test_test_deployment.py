@@ -29,7 +29,17 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn('.mode == "ha-primary-new"', SUPERVISOR)
         self.assertIn("NOT EXISTS (SELECT 1 FROM events)", SUPERVISOR)
         self.assertIn("NOT is_root_admin", SUPERVISOR)
-        self.assertIn("count(*) FROM webauthn_credentials) = 1", SUPERVISOR)
+        self.assertIn("count(*) FROM users WHERE is_root_admin) = 1", SUPERVISOR)
+        self.assertIn("is_root_admin AND is_active AND NOT is_activated", SUPERVISOR)
+        for table in (
+            "webauthn_credentials",
+            "auth_sessions",
+            "exchange_codes",
+            "activation_links",
+            "passkey_challenges",
+            "passkey_ceremonies",
+        ):
+            self.assertIn(f"NOT EXISTS (SELECT 1 FROM {table})", SUPERVISOR)
 
     def test_frontend_build_uses_host_resolved_exact_source_identity(self) -> None:
         common = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
