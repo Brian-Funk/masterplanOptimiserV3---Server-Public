@@ -2,8 +2,9 @@
 """Offline controller-custody utility for a trusted controller workstation.
 
 This tool is not imported by or packaged into the Server runtime. It creates an
-encrypted Ed25519 private key locally and exports only public packages and
-detached signatures for transfer to a Masterplan deployment.
+Ed25519 private key locally and exports only public packages and detached
+signatures for transfer to a Masterplan deployment. Private files must be moved
+to protected controller custody immediately after generation.
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ from __future__ import annotations
 import argparse
 import base64
 from datetime import datetime, timezone
-import getpass
 import hashlib
 import json
 import os
@@ -50,14 +50,6 @@ def key_id(public: str) -> str:
     return "ek-" + hashlib.sha256(public.encode("ascii")).hexdigest()[:16]
 
 
-def _passphrase(confirm: bool = False) -> bytes:
-    first = getpass.getpass("Controller key passphrase: ").encode("utf-8")
-    if len(first) < 16: raise CustodyError("use a controller-held passphrase of at least 16 characters")
-    if confirm and first != getpass.getpass("Repeat passphrase: ").encode("utf-8"):
-        raise CustodyError("passphrases do not match")
-    return first
-
-
 def _write_new(path: Path, data: bytes, mode: int = 0o600) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
@@ -65,15 +57,15 @@ def _write_new(path: Path, data: bytes, mode: int = 0o600) -> None:
     finally: os.close(descriptor)
 
 
-def generate(controller_id: str, output_dir: Path, *, passphrase: bytes, supersedes: str | None = None) -> dict[str, Any]:
+def generate(controller_id: str, output_dir: Path, *, supersedes: str | None = None) -> dict[str, Any]:
     if not CONTROLLER_RE.fullmatch(controller_id): raise CustodyError("controller ID is invalid")
     if supersedes is not None and not KEY_RE.fullmatch(supersedes): raise CustodyError("superseded key ID is invalid")
     private = Ed25519PrivateKey.generate(); public = public_text(private); identifier = key_id(public)
     private_path = output_dir / f"{identifier}.controller.ed25519.pem"
     public_path = output_dir / f"{identifier}.controller.public.json"
-    encrypted = private.private_bytes(
+    private_bytes = private.private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-        serialization.BestAvailableEncryption(passphrase),
+        serialization.NoEncryption(),
     )
     created = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
     package = {
@@ -84,17 +76,17 @@ def generate(controller_id: str, output_dir: Path, *, passphrase: bytes, superse
         "supersedes_key_id": supersedes, "created_at": created,
         "signature_namespace": NAMESPACE,
     }
-    _write_new(private_path, encrypted)
+    _write_new(private_path, private_bytes)
     try: _write_new(public_path, canonical_json(package))
     except Exception:
         private_path.unlink(missing_ok=True); raise
     return {"private_key_path": str(private_path), "public_package_path": str(public_path), **package}
 
 
-def load_private(path: Path, passphrase: bytes) -> Ed25519PrivateKey:
+def load_private(path: Path) -> Ed25519PrivateKey:
     if not path.is_file() or path.is_symlink(): raise CustodyError("controller private-key path is unsafe or missing")
-    try: key = serialization.load_pem_private_key(path.read_bytes(), password=passphrase)
-    except (ValueError, TypeError) as exc: raise CustodyError("controller private key or passphrase is invalid") from exc
+    try: key = serialization.load_pem_private_key(path.read_bytes(), password=None)
+    except (ValueError, TypeError) as exc: raise CustodyError("controller private key is invalid") from exc
     if not isinstance(key, Ed25519PrivateKey): raise CustodyError("controller key must use Ed25519")
     return key
 
@@ -128,8 +120,8 @@ def validate_controller_document(document: dict[str, Any], private: Ed25519Priva
     canonical_json(document)
 
 
-def sign(path: Path, document: dict[str, Any], *, passphrase: bytes) -> dict[str, Any]:
-    private = load_private(path, passphrase); validate_controller_document(document, private)
+def sign(path: Path, document: dict[str, Any]) -> dict[str, Any]:
+    private = load_private(path); validate_controller_document(document, private)
     signature = private.sign(NAMESPACE.encode("ascii") + b"\0" + canonical_json(document))
     return {
         "document": document,
@@ -137,8 +129,8 @@ def sign(path: Path, document: dict[str, Any], *, passphrase: bytes) -> dict[str
     }
 
 
-def verify_recovery(path: Path, public_package: dict[str, Any], *, passphrase: bytes) -> dict[str, Any]:
-    private = load_private(path, passphrase); public = public_text(private)
+def verify_recovery(path: Path, public_package: dict[str, Any]) -> dict[str, Any]:
+    private = load_private(path); public = public_text(private)
     if public_package.get("role") != "controller" or public_package.get("public_key") != public or public_package.get("key_id") != key_id(public):
         raise CustodyError("recovery key does not match the controller public package")
     return {"verified": True, "entity_id": public_package["entity_id"], "key_id": key_id(public), "public_key_sha256": hashlib.sha256(public.encode("ascii")).hexdigest()}
@@ -151,11 +143,11 @@ def main() -> int:
     signer = commands.add_parser("sign"); signer.add_argument("--private-key", type=Path, required=True); signer.add_argument("--document", type=Path, required=True); signer.add_argument("--output", type=Path, required=True)
     recovery = commands.add_parser("verify-recovery"); recovery.add_argument("--private-key", type=Path, required=True); recovery.add_argument("--public-package", type=Path, required=True)
     args = parser.parse_args()
-    if args.command == "generate": result = generate(args.controller_id, args.output_dir, passphrase=_passphrase(True), supersedes=args.supersedes_key_id)
+    if args.command == "generate": result = generate(args.controller_id, args.output_dir, supersedes=args.supersedes_key_id)
     elif args.command == "sign":
-        document = json.loads(args.document.read_text(encoding="utf-8")); result = sign(args.private_key, document, passphrase=_passphrase()); _write_new(args.output, canonical_json(result))
+        document = json.loads(args.document.read_text(encoding="utf-8")); result = sign(args.private_key, document); _write_new(args.output, canonical_json(result))
     else:
-        package = json.loads(args.public_package.read_text(encoding="utf-8")); result = verify_recovery(args.private_key, package, passphrase=_passphrase())
+        package = json.loads(args.public_package.read_text(encoding="utf-8")); result = verify_recovery(args.private_key, package)
     print(json.dumps(result, sort_keys=True)); return 0
 
 

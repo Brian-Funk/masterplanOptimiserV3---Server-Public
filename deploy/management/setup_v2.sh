@@ -218,7 +218,7 @@ mp_setup_wait_for_root_commissioning() (
             stage="$(mp_setup_commissioning_stage 2>/dev/null || true)"
             case "$stage" in
                 recovery) label="Step 1 of 3 — Recovery key"; action="Generate, download, reselect and verify the recovery file in the browser." ;;
-                controller) label="Step 2 of 3 — Controller identity"; action="Generate or import the encrypted controller key and approve its public identity." ;;
+                controller) label="Step 2 of 3 — Controller identity"; action="Generate or import the controller private-key file, move it into protected custody, and approve its public identity." ;;
                 governance) label="Step 3 of 3 — Governance baseline"; action="Complete the draft, preview it, publish version 1 and run final checks." ;;
                 complete)
                     mp_setup_sync_commissioning_recipient || return 1

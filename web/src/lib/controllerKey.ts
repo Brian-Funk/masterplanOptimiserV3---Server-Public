@@ -1,5 +1,4 @@
 const encoder = new TextEncoder();
-const ITERATIONS = 600_000;
 const NAMESPACE = "mp-opt-role-trust-v1";
 
 function asArrayBuffer(value: Uint8Array): ArrayBuffer {
@@ -21,11 +20,9 @@ export type ControllerPublicPackage = {
 };
 
 export type ControllerPrivatePackage = {
-  format: "mp-opt-controller-private-key-v1";
+  format: "mp-opt-controller-private-key-v2";
   public_package: ControllerPublicPackage;
-  kdf: { name: "PBKDF2"; hash: "SHA-256"; iterations: number; salt: string };
-  cipher: { name: "AES-GCM"; iv: string; tag_length: 128 };
-  ciphertext: string;
+  private_key_pkcs8: string;
 };
 
 function canonicalJson(value: unknown): string {
@@ -50,7 +47,7 @@ function bytesToBase64(value: ArrayBuffer | Uint8Array): string {
 
 function base64ToBytes(value: string): Uint8Array {
   let binary: string;
-  try { binary = atob(value); } catch { throw new Error("The encrypted key contains invalid binary data."); }
+  try { binary = atob(value); } catch { throw new Error("The controller key contains invalid binary data."); }
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 }
 
@@ -69,11 +66,6 @@ function openSshPublic(raw: Uint8Array): string {
 async function sha256Hex(value: Uint8Array): Promise<string> {
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256", asArrayBuffer(value)))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
-async function deriveKey(passphrase: string, salt: Uint8Array): Promise<CryptoKey> {
-  const material = await crypto.subtle.importKey("raw", asArrayBuffer(encoder.encode(passphrase)), "PBKDF2", false, ["deriveKey"]);
-  return crypto.subtle.deriveKey({ name: "PBKDF2", hash: "SHA-256", iterations: ITERATIONS, salt: asArrayBuffer(salt) }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
-}
-
 function validatePublicPackage(value: ControllerPublicPackage): void {
   if (value?.format !== "mp-opt-controller-public-key-v1" || value.role !== "controller" || value.algorithm !== "Ed25519") throw new Error("The controller public package is invalid.");
   if (!/^ctl-[a-z0-9]{8,48}$/.test(value.entity_id) || !/^ek-[0-9a-f]{16}$/.test(value.key_id) || !/^[0-9a-f]{64}$/.test(value.public_key_sha256)) throw new Error("The controller public identity is invalid.");
@@ -85,8 +77,7 @@ export function newControllerEntityId(): string {
   return `ctl-${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
-export async function generateControllerKey(entityId: string, passphrase: string): Promise<{ privatePackage: ControllerPrivatePackage; publicPackage: ControllerPublicPackage }> {
-  if (passphrase.length < 16) throw new Error("Use a passphrase of at least 16 characters.");
+export async function generateControllerKey(entityId: string): Promise<{ privatePackage: ControllerPrivatePackage; publicPackage: ControllerPublicPackage }> {
   const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]) as CryptoKeyPair;
   const rawPublic = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
   const pkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", pair.privateKey));
@@ -98,41 +89,35 @@ export async function generateControllerKey(entityId: string, passphrase: string
     public_key: publicKey, public_key_sha256: fingerprint, supersedes_key_id: null,
     created_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"), signature_namespace: NAMESPACE,
   };
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv: asArrayBuffer(iv), additionalData: asArrayBuffer(canonicalBytes(publicPackage)), tagLength: 128 }, await deriveKey(passphrase, salt), asArrayBuffer(pkcs8));
+  const privateKeyPkcs8 = bytesToBase64(pkcs8);
   pkcs8.fill(0);
   const privatePackage: ControllerPrivatePackage = {
-    format: "mp-opt-controller-private-key-v1", public_package: publicPackage,
-    kdf: { name: "PBKDF2", hash: "SHA-256", iterations: ITERATIONS, salt: bytesToBase64(salt) },
-    cipher: { name: "AES-GCM", iv: bytesToBase64(iv), tag_length: 128 }, ciphertext: bytesToBase64(encrypted),
+    format: "mp-opt-controller-private-key-v2", public_package: publicPackage,
+    private_key_pkcs8: privateKeyPkcs8,
   };
-  await loadControllerKey(privatePackage, passphrase);
+  await loadControllerKey(privatePackage);
   return { privatePackage, publicPackage };
 }
 
-export async function loadControllerKey(keyPackage: ControllerPrivatePackage, passphrase: string): Promise<{ privateKey: CryptoKey; publicPackage: ControllerPublicPackage }> {
-  if (keyPackage?.format !== "mp-opt-controller-private-key-v1") throw new Error("Select an encrypted controller-key package.");
+export async function loadControllerKey(keyPackage: ControllerPrivatePackage): Promise<{ privateKey: CryptoKey; publicPackage: ControllerPublicPackage }> {
+  if (keyPackage?.format !== "mp-opt-controller-private-key-v2") throw new Error("Select an unencrypted controller-key package generated by Masterplan.");
   validatePublicPackage(keyPackage.public_package);
-  if (keyPackage.kdf?.name !== "PBKDF2" || keyPackage.kdf.hash !== "SHA-256" || keyPackage.kdf.iterations !== ITERATIONS || keyPackage.cipher?.name !== "AES-GCM" || keyPackage.cipher.tag_length !== 128) throw new Error("The encrypted key uses an unsupported protection policy.");
-  const salt = base64ToBytes(keyPackage.kdf.salt); const iv = base64ToBytes(keyPackage.cipher.iv);
-  if (salt.length !== 16 || iv.length !== 12) throw new Error("The encrypted key parameters are invalid.");
-  let pkcs8: Uint8Array;
-  try { pkcs8 = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: asArrayBuffer(iv), additionalData: asArrayBuffer(canonicalBytes(keyPackage.public_package)), tagLength: 128 }, await deriveKey(passphrase, salt), asArrayBuffer(base64ToBytes(keyPackage.ciphertext)))); }
-  catch { throw new Error("The passphrase is wrong or the encrypted key package was changed."); }
+  const pkcs8 = base64ToBytes(keyPackage.private_key_pkcs8);
+  if (pkcs8.length < 32 || pkcs8.length > 256) throw new Error("The controller private key has an invalid length.");
   let privateKey: CryptoKey;
   try { privateKey = await crypto.subtle.importKey("pkcs8", asArrayBuffer(pkcs8), { name: "Ed25519" }, true, ["sign"]); }
+  catch { throw new Error("The controller private key is invalid or was changed."); }
   finally { pkcs8.fill(0); }
   const jwk = await crypto.subtle.exportKey("jwk", privateKey);
-  if (!jwk.x) throw new Error("The encrypted key has no public identity.");
+  if (!jwk.x) throw new Error("The controller key has no public identity.");
   const publicKey = openSshPublic(base64ToBytes(jwk.x.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(jwk.x.length / 4) * 4, "=")));
   const fingerprint = await sha256Hex(encoder.encode(publicKey));
-  if (publicKey !== keyPackage.public_package.public_key || fingerprint !== keyPackage.public_package.public_key_sha256) throw new Error("The encrypted private key does not match its public package.");
+  if (publicKey !== keyPackage.public_package.public_key || fingerprint !== keyPackage.public_package.public_key_sha256) throw new Error("The private key does not match its public package.");
   return { privateKey, publicPackage: keyPackage.public_package };
 }
 
-export async function signControllerRegistration(keyPackage: ControllerPrivatePackage, passphrase: string, document: Record<string, unknown>) {
-  const { privateKey, publicPackage } = await loadControllerKey(keyPackage, passphrase);
+export async function signControllerRegistration(keyPackage: ControllerPrivatePackage, document: Record<string, unknown>) {
+  const { privateKey, publicPackage } = await loadControllerKey(keyPackage);
   if (document.format !== "mp-opt-controller-trust-registration-v2" || document.trust_scope !== "controller_governance_authority" || document.governance_authorisation !== "root_passkey_per_publication") throw new Error("The Server requested an unsupported controller action.");
   if (document.entity_id !== publicPackage.entity_id || document.key_id !== publicPackage.key_id || document.public_key_sha256 !== publicPackage.public_key_sha256) throw new Error("The Server action targets a different controller key.");
   const exactAction = {

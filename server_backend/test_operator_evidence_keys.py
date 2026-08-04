@@ -260,12 +260,11 @@ def test_instance_key_commissioning_is_exactly_once_fail_closed_and_ha_consisten
     else: raise AssertionError("HA fingerprint mismatch did not fail closed")
 
 
-def test_controller_utility_keeps_encrypted_private_key_outside_server_and_signs_only_controller(tmp_path, monkeypatch):
-    passphrase = b"synthetic-passphrase-long"
-    package = generate_controller("ctl-custody0001", tmp_path, passphrase=passphrase)
+def test_controller_utility_keeps_private_key_outside_server_and_signs_only_controller(tmp_path, monkeypatch):
+    package = generate_controller("ctl-custody0001", tmp_path)
     private_path = Path(package["private_key_path"])
-    encrypted_private_key_label = b"ENCRYPTED " + b"PRIVATE KEY"
-    assert encrypted_private_key_label in private_path.read_bytes()
+    assert b"BEGIN PRIVATE KEY" in private_path.read_bytes()
+    assert b"ENCRYPTED PRIVATE KEY" not in private_path.read_bytes()
     assert "private" not in Path(package["public_package_path"]).read_text(encoding="utf-8").lower()
     created_at = datetime.now(timezone.utc).replace(microsecond=0)
     document = {
@@ -281,9 +280,9 @@ def test_controller_utility_keeps_encrypted_private_key_outside_server_and_signs
         "expires_at": (created_at + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     document["action_sha256"] = action_sha256(document)
-    signed = controller_sign(private_path, document, passphrase=passphrase)
+    signed = controller_sign(private_path, document)
     assert signed["proof"]["namespace"] == TRUST_NAMESPACE
     processor = document | {"format": "mp-opt-processor-statement-v1", "role": "processor", "entity_id": "prc-custody0001", "statement_type": "receipt"}
-    try: controller_sign(private_path, processor, passphrase=passphrase)
+    try: controller_sign(private_path, processor)
     except ValueError: pass
     else: raise AssertionError("controller utility signed a processor statement")
