@@ -8,6 +8,9 @@ PUBLIC_LINK_API = (
     ROOT / "backend/app/api/v1/public_schedule_links.py"
 ).read_text(encoding="utf-8")
 ADMIN_UI = (ROOT / "web/src/app/admin/page.tsx").read_text(encoding="utf-8")
+ADMIN_NAV = (ROOT / "web/src/components/AdminNavigation.tsx").read_text(
+    encoding="utf-8"
+)
 CALENDAR_UI = (ROOT / "web/src/app/calendar/page.tsx").read_text(encoding="utf-8")
 UNAVAILABILITY_UI = (
     ROOT / "web/src/components/DailyUnavailabilityIndicator.tsx"
@@ -49,7 +52,7 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
         self.assertIn('format="mp-opt-ha-dashboard-v1"', ADMIN_API)
         self.assertIn('replication["potential_data_loss_seconds"] = _ha_age_seconds', ADMIN_API)
         self.assertIn('| "ha"', ADMIN_UI)
-        self.assertIn('label: "High Availability"', ADMIN_UI)
+        self.assertIn('label: "High availability"', ADMIN_NAV)
         self.assertIn('window.setInterval(() => poll().catch(() => undefined), 2000)', ADMIN_UI)
         self.assertIn('For safety, enabling automatic failover', ADMIN_UI)
         self.assertNotIn('apiFetch("/api/v1/admin/ha/handoff"', ADMIN_UI)
@@ -144,14 +147,15 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
 
     def test_root_tabs_wrap_and_event_filter_uses_a_separate_context_row(self) -> None:
         self.assertIn("const EVENT_SCOPED_TABS: AdminTab[]", ADMIN_UI)
-        self.assertIn('flex-wrap gap-1', ADMIN_UI)
+        self.assertIn('flex-wrap gap-1', ADMIN_NAV)
+        self.assertIn('aria-label="Administration sections"', ADMIN_NAV)
         self.assertIn('htmlFor="admin-event-context"', ADMIN_UI)
         self.assertIn('Event context', ADMIN_UI)
-        tab_bar_start = ADMIN_UI.index("{/* Full-width tab bar */}")
-        context_start = ADMIN_UI.index("{/* Event context is separate", tab_bar_start)
-        tab_bar = ADMIN_UI[tab_bar_start:context_start]
-        self.assertNotIn("overflow-x-auto", tab_bar)
-        self.assertNotIn("admin-event-context", tab_bar)
+        navigation_start = ADMIN_UI.index("<AdminNavigation")
+        context_start = ADMIN_UI.index("{/* Event context is separate", navigation_start)
+        self.assertLess(navigation_start, context_start)
+        self.assertNotIn("overflow-x-auto", ADMIN_NAV)
+        self.assertNotIn("admin-event-context", ADMIN_NAV)
 
     def test_mobile_calendar_exposes_unavailability_and_every_programme_view(self) -> None:
         mobile_start = CALENDAR_UI.index("{/* Filters + view toggle */}")
