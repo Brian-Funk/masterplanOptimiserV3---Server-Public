@@ -23,6 +23,8 @@ MP_TEST_SOURCE="$MP_TEST_HOME/source"
 MP_TEST_STATE_DIR="$MP_STATE/test-deployments"
 MP_TEST_STATE_FILE="$MP_TEST_STATE_DIR/current.json"
 MP_TEST_ENV="$MP_ROOT/.test-deployment.env"
+MP_TEST_FAILURE_FILE="$MP_TEST_STATE_DIR/last-failure.json"
+MP_TEST_STAGE_FILE="$MP_TEST_STATE_DIR/current-stage"
 
 usage() {
     cat <<'EOF'
@@ -45,6 +47,38 @@ policy_value() {
     cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf 'production\n'
 }
 
+set_apply_stage() {
+    mkdir -p "$MP_TEST_STATE_DIR"
+    printf '%s\n' "$1" > "$MP_TEST_STAGE_FILE"
+    chmod 600 "$MP_TEST_STAGE_FILE"
+}
+
+record_apply_failure() {
+    local target="$1" stage temporary
+    stage="$(head -1 "$MP_TEST_STAGE_FILE" 2>/dev/null || printf unknown)"
+    temporary="$(mktemp "$MP_TEST_STATE_DIR/failure.XXXXXX")" || return 0
+    jq -n --arg target "$target" --arg stage "$stage" \
+        --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{format:"mp-opt-test-deployment-failure-v1",target:$target,stage:$stage,at:$at}' \
+        > "$temporary" || { rm -f "$temporary"; return 0; }
+    chmod 600 "$temporary"
+    mv "$temporary" "$MP_TEST_FAILURE_FILE"
+}
+
+restore_verified_previous_deployment() {
+    local verified_before="$1" previous_commit stage
+    [ -n "$verified_before" ] || return 0
+    stage="$(head -1 "$MP_TEST_STAGE_FILE" 2>/dev/null || printf unknown)"
+    case "$stage" in preflight|build-*) ;; *) return 0 ;; esac
+    [ -s "$MP_TEST_STATE_DIR/previous.env" ] || return 0
+    previous_commit="$(sed -n 's/^MP_TEST_COMMIT=//p' "$MP_TEST_STATE_DIR/previous.env" | head -1)"
+    [ "$previous_commit" = "$verified_before" ] || return 0
+    install -m 0600 "$MP_TEST_STATE_DIR/previous.env" "$MP_TEST_ENV"
+    mp_compose_init || return 1
+    "${MP_COMPOSE[@]}" up -d db backend caddy || return 1
+    mp_wait_for_health 45
+}
+
 require_test_policy() {
     [ "$(policy_value)" = test ] || {
         ui_error "Unsigned deployments are disabled. This server is production-policy."
@@ -53,49 +87,41 @@ require_test_policy() {
 }
 
 require_fresh_commissioning_database() {
-    local setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v1.json}" safe
+    local target="$1" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
     [ -s "$setup_state" ] || { ui_error "Fresh commissioning state is missing."; return 1; }
-    jq -e '.state == "in_progress" and (.mode == "standalone-new" or .mode == "ha-primary-new")' \
+    jq -e --arg target "$target" \
+        '.format == "mp-opt-setup-state-v2"
+         and .state == "in_progress"
+         and .deployment_lane == "unsigned"
+         and .campaign_commit == $target
+         and (.mode == "standalone-new" or .mode == "ha-primary-new" or .mode == "ha-join")
+         and ((.completed | index("root_commissioning_complete")) == null)' \
         "$setup_state" >/dev/null \
-        || { ui_error "Snapshot-free test deployment is limited to fresh commissioning."; return 1; }
+        || { ui_error "Snapshot-free deployment requires an in-progress unsigned v2 setup pinned to this exact commit."; return 1; }
     [ ! -s "$MP_RECIPIENT_FILE" ] \
         || { ui_error "Fresh commissioning already has recovery material; use the normal snapshot-protected deployment path."; return 1; }
+    [ ! -s "$MP_TEST_STATE_FILE" ] \
+        || [ "$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null)" = "$target" ] \
+        || { ui_error "A different verified unsigned deployment already exists."; return 1; }
+}
+
+assert_fresh_database_content() {
+    local present safe
     mp_compose_init
+    present="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d masterplan -Atqc \
+        "SELECT to_regclass('public.users') IS NOT NULL" 2>/dev/null || true)"
+    [ "$present" = t ] || return 0
     safe="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d masterplan -Atqc \
         "SELECT
             NOT EXISTS (SELECT 1 FROM events)
             AND NOT EXISTS (SELECT 1 FROM users WHERE NOT is_root_admin)
-            AND (SELECT count(*) FROM users WHERE is_root_admin) = 1
-            AND (
-                (
-                    EXISTS (
-                        SELECT 1 FROM users
-                        WHERE is_root_admin AND is_active AND is_activated
-                    )
-                    AND NOT EXISTS (SELECT 1 FROM webauthn_credentials)
-                )
-                OR (
-                    EXISTS (
-                        SELECT 1 FROM users
-                        WHERE is_root_admin AND is_active AND NOT is_activated
-                    )
-                    AND (SELECT count(*) FROM webauthn_credentials) = 1
-                    AND EXISTS (
-                        SELECT 1 FROM webauthn_credentials credential
-                        JOIN users root_user ON root_user.id = credential.user_id
-                        WHERE root_user.is_root_admin
-                    )
-                )
-            )
-            AND NOT EXISTS (SELECT 1 FROM auth_sessions)
-            AND NOT EXISTS (SELECT 1 FROM exchange_codes)
-            AND NOT EXISTS (SELECT 1 FROM activation_links)
-            AND NOT EXISTS (SELECT 1 FROM passkey_challenges)
+            AND (SELECT count(*) FROM users WHERE is_root_admin) <= 1
             AND NOT EXISTS (
-                SELECT 1 FROM passkey_ceremonies WHERE consumed_at IS NULL
+              SELECT 1 FROM server_settings
+              WHERE key IN ('root_commissioning_completed_at','root_recovery_download_acknowledged_at')
             )" 2>/dev/null || true)"
     [ "$safe" = t ] \
-        || { ui_error "The database is not the narrow fresh root-only commissioning state."; return 1; }
+        || { ui_error "The database contains application data or completed commissioning facts; snapshot-free deployment is prohibited."; return 1; }
 }
 
 set_policy() {
@@ -238,18 +264,27 @@ prepare_runtime_from_installed_sources() {
 }
 
 compose_activate() {
-    local components="$1"
+    local components="$1" fresh_commissioning="${2:-false}" domain
     prepare_runtime_from_installed_sources
     mp_prepare_backend_secret_permissions
     mp_compose_init
     mp_compose_validate
     if grep -qw database <<< "$components"; then
+        # Contract migrations must never run while an older backend is alive.
+        set_apply_stage stop-old-backend
+        "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
+        set_apply_stage database
         "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate db
         mp_wait_for_database 30
+        [ "$fresh_commissioning" != true ] || assert_fresh_database_content
+        set_apply_stage base-schema
         mp_ensure_base_schema
+        set_apply_stage migrations
         mp_apply_migrations
+        set_apply_stage schema-contract
         mp_verify_database_schema_contract
     fi
+    set_apply_stage activation
     if grep -qw backend <<< "$components" || grep -qw database <<< "$components" \
         || grep -qw operations <<< "$components"; then
         "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend
@@ -258,7 +293,12 @@ compose_activate() {
         || grep -qw operations <<< "$components"; then
         "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate caddy
     fi
+    set_apply_stage public-health
     mp_wait_for_health 45
+    domain="$(mp_env_get DOMAIN)"
+    curl -fsS --max-time 10 --resolve "${domain}:443:127.0.0.1" \
+        "https://${domain}/health" >/dev/null \
+        || { ui_error "The exact deployment is not healthy on this node's local TLS endpoint."; return 1; }
     [ "$(stat -c %a "$MP_ROOT/runtime")" = 711 ] || {
         ui_error "Runtime traversal permissions were not preserved during activation."
         return 1
@@ -291,7 +331,7 @@ peer_copy_image() {
 }
 
 peer_activate() {
-    local target="$1" components="$2"
+    local target="$1" components="$2" fresh_commissioning="${3:-false}"
     scp -q "$MP_TEST_ENV" mp-opt-ha-peer:/tmp/mp-opt-test-deployment.env
     if grep -qw frontend <<< "$components"; then
         tar -C "$MP_TEST_SOURCE" -czf - web/out runtime/frontend-csp.caddy \
@@ -300,12 +340,17 @@ peer_activate() {
     fi
     ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
         env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
-        /opt/masterplan/deploy/test-deployment.sh internal-activate "$target" "$components"
+        /opt/masterplan/deploy/test-deployment.sh internal-activate "$target" "$components" "$fresh_commissioning"
+    [ "$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+        env MP_ROOT=/opt/masterplan bash -c \
+        'source "$MP_ROOT/deploy/management/common.sh"; jq -r ".current_commit // empty" "$MP_STATE/test-deployments/current.json"' 2>/dev/null)" = "$target" ] \
+        || { ui_error "Node B did not record the exact pinned deployment receipt."; return 1; }
 }
 
 internal_activate() {
-    local target="$1" components="$2"
+    local target="$1" components="$2" fresh_commissioning="${3:-false}" plan setup_state temporary
     require_test_policy
+    [ "$fresh_commissioning" != true ] || require_fresh_commissioning_database "$target"
     mp_lock
     trap 'mp_unlock' EXIT
     prepare_source "$target"
@@ -317,7 +362,20 @@ internal_activate() {
     if grep -qw frontend <<< "$components"; then
         sync_frontend "$MP_TEST_HOME/peer-assets"
     fi
-    compose_activate "$components"
+    compose_activate "$components" "$fresh_commissioning"
+    plan="$(jq -n --arg components "$components" \
+        '{base:"",target:"",full:true,migrations:true,components:($components|split(" "))}')"
+    write_state "$target" "" "$plan" ""
+    setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
+    if [ -s "$setup_state" ]; then
+        temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")"
+        jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '.completed=((.completed+["application_deployed"])|unique) |
+             .state="complete" | .completed_at=$now |
+             .current_action="Waiting for root commissioning on Node A" | .updated_at=$now' \
+            "$setup_state" > "$temporary"
+        chmod 600 "$temporary"; mv "$temporary" "$setup_state"
+    fi
     mp_unlock
     trap - EXIT
 }
@@ -342,10 +400,17 @@ deploy_witness() {
 
 apply_commit() {
     local target="$1" confirm_full="$2" confirm_migrations="$3" fresh_commissioning="$4"
-    local plan previous components snapshot="" automatic=false role component image
+    local plan previous components snapshot="" automatic=false role component image verified_before=""
     local -a remote_args
     require_test_policy
     plan="$(create_plan "$target")"
+    if [ "$fresh_commissioning" = true ]; then
+        require_fresh_commissioning_database "$target"
+        plan="$(jq '
+          .full=true | .migrations=true |
+          .components=((.components + ["backend","frontend","caddy","database","tools","operations"]) | unique)
+        ' <<< "$plan")"
+    fi
     previous="$(jq -r '.base' <<< "$plan")"
     components="$(jq -r '.components | join(" ")' <<< "$plan")"
     [ -n "$components" ] || { printf 'Commit already matches the deployed state.\n'; return 0; }
@@ -382,10 +447,11 @@ apply_commit() {
     fi
     mp_lock
     trap 'mp_unlock' EXIT
+    verified_before="$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)"
+    set_apply_stage preflight
+    trap 'failure_status=$?; set +e; record_apply_failure "$target"; restore_verified_previous_deployment "$verified_before"; exit "$failure_status"' ERR
     if [ "$(jq -r .migrations <<< "$plan")" = true ]; then
-        if [ "$fresh_commissioning" = true ]; then
-            require_fresh_commissioning_database
-        else
+        if [ "$fresh_commissioning" != true ]; then
             snapshot="$(MP_MANAGEMENT_LOCK_HELD=1 mp_snapshot_create full "test-deploy-${target:0:12}")"
             [ -n "$snapshot" ]
         fi
@@ -396,6 +462,7 @@ apply_commit() {
     env_set "$MP_TEST_STATE_DIR/next.env" MP_TEST_COMMIT "$target"
     for component in backend caddy database tools; do
         if grep -qw "$component" <<< "$components"; then
+            set_apply_stage "build-${component}"
             image="$(build_component "$component" "$target")"
             case "$component" in
                 backend) env_set "$MP_TEST_STATE_DIR/next.env" MP_BACKEND_IMAGE "$image" ;;
@@ -407,11 +474,12 @@ apply_commit() {
         fi
     done
     if grep -qw frontend <<< "$components"; then
+        set_apply_stage build-frontend
         build_frontend
     fi
     install -m 0600 "$MP_TEST_STATE_DIR/next.env" "$MP_TEST_ENV"
     if [ "$role" = dynamic ]; then
-        peer_activate "$target" "$components"
+        peer_activate "$target" "$components" "$fresh_commissioning"
     fi
     if grep -qw operations <<< "$components" || grep -qw caddy <<< "$components"; then
         sync_operations "$MP_TEST_SOURCE"
@@ -425,7 +493,8 @@ apply_commit() {
     if [ "$role" = dynamic ] && grep -qw witness <<< "$components"; then
         deploy_witness "$target"
     fi
-    compose_activate "$components"
+    compose_activate "$components" "$fresh_commissioning"
+    set_apply_stage deployment-receipt
     write_state "$target" "$previous" "$plan" "$snapshot"
     if [ "$role" = dynamic ]; then
         mp_ha_replicate_now
@@ -437,6 +506,8 @@ apply_commit() {
         fi
     fi
     mp_audit "deploy.test" "success" "$target"
+    rm -f "$MP_TEST_FAILURE_FILE" "$MP_TEST_STAGE_FILE"
+    trap - ERR
     printf 'MP-OPT UNSIGNED TEST BUILD DEPLOYED\nCommit: %s\nComponents: %s\nSigned baseline: %s\n' \
         "$target" "$components" "$(sed -n 's/^MP_RELEASE_TAG=//p' "$MP_ROOT/.release.env" | head -1)"
 }
@@ -546,7 +617,7 @@ case "$command" in
     rollback) [ "$#" -eq 0 ] || { usage; exit 2; }; rollback ;;
     restore-signed) [ "$#" -eq 0 ] || { usage; exit 2; }; restore_signed ;;
     status) [ "$#" -eq 0 ] || { usage; exit 2; }; status ;;
-    internal-activate) [ "$#" -eq 2 ] || exit 2; internal_activate "$1" "$2" ;;
+    internal-activate) [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || exit 2; internal_activate "$1" "$2" "${3:-false}" ;;
     help|-h|--help|'') usage ;;
     *) usage; exit 2 ;;
 esac
