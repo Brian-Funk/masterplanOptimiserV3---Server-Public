@@ -74,16 +74,18 @@ def get_all(db: Session) -> Dict[str, dict]:
                 value = meta["default"]
         else:
             value = meta["default"]
-        result[key] = {
+        item = {
             "value": value,
             "default": meta["default"],
             "label": meta["label"],
             "unit": meta["unit"],
             "min": meta["min"],
             "max": meta["max"],
-            "governance_managed": key in GOVERNANCE_RUNTIME_FIELDS,
-            "governance_field": GOVERNANCE_RUNTIME_FIELDS.get(key, (None, None))[0],
         }
+        if key in GOVERNANCE_RUNTIME_FIELDS:
+            item["governance_managed"] = True
+            item["governance_field"] = GOVERNANCE_RUNTIME_FIELDS[key][0]
+        result[key] = item
     return result
 
 
