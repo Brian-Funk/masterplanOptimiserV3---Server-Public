@@ -469,6 +469,7 @@ def test_tui_uses_masked_atomic_secret_storage_and_excludes_token_everywhere():
     tui = (ROOT / "deploy" / "management" / "evidence.sh").read_text(encoding="utf-8")
     snapshots = (ROOT / "deploy" / "management" / "snapshots.sh").read_text(encoding="utf-8")
     diagnostics = (ROOT / "deploy" / "management" / "actions.sh").read_text(encoding="utf-8")
+    common = (ROOT / "deploy" / "management" / "common.sh").read_text(encoding="utf-8")
     config = (ROOT / "backend" / "app" / "core" / "config.py").read_text(encoding="utf-8")
     assert tui.count("ui_password") >= 2
     assert "github_pat_*" in tui and "Classic tokens are not supported" in tui
@@ -476,8 +477,14 @@ def test_tui_uses_masked_atomic_secret_storage_and_excludes_token_everywhere():
     assert "--token-file \"$token_file\"" in tui
     assert "EVIDENCE_GIT_ARCHIVE_ENABLED: bool = False" in config
     assert "evidence_github_fine_grained_token" in snapshots and "rm -f" in snapshots
-    assert "evidence_github_fine_grained_token" not in diagnostics
-    assert "mp_permissions_report diagnostics" in diagnostics
+    diagnostics_body = diagnostics[
+        diagnostics.index("mp_diagnostics() {"):
+        diagnostics.index("# Capture a redacted, hash-verifiable recovery checkpoint")
+    ]
+    assert "evidence_github_fine_grained_token" not in diagnostics_body
+    assert "mp_permissions_report diagnostics" in diagnostics_body
+    assert '[ "$mode" = diagnostics ]' in common
+    assert '[ "$(basename "$file")" = evidence_github_fine_grained_token ]' in common
     forbidden = ("GITHUB_APP", "installation-token", "app private key", "classic personal access token")
     combined = "\n".join((tui, config, (ROOT / "deploy" / "evidence" / "github_token_client.py").read_text(encoding="utf-8")))
     assert not any(value.casefold() in combined.casefold() for value in forbidden)

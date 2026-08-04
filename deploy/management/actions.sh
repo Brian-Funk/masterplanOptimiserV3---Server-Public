@@ -1518,7 +1518,7 @@ mp_diagnostics() {
         printf 'Host: %s\nDomain: %s\n' "$(hostname -f 2>/dev/null || hostname)" "$domain"
         printf 'HA role: %s\n' "$(mp_ha_role 2>/dev/null || printf invalid)"
         printf 'Commit: %s\n\n' "$(git -C "$MP_ROOT" rev-parse HEAD 2>/dev/null || printf unknown)"
-        mp_permissions_report
+        mp_permissions_report diagnostics
         printf '\nCompose validation: '
         if mp_compose_validate; then printf 'valid\n'; else printf 'invalid\n'; fi
         printf '\nContainers\n'
