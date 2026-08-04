@@ -378,3 +378,16 @@ def test_frontend_build_generates_and_reloads_build_specific_csp():
         in compose
     )
     assert "runtime/" in (root / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_root_commissioning_migration_is_expand_first_for_signed_handoff():
+    """The signed stable backend must survive until exact campaign images start."""
+    migration = (
+        _server_root()
+        / "deploy"
+        / "migrations"
+        / "20260804_root_commissioning.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "ADD COLUMN IF NOT EXISTS trust_establishment_sha256" in migration
+    assert "DROP COLUMN" not in migration
