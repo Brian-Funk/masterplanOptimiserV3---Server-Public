@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 
 type TrustKey = {
+  instance_id: string;
   entity_id: string | null;
   key_id: string;
   role: "instance" | "controller" | "processor";
@@ -22,6 +23,7 @@ type TrustKey = {
   event_ref: string | null;
   event_name: string | null;
   display_label: string | null;
+  trust_declaration_sha256: string | null;
 };
 
 type PendingEnrolment = {
@@ -76,6 +78,7 @@ export function TrustKeysPanel() {
   const [controllerEntity, setControllerEntity] = useState("");
   const [challenge, setChallenge] = useState("");
   const [signedRegistration, setSignedRegistration] = useState("");
+  const [signedTrustDeclaration, setSignedTrustDeclaration] = useState("");
 
   const load = useCallback(async () => {
     setError("");
@@ -148,6 +151,24 @@ export function TrustKeysPanel() {
     finally { setBusy(""); }
   }
 
+  async function importControllerTrustDeclaration() {
+    setBusy("controller-trust-import"); setError(""); setNotice("");
+    try {
+      const packageValue = JSON.parse(signedTrustDeclaration) as { document: Record<string, unknown>; proof: object };
+      const keyId = String(packageValue.document?.key_id || "");
+      const activeController = controllers.find((key) => key.key_id === keyId && key.validity_status === "active");
+      if (!activeController) throw new Error("The signed declaration must use an active controller key shown on this page.");
+      await checked(await withReauth(() => apiFetch(
+        `/api/v1/admin/evidence/trust-keys/${encodeURIComponent(keyId)}/statements/import`,
+        { method: "POST", body: JSON.stringify(packageValue) },
+      )));
+      setSignedTrustDeclaration("");
+      setNotice("The initial controller trust declaration is verified and recorded.");
+      await load();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Controller trust declaration import failed."); }
+    finally { setBusy(""); }
+  }
+
   return <div className="space-y-6">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="flex items-center gap-2 text-3xl font-bold"><KeyRound className="text-blue-600" />Trust &amp; keys</h1><p className="mt-1 max-w-3xl text-sm text-gray-600 dark:text-gray-300">Set up trust once, then return here only for enrolment, rotation, recovery, or revocation.</p></div><Button size="sm" variant="outline" onClick={() => void load()} disabled={!!busy}><RefreshCw size={15} />Refresh</Button></div>
     {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200">{error}</p>}
@@ -168,7 +189,14 @@ export function TrustKeysPanel() {
 
     <section aria-labelledby="processor-keys" className="space-y-3"><h2 id="processor-keys" className="text-lg font-semibold">Event processor keys</h2>{processorsByEvent.length === 0 ? <Card className="p-5 text-sm text-gray-500">No Desktop processor is enrolled. Linking an event from Desktop starts enrolment.</Card> : processorsByEvent.map(([eventRef, eventKeys]) => <div key={eventRef} className="space-y-2"><h3 className="text-sm font-semibold text-gray-700 dark:text-gray-200">{eventKeys[0]?.event_name || eventRef}</h3><div className="grid gap-3 lg:grid-cols-2">{eventKeys.map((key) => <KeyCard key={key.key_id} title={key.display_label || key.entity_id || key.key_id} subtitle={`${key.key_id} · ${key.event_ref || "event assignment missing"}`} scope="Signs this event's Desktop policy acknowledgement, controlled deletion receipt, and local-copy resolution only." icon={<Laptop size={20} />} status={key.validity_status} fingerprint={key.public_key_sha256}>{key.validity_status === "active" && <Button size="sm" variant="outline" onClick={() => void revoke(key)} disabled={!!busy}>Revoke</Button>}</KeyCard>)}</div></div>)}</section>
 
-    <section aria-labelledby="controller-keys" className="space-y-3"><h2 id="controller-keys" className="text-lg font-semibold">Controller keys</h2><div className="grid gap-3 lg:grid-cols-2">{controllers.map((key) => <KeyCard key={key.key_id} title={key.entity_id || key.key_id} subtitle={key.key_id} scope="Controller trust and governance statements only." icon={<UserRoundCheck size={20} />} status={key.validity_status} fingerprint={key.public_key_sha256}>{key.validity_status === "active" && <Button size="sm" variant="outline" onClick={() => void revoke(key)} disabled={!!busy}>Revoke</Button>}</KeyCard>)}</div>
+    <section aria-labelledby="controller-keys" className="space-y-3"><h2 id="controller-keys" className="text-lg font-semibold">Controller keys</h2><div className="grid gap-3 lg:grid-cols-2">{controllers.map((key) => <KeyCard key={key.key_id} title={key.entity_id || key.key_id} subtitle={`${key.key_id} · ${key.trust_declaration_sha256 ? "initial trust recorded" : "initial trust declaration required"}`} scope="Controller trust and governance statements only." icon={<UserRoundCheck size={20} />} status={key.validity_status} fingerprint={key.public_key_sha256}>{key.validity_status === "active" && <Button size="sm" variant="outline" onClick={() => void revoke(key)} disabled={!!busy}>Revoke</Button>}</KeyCard>)}</div>
+      {controllers.some((key) => key.validity_status === "active") && <Card className="space-y-3 p-4">
+        <div><h3 className="font-semibold">Initial controller trust declaration</h3><p className="mt-1 text-sm text-gray-600 dark:text-gray-300">After the controller-custody tool signs its deployment-bound declaration, import the complete signed package here. This one-time declaration enables controller-specific governance publication.</p></div>
+        {controllers.some((key) => key.validity_status === "active" && key.trust_declaration_sha256) ? <p className="flex items-center gap-2 text-sm text-green-700 dark:text-green-300"><CheckCircle2 size={16} />Controller trust is ready for governance publication.</p> : <>
+          <label className="block text-sm font-medium">Signed initial trust package<textarea aria-label="Signed initial controller trust package" value={signedTrustDeclaration} onChange={(event) => setSignedTrustDeclaration(event.target.value)} rows={8} spellCheck={false} className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-900" /></label>
+          <Button onClick={() => void importControllerTrustDeclaration()} disabled={!!busy || !signedTrustDeclaration}>{busy === "controller-trust-import" ? "Verifying declaration…" : "Verify and record controller trust"}</Button>
+        </>}
+      </Card>}
       <details className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800"><summary className="cursor-pointer text-sm font-semibold">Advanced controller key ceremony</summary><div className="mt-4 space-y-3"><p className="text-sm text-gray-600 dark:text-gray-300">The controller custody tool signs the exact challenge. Never paste a private key into this page.</p><label className="block text-sm font-medium">Controller entity ID<input value={controllerEntity} onChange={(event) => setControllerEntity(event.target.value)} className="mt-1 min-h-11 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-900" /></label><label className="block text-sm font-medium">OpenSSH public key<textarea value={controllerPublicKey} onChange={(event) => setControllerPublicKey(event.target.value)} rows={3} className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-900" /></label><Button variant="outline" onClick={() => void beginControllerRegistration()} disabled={!!busy || !controllerEntity || !controllerPublicKey}>Create exact challenge</Button>{challenge && <label className="block text-sm font-medium">Challenge to sign<textarea readOnly value={challenge} rows={8} className="mt-1 w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-950" /></label>}<label className="block text-sm font-medium">Signed registration package<textarea value={signedRegistration} onChange={(event) => setSignedRegistration(event.target.value)} rows={8} className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-900" /></label><Button onClick={() => void completeControllerRegistration()} disabled={!!busy || !signedRegistration}>Verify and activate with root passkey</Button></div></details>
     </section>
     <p className="flex items-center gap-2 text-xs text-gray-500"><CheckCircle2 size={14} />Rotation and revocation preserve earlier public keys and signatures for historical verification.</p>
