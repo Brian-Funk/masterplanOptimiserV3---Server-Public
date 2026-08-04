@@ -4,7 +4,7 @@
 # The state file contains checkpoints and public metadata only; credentials are
 # either installed as mode-0600 secrets or kept in memory for one operation.
 
-MP_SETUP_V2_STATE="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v1.json}"
+MP_SETUP_V2_STATE="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
 MP_SETUP_V2_PENDING_JOIN="${MP_SETUP_V2_PENDING_JOIN:-$MP_STATE/pending-ha-join.json}"
 MP_SETUP_V2_PENDING_BOOTSTRAP="${MP_SETUP_V2_PENDING_BOOTSTRAP:-$MP_STATE/pending-witness-bootstrap.json}"
 MP_SETUP_V2_PENDING_LOCAL_JOIN="${MP_SETUP_V2_PENDING_LOCAL_JOIN:-$MP_STATE/pending-local-join.json}"
@@ -18,7 +18,7 @@ MP_SETUP_V2_IMPORT_RECEIPT="${MP_SETUP_V2_IMPORT_RECEIPT:-$MP_STATE/setup-import
 mp_setup_restore_test_management_checkout() {
     local commit
     [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)" = test ] || return 0
-    commit="$(git -C "$MP_ROOT" rev-parse HEAD 2>/dev/null || true)"
+    commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE" 2>/dev/null || true)"
     [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
     git -C "$MP_ROOT" cat-file -e "${commit}^{commit}" || return 1
     git -C "$MP_ROOT" restore --source="$commit" -- \
@@ -34,7 +34,7 @@ mp_setup_install_signed_release() {
         mp_setup_restore_test_management_checkout \
             || { ui_error "The signed baseline exists, but the exact test-campaign management checkout could not be restored. Commissioning remains paused."; return 1; }
         [ "$(jq -r '.state // empty' "$MP_SETUP_V2_STATE" 2>/dev/null || true)" != in_progress ] \
-            || mp_setup_state_mark signed_release
+            || mp_setup_record_signed_baseline
         return 0
     fi
     ui_run_command "Install production release" \
@@ -44,24 +44,85 @@ mp_setup_install_signed_release() {
     mp_setup_restore_test_management_checkout \
         || { ui_error "The signed baseline was installed, but the exact test-campaign management checkout could not be restored. Commissioning stopped before configuration or deployment."; return 1; }
     [ "$(jq -r '.state // empty' "$MP_SETUP_V2_STATE" 2>/dev/null || true)" != in_progress ] \
-        || mp_setup_state_mark signed_release
+        || mp_setup_record_signed_baseline
 }
 
 mp_setup_state_begin() {
-    local mode="$1" temporary
+    local mode="$1" temporary lane="" policy commit=""
     if [ -f "$MP_SETUP_V2_STATE" ]; then
+        jq -e '.format == "mp-opt-setup-state-v2" and .state == "in_progress"' \
+            "$MP_SETUP_V2_STATE" >/dev/null || {
+            ui_error "The commissioning checkpoint is not a valid v2 state. A clean reset is required; unsigned setup will not guess or translate old state."
+            return 1
+        }
         [ "$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE")" = "$mode" ] || {
             ui_error "Another commissioning workflow is already in progress. Resume it and complete its guarded checkpoints before starting a different mode."
             return 1
         }
         return 0
     fi
+    policy="$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)"
+    case "$policy" in
+        production) lane=signed ;;
+        test)
+            lane=unsigned
+            commit="$(git -C "$MP_ROOT" rev-parse HEAD 2>/dev/null || true)"
+            [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || {
+                ui_error "Unsigned commissioning requires a lowercase 40-character checkout HEAD."
+                return 1
+            }
+            git -C "$MP_ROOT" fetch --no-tags --force origin "$commit" >/dev/null 2>&1 \
+                || { ui_error "Checkout HEAD is not available from origin. Push the exact commit before commissioning."; return 1; }
+            [ "$(git -C "$MP_ROOT" rev-parse FETCH_HEAD 2>/dev/null || true)" = "$commit" ] \
+                || { ui_error "Origin did not return the exact checkout HEAD. Commissioning stopped before state was created."; return 1; }
+            ;;
+        *) ui_error "Unsupported deployment policy: $policy"; return 1 ;;
+    esac
     temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")" || return 1
-    jq -n --arg mode "$mode" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '{format:"mp-opt-setup-state-v1",mode:$mode,state:"in_progress",started_at:$now,updated_at:$now,completed:[]}' \
+    jq -n --arg mode "$mode" --arg lane "$lane" --arg commit "$commit" \
+        --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{format:"mp-opt-setup-state-v2",mode:$mode,state:"in_progress",
+          deployment_lane:$lane,campaign_commit:(if $commit == "" then null else $commit end),
+          signed_baseline:null,completed:[],current_action:"Verifying signed rollback baseline",
+          last_failure:null,started_at:$now,updated_at:$now}' \
         > "$temporary" || { rm -f "$temporary"; return 1; }
     chmod 600 "$temporary"
     mv "$temporary" "$MP_SETUP_V2_STATE"
+}
+
+mp_setup_state_update() {
+    local filter="$1" temporary
+    shift
+    temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")" || return 1
+    jq "$@" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "$filter | .updated_at=$now" "$MP_SETUP_V2_STATE" > "$temporary" \
+        || { rm -f "$temporary"; return 1; }
+    chmod 600 "$temporary"
+    mv "$temporary" "$MP_SETUP_V2_STATE"
+}
+
+mp_setup_state_action() {
+    mp_setup_state_update '.current_action=$action | .last_failure=null' --arg action "$1"
+}
+
+mp_setup_state_failure() {
+    local code="$1" message="${2:0:400}"
+    mp_setup_state_update \
+        '.last_failure={code:$code,message:$message,at:$now}' \
+        --arg code "$code" --arg message "$message"
+}
+
+mp_setup_record_signed_baseline() {
+    local tag commit
+    tag="$(sed -n 's/^MP_RELEASE_TAG=//p' "$MP_ROOT/.release.env" 2>/dev/null | head -1)"
+    commit="$(sed -n 's/^MP_RELEASE_COMMIT=//p' "$MP_ROOT/.release.env" 2>/dev/null | head -1)"
+    [ -n "$tag" ] && [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || {
+        ui_error "The verified signed rollback baseline did not expose a valid tag and commit."
+        return 1
+    }
+    mp_setup_state_update \
+        '.signed_baseline={tag:$tag,commit:$commit} | .completed=((.completed+["signed_baseline_verified"])|unique)' \
+        --arg tag "$tag" --arg commit "$commit"
 }
 
 mp_setup_state_has() {
@@ -70,23 +131,12 @@ mp_setup_state_has() {
 }
 
 mp_setup_state_mark() {
-    local step="$1" temporary
-    temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")" || return 1
-    jq --arg step "$step" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '.updated_at=$now | .completed=((.completed + [$step]) | unique)' \
-        "$MP_SETUP_V2_STATE" > "$temporary" || { rm -f "$temporary"; return 1; }
-    chmod 600 "$temporary"
-    mv "$temporary" "$MP_SETUP_V2_STATE"
+    mp_setup_state_update '.completed=((.completed + [$step]) | unique) | .last_failure=null' --arg step "$1"
 }
 
 mp_setup_state_complete() {
-    local temporary
-    temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")" || return 1
-    jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '.state="complete" | .completed_at=$now | .updated_at=$now' \
-        "$MP_SETUP_V2_STATE" > "$temporary" || { rm -f "$temporary"; return 1; }
-    chmod 600 "$temporary"
-    mv "$temporary" "$MP_SETUP_V2_STATE"
+    mp_setup_state_update \
+        '.state="complete" | .completed_at=$now | .current_action="Complete" | .last_failure=null'
 }
 
 mp_setup_state_clear_completed() {
@@ -188,6 +238,16 @@ mp_setup_wait_for_root_commissioning() (
 )
 
 mp_setup_register_root_passkey() {
+    mp_setup_state_action "Root commissioning — Step 1 of 3" || return 1
+    mp_wait_for_health 45 || {
+        ui_error "The pinned application is not publicly healthy, so root commissioning was not presented."
+        return 1
+    }
+    curl -fsS --max-time 10 "https://$(mp_env_get DOMAIN)/api/v1/passkey/bootstrap-status" \
+        | jq -e 'has("needs_bootstrap") and has("stage")' >/dev/null || {
+        ui_error "The pinned application health endpoint passed, but root bootstrap status is unavailable."
+        return 1
+    }
     mp_setup_present_bootstrap || return 1
     ui_run_command "Waiting for root commissioning" \
         "Complete all three browser steps. Setup reports the current verified step every 5 seconds. Press Ctrl+C or close SSH to pause safely; commissioning will resume at this checkpoint." \
@@ -195,20 +255,76 @@ mp_setup_register_root_passkey() {
         || { ui_message "Root commissioning paused" "Setup remains at its last verified browser step. Run mp-opt to resume the safe polling view."; return 1; }
 }
 
-mp_setup_apply_fresh_test_commit() {
-    local commit deployed
-    [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)" = test ] \
-        || return 0
-    commit="$(git -C "$MP_ROOT" rev-parse HEAD 2>/dev/null || true)"
+mp_setup_verify_exact_environment() {
+    local commit="$1" short key value
+    short="${commit:0:12}"
+    [ "$(sed -n 's/^MP_TEST_COMMIT=//p' "$MP_ROOT/.test-deployment.env" 2>/dev/null | head -1)" = "$commit" ] \
+        || { ui_error "The unsigned environment does not match the pinned campaign commit."; return 1; }
+    for key in MP_BACKEND_IMAGE MP_CADDY_IMAGE MP_POSTGRES_IMAGE MP_TOOLS_IMAGE; do
+        value="$(sed -n "s/^${key}=//p" "$MP_ROOT/.test-deployment.env" | head -1)"
+        [[ "$value" =~ ^masterplan-(backend|caddy|postgres|tools):test-${short}$ ]] \
+            || { ui_error "${key} is not pinned to test-${short}."; return 1; }
+        docker image inspect "$value" >/dev/null 2>&1 \
+            || { ui_error "Pinned image ${value} is missing."; return 1; }
+    done
+}
+
+mp_setup_reconcile_unsigned_application() {
+    local commit receipt mode failure_stage
+    local -a deploy_args
+    commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
+    mode="$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE")"
     [[ "$commit" =~ ^[0-9a-f]{40}$ ]] \
-        || { ui_error "The exact test-campaign commit could not be identified."; return 1; }
-    deployed="$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)"
-    [ "$deployed" != "$commit" ] || return 0
+        || { ui_error "The v2 setup state has no valid pinned campaign commit."; return 1; }
+    receipt="$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)"
+    if [ -n "$receipt" ] && [ "$receipt" != "$commit" ]; then
+        ui_error "The unsigned deployment receipt is for ${receipt}; setup is pinned to ${commit}. Automatic fallback is prohibited."
+        return 1
+    fi
+    if [ "$receipt" = "$commit" ]; then
+        mp_setup_state_action "Recovering exact deployment" || return 1
+        mp_setup_verify_exact_environment "$commit" || return 1
+        mp_compose_init || return 1
+        "${MP_COMPOSE[@]}" up -d db backend caddy || return 1
+        mp_wait_for_database 30 && mp_verify_database_schema_contract && mp_wait_for_health 45 \
+            || { ui_error "The exact deployment receipt exists, but its database, schema, containers, or public health could not be recovered."; return 1; }
+        return 0
+    fi
+    mp_setup_state_action "Building pinned commit" || return 1
+    deploy_args=(apply "$commit" --confirm-full --confirm-migrations)
+    case "$mode" in standalone-new|ha-primary-new|ha-join) deploy_args+=(--fresh-commissioning) ;; esac
     ui_run_command "Install exact test-campaign build" \
-        "Building the pushed backend, frontend and proxy from commit ${commit}. Snapshot-free migration is permitted only because commissioning proved this is the fresh root-only disposable database." \
-        "$MP_ROOT/deploy/test-deployment.sh" apply "$commit" \
-            --confirm-full --confirm-migrations --fresh-commissioning \
-        || { ui_error "The exact test-campaign application build failed. Recovery-key setup remains locked and commissioning will resume here."; return 1; }
+        "Building and activating only commit ${commit}. The signed release remains a verified rollback baseline and is not started." \
+        "$MP_ROOT/deploy/test-deployment.sh" "${deploy_args[@]}" \
+        || {
+            failure_stage="$(jq -r '.stage // "unknown"' "$MP_STATE/test-deployments/last-failure.json" 2>/dev/null || printf unknown)"
+            mp_setup_state_failure "UNSIGNED_DEPLOYMENT_FAILED" \
+                "Pinned deployment paused at ${failure_stage}; resume retries the same commit." || true
+            ui_error "The pinned application build paused at ${failure_stage} before a verified receipt was written. Resume commissioning to retry the exact same commit."
+            return 1
+        }
+    [ "$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)" = "$commit" ] \
+        && mp_setup_verify_exact_environment "$commit" && mp_wait_for_health 45
+}
+
+mp_setup_deploy_application() {
+    local lane
+    lane="$(jq -r '.deployment_lane // empty' "$MP_SETUP_V2_STATE")"
+    case "$lane" in
+        unsigned) mp_setup_reconcile_unsigned_application ;;
+        signed)
+            [ -z "$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")" ] \
+                || { ui_error "Signed commissioning must not contain a campaign commit."; return 1; }
+            if mp_setup_state_has application_deployed; then
+                mp_setup_state_action "Recovering signed deployment" || return 1
+                mp_compose_init && "${MP_COMPOSE[@]}" up -d db backend caddy && mp_wait_for_health 45
+            else
+                mp_setup_state_action "Deploying signed release" || return 1
+                "$MP_ROOT/deploy/deploy.sh" --no-pull && mp_wait_for_health 45
+            fi
+            ;;
+        *) ui_error "The setup deployment lane is invalid."; return 1 ;;
+    esac
 }
 
 mp_setup_prepare_node_material() {
@@ -440,7 +556,7 @@ mp_setup_primary_create() {
         fi
     fi
     mp_setup_state_begin "$mode" || return 1
-    mp_setup_state_has signed_release || mp_setup_install_signed_release || return 1
+    mp_setup_state_has signed_baseline_verified || mp_setup_install_signed_release || return 1
     if ! mp_setup_state_has configuration; then
         MP_SETUP_V2_ACTIVE=1 mp_guided_initial_configuration || return 1
         [ -f "$MP_ROOT/.env" ] || {
@@ -520,7 +636,11 @@ mp_setup_primary_create() {
         pending="$(mktemp "$MP_STATE/pending-ha-join.XXXXXX")" || return 1
         jq -n --arg cluster "$cluster_id" --arg domain "$domain" \
             --arg witness "$MP_SETUP_WITNESS_URL" --arg pair "$pairing_secret" \
-            '{format:"mp-opt-ha-join-v1",cluster_id:$cluster,domain:$domain,witness_url:$witness,pairing_secret:$pair,node_id:"node-b"}' \
+            --arg lane "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" \
+            --arg commit "$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")" \
+            '{format:"mp-opt-ha-join-v2",cluster_id:$cluster,domain:$domain,witness_url:$witness,
+              pairing_secret:$pair,node_id:"node-b",deployment_lane:$lane,
+              campaign_commit:(if $commit == "" then null else $commit end)}' \
             > "$pending"
         chmod 600 "$pending"; mv "$pending" "$MP_SETUP_V2_PENDING_JOIN"
         mp_setup_state_mark witness_bootstrap
@@ -534,13 +654,12 @@ mp_setup_primary_create() {
 }
 
 mp_setup_join_node() {
-    local workflow="${1:-ha-join}" code decoded cluster domain witness pair node_id peer_id node_token body response pair_body peer db_password pending join_error
+    local workflow="${1:-ha-join}" code decoded cluster domain witness pair node_id peer_id node_token body response pair_body peer db_password pending join_error lane campaign policy
     if [ ! -f "$MP_SETUP_V2_STATE" ] && [ -f "$MP_ROOT/.env" ]; then
         ui_error "This VPS already contains an application configuration. Join codes are accepted only on a fresh or explicitly cleared replacement VPS."
         return 1
     fi
     mp_setup_state_begin "$workflow" || return 1
-    mp_setup_state_has signed_release || mp_setup_install_signed_release || return 1
     if [ ! -s "$MP_SETUP_V2_PENDING_LOCAL_JOIN" ]; then
         code="$(ui_input "Join HA" "Paste the one-time join code from the current primary")" || return 1
         decoded="$(mktemp "$MP_STATE/ha-join.XXXXXX")" || return 1
@@ -549,6 +668,25 @@ mp_setup_join_node() {
         cluster="$(jq -r .cluster_id "$decoded")"; domain="$(jq -r .domain "$decoded")"
         witness="$(jq -r .witness_url "$decoded")"; pair="$(jq -r .pairing_secret "$decoded")"
         node_id="$(jq -r .node_id "$decoded")"
+        lane="$(jq -r '.deployment_lane // empty' "$decoded")"
+        campaign="$(jq -r '.campaign_commit // empty' "$decoded")"
+        policy="$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)"
+        [ "$lane" = signed ] || [ "$lane" = unsigned ] \
+            || { rm -f "$decoded"; ui_error "The join code has no supported deployment lane."; return 1; }
+        [ "$policy:$lane" = production:signed ] || [ "$policy:$lane" = test:unsigned ] \
+            || { rm -f "$decoded"; ui_error "Node B deployment policy does not match Node A."; return 1; }
+        if [ "$lane" = unsigned ]; then
+            [[ "$campaign" =~ ^[0-9a-f]{40}$ ]] \
+                || { rm -f "$decoded"; ui_error "The join code has no valid pinned campaign commit."; return 1; }
+            git -C "$MP_ROOT" fetch --no-tags --force origin "$campaign" >/dev/null 2>&1 \
+                && [ "$(git -C "$MP_ROOT" rev-parse FETCH_HEAD 2>/dev/null || true)" = "$campaign" ] \
+                || { rm -f "$decoded"; ui_error "Node B cannot fetch Node A's exact pinned campaign commit."; return 1; }
+        else
+            campaign=""
+        fi
+        mp_setup_state_update \
+            '.deployment_lane=$lane | .campaign_commit=(if $commit == "" then null else $commit end)' \
+            --arg lane "$lane" --arg commit "$campaign" || { rm -f "$decoded"; return 1; }
         case "$node_id" in node-a) peer_id=node-b ;; node-b) peer_id=node-a ;; *) rm -f "$decoded"; return 1 ;; esac
         mp_setup_prepare_node_material "$node_id" || { rm -f "$decoded"; return 1; }
         node_token="$(mp_random_secret)"
@@ -558,21 +696,24 @@ mp_setup_join_node() {
             --arg token "$node_token" --arg ipv4 "$MP_SETUP_NODE_IPV4" \
             --arg ipv6 "$MP_SETUP_NODE_IPV6" --arg ssh "$MP_SETUP_NODE_SSH_PUBLIC" \
             --arg host "$MP_SETUP_NODE_SSH_HOST" --arg age "$MP_SETUP_NODE_AGE_RECIPIENT" \
-            '{format:"mp-opt-pending-local-join-v1",cluster_id:$cluster,domain:$domain,
+            --arg lane "$lane" --arg commit "$campaign" \
+            '{format:"mp-opt-pending-local-join-v2",cluster_id:$cluster,domain:$domain,
               witness_url:$witness,pairing_secret:$pair,node_id:$node,peer_id:$peer,
               node_token:$token,ipv4:$ipv4,ipv6:$ipv6,ssh_public_key:$ssh,
-              ssh_host_key:$host,age_recipient:$age}' > "$pending" \
+              ssh_host_key:$host,age_recipient:$age,deployment_lane:$lane,
+              campaign_commit:(if $commit == "" then null else $commit end)}' > "$pending" \
             || { rm -f "$decoded" "$pending"; return 1; }
         chmod 600 "$pending" && mv "$pending" "$MP_SETUP_V2_PENDING_LOCAL_JOIN" \
             || { rm -f "$decoded" "$pending"; return 1; }
         rm -f "$decoded"
         unset pair node_token
     fi
-    jq -e '.format == "mp-opt-pending-local-join-v1"' \
+    jq -e '.format == "mp-opt-pending-local-join-v2"' \
         "$MP_SETUP_V2_PENDING_LOCAL_JOIN" >/dev/null || {
         ui_error "The protected pending local join receipt is invalid. It was retained for manual inspection."
         return 1
     }
+    mp_setup_state_has signed_baseline_verified || mp_setup_install_signed_release || return 1
     cluster="$(jq -r .cluster_id "$MP_SETUP_V2_PENDING_LOCAL_JOIN")"
     domain="$(jq -r .domain "$MP_SETUP_V2_PENDING_LOCAL_JOIN")"
     witness="$(jq -r .witness_url "$MP_SETUP_V2_PENDING_LOCAL_JOIN")"
@@ -638,12 +779,17 @@ mp_setup_join_node() {
     "$MP_ROOT/deploy/ha/install_services.sh" || return 1
     rm -f "$body" "$pair_body" "$MP_SETUP_V2_PENDING_LOCAL_JOIN"; unset pair node_token
     mp_setup_state_mark joined
-    mp_setup_state_complete
-    ui_message "HA node joined" "The one-time code is consumed for ${node_id}. Peer SSH and replication encryption were verified. Only a node-local database credential was created here; the current holder will now send the complete protected shared application state."
+    if [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ]; then
+        mp_setup_state_action "Waiting for pinned images from Node A"
+        ui_message "HA node joined" "The one-time code is consumed for ${node_id}. This node is pinned to $(jq -r .campaign_commit "$MP_SETUP_V2_STATE") and is waiting for Node A to transfer and activate those exact images."
+    else
+        mp_setup_state_complete
+        ui_message "HA node joined" "The one-time code is consumed for ${node_id}. Peer SSH and replication encryption were verified. Only a node-local database credential was created here; the current holder will now send the complete protected shared application state."
+    fi
 }
 
 mp_setup_replace_standby() {
-    local pair body token response join_code domain pending replacement_tmp
+    local pair body token response join_code domain pending replacement_tmp lane campaign
     mp_load_ha_config || return 1
     [ "$HA_ROLE" = dynamic ] || { ui_error "This server is not an HA node."; return 1; }
     mp_require_active_or_standalone || return 1
@@ -673,18 +819,31 @@ mp_setup_replace_standby() {
         || { rm -f "$body"; unset pair token; return 1; }
     jq -e '.pairing_open == true' <<< "$response" >/dev/null || return 1
     domain="$(mp_env_get DOMAIN)" || return 1
+    if [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)" = test ]; then
+        lane=unsigned
+        campaign="$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)"
+        [[ "$campaign" =~ ^[0-9a-f]{40}$ ]] \
+            || { ui_error "The active unsigned deployment has no exact receipt."; return 1; }
+    else
+        lane=signed; campaign=""
+    fi
     pending="$(mktemp "$MP_STATE/pending-ha-join.XXXXXX")" || return 1
     jq -n --arg cluster "$HA_CLUSTER_ID" --arg domain "$domain" \
         --arg witness "$HA_WITNESS_URL" --arg pair "$pair" \
-        --arg target "$HA_PEER_NODE_ID" \
-        '{format:"mp-opt-ha-join-v1",cluster_id:$cluster,domain:$domain,witness_url:$witness,pairing_secret:$pair,node_id:$target}' \
+        --arg target "$HA_PEER_NODE_ID" --arg lane "$lane" --arg commit "$campaign" \
+        '{format:"mp-opt-ha-join-v2",cluster_id:$cluster,domain:$domain,witness_url:$witness,
+          pairing_secret:$pair,node_id:$target,deployment_lane:$lane,
+          campaign_commit:(if $commit == "" then null else $commit end)}' \
         > "$pending"
     chmod 600 "$pending"; mv "$pending" "$MP_SETUP_V2_PENDING_JOIN"
     rm -f "$body"; unset pair token
     rm -f "$MP_SETUP_V2_STATE"
     mp_setup_state_begin replace-primary || return 1
+    mp_setup_state_update \
+        '.deployment_lane=$lane | .campaign_commit=(if $commit == "" then null else $commit end)' \
+        --arg lane "$lane" --arg commit "$campaign" || return 1
     mp_setup_state_mark witness_bootstrap
-    mp_setup_state_mark deployed
+    mp_setup_state_mark application_deployed
     rm -f "$MP_SETUP_V2_PENDING_REPLACEMENT"
     join_code="$(python3 "$MP_ROOT/deploy/ha/pairing.py" encode < "$MP_SETUP_V2_PENDING_JOIN")" || return 1
     ui_copyable_terminal_text "Replacement node join code" "$join_code" \
@@ -897,7 +1056,11 @@ mp_setup_primary_resume() {
         pending="$(mktemp "$MP_STATE/pending-ha-join.XXXXXX")" || return 1
         jq -n --arg cluster "$cluster" --arg domain "$domain" --arg witness "$witness" \
             --arg pair "$pairing_secret" --arg target "$HA_PEER_NODE_ID" \
-            '{format:"mp-opt-ha-join-v1",cluster_id:$cluster,domain:$domain,witness_url:$witness,pairing_secret:$pair,node_id:$target}' \
+            --arg lane "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" \
+            --arg commit "$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")" \
+            '{format:"mp-opt-ha-join-v2",cluster_id:$cluster,domain:$domain,witness_url:$witness,
+              pairing_secret:$pair,node_id:$target,deployment_lane:$lane,
+              campaign_commit:(if $commit == "" then null else $commit end)}' \
             > "$pending"
         chmod 600 "$pending"; mv "$pending" "$MP_SETUP_V2_PENDING_JOIN"
         join_code="$(python3 "$MP_ROOT/deploy/ha/pairing.py" encode < "$MP_SETUP_V2_PENDING_JOIN")" || return 1
@@ -912,21 +1075,18 @@ mp_setup_primary_resume() {
         "$(jq -r .ssh_public_key <<< "$peer")" "$(jq -r .ssh_host_key <<< "$peer")" \
         "$(jq -r .age_recipient <<< "$peer")" || return 1
     mp_setup_state_mark paired
-    if ! mp_setup_state_has deployed; then
+    if [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ] \
+        || ! mp_setup_state_has application_deployed; then
         if [ "$mode" = convert-ha ] && [ -f "$MP_ROOT/infra/docker-compose.override.yml" ]; then
             mp_ha_convert_host_caddy || return 1
         fi
-        "$MP_ROOT/deploy/deploy.sh" --no-pull || return 1
+        mp_setup_deploy_application || return 1
         python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null || return 1
-        mp_setup_state_mark deployed
+        mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed
     fi
-    if [ "$mode" = ha-primary-new ] && ! mp_setup_state_has test_commit_deployed; then
-        mp_setup_apply_fresh_test_commit || return 1
-        mp_setup_state_mark test_commit_deployed
-    fi
-    if [ "$mode" = ha-primary-new ] && ! mp_setup_state_has root_passkey_registered; then
+    if [ "$mode" = ha-primary-new ] && ! mp_setup_state_has root_commissioning_complete; then
         mp_setup_register_root_passkey || return 1
-        mp_setup_state_mark root_passkey_registered
+        mp_setup_state_mark root_commissioning_complete
     fi
     if [ "$mode" != ha-primary-new ] && ! mp_setup_state_has recovery_recipient; then
         [ -s "$MP_RECIPIENT_FILE" ] || mp_configure_recovery_recipient || return 1
@@ -964,7 +1124,7 @@ mp_setup_standalone() {
         return 1
     fi
     mp_setup_state_begin standalone-new || return 1
-    mp_setup_state_has signed_release || mp_setup_install_signed_release || return 1
+    mp_setup_state_has signed_baseline_verified || mp_setup_install_signed_release || return 1
     if ! mp_setup_state_has configuration; then
         MP_SETUP_V2_ACTIVE=1 mp_guided_initial_configuration || return 1
         [ -f "$MP_ROOT/.env" ] || {
@@ -977,17 +1137,14 @@ mp_setup_standalone() {
         mp_setup_verify_standalone_dns || return 1
         mp_setup_state_mark public_dns
     fi
-    if ! mp_setup_state_has deployed; then
-        "$MP_ROOT/deploy/deploy.sh" --no-pull || return 1
-        mp_setup_state_mark deployed
+    if [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ] \
+        || ! mp_setup_state_has application_deployed; then
+        mp_setup_deploy_application || return 1
+        mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed
     fi
-    if ! mp_setup_state_has test_commit_deployed; then
-        mp_setup_apply_fresh_test_commit || return 1
-        mp_setup_state_mark test_commit_deployed
-    fi
-    if ! mp_setup_state_has root_passkey_registered; then
+    if ! mp_setup_state_has root_commissioning_complete; then
         mp_setup_register_root_passkey || return 1
-        mp_setup_state_mark root_passkey_registered
+        mp_setup_state_mark root_commissioning_complete
     fi
     mp_setup_state_mark recovery_recipient
     if ! mp_setup_state_has validated; then
@@ -1008,7 +1165,7 @@ mp_setup_restore_full_loss() {
         return 1
     fi
     mp_setup_state_begin full-restore || return 1
-    mp_setup_state_has signed_release || mp_setup_install_signed_release || return 1
+    mp_setup_state_has signed_baseline_verified || mp_setup_install_signed_release || return 1
     ui_message "Full-loss recovery" "Import the latest encrypted portable snapshot. The restore flow verifies its receipt and requires the recovery identity held outside the VPS."
     if ! mp_setup_state_has imported; then
         mp_snapshot_import_portable_interactive || return 1
@@ -1030,7 +1187,7 @@ mp_setup_restore_full_loss() {
         mp_snapshot_restore_full_loss "$imported_snapshot" || return 1
         mp_setup_state_mark restored
     fi
-    mp_setup_state_has deployed || mp_setup_state_mark deployed
+    mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed
     if ! mp_setup_state_has validated; then
         mp_validate_installation || return 1
         mp_setup_state_mark validated
@@ -1044,7 +1201,7 @@ mp_setup_restore_full_loss() {
 }
 
 mp_setup_v2() {
-    local choice mode state role completed_state=false
+    local choice mode state role action status=0 completed_state=false
     if [ -f "$MP_SETUP_V2_STATE" ]; then
         state="$(jq -r '.state // "invalid"' "$MP_SETUP_V2_STATE" 2>/dev/null || printf invalid)"
         mode="$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE" 2>/dev/null || true)"
@@ -1055,6 +1212,9 @@ mp_setup_v2() {
         elif [ "$state" != in_progress ]; then
             ui_error "The setup checkpoint is invalid. Inspect $MP_SETUP_V2_STATE before continuing."
             return 1
+        else
+            ui_message "Resuming commissioning" \
+                "Current action: $(jq -r '.current_action // "Reconcile setup"' "$MP_SETUP_V2_STATE"). Deployment lane: $(jq -r '.deployment_lane' "$MP_SETUP_V2_STATE"). The pinned target will not change."
         fi
     fi
     if [ -z "${mode:-}" ]; then
@@ -1084,17 +1244,34 @@ mp_setup_v2() {
         mp_setup_state_clear_completed || return 1
     fi
     case "$mode" in
-        standalone-new) mp_setup_standalone ;;
+        standalone-new) mp_setup_standalone || status=$? ;;
         ha-primary-new|convert-ha) 
-            if mp_setup_state_has witness_bootstrap 2>/dev/null; then mp_setup_primary_resume; else mp_setup_primary_create "$mode"; fi ;;
-        ha-join) mp_setup_join_node ha-join ;;
-        replace-primary) mp_setup_primary_resume ;;
-        replace-peer) mp_setup_replace_standby ;;
+            if mp_setup_state_has witness_bootstrap 2>/dev/null; then mp_setup_primary_resume || status=$?; else mp_setup_primary_create "$mode" || status=$?; fi ;;
+        ha-join)
+            if mp_setup_state_has joined 2>/dev/null \
+                && [ "$(jq -r '.deployment_lane // empty' "$MP_SETUP_V2_STATE")" = unsigned ]; then
+                ui_message "Waiting for pinned deployment" \
+                    "Node B is paired and pinned to $(jq -r .campaign_commit "$MP_SETUP_V2_STATE"). Resume on Node A; it will transfer, verify and activate the exact images here."
+            else
+                mp_setup_join_node ha-join || status=$?
+            fi
+            ;;
+        replace-primary) mp_setup_primary_resume || status=$? ;;
+        replace-peer) mp_setup_replace_standby || status=$? ;;
         # Compatibility for a setup checkpoint created by the pre-contextual
         # menu. New replacement VPSes use the same idempotent HA join path.
-        replace-node) mp_setup_join_node replace-node ;;
-        full-restore) mp_setup_restore_full_loss ;;
+        replace-node) mp_setup_join_node replace-node || status=$? ;;
+        full-restore) mp_setup_restore_full_loss || status=$? ;;
         cancel|"") return 0 ;;
         *) ui_error "Unsupported setup checkpoint mode: $mode"; return 1 ;;
     esac
+    if [ "$status" -ne 0 ] && [ -s "$MP_SETUP_V2_STATE" ]; then
+        action="$(jq -r '.current_action // "the current action"' "$MP_SETUP_V2_STATE" 2>/dev/null || printf 'the current action')"
+        jq -e '.last_failure != null' "$MP_SETUP_V2_STATE" >/dev/null 2>&1 \
+            || mp_setup_state_failure "SETUP_ACTION_PAUSED" "${action} did not complete; resume will reconcile authoritative deployment facts before retrying." || true
+        ui_message "Commissioning paused" \
+            "Current action: ${action}. The exact lane and commit remain pinned. Run mp-opt to resume; setup will not fall back to another deployment."
+        return 0
+    fi
+    return "$status"
 }
