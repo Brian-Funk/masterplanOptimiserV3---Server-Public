@@ -402,6 +402,20 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn("The exact lane and commit remain pinned", setup)
         self.assertIn('return 0', setup)
 
+    def test_resume_notice_explicitly_continues_and_next_action_is_current(self) -> None:
+        setup = shell_function(SETUP, "mp_setup_v2")
+        continue_message = shell_function(COMMON, "ui_continue_message")
+        standalone = shell_function(SETUP, "mp_setup_standalone")
+        primary = shell_function(SETUP, "mp_setup_primary_create")
+        self.assertIn('ui_continue_message "Resuming commissioning"', setup)
+        self.assertIn('--ok-label "Continue"', continue_message)
+        self.assertIn('--ok-button "Continue"', continue_message)
+        for workflow in (standalone, primary):
+            self.assertLess(
+                workflow.index('mp_setup_state_action "Protected configuration"'),
+                workflow.index("mp_guided_initial_configuration"),
+            )
+
     def test_standalone_dns_wait_retries_at_thirty_second_intervals(self) -> None:
         script = r'''
             TEST_ROOT="$(mktemp -d)"

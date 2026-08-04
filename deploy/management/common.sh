@@ -327,6 +327,29 @@ ui_message() {
     esac
 }
 
+# Present an informational checkpoint whose acknowledgement advances the
+# current workflow. Keep this distinct from ui_message, whose Return label is
+# appropriate when an action is finished and control goes back to a menu.
+ui_continue_message() {
+    local title="$1"
+    local message="$2"
+    local height width unused
+    read -r height width unused < <(mp_ui_geometry prompt)
+    case "$(mp_tui_backend)" in
+        dialog)
+            dialog --backtitle "$MP_TUI_BACKTITLE" --title "$title" \
+                --ok-label "Continue" --msgbox "$message" "$height" "$width" \
+                </dev/tty >/dev/tty 2>/dev/tty
+            ;;
+        whiptail)
+            whiptail --backtitle "$MP_TUI_BACKTITLE" --title "$title" \
+                --ok-button "Continue" --msgbox "$message" "$height" "$width" \
+                </dev/tty >/dev/tty 2>/dev/tty
+            ;;
+        *) printf '\n[%s]\n%s\n' "$title" "$message" >&2 ;;
+    esac
+}
+
 # Show selectable ordinary terminal text outside dialog/whiptail. This is used
 # for short-lived values that an operator must copy without persisting them in
 # a report file. Clear before presentation and again on return so the terminal

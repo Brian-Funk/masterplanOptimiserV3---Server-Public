@@ -555,6 +555,7 @@ mp_setup_primary_create() {
     mp_setup_state_begin "$mode" || return 1
     mp_setup_state_has signed_baseline_verified || mp_setup_install_signed_release || return 1
     if ! mp_setup_state_has configuration; then
+        mp_setup_state_action "Protected configuration" || return 1
         MP_SETUP_V2_ACTIVE=1 mp_guided_initial_configuration || return 1
         [ -f "$MP_ROOT/.env" ] || {
             ui_message "Commissioning paused" "The configuration review was cancelled. No configuration checkpoint was recorded; resume setup whenever you are ready."
@@ -1123,6 +1124,7 @@ mp_setup_standalone() {
     mp_setup_state_begin standalone-new || return 1
     mp_setup_state_has signed_baseline_verified || mp_setup_install_signed_release || return 1
     if ! mp_setup_state_has configuration; then
+        mp_setup_state_action "Protected configuration" || return 1
         MP_SETUP_V2_ACTIVE=1 mp_guided_initial_configuration || return 1
         [ -f "$MP_ROOT/.env" ] || {
             ui_message "Commissioning paused" "The configuration review was cancelled. No configuration checkpoint was recorded; resume setup whenever you are ready."
@@ -1163,6 +1165,7 @@ mp_setup_restore_full_loss() {
     fi
     mp_setup_state_begin full-restore || return 1
     mp_setup_state_has signed_baseline_verified || mp_setup_install_signed_release || return 1
+    mp_setup_state_action "Importing verified recovery snapshot" || return 1
     ui_message "Full-loss recovery" "Import the latest encrypted portable snapshot. The restore flow verifies its receipt and requires the recovery identity held outside the VPS."
     if ! mp_setup_state_has imported; then
         mp_snapshot_import_portable_interactive || return 1
@@ -1210,7 +1213,7 @@ mp_setup_v2() {
             ui_error "The setup checkpoint is invalid. Inspect $MP_SETUP_V2_STATE before continuing."
             return 1
         else
-            ui_message "Resuming commissioning" \
+            ui_continue_message "Resuming commissioning" \
                 "Current action: $(jq -r '.current_action // "Reconcile setup"' "$MP_SETUP_V2_STATE"). Deployment lane: $(jq -r '.deployment_lane' "$MP_SETUP_V2_STATE"). The pinned target will not change."
         fi
     fi
