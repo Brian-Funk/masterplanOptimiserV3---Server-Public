@@ -293,52 +293,69 @@ def governance_preflight(profile: InstanceGovernanceProfile | None) -> dict[str,
     def add(code: str, status: str, message: str) -> None:
         checks.append({"code": code, "status": status, "message": message})
 
+    def add_optional(code: str, value: Any, label: str) -> None:
+        present = bool(value and (not isinstance(value, str) or value.strip()))
+        add(code, "ready" if present else "optional", f"{label} recorded." if present else f"{label} is optional and has not been provided.")
+
     if profile is None:
         add("controller", "missing", "Controller configuration has not been saved.")
         return {"ready": False, "checks": checks}
 
     required = {
         "controller_identity": profile.controller_legal_name,
-        "controller_address": profile.controller_postal_address,
         "privacy_contact": profile.privacy_contact_email,
-        "supervisory_authority": profile.supervisory_authority_name,
-        "processor_summary": profile.processor_summary,
-        "retention_summary": profile.retention_summary,
-        "rights_summary": profile.rights_summary,
-        "instance_terms": profile.terms_summary,
     }
     for code, value in required.items():
         add(code, "ready" if value and value.strip() else "missing", f"{code.replace('_', ' ').title()} recorded." if value and value.strip() else f"{code.replace('_', ' ').title()} is missing.")
 
-    structured = profile_structured(profile)
-    for code, key in (
-        ("instance_name", "instance_name"),
-        ("jurisdiction_scope", "jurisdiction_scope"),
-        ("incident_contact", "incident_contact_email"),
+    for code, value, label in (
+        ("controller_address", profile.controller_postal_address, "Controller service address"),
+        ("controller_country", profile.controller_country, "Controller country"),
+        ("supervisory_authority", profile.supervisory_authority_name, "Specific supervisory authority"),
+        ("processor_summary", profile.processor_summary, "Supplementary processor wording"),
+        ("retention_summary", profile.retention_summary, "Supplementary retention wording"),
+        ("rights_summary", profile.rights_summary, "Supplementary rights procedure"),
+        ("instance_terms", profile.terms_summary, "Supplementary instance terms"),
     ):
-        value = structured.get(key)
-        add(code, "ready" if value else "missing", f"{code.replace('_', ' ').title()} recorded." if value else f"{code.replace('_', ' ').title()} is missing.")
+        add_optional(code, value, label)
+
+    structured = profile_structured(profile)
+    for code, key, label in (
+        ("instance_name", "instance_name", "Public instance name"),
+        ("jurisdiction_scope", "jurisdiction_scope", "Jurisdiction explanation"),
+        ("incident_contact", "incident_contact_email", "Separate incident contact"),
+        ("hosting_countries", "hosting_countries", "Deployment-level hosting countries"),
+        ("processor_register", "processors", "Processor register"),
+    ):
+        add_optional(code, structured.get(key), label)
     for code, key in (
         ("processing_purposes", "processing_purposes"),
         ("data_categories", "data_categories"),
-        ("processor_register", "processors"),
-        ("hosting_countries", "hosting_countries"),
     ):
         value = structured.get(key)
         add(code, "ready" if value else "missing", f"{code.replace('_', ' ').title()} recorded." if value else f"{code.replace('_', ' ').title()} is missing.")
     retention = structured.get("retention") or {}
-    retention_ready = all(retention.get(key) is not None for key in (
-        "live_retention_days", "event_grace_days", "backup_retention_days",
-        "audit_retention_days", "receipt_retention_days", "browser_cache_expiry_hours",
+    enforced_retention_ready = all(retention.get(key) is not None for key in (
+        "event_grace_days", "audit_retention_days", "browser_cache_expiry_hours",
     ))
-    add("retention_configuration", "ready" if retention_ready else "missing", "Structured retention periods recorded." if retention_ready else "One or more structured retention periods are missing.")
+    controller_retention_ready = all(retention.get(key) is not None for key in (
+        "live_retention_days", "backup_retention_days", "receipt_retention_days",
+    )) or bool(profile.retention_summary and profile.retention_summary.strip())
+    retention_ready = enforced_retention_ready and controller_retention_ready
+    add(
+        "retention_configuration", "ready" if retention_ready else "missing",
+        "Server-enforced periods and controller retention periods or criteria are recorded."
+        if retention_ready else
+        "Record the Server-managed periods and either the controller-selected live, backup and receipt periods or clear retention criteria.",
+    )
 
     enabled_purposes = [item for item in structured.get("processing_purposes", []) if item.get("enabled")]
     undecided = [item.get("purpose_code") for item in enabled_purposes if not (item.get("gdpr_legal_basis") or item.get("swiss_justification_or_basis"))]
     add(
         "controller_basis_decisions",
-        "requires_controller_decision" if undecided else "ready",
-        "Controller must record a basis or Swiss justification for: " + ", ".join(filter(None, undecided)) if undecided else "Controller basis or justification decisions recorded.",
+        "externally_unverifiable" if undecided else "ready",
+        "A legal basis is conditionally required where GDPR applies. Masterplan cannot determine applicability for: "
+        + ", ".join(filter(None, undecided)) if undecided else "Controller basis or justification decisions recorded.",
     )
 
     features = structured.get("optional_features") or {}
@@ -364,7 +381,12 @@ def governance_preflight(profile: InstanceGovernanceProfile | None) -> dict[str,
     missing_providers = [code for code in required_provider_codes if not code or code not in enabled_processors]
     add("enabled_feature_processors", "contradiction" if missing_providers else "ready", "Every enabled external feature has an enabled processor entry." if not missing_providers else "An enabled external feature is missing its processor entry.")
 
-    source_strings = list(required.values()) + _walk_strings(structured)
+    source_strings = list(required.values()) + [
+        profile.controller_postal_address, profile.controller_country,
+        profile.supervisory_authority_name, profile.supervisory_authority_url,
+        profile.processor_summary, profile.retention_summary,
+        profile.rights_summary, profile.terms_summary,
+    ] + _walk_strings(structured)
     if any(_PLACEHOLDER.search(value) for value in source_strings if value):
         add("placeholder_content", "missing", "Replace placeholder or example content before publication.")
     else:

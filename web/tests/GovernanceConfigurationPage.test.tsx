@@ -181,4 +181,28 @@ describe("governance configuration import and export", () => {
     expect(screen.getByRole("heading", { name: "1. Controller and privacy contact" }).closest("[data-validation-state]"))
       .toHaveAttribute("data-validation-state", "error");
   });
+
+  it("warns when published runtime features changed without republishing governance", async () => {
+    const structured = createInitialStructured(
+      { smtp_enabled: false, push_enabled: false, ha_enabled: false, dns_mode: "dns_only" },
+      {},
+    );
+    mockApiFetch.mockImplementation((url: string) => {
+      if (url === "/api/v1/admin/governance") return Promise.resolve(jsonResponse({
+        runtime_features: { smtp_enabled: true, push_enabled: false, ha_enabled: true, dns_mode: "dns_only" },
+        runtime_settings: {},
+        draft: { ...importedForm, structured },
+        published_version: 1,
+        preflight: { checks: [], ready: false },
+      }));
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    render(<GovernanceAdminPage />);
+
+    const warning = await screen.findByRole("alert");
+    expect(warning).toHaveTextContent("Governance update required");
+    expect(warning).toHaveTextContent("SMTP, high availability");
+    expect(warning).toHaveTextContent(/has not been changed silently/i);
+  });
 });

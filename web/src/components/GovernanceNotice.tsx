@@ -89,8 +89,8 @@ export function GovernanceNotice({ section }: { section: GovernanceSection }) {
               <section className="space-y-2">
                 <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Controller</h2>
                 <p>{notice.controller_legal_name}</p>
-                <p className="whitespace-pre-line">{notice.controller_postal_address}</p>
-                <p>{notice.controller_country}</p>
+                {notice.controller_postal_address && <p className="whitespace-pre-line">{notice.controller_postal_address}</p>}
+                {notice.controller_country && <p>Country: {notice.controller_country}</p>}
                 <p><a className="text-blue-600 underline dark:text-blue-400" href={`mailto:${notice.privacy_contact_email}`}>{notice.privacy_contact_email}</a></p>
                 {notice.privacy_contact_phone && <p>{notice.privacy_contact_phone}</p>}
                 {notice.dpo_contact && <p>Data-protection contact: {notice.dpo_contact}</p>}
@@ -126,21 +126,25 @@ export function GovernanceNotice({ section }: { section: GovernanceSection }) {
               </section>
             )}
             {(section === "privacy" || section === "retention") && (
-              <><TextSection heading="Retention and deletion" value={notice.retention_summary} />
-              {notice.retention && <table className="w-full border-collapse text-sm"><caption className="pb-2 text-left font-semibold">Controller-selected retention periods</caption><tbody>{Object.entries(notice.retention).map(([key, value]) => <tr key={key} className="border-t"><th scope="row" className="py-2 pr-3 text-left font-medium">{sentenceLabel(key)}</th><td className="py-2">{String(value)}</td></tr>)}</tbody></table>}</>
+              <><OptionalTextSection heading="Retention and deletion" value={notice.retention_summary} />
+              {notice.retention && <table className="w-full border-collapse text-sm"><caption className="pb-2 text-left font-semibold">Controller-selected retention periods</caption><tbody>{Object.entries(notice.retention).filter(([, value]) => value !== null).map(([key, value]) => <tr key={key} className="border-t"><th scope="row" className="py-2 pr-3 text-left font-medium">{sentenceLabel(key)}</th><td className="py-2">{String(value)}</td></tr>)}</tbody></table>}</>
             )}
             {(section === "privacy" || section === "rights") && (
-              <TextSection heading="Your rights" value={notice.rights_summary} />
+              <section className="space-y-2"><h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Your rights</h2><p>Depending on the law that applies, you may have rights to access, correct, erase, restrict or object to processing, and to receive portable data. Contact the controller at <a className="text-blue-600 underline dark:text-blue-400" href={`mailto:${notice.privacy_contact_email}`}>{notice.privacy_contact_email}</a>; the controller will assess the applicable right, scope and proportionate identity verification.</p>{notice.rights_summary && <p className="whitespace-pre-line">{notice.rights_summary}</p>}</section>
             )}
             {(section === "privacy" || section === "processors") && (
-              <><TextSection heading="Processors and service providers" value={notice.processor_summary} />
+              <><OptionalTextSection heading="Processors and service providers" value={notice.processor_summary} />
               {notice.processors && <ul className="space-y-3">{notice.processors.map((processor) => <li key={processor.provider_code} className="rounded border p-3"><strong>{processor.display_name}</strong><p>{processor.service}</p><p>{processor.public_notice_summary}</p><p>Hosting countries: {processor.hosting_countries.join(", ")}</p></li>)}</ul>}</>
             )}
-            {(section === "legal" || section === "terms") && <TextSection heading="Terms for this instance" value={notice.terms_summary} />}
+            {(section === "legal" || section === "terms") && <section className="space-y-2"><h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Terms for this instance</h2><p>Use is limited to authorised operational event scheduling and access management. Users must follow the permitted-data boundary and protect their own account access.</p>{notice.terms_summary && <p className="whitespace-pre-line">{notice.terms_summary}</p>}</section>}
             {section === "rights" && (
               <section>
                 <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Supervisory authority</h2>
-                <a className="text-blue-600 underline dark:text-blue-400" href={notice.supervisory_authority_url} rel="noopener noreferrer">{notice.supervisory_authority_name}</a>
+                {notice.supervisory_authority_name && notice.supervisory_authority_url
+                  ? <a className="text-blue-600 underline dark:text-blue-400" href={notice.supervisory_authority_url} rel="noopener noreferrer">{notice.supervisory_authority_name}</a>
+                  : notice.supervisory_authority_name
+                    ? <p>{notice.supervisory_authority_name}</p>
+                    : <p>Where applicable, you may lodge a complaint with the competent data-protection supervisory authority.</p>}
                 {notice.rights_request_url && <p><a className="text-blue-600 underline dark:text-blue-400" href={notice.rights_request_url} rel="noopener noreferrer">Submit a rights request</a></p>}
                 {notice.incident_contact_email && <p>Incident contact: <a className="text-blue-600 underline dark:text-blue-400" href={`mailto:${notice.incident_contact_email}`}>{notice.incident_contact_email}</a></p>}
               </section>
@@ -164,6 +168,6 @@ function sentenceLabel(value: string) {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
-function TextSection({ heading, value }: { heading: string; value?: string }) {
-  return <section className="space-y-2"><h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">{heading}</h2><p className="whitespace-pre-line">{value}</p></section>;
+function OptionalTextSection({ heading, value }: { heading: string; value?: string }) {
+  return <section className="space-y-2"><h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">{heading}</h2>{value && <p className="whitespace-pre-line">{value}</p>}</section>;
 }

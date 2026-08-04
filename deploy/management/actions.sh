@@ -354,7 +354,7 @@ mp_configure_smtp() {
             >/dev/null 2>&1 || true
     fi
     mp_queue_ha_replication "smtp-configuration" || true
-    ui_message "SMTP ready" "Provider authentication and public health passed. No email was sent. In HA mode, the protected configuration is queued for the peer; verify both origins under High availability before relying on failover delivery."
+    ui_message "SMTP ready" "Provider authentication and public health passed. No email was sent. In HA mode, the protected configuration is queued for the peer; verify both origins under High availability before relying on failover delivery. Review Policies & notices at https://$(mp_env_get DOMAIN)/admin/governance. If a policy is already published, save the updated runtime facts, review the exact diff and publish a new version."
 }
 
 # Disable SMTP without retaining an unencrypted token rollback file on disk.
@@ -400,7 +400,7 @@ mp_disable_smtp() {
     mp_audit "smtp.disable" "success" "disabled"
     rm -f "$MP_ROOT/runtime/ha-smtp-status.json"
     mp_queue_ha_replication "smtp-disabled" || true
-    ui_message "SMTP disabled" "Activation email is disabled. Existing users, links and passkeys were not changed."
+    ui_message "SMTP disabled" "Activation email is disabled. Existing users, links and passkeys were not changed. Review Policies & notices at https://$(mp_env_get DOMAIN)/admin/governance. If a policy is already published, save the updated runtime facts, review the exact diff and publish a new version."
 }
 
 # Send one token-free SMTP test message from the running backend.

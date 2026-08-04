@@ -32,12 +32,14 @@ describe("governance draft guidance", () => {
     expect(draft.optional_features.smtp_provider_code).toBeNull();
   });
 
-  it("marks suggested public wording as an incomplete controller draft", () => {
+  it("does not invent optional controller wording", () => {
     const summaries = createSuggestedSummaries(settings);
-    expect(summaries.retention_summary).toContain("TODO:");
-    expect(summaries.retention_summary).toContain("42 day(s)");
-    expect(summaries.processor_summary).toContain("countries");
-    expect(summaries.rights_summary).toContain("identity checks");
+    expect(summaries).toEqual({
+      processor_summary: "",
+      retention_summary: "",
+      rights_summary: "",
+      terms_summary: "",
+    });
   });
 
   it("normalises country-code lists without inventing values", () => {

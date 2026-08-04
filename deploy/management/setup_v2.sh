@@ -1113,7 +1113,11 @@ mp_setup_primary_resume() {
     fi
     rm -f "$body" "$MP_SETUP_V2_PENDING_JOIN"; unset token
     mp_setup_state_complete
-    ui_message "HA commissioning complete" "${HA_NODE_ID} is primary. ${HA_PEER_NODE_ID} accepted the current complete encrypted copy, all readiness gates passed, and automatic failover is enabled with a two-minute loss threshold and five-minute copy target. Open https://$(mp_env_get DOMAIN)/admin/governance to publish the controller-specific legal centre."
+    if [ "$mode" = convert-ha ]; then
+        ui_message "HA conversion complete" "${HA_NODE_ID} is primary. ${HA_PEER_NODE_ID} accepted the current complete encrypted copy, all readiness gates passed, and automatic failover is enabled with a two-minute loss threshold and five-minute copy target. High availability changes the deployment facts. Review Policies & notices at https://$(mp_env_get DOMAIN)/admin/governance, save the authoritative HA state, review the exact diff and publish a new policy version."
+    else
+        ui_message "HA commissioning complete" "${HA_NODE_ID} is primary. ${HA_PEER_NODE_ID} accepted the current complete encrypted copy, all readiness gates passed, and automatic failover is enabled with a two-minute loss threshold and five-minute copy target. Open https://$(mp_env_get DOMAIN)/admin/governance to publish the controller-specific legal centre."
+    fi
 }
 
 mp_setup_standalone() {

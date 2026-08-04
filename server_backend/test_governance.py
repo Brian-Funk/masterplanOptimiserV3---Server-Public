@@ -170,6 +170,56 @@ def test_draft_is_private_and_publication_is_immutable(db):
     assert retry.json()["version"] == 1
 
 
+def test_optional_controller_details_do_not_block_a_truthful_minimum_notice(db):
+    client, _root = _root_with_reauth(db)
+    profile = deepcopy(PROFILE)
+    for key in (
+        "controller_postal_address", "controller_country",
+        "supervisory_authority_name", "supervisory_authority_url",
+        "processor_summary", "retention_summary", "rights_summary", "terms_summary",
+    ):
+        profile[key] = ""
+    profile["structured"]["instance_name"] = ""
+    profile["structured"]["jurisdiction_scope"] = ""
+    profile["structured"]["incident_contact_email"] = None
+    profile["structured"]["hosting_countries"] = []
+    for purpose in profile["structured"]["processing_purposes"]:
+        purpose["gdpr_legal_basis"] = None
+        purpose["swiss_justification_or_basis"] = None
+
+    saved = client.put("/api/v1/admin/governance", json=profile)
+    assert saved.status_code == 200, saved.json()
+    preflight = saved.json()["preflight"]
+    assert preflight["ready"] is True
+    statuses = {item["code"]: item["status"] for item in preflight["checks"]}
+    assert statuses["controller_address"] == "optional"
+    assert statuses["supervisory_authority"] == "optional"
+    assert statuses["rights_summary"] == "optional"
+    assert statuses["controller_basis_decisions"] == "externally_unverifiable"
+
+    published = client.post("/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION)
+    assert published.status_code == 200, published.json()
+    rights = client.get("/api/v1/governance/public/rights.html")
+    assert rights.status_code == 200
+    assert "competent data-protection supervisory authority" in rights.text
+    assert "mailto:privacy@synthetic-controller.ch" in rights.text
+
+
+def test_retention_needs_periods_or_clear_controller_criteria(db):
+    client, _root = _root_with_reauth(db)
+    profile = deepcopy(PROFILE)
+    profile["retention_summary"] = ""
+    profile["structured"]["retention"]["live_retention_days"] = None
+    profile["structured"]["retention"]["backup_retention_days"] = None
+    profile["structured"]["retention"]["receipt_retention_days"] = None
+
+    saved = client.put("/api/v1/admin/governance", json=profile)
+    assert saved.status_code == 200, saved.json()
+    check = next(item for item in saved.json()["preflight"]["checks"] if item["code"] == "retention_configuration")
+    assert check["status"] == "missing"
+    assert saved.json()["preflight"]["ready"] is False
+
+
 def test_runtime_retention_settings_are_authoritative_and_require_republication(db):
     client, _root = _root_with_reauth(db)
     imported = deepcopy(PROFILE)

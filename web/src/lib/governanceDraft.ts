@@ -133,18 +133,12 @@ function setting(settings: RuntimeSettings, key: string): number | null {
 }
 
 export function createSuggestedSummaries(settings: RuntimeSettings) {
-  const eventGrace = setting(settings, "event_purge_grace_days");
-  const auditDays = setting(settings, "audit_log_retention_days");
-  const offlineHours = setting(settings, "offline_access_ttl_hours");
+  void settings;
   return {
-    processor_summary:
-      "TODO: Identify each enabled hosting, email, push, backup, calendar and support provider. State its role, service, countries, support access, transfer safeguards and agreement status.",
-    retention_summary:
-      `TODO: Describe the controller's live-record and backup periods. The current Server settings use ${eventGrace ?? "a configured"} day(s) of event-purge grace, ${auditDays ?? "a configured number of"} day(s) for audit logs, and ${offlineHours ?? "a configured number of"} hour(s) for offline browser access. Explain deletion, evidence-receipt, legal-hold and external-copy periods.`,
-    rights_summary:
-      "TODO: Explain how a person requests access, correction, restriction, export, objection or deletion; identify the contact channel, identity checks and expected response process.",
-    terms_summary:
-      "TODO: State who may use this instance, the authorised operational purposes, the prohibited sensitive-data boundary, account responsibilities and consequences of misuse.",
+    processor_summary: "",
+    retention_summary: "",
+    rights_summary: "",
+    terms_summary: "",
   };
 }
 
@@ -167,12 +161,12 @@ export function createInitialStructured(
   })) as ProcessingPurpose[];
 
   return {
-    instance_name: "TODO: Enter the public name of this deployment",
+    instance_name: "",
     dpo_name_or_role: null,
     eu_representative: null,
     swiss_representative: null,
     supported_locales: ["en"],
-    jurisdiction_scope: "TODO: State the countries and legal regimes the controller determined apply to this deployment.",
+    jurisdiction_scope: "",
     processing_purposes: purposes,
     data_categories: [
       {

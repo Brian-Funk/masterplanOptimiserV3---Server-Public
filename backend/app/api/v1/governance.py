@@ -157,24 +157,27 @@ class GovernanceDraft(BaseModel):
 
     controller_type: Literal["organisation", "individual"]
     controller_legal_name: str = Field(min_length=1, max_length=200)
-    controller_postal_address: str = Field(min_length=1, max_length=500)
-    controller_country: str = Field(min_length=2, max_length=2)
+    controller_postal_address: str = Field(default="", max_length=500)
+    controller_country: str = Field(default="", max_length=2)
     privacy_contact_email: EmailStr
     privacy_contact_phone: str | None = Field(default=None, max_length=64)
     dpo_contact: str | None = Field(default=None, max_length=320)
-    supervisory_authority_name: str = Field(min_length=1, max_length=200)
-    supervisory_authority_url: HttpUrl
+    supervisory_authority_name: str = Field(default="", max_length=200)
+    supervisory_authority_url: HttpUrl | Literal[""] = ""
     default_locale: str = Field(default="en", pattern=r"^[a-z]{2}(?:-[A-Z]{2})?$")
-    processor_summary: str = Field(min_length=1, max_length=4000)
-    retention_summary: str = Field(min_length=1, max_length=4000)
-    rights_summary: str = Field(min_length=1, max_length=4000)
-    terms_summary: str = Field(min_length=1, max_length=4000)
+    processor_summary: str = Field(default="", max_length=4000)
+    retention_summary: str = Field(default="", max_length=4000)
+    rights_summary: str = Field(default="", max_length=4000)
+    terms_summary: str = Field(default="", max_length=4000)
     structured: GovernanceStructuredIn
 
     @field_validator("controller_country")
     @classmethod
     def normalise_country(cls, value: str) -> str:
-        return value.upper()
+        normalised = value.strip().upper()
+        if normalised and (len(normalised) != 2 or not normalised.isalpha()):
+            raise ValueError("country must be empty or use a two-letter code")
+        return normalised
 
 
 def _profile_payload(profile: InstanceGovernanceProfile) -> dict[str, object]:
@@ -251,10 +254,12 @@ def _render_governance_html(
             body.extend([
                 "<h2>Controller</h2>",
                 f"<p>{_text(notice.get('controller_legal_name'))}</p>",
-                _paragraphs(notice.get("controller_postal_address")),
-                f"<p>{_text(notice.get('controller_country'))}</p>",
                 f"<p>Email: <a href=\"mailto:{_text(notice.get('privacy_contact_email'))}\">{_text(notice.get('privacy_contact_email'))}</a></p>",
             ])
+            if notice.get("controller_postal_address"):
+                body.append(_paragraphs(notice.get("controller_postal_address")))
+            if notice.get("controller_country"):
+                body.append(f"<p>Country: {_text(notice.get('controller_country'))}</p>")
             if notice.get("privacy_contact_phone"):
                 body.append(f"<p>Telephone: {_text(notice['privacy_contact_phone'])}</p>")
             if notice.get("dpo_contact"):
@@ -293,21 +298,33 @@ def _render_governance_html(
                     "</ul>",
                 ])
         if section in {"privacy", "retention"}:
-            body.extend(["<h2>Retention and deletion</h2>", _paragraphs(notice.get("retention_summary"))])
+            body.append("<h2>Retention and deletion</h2>")
+            if notice.get("retention_summary"):
+                body.append(_paragraphs(notice.get("retention_summary")))
             retention = notice.get("retention") or {}
             if retention:
                 body.extend([
                     '<table><caption>Controller-selected retention periods</caption><tbody>',
                     *[
                         f"<tr><th scope=\"row\">{_text(key.replace('_', ' ').title())}</th><td>{_text(value)}</td></tr>"
-                        for key, value in retention.items()
+                        for key, value in retention.items() if value is not None
                     ],
                     "</tbody></table>",
                 ])
         if section in {"privacy", "rights"}:
-            body.extend(["<h2>Your rights</h2>", _paragraphs(notice.get("rights_summary"))])
+            body.extend([
+                "<h2>Your rights</h2>",
+                "<p>Depending on the law that applies, you may have rights to access, correct, erase, "
+                "restrict or object to processing, and to receive portable data. Contact the controller at "
+                f"<a href=\"mailto:{_text(notice.get('privacy_contact_email'))}\">{_text(notice.get('privacy_contact_email'))}</a>; "
+                "the controller will assess the applicable right, scope and proportionate identity verification.</p>",
+            ])
+            if notice.get("rights_summary"):
+                body.append(_paragraphs(notice.get("rights_summary")))
         if section in {"privacy", "processors"}:
-            body.extend(["<h2>Processors and service providers</h2>", _paragraphs(notice.get("processor_summary"))])
+            body.append("<h2>Processors and service providers</h2>")
+            if notice.get("processor_summary"):
+                body.append(_paragraphs(notice.get("processor_summary")))
             processors = notice.get("processors") or []
             if processors:
                 body.extend([
@@ -321,12 +338,21 @@ def _render_governance_html(
                     "</ul>",
                 ])
         if section in {"legal", "terms"}:
-            body.extend(["<h2>Terms for this instance</h2>", _paragraphs(notice.get("terms_summary"))])
-        if section == "rights":
             body.extend([
-                "<h2>Supervisory authority</h2>",
-                f"<p><a href=\"{_text(notice.get('supervisory_authority_url'))}\" rel=\"noopener noreferrer\">{_text(notice.get('supervisory_authority_name'))}</a></p>",
+                "<h2>Terms for this instance</h2>",
+                "<p>Use is limited to authorised operational event scheduling and access management. "
+                "Users must follow the permitted-data boundary and protect their own account access.</p>",
             ])
+            if notice.get("terms_summary"):
+                body.append(_paragraphs(notice.get("terms_summary")))
+        if section == "rights":
+            body.append("<h2>Supervisory authority</h2>")
+            if notice.get("supervisory_authority_name") and notice.get("supervisory_authority_url"):
+                body.append(f"<p><a href=\"{_text(notice.get('supervisory_authority_url'))}\" rel=\"noopener noreferrer\">{_text(notice.get('supervisory_authority_name'))}</a></p>")
+            elif notice.get("supervisory_authority_name"):
+                body.append(f"<p>{_text(notice.get('supervisory_authority_name'))}</p>")
+            else:
+                body.append("<p>Where applicable, you may lodge a complaint with the competent data-protection supervisory authority.</p>")
         if preview:
             body.append("<p>Private draft preview. No policy version or publication time has been assigned.</p>")
         else:
