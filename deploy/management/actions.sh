@@ -405,18 +405,31 @@ mp_disable_smtp() {
 
 # Send one token-free SMTP test message from the running backend.
 mp_send_smtp_test() {
-    local recipient
+    local recipient result reason
     mp_require_active_or_standalone || return 1
     recipient="$(ui_input "SMTP test" "Test recipient email")" || return 1
     mp_validate_email_address "$recipient" || { ui_error "Enter a valid recipient email."; return 1; }
     mp_compose_init
-    if "${MP_COMPOSE[@]}" exec -T -e MP_TEST_RECIPIENT="$recipient" backend python -c \
-        'import os; from app.core.activation_email import ActivationMailer, build_test_message; m=ActivationMailer(); m.__enter__(); m.send(build_test_message(os.environ["MP_TEST_RECIPIENT"])); m.__exit__(None,None,None)' >/dev/null; then
+    if result="$("${MP_COMPOSE[@]}" exec -T -e MP_TEST_RECIPIENT="$recipient" backend python -c '
+import os
+import sys
+from app.core.activation_email import ActivationMailError, ActivationMailer, build_test_message
+
+try:
+    with ActivationMailer() as mailer:
+        mailer.send(build_test_message(os.environ["MP_TEST_RECIPIENT"]))
+except ActivationMailError as exc:
+    print(f"MP_SMTP_ERROR:{exc.code}:{exc}", file=sys.stderr)
+    raise SystemExit(1)
+' 2>&1)"; then
         mp_audit "smtp.test" "success" "recipient-supplied"
         ui_message "Test accepted" "The mail server accepted the token-free test message."
     else
         mp_audit "smtp.test" "failed" "provider-error"
-        ui_error "The mail server did not accept the test message. Review backend logs."
+        reason="$(printf '%s\n' "$result" | sed -n 's/^MP_SMTP_ERROR:[a-z_]*://p' | tail -n 1)"
+        [ -n "$reason" ] \
+            || reason="The SMTP test process failed before returning a safe diagnostic."
+        ui_error "The mail server did not accept the test message.\n\n${reason}\n\nReview Configuration > SMTP and retry the guarded test."
         return 1
     fi
 }

@@ -574,6 +574,17 @@ def test_production_configurator_delegates_to_guarded_wizard():
     assert "VAPID_PRIVATE_KEY=" not in _read(".env.example")
 
 
+def test_smtp_test_reports_the_safe_one_off_process_error():
+    """A failed Docker exec must not direct the operator to unrelated backend logs."""
+
+    actions = _read("deploy/management/actions.sh")
+
+    assert "MP_SMTP_ERROR:{exc.code}:{exc}" in actions
+    assert "The SMTP test process failed before returning a safe diagnostic." in actions
+    assert "Review Configuration > SMTP and retry the guarded test." in actions
+    assert "Review backend logs." not in actions
+
+
 def test_redacted_configuration_hides_database_urls_and_secret_keys(tmp_path: Path):
     """Diagnostics must not reveal passwords embedded inside DATABASE_URL."""
 
