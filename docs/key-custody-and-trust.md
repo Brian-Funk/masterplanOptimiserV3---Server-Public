@@ -20,17 +20,20 @@ still uses separate entity identifiers, keys and signed role statements.
 
 1. Commission Server and create the instance key once.
 2. Bootstrap root and register its passkey.
-3. Generate the controller key outside Server and Desktop, then independently
-   verify its public fingerprint.
+3. In the restricted setup wizard, generate the controller key locally or
+   import a compatible encrypted package, then download and re-import it to
+   verify recovery before registration.
 4. Root creates a short-lived Server challenge bound to controller ID, instance
    ID, role, fingerprint, exact action, expiry and nonce.
 5. The external controller key proves possession. Root then completes a
    separate WebAuthn ceremony for that exact action.
 6. The instance key signs the durable ledger record. It distinguishes external
    proof, root passkey authorisation, Server verification and instance signing.
-7. Import the controller-signed initial trust declaration. Governance and
-   privacy publication remains blocked until this succeeds.
-8. Link an event from Desktop. Desktop generates a new event processor key or
+7. Successful proof plus exact root authorisation establishes controller trust
+   for governance authority. No separate trust declaration is required.
+8. Complete and publish governance version 1 in the setup wizard. Automatic
+   final checks append the commissioning receipt before administration opens.
+9. Link an event from Desktop. Desktop generates a new event processor key or
    imports an encrypted package, signs the event-bound challenge automatically,
    and waits for root approval in **Governance > Trust & keys**.
 
@@ -50,8 +53,9 @@ python tools/controller_custody.py verify-recovery --private-key /protected/reco
 
 The software fallback creates a passphrase-encrypted private PEM with owner-only
 permissions. Prefer hardware-backed or operating-system protected storage when
-available. The utility signs controller registration documents and controller
-trust declarations only. It rejects processor statements.
+available. The utility signs the versioned controller governance-authority
+registration challenge only. It rejects processor statements and obsolete
+trust-declaration formats.
 
 ## Desktop processor workflow
 

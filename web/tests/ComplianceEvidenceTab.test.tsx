@@ -70,7 +70,7 @@ describe("ComplianceEvidenceTab", () => {
     expect(screen.getByText("Desktop report recorded")).toBeInTheDocument();
 
     expect(screen.queryByText("Advanced evidence archive and signing-key administration")).not.toBeInTheDocument();
-    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledTimes(6));
+    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledTimes(5));
   });
 
   it("verifies the complete chain from the signed ledger card", async () => {

@@ -454,7 +454,7 @@ def _preflight(profile: InstanceGovernanceProfile | None, db: Session) -> dict[s
             EvidenceKey.role == "controller",
             EvidenceKey.activated_at.isnot(None),
             EvidenceKey.revoked_at.is_(None),
-            EvidenceKey.trust_declaration_sha256.isnot(None),
+            EvidenceKey.trust_establishment_sha256.isnot(None),
         ).first()
         result["checks"].append({
             "code": "controller_trust",
@@ -462,7 +462,7 @@ def _preflight(profile: InstanceGovernanceProfile | None, db: Session) -> dict[s
             "message": (
                 "External controller trust is active."
                 if controller_key
-                else "Register and activate an external controller key, then import its signed initial trust declaration before publication."
+                else "Complete controller identity setup before publication."
             ),
         })
         if controller_key is None:
@@ -607,14 +607,14 @@ def publish_governance(
             EvidenceKey.role == "controller",
             EvidenceKey.activated_at.isnot(None),
             EvidenceKey.revoked_at.is_(None),
-            EvidenceKey.trust_declaration_sha256.isnot(None),
+            EvidenceKey.trust_establishment_sha256.isnot(None),
         ).first()
         if controller_key is None:
             raise HTTPException(
                 status_code=409,
                 detail={
                     "code": "controller_trust_required",
-                    "message": "Complete the external controller-key ceremony and import its signed initial trust declaration before publishing controller-specific governance or privacy notices.",
+                    "message": "Complete controller identity setup before publishing controller-specific governance or privacy notices.",
                 },
             )
     profile = db.get(InstanceGovernanceProfile, 1)

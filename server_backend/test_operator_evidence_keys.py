@@ -17,7 +17,7 @@ from webauthn.helpers import bytes_to_base64url
 
 from app.api.v1 import evidence_keys as trust_api
 from app.core.config import settings
-from app.core.operator_evidence import TRUST_NAMESPACE, canonical_json, key_id, signature_envelope
+from app.core.operator_evidence import TRUST_NAMESPACE, action_sha256, canonical_json, key_id, signature_envelope
 from app.models.evidence import EvidenceKey, EvidenceKeyRegistrationChallenge, ProcessorIdentity, RootActionAuthorisation
 from app.models.user import WebAuthnCredential
 from deploy.management.instance_key import InstanceKeyError, commission, compare, verify
@@ -97,7 +97,10 @@ def test_controller_and_processor_challenges_are_entity_instance_action_and_role
         "format": "mp-opt-trust-action-v1", "action": controller["action"],
         "instance_id": controller["instance_id"], "entity_id": controller["entity_id"],
         "key_id": controller["key_id"], "role": controller["role"], "algorithm": controller["algorithm"],
-        "public_key_sha256": controller["public_key_sha256"], "supersedes_key_id": None, "reason": None,
+        "public_key_sha256": controller["public_key_sha256"],
+        "trust_scope": "controller_governance_authority",
+        "governance_authorisation": "root_passkey_per_publication",
+        "supersedes_key_id": None, "reason": None,
     })).hexdigest()
     invalid = client.post(f"{BASE}/trust-keys/challenges", json={"public_key": public, "role": "processor", "entity_id": "prc-synthetic0001"})
     assert invalid.status_code == 422
@@ -188,27 +191,19 @@ def test_routine_rotation_requires_old_and_new_proof_and_history_is_preserved(db
     assert historic.public_key == previous["public"]
 
 
-def test_role_statement_rejects_cross_role_and_accepts_controller_declaration(db, monkeypatch):
-    controller = _activate(db, monkeypatch, role="controller", entity_id="ctl-declaration01")
+def test_controller_registration_directly_establishes_governance_trust(db, monkeypatch):
+    controller = _activate(db, monkeypatch, role="controller", entity_id="ctl-established01")
+    row = db.query(EvidenceKey).filter(EvidenceKey.key_id == controller["key"]["key_id"]).one()
+    assert row.trust_establishment_sha256
     assert controller["client"].put("/api/v1/admin/governance", json=PROFILE).status_code == 200
     monkeypatch.setattr(settings, "KEY_SEPARATION_ENFORCED", True)
-    blocked = controller["client"].post("/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION)
-    assert blocked.status_code == 409
-    assert blocked.json()["detail"]["code"] == "controller_trust_required"
-    document = {
-        "format": "mp-opt-controller-trust-declaration-v1", "instance_id": controller["key"]["instance_id"],
-        "entity_id": controller["key"]["entity_id"], "key_id": controller["key"]["key_id"],
-        "role": "controller", "algorithm": "Ed25519", "public_key_sha256": controller["key"]["public_key_sha256"],
-        "statement_type": "initial_trust_declaration", "statement_sha256": hashlib.sha256(b"synthetic controller trust").hexdigest(),
-        "created_at": datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
-    accepted = controller["client"].post(f"{BASE}/trust-keys/{controller['key']['key_id']}/statements/import", json={"document": document, "proof": _proof(controller["private"], document)})
-    assert accepted.status_code == 200, accepted.text
     published = controller["client"].post("/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION)
     assert published.status_code == 200, published.text
-    wrong_role = document | {"role": "processor", "format": "mp-opt-processor-statement-v1", "statement_type": "receipt"}
-    rejected = controller["client"].post(f"{BASE}/trust-keys/{controller['key']['key_id']}/statements/import", json={"document": wrong_role, "proof": _proof(controller["private"], wrong_role)})
-    assert rejected.status_code == 409
+    removed = controller["client"].post(
+        f"{BASE}/trust-keys/{controller['key']['key_id']}/statements/import",
+        json={"document": {}, "proof": {}},
+    )
+    assert removed.status_code == 404
 
 
 def test_instance_key_commissioning_is_exactly_once_fail_closed_and_ha_consistent(tmp_path):
@@ -240,13 +235,20 @@ def test_controller_utility_keeps_encrypted_private_key_outside_server_and_signs
     encrypted_private_key_label = b"ENCRYPTED " + b"PRIVATE KEY"
     assert encrypted_private_key_label in private_path.read_bytes()
     assert "private" not in Path(package["public_package_path"]).read_text(encoding="utf-8").lower()
+    created_at = datetime.now(timezone.utc).replace(microsecond=0)
     document = {
-        "format": "mp-opt-controller-trust-declaration-v1", "instance_id": str(uuid.uuid4()),
-        "entity_id": "ctl-custody0001", "key_id": package["key_id"], "role": "controller",
-        "algorithm": "Ed25519", "public_key_sha256": package["public_key_sha256"],
-        "statement_type": "initial_trust_declaration", "statement_sha256": hashlib.sha256(b"synthetic").hexdigest(),
-        "created_at": datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "format": "mp-opt-controller-trust-registration-v2", "challenge_id": str(uuid.uuid4()),
+        "action": "register", "instance_id": str(uuid.uuid4()), "entity_id": "ctl-custody0001",
+        "key_id": package["key_id"], "role": "controller", "algorithm": "Ed25519",
+        "public_key_sha256": package["public_key_sha256"],
+        "trust_scope": "controller_governance_authority",
+        "governance_authorisation": "root_passkey_per_publication",
+        "supersedes_key_id": None, "reason": None, "action_sha256": "a" * 64,
+        "nonce": base64.b64encode(os.urandom(32)).decode("ascii"),
+        "created_at": created_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "expires_at": (created_at + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    document["action_sha256"] = action_sha256(document)
     signed = controller_sign(private_path, document, passphrase=passphrase)
     assert signed["proof"]["namespace"] == TRUST_NAMESPACE
     processor = document | {"format": "mp-opt-processor-statement-v1", "role": "processor", "entity_id": "prc-custody0001", "statement_type": "receipt"}

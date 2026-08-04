@@ -19,10 +19,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 
-REGISTRATION_FORMAT = "mp-opt-trust-key-registration-v1"
+REGISTRATION_FORMAT = "mp-opt-controller-trust-registration-v2"
 PROCESSOR_EVENT_REGISTRATION_FORMAT = "mp-opt-processor-event-registration-v1"
-DECLARATION_FORMAT = "mp-opt-controller-trust-declaration-v1"
-PROCESSOR_STATEMENT_FORMAT = "mp-opt-processor-statement-v1"
 DESKTOP_POLICY_ACK_FORMAT = "mp-opt-desktop-policy-acknowledgement-v1"
 DESKTOP_DELETION_FORMAT = "mp-opt-desktop-deletion-receipt-v2"
 DESKTOP_COPY_RESOLUTION_FORMAT = "mp-opt-desktop-copy-resolution-v1"
@@ -142,6 +140,8 @@ def action_payload(document: dict[str, Any]) -> dict[str, Any]:
         "role": document.get("role"),
         "algorithm": document.get("algorithm"),
         "public_key_sha256": document.get("public_key_sha256"),
+        "trust_scope": document.get("trust_scope"),
+        "governance_authorisation": document.get("governance_authorisation"),
         "supersedes_key_id": document.get("supersedes_key_id"),
         "reason": document.get("reason"),
     }
@@ -154,7 +154,8 @@ def action_sha256(document: dict[str, Any]) -> str:
 def validate_registration_document(document: dict[str, Any]) -> None:
     fields = {
         "format", "challenge_id", "action", "instance_id", "entity_id", "key_id",
-        "role", "algorithm", "public_key_sha256", "supersedes_key_id", "reason",
+        "role", "algorithm", "public_key_sha256", "trust_scope",
+        "governance_authorisation", "supersedes_key_id", "reason",
         "action_sha256", "nonce", "created_at", "expires_at",
     }
     if not isinstance(document, dict) or set(document) != fields or document.get("format") != REGISTRATION_FORMAT:
@@ -163,6 +164,12 @@ def validate_registration_document(document: dict[str, Any]) -> None:
     validate_entity(document["role"], document["entity_id"])
     if document["action"] not in {"register", "rotate"} or document["algorithm"] != "Ed25519":
         raise TrustEvidenceError("registration action or algorithm is invalid")
+    if document.get("role") != "controller":
+        raise TrustEvidenceError("the controller registration role is invalid")
+    if document.get("trust_scope") != "controller_governance_authority":
+        raise TrustEvidenceError("the controller trust scope is invalid")
+    if document.get("governance_authorisation") != "root_passkey_per_publication":
+        raise TrustEvidenceError("the governance authorisation scope is invalid")
     if not isinstance(document["key_id"], str) or not KEY_ID_RE.fullmatch(document["key_id"]):
         raise TrustEvidenceError("registration key ID is invalid")
     if not isinstance(document["public_key_sha256"], str) or not SHA256_RE.fullmatch(document["public_key_sha256"]):
@@ -305,26 +312,6 @@ def validate_desktop_evidence_document(
         raise TrustEvidenceError("Desktop evidence targets another deployment, event, entity, or key")
     canonical_json(document)
     return str(document["format"])
-
-
-def validate_role_statement(document: dict[str, Any], *, role: str, entity_id: str, instance_id: str, row_key_id: str, fingerprint: str) -> None:
-    expected_format = DECLARATION_FORMAT if role == "controller" else PROCESSOR_STATEMENT_FORMAT
-    fields = {"format", "instance_id", "entity_id", "key_id", "role", "algorithm", "public_key_sha256", "statement_type", "statement_sha256", "created_at"}
-    if set(document) != fields or document.get("format") != expected_format:
-        raise TrustEvidenceError("role statement fields are invalid")
-    if document.get("instance_id") != instance_id or document.get("entity_id") != entity_id or document.get("key_id") != row_key_id:
-        raise TrustEvidenceError("role statement targets another instance, entity, or key")
-    if document.get("role") != role or document.get("algorithm") != "Ed25519" or document.get("public_key_sha256") != fingerprint:
-        raise TrustEvidenceError("role statement has the wrong trust role or fingerprint")
-    if role == "controller" and document.get("statement_type") != "initial_trust_declaration":
-        raise TrustEvidenceError("controller key may sign only controller trust declarations here")
-    if role == "processor" and document.get("statement_type") not in {"publication", "conversion", "erasure", "receipt"}:
-        raise TrustEvidenceError("processor statement type is unsupported")
-    if not isinstance(document.get("statement_sha256"), str) or not SHA256_RE.fullmatch(document["statement_sha256"]):
-        raise TrustEvidenceError("exact statement digest is invalid")
-    if parse_timestamp(document.get("created_at"), "created_at") > datetime.now(timezone.utc) + timedelta(minutes=5):
-        raise TrustEvidenceError("role statement time is too far in the future")
-    canonical_json(document)
 
 
 # Compatibility exception names are intentionally absent: callers must use

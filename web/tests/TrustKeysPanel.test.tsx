@@ -23,13 +23,13 @@ describe("TrustKeysPanel", () => {
         instance_id: "instance-example", entity_id: "ctl-example0001", key_id: "ek-controller000001", role: "controller",
         public_key_sha256: "c".repeat(64), validity_status: "active", created_at: null,
         activated_at: "2026-08-03T19:00:00Z", revoked_at: null, supersedes_key_id: null,
-        event_ref: null, event_name: null, display_label: null, trust_declaration_sha256: null,
+        event_ref: null, event_name: null, display_label: null, trust_establishment_sha256: "d".repeat(64),
       }, {
         instance_id: "instance-example",
         entity_id: "prc-example0001", key_id: "ek-1234567890abcdef", role: "processor",
         public_key_sha256: "a".repeat(64), validity_status: "active", created_at: null,
         activated_at: "2026-08-03T20:00:00Z", revoked_at: null, supersedes_key_id: null,
-        event_ref: "event-example", event_name: "Synthetic Event", display_label: "Primary workstation", trust_declaration_sha256: null,
+        event_ref: "event-example", event_name: "Synthetic Event", display_label: "Primary workstation", trust_establishment_sha256: null,
       }]);
       if (path === "/api/v1/admin/evidence/trust-keys/pending-enrolments") return json([{
         challenge_id: "challenge-example", event_ref: "event-example", event_name: "Synthetic Event",
@@ -38,7 +38,6 @@ describe("TrustKeysPanel", () => {
       }]);
       if (path.endsWith("/root-authorisation/begin")) return json({ options: JSON.stringify({ challenge: "example" }), ceremony_id: "ceremony-example" });
       if (path.endsWith("/root-authorisation/complete")) return json({ status: "active" });
-      if (path === "/api/v1/admin/evidence/trust-keys/ek-controller000001/statements/import") return json({ statement_sha256: "d".repeat(64) });
       throw new Error(`Unexpected path: ${path}`);
     });
   });
@@ -61,19 +60,12 @@ describe("TrustKeysPanel", () => {
     ));
   });
 
-  it("imports the initial declaration on Trust & keys instead of deletion evidence", async () => {
+  it("shows controller trust as established by registration without another import", async () => {
     const { TrustKeysPanel } = await import("@/components/TrustKeysPanel");
     render(<TrustKeysPanel />);
 
-    const input = await screen.findByRole("textbox", { name: "Signed initial controller trust package" });
-    const packageValue = { document: { key_id: "ek-controller000001" }, proof: { signature: "synthetic" } };
-    fireEvent.change(input, { target: { value: JSON.stringify(packageValue) } });
-    fireEvent.click(screen.getByRole("button", { name: "Verify and record controller trust" }));
-
-    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledWith(
-      "/api/v1/admin/evidence/trust-keys/ek-controller000001/statements/import",
-      { method: "POST", body: JSON.stringify(packageValue) },
-    ));
-    expect(await screen.findByText("The initial controller trust declaration is verified and recorded.")).toBeInTheDocument();
+    expect(await screen.findByText(/identity and possession were established during registration/i)).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: /initial controller trust/i })).not.toBeInTheDocument();
+    expect(mockApiFetch.mock.calls.some(([path]) => String(path).includes("statements/import"))).toBe(false);
   });
 });

@@ -6,7 +6,7 @@ import { apiFetch } from "@/lib/api";
 import { withReauth } from "@/lib/reauth";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { CheckCircle, Circle, Download, FileCheck2, HardDrive, Info, KeyRound, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
+import { CheckCircle, Circle, Download, FileCheck2, HardDrive, Info, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
 
 const PUBLIC_EVIDENCE_VERIFIER = "https://brian-funk.github.io/masterplanOptimiserV3---Evidence-Public/verify-evidence/";
 
@@ -94,22 +94,6 @@ type ArchiveStatus = {
   merge_commit_sha: string | null;
   failure_reason: string | null;
 };
-type TrustKey = {
-  instance_id: string;
-  entity_id: string | null;
-  key_id: string;
-  public_key: string;
-  public_key_sha256: string;
-  role: "instance" | "controller" | "processor";
-  algorithm: "Ed25519";
-  validity_status: "pending" | "active" | "revoked";
-  activated_at: string | null;
-  revoked_at: string | null;
-  revocation_reason: string | null;
-  supersedes_key_id: string | null;
-  superseded_by_key_id: string | null;
-};
-
 function messageFrom(value: unknown): string {
   if (!value || typeof value !== "object") return "The operation was rejected.";
   const detail = (value as Record<string, unknown>).detail;
@@ -150,30 +134,19 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
   const [backups, setBackups] = useState<BackupRecord[]>([]);
   const [evidence, setEvidence] = useState<EvidenceStatus | null>(null);
   const [archive, setArchive] = useState<ArchiveStatus | null>(null);
-  const [trustKeys, setTrustKeys] = useState<TrustKey[]>([]);
   const [eventId, setEventId] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-  const [trustPublicKey, setTrustPublicKey] = useState("");
-  const [trustRole, setTrustRole] = useState<"controller" | "processor">("controller");
-  const [entityId, setEntityId] = useState("");
-  const [supersedesKeyId, setSupersedesKeyId] = useState("");
-  const [rotationReason, setRotationReason] = useState<"routine" | "lost" | "compromised">("routine");
-  const [challengeOutput, setChallengeOutput] = useState("");
-  const [registrationPackage, setRegistrationPackage] = useState("");
-  const [previousProofPackage, setPreviousProofPackage] = useState("");
-  const [statementPackage, setStatementPackage] = useState("");
   const [chainVerification, setChainVerification] = useState<ChainVerification | null>(null);
   const [exportStatus, setExportStatus] = useState("");
 
   const load = useCallback(async () => {
     setError("");
     try {
-      const [casesResponse, backupsResponse, evidenceResponse, keysResponse, archiveResponse] = await Promise.all([
+      const [casesResponse, backupsResponse, evidenceResponse, archiveResponse] = await Promise.all([
         apiFetch("/api/v1/admin/deletion-requests"),
         apiFetch("/api/v1/admin/evidence/backups"),
         apiFetch("/api/v1/admin/evidence"),
-        apiFetch("/api/v1/admin/evidence/trust-keys"),
         apiFetch("/api/v1/admin/evidence/archive"),
       ]);
       let cases = (await checked(casesResponse)) as Workflow[];
@@ -195,7 +168,6 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
       setWorkflows(cases);
       setBackups((await checked(backupsResponse)) as BackupRecord[]);
       setEvidence((await checked(evidenceResponse)) as EvidenceStatus);
-      setTrustKeys((await checked(keysResponse)) as TrustKey[]);
       setArchive((await checked(archiveResponse)) as ArchiveStatus);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Deletion cases could not be loaded.");
@@ -282,101 +254,6 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
       await load();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The complete evidence ZIP could not be downloaded.");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function beginTrustRegistration() {
-    setBusy("trust-key-begin");
-    setError("");
-    try {
-      const body = {
-        public_key: trustPublicKey.trim(),
-        role: trustRole,
-        entity_id: entityId.trim(),
-        supersedes_key_id: supersedesKeyId || null,
-        reason: supersedesKeyId ? rotationReason : null,
-      };
-      const result = await checked(await withReauth(() => apiFetch(
-        "/api/v1/admin/evidence/trust-keys/challenges",
-        { method: "POST", body: JSON.stringify(body) },
-      ))) as { challenge: Record<string, unknown> };
-      setChallengeOutput(JSON.stringify(result.challenge, null, 2));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Key challenge creation failed.");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function completeTrustRegistration() {
-    setBusy("trust-key-complete");
-    setError("");
-    try {
-      const current = JSON.parse(registrationPackage) as { document: object; proof: object };
-      const previous = previousProofPackage
-        ? JSON.parse(previousProofPackage) as { proof: object }
-        : null;
-      const proofResult = await checked(await withReauth(() => apiFetch(
-        "/api/v1/admin/evidence/trust-keys/proofs",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            challenge: current.document,
-            proof: current.proof,
-            previous_proof: previous?.proof || null,
-          }),
-        },
-      ))) as { challenge_id: string };
-      const begin = await checked(await apiFetch(
-        `/api/v1/admin/evidence/trust-keys/${proofResult.challenge_id}/root-authorisation/begin`,
-        { method: "POST", body: "{}" },
-      )) as { options: string; ceremony_id: string };
-      const credential = await startAuthentication({ optionsJSON: JSON.parse(begin.options) });
-      await checked(await apiFetch(
-        `/api/v1/admin/evidence/trust-keys/${proofResult.challenge_id}/root-authorisation/complete`,
-        { method: "POST", body: JSON.stringify({ ceremony_id: begin.ceremony_id, credential }) },
-      ));
-      setTrustPublicKey("");
-      setEntityId("");
-      setSupersedesKeyId("");
-      setChallengeOutput("");
-      setRegistrationPackage("");
-      setPreviousProofPackage("");
-      await load();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Key activation failed.");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function revokeTrustKey(key: TrustKey) {
-    const reason = window.prompt("Revocation reason: retired, lost, compromised, or role_changed", "retired");
-    if (!reason || !["retired", "lost", "compromised", "role_changed"].includes(reason)) return;
-    await mutate(
-      `revoke-${key.key_id}`,
-      `/api/v1/admin/evidence/trust-keys/${key.key_id}/revoke`,
-      { reason_code: reason, confirmation: "ROOT PASSKEY AUTHORISED" },
-    );
-  }
-
-  async function importRoleStatement() {
-    setBusy("statement-import");
-    setError("");
-    try {
-      const body = JSON.parse(statementPackage) as { document: object; proof: object };
-      const keyId = String((body.document as Record<string, unknown>).key_id || "");
-      if (!keyId) throw new Error("The signed statement has no key ID.");
-      await checked(await withReauth(() => apiFetch(
-        `/api/v1/admin/evidence/trust-keys/${encodeURIComponent(keyId)}/statements/import`,
-        { method: "POST", body: JSON.stringify(body) },
-      )));
-      setStatementPackage("");
-      await load();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Role statement import failed.");
     } finally {
       setBusy("");
     }
@@ -479,90 +356,6 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
         <Card className="flex items-start gap-3 p-4"><ShieldCheck size={20} className="mt-0.5 text-blue-600" /><div><p className="text-xs text-gray-500">Open cases</p><p className="mt-1 text-sm font-semibold">{openWorkflows.length}</p><p className="mt-1 text-xs text-gray-500">{completedWorkflows.length} completed</p></div></Card>
         <Card className="flex items-start gap-3 p-4"><HardDrive size={20} className="mt-0.5 text-blue-600" /><div><p className="text-xs text-gray-500">Evidence archive</p><p className="mt-1 text-sm font-semibold">{archive?.enabled ? "Enabled" : "Optional / disabled"}</p><p className="mt-1 text-xs text-gray-500">{archive?.pending_submission_count ?? 0} pending submission(s)</p></div></Card>
       </div>
-
-      {false && <details className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
-        <summary className="flex cursor-pointer items-center gap-2 font-medium text-gray-900 dark:text-gray-100"><KeyRound size={18} />Advanced evidence archive and signing-key administration</summary>
-        <div className="mt-4 space-y-4">
-      <Card className="space-y-3 p-4 text-xs text-gray-600 dark:text-gray-300">
-        <div>
-          <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Optional private Evidence Git archive</p>
-          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">The local signed ledger remains authoritative. Configure, rotate or delete the Fine-grained GitHub personal access token only through the masked Server management TUI.</p>
-        </div>
-        <div className="grid gap-1 sm:grid-cols-2">
-          <p>Automatic archival: <strong>{archive?.enabled ? "enabled" : "disabled"}</strong></p>
-          <p>Authentication: <strong>{archive?.authentication || "Disabled"}</strong></p>
-          <p>Repository: <span className="font-mono">{archive?.repository || "not configured"}</span></p>
-          <p>Protected branch: <span className="font-mono">{archive?.default_branch || "not configured"}</span></p>
-          <p>Durable state: <strong>{archive?.state || "No submission"}</strong></p>
-          <p>Pending submissions: {archive?.pending_submission_count ?? 0}</p>
-          {archive?.pull_request_number && <p>Pull request: #{archive?.pull_request_number}</p>}
-          {archive?.failure_reason && <p>Reason: <span className="font-mono">{archive?.failure_reason}</span></p>}
-        </div>
-        {archive?.submission_id && archive?.failure_reason && (
-          <Button size="sm" variant="outline" onClick={() => mutate(
-            `archive-retry-${archive?.submission_id}`,
-            `/api/v1/admin/evidence/archive/${archive?.submission_id}/retry`,
-          )} disabled={!!busy}>Retry safe failed submission</Button>
-        )}
-        <p className="text-xs text-gray-500 dark:text-gray-400">No token value or secret path is available through this screen. Complete ZIP export continues without a token.</p>
-      </Card>
-
-      <Card className="space-y-4 p-4">
-        <div>
-          <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Controller and processor public-key ceremonies</p>
-          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Controller keys come from the separate controller-custody utility. Processor keys come from Desktop. Private material never enters Server, and activation requires a separate exact-action root passkey ceremony.</p>
-        </div>
-        <div className="grid gap-3 lg:grid-cols-2">
-          <label className="text-xs text-gray-600 dark:text-gray-300">OpenSSH Ed25519 public key
-            <textarea value={trustPublicKey} onChange={(event) => setTrustPublicKey(event.target.value)} rows={4} spellCheck={false} className="mt-1 block w-full rounded-lg border border-gray-300 bg-white p-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-800" />
-          </label>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="text-xs text-gray-600 dark:text-gray-300">Role
-              <select value={trustRole} onChange={(event) => setTrustRole(event.target.value as "controller" | "processor")} className="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800">
-                <option value="controller">Controller</option><option value="processor">Processor</option>
-              </select>
-            </label>
-            <label className="text-xs text-gray-600 dark:text-gray-300">Entity ID
-              <input value={entityId} onChange={(event) => setEntityId(event.target.value)} placeholder={trustRole === "controller" ? "ctl-example0001" : "prc-example0001"} className="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-sm dark:border-gray-600 dark:bg-gray-800" />
-            </label>
-            <label className="text-xs text-gray-600 dark:text-gray-300">Supersedes key
-              <select value={supersedesKeyId} onChange={(event) => setSupersedesKeyId(event.target.value)} className="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800">
-                <option value="">New registration</option>
-                {trustKeys.filter((key) => key.validity_status === "active" && key.role === trustRole && key.entity_id === entityId).map((key) => <option key={key.key_id} value={key.key_id}>{key.key_id}</option>)}
-              </select>
-            </label>
-            {supersedesKeyId && <label className="text-xs text-gray-600 dark:text-gray-300">Rotation reason
-              <select value={rotationReason} onChange={(event) => setRotationReason(event.target.value as typeof rotationReason)} className="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800">
-                <option value="routine">Routine</option><option value="lost">Lost</option><option value="compromised">Compromised</option>
-              </select>
-            </label>}
-          </div>
-        </div>
-        <Button size="sm" onClick={beginTrustRegistration} disabled={!trustPublicKey.trim() || !entityId.trim() || !!busy}>Create entity-bound challenge</Button>
-        {challengeOutput && <label className="block text-xs text-gray-600 dark:text-gray-300">Challenge to sign outside Server
-          <textarea readOnly value={challengeOutput} rows={8} className="mt-1 block w-full rounded-lg border border-gray-300 bg-gray-50 p-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-900" />
-        </label>}
-        <div className="grid gap-3 lg:grid-cols-2">
-          <label className="text-xs text-gray-600 dark:text-gray-300">New-key proof package
-            <textarea value={registrationPackage} onChange={(event) => setRegistrationPackage(event.target.value)} rows={7} spellCheck={false} className="mt-1 block w-full rounded-lg border border-gray-300 bg-white p-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-800" />
-          </label>
-          <label className="text-xs text-gray-600 dark:text-gray-300">Previous-key proof package for routine rotation
-            <textarea value={previousProofPackage} onChange={(event) => setPreviousProofPackage(event.target.value)} rows={7} spellCheck={false} className="mt-1 block w-full rounded-lg border border-gray-300 bg-white p-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-800" />
-          </label>
-        </div>
-        <Button size="sm" variant="outline" onClick={completeTrustRegistration} disabled={!registrationPackage || !!busy}>Verify possession, then authorise exact activation with root passkey</Button>
-        <div className="space-y-2">
-          {trustKeys.map((key) => <div key={key.key_id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-gray-200 p-2 text-xs dark:border-gray-700"><span><span className="font-mono">{key.key_id}</span> · {key.entity_id || key.instance_id} · {key.role} · {key.validity_status}</span>{key.validity_status === "active" && key.role !== "instance" && <Button size="sm" variant="outline" onClick={() => void revokeTrustKey(key)} disabled={!!busy}>Revoke</Button>}</div>)}
-        </div>
-      </Card>
-
-      <Card className="space-y-3 p-4">
-        <div><p className="text-sm font-medium text-gray-900 dark:text-gray-100">Import a typed role statement</p><p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Controller trust declarations and processor statements remain separate. Wrong-role, wrong-entity and wrong-instance packages are rejected.</p></div>
-        <textarea value={statementPackage} onChange={(event) => setStatementPackage(event.target.value)} rows={8} spellCheck={false} className="block w-full rounded-lg border border-gray-300 bg-white p-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-800" />
-        <Button size="sm" variant="outline" onClick={importRoleStatement} disabled={!statementPackage || !!busy}>Verify and import role statement</Button>
-      </Card>
-        </div>
-      </details>}
 
       <Card className="space-y-3 p-4">
         <div>

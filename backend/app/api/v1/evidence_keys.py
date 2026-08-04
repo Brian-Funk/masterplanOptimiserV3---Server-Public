@@ -1,4 +1,4 @@
-"""Four-domain trust-key ceremonies and typed role-statement import."""
+"""Four-domain trust-key registration, rotation and revocation ceremonies."""
 
 from __future__ import annotations
 
@@ -35,7 +35,6 @@ from app.core.operator_evidence import (
     validate_entity,
     validate_processor_event_registration,
     validate_registration_document,
-    validate_role_statement,
     verify_signature,
 )
 from app.core.passkey_ceremonies import TRUST_KEY_ACTIVATION, consume_ceremony, create_ceremony
@@ -71,12 +70,6 @@ class SubmitPossessionProof(BaseModel):
     previous_proof: dict[str, Any] | None = None
 
 
-class ImportRoleStatement(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    document: dict[str, Any]
-    proof: dict[str, Any]
-
-
 class RevokeTrustKeyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reason_code: Literal["retired", "lost", "compromised", "role_changed"]
@@ -110,7 +103,7 @@ def _public_key_row(row: EvidenceKey, identity: ProcessorIdentity | None = None)
         "revoked_at": row.revoked_at,
         "revocation_reason": row.revocation_reason,
         "root_action_sha256": row.root_action_sha256,
-        "trust_declaration_sha256": row.trust_declaration_sha256,
+        "trust_establishment_sha256": row.trust_establishment_sha256,
         "event_ref": identity.event_evidence_id if identity else None,
         "event_name": identity.event_display_name if identity else None,
         "display_label": identity.display_label if identity else None,
@@ -207,7 +200,7 @@ def begin_trust_key_challenge(
         now = datetime.now(timezone.utc).replace(microsecond=0)
         expires = now + timedelta(minutes=10)
         document = {
-            "format": "mp-opt-trust-key-registration-v1",
+            "format": "mp-opt-controller-trust-registration-v2",
             "challenge_id": str(uuid.uuid4()),
             "action": purpose,
             "instance_id": state.instance_id,
@@ -216,6 +209,8 @@ def begin_trust_key_challenge(
             "role": body.role,
             "algorithm": "Ed25519",
             "public_key_sha256": fingerprint,
+            "trust_scope": "controller_governance_authority",
+            "governance_authorisation": "root_passkey_per_publication",
             "supersedes_key_id": previous.key_id if previous else None,
             "reason": body.reason if previous else None,
             "action_sha256": "",
@@ -326,6 +321,11 @@ def begin_root_authorisation(
         "expires_at": challenge.expires_at.astimezone(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ") if challenge.expires_at.tzinfo else challenge.expires_at.replace(tzinfo=timezone.utc, microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "nonce": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
     }
+    if challenge.role == "controller":
+        action.update({
+            "trust_scope": "controller_governance_authority",
+            "governance_authorisation": "root_passkey_per_publication",
+        })
     rendered = canonical_json(action)
     digest = hashlib.sha256(rendered).hexdigest()
     ceremony = create_ceremony(
@@ -466,6 +466,11 @@ def complete_root_authorisation(
         "ledger_signer_role": "instance",
         "status": operation,
     }
+    if row.role == "controller":
+        payload.update({
+            "trust_scope": "controller_governance_authority",
+            "governance_authorisation": "root_passkey_per_publication",
+        })
     if processor_identity is not None:
         payload.update({
             "event_ref": processor_identity.event_evidence_id,
@@ -478,6 +483,8 @@ def complete_root_authorisation(
         db, workflow_type="trust_key", workflow_id=row.key_id,
         operation_type=operation, record_type=record_type, payload=payload,
     )
+    if row.role == "controller":
+        row.trust_establishment_sha256 = digest
     root_action.instance_record_sha256 = digest
     audit(db, user=root, action="evidence.trust_key.root_authorised", resource_type="evidence", request=request,
           detail=json.dumps({"schema_version": 1, "purpose": challenge.purpose, "role": challenge.role}))
@@ -486,39 +493,6 @@ def complete_root_authorisation(
           detail=json.dumps({"schema_version": 1, "role": challenge.role}))
     db.commit()
     return {"key": _public_key_row(row, processor_identity), "root_authorisation": {"role": "root_passkey", "credential_id_sha256": credential_digest, "action_sha256": ceremony.action_sha256, "server_verified_at": now}, "instance_record_sha256": digest}
-
-
-@router.post("/trust-keys/{trust_key_id}/statements/import")
-def import_role_statement(
-    trust_key_id: str,
-    body: ImportRoleStatement,
-    request: Request,
-    root: User = Depends(require_root_recent_reauth),
-    db: Session = Depends(get_db),
-):
-    """Accept a typed statement only from its active role and entity key."""
-    try:
-        row = db.query(EvidenceKey).filter(EvidenceKey.key_id == trust_key_id, EvidenceKey.revoked_at.is_(None), EvidenceKey.activated_at.isnot(None)).first()
-        if row is None or row.role != "controller": raise TrustEvidenceError("the controller trust key is not active")
-        validate_role_statement(body.document, role=row.role, entity_id=row.entity_id, instance_id=row.instance_id, row_key_id=row.key_id, fingerprint=row.public_key_sha256)
-        proof_digest = verify_signature(body.document, body.proof, row.public_key)
-        if row.role == "controller" and body.document["statement_type"] == "initial_trust_declaration":
-            row.trust_declaration_sha256 = body.document["statement_sha256"]
-        digest = append_record(
-            db, workflow_type="role_statement", workflow_id=row.key_id,
-            operation_type=body.document["statement_type"], record_type="trust.role_statement_imported",
-            payload={"instance_id": row.instance_id, "entity_id": row.entity_id, "key_id": row.key_id,
-                     "key_role": row.role, "algorithm": "ed25519",
-                     "public_key_sha256": row.public_key_sha256,
-                     "statement_sha256": body.document["statement_sha256"],
-                     "signature_sha256": proof_digest, "status": "imported"},
-        )
-        audit(db, user=root, action="evidence.role_statement.import", resource_type="evidence", request=request,
-              detail=json.dumps({"schema_version": 1, "role": row.role}))
-        db.commit()
-        return {"statement_sha256": body.document["statement_sha256"], "instance_record_sha256": digest}
-    except (EvidenceUnavailable, TrustEvidenceError, ValueError) as exc:
-        db.rollback(); raise _reject(exc) from exc
 
 
 @router.post("/trust-keys/{trust_key_id}/revoke")

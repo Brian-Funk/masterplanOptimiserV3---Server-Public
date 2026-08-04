@@ -11,11 +11,11 @@ const source = fs.readFileSync(
 describe("root Evidence Git archive status", () => {
   it("shows non-secret durable state and keeps credential management in the TUI", () => {
     expect(source).toContain("/api/v1/admin/evidence/archive");
+    expect(source).toContain("Evidence archive");
+    expect(source).toContain("pending submission(s)");
+    expect(source).toContain("Download evidence ZIP");
     expect(source).toContain("Fine-grained GitHub personal access token");
-    expect(source).toContain("latest_archived_chain_head");
-    expect(source).toContain("pull_request_head_sha");
-    expect(source).toContain("Retry safe failed submission");
-    expect(source).toContain("No token value or secret path is available");
+    expect(source).not.toContain("Retry safe failed submission");
     expect(source).not.toContain("github_pat_");
     expect(source).not.toContain("type=\"password\"");
   });

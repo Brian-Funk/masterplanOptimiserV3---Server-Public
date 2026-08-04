@@ -27,7 +27,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 NAMESPACE = "mp-opt-role-trust-v1"
 CONTROLLER_RE = re.compile(r"^ctl-[a-z0-9]{8,48}$")
 KEY_RE = re.compile(r"^ek-[0-9a-f]{16}$")
-SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class CustodyError(ValueError):
@@ -107,14 +106,25 @@ def validate_controller_document(document: dict[str, Any], private: Ed25519Priva
     public = public_text(private)
     if document.get("key_id") != key_id(public) or document.get("public_key_sha256") != hashlib.sha256(public.encode("ascii")).hexdigest():
         raise CustodyError("the document targets another controller key")
-    if document.get("format") == "mp-opt-controller-trust-declaration-v1":
-        if document.get("statement_type") != "initial_trust_declaration" or not SHA_RE.fullmatch(str(document.get("statement_sha256", ""))):
-            raise CustodyError("controller trust declaration is invalid")
-    elif document.get("format") == "mp-opt-trust-key-registration-v1":
-        if document.get("action") not in {"register", "rotate"}:
-            raise CustodyError("controller registration action is invalid")
-    else:
+    if document.get("format") != "mp-opt-controller-trust-registration-v2":
         raise CustodyError("unsupported controller document format")
+    if document.get("action") not in {"register", "rotate"}:
+        raise CustodyError("controller registration action is invalid")
+    if document.get("trust_scope") != "controller_governance_authority":
+        raise CustodyError("controller registration has the wrong trust scope")
+    if document.get("governance_authorisation") != "root_passkey_per_publication":
+        raise CustodyError("controller registration has the wrong governance authorisation")
+    exact_action = {
+        "format": "mp-opt-trust-action-v1", "action": document.get("action"),
+        "instance_id": document.get("instance_id"), "entity_id": document.get("entity_id"),
+        "key_id": document.get("key_id"), "role": document.get("role"),
+        "algorithm": document.get("algorithm"), "public_key_sha256": document.get("public_key_sha256"),
+        "trust_scope": document.get("trust_scope"),
+        "governance_authorisation": document.get("governance_authorisation"),
+        "supersedes_key_id": document.get("supersedes_key_id"), "reason": document.get("reason"),
+    }
+    if document.get("action_sha256") != hashlib.sha256(canonical_json(exact_action)).hexdigest():
+        raise CustodyError("controller registration exact action digest is invalid")
     canonical_json(document)
 
 
