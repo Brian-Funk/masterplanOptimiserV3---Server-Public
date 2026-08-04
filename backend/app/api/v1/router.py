@@ -1,11 +1,12 @@
 ﻿"""API v1 Router  -  wire all sub-routers."""
 from fastapi import APIRouter
-from app.api.v1 import auth, passkey, activation, publish, calendar, admin, notifications, history, gdpr, governance, general_schedule, public_schedule_links, evidence, evidence_keys
+from app.api.v1 import auth, passkey, activation, publish, calendar, admin, notifications, history, gdpr, governance, general_schedule, public_schedule_links, evidence, evidence_keys, setup
 
 api_router = APIRouter()
 
 api_router.include_router(auth.router, prefix="/auth", tags=["authentication"])
 api_router.include_router(passkey.router, prefix="/passkey", tags=["passkey"])
+api_router.include_router(setup.router, prefix="/setup", tags=["setup"])
 api_router.include_router(activation.router, prefix="/activation", tags=["activation"])
 api_router.include_router(publish.router, prefix="/publish", tags=["publish"])
 api_router.include_router(general_schedule.publish_router, prefix="/publish", tags=["publish"])

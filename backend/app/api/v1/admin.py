@@ -61,6 +61,7 @@ from app.core.web_edits import (
 )
 from app.core.security import (
     get_current_user,
+    get_current_user_for_commissioning,
     require_admin,
     require_admin_or_issuer,
     require_recent_reauth,
@@ -128,7 +129,7 @@ def _ensure_aware_utc(value: datetime | None) -> datetime | None:
 )
 def reauth_begin(
     request: Request,
-    admin: User = Depends(get_current_user),
+    admin: User = Depends(get_current_user_for_commissioning),
     db: Session = Depends(get_db),
 ):
     """Start a passkey re-authentication challenge for the current account."""
@@ -161,7 +162,7 @@ def reauth_begin(
 def reauth_complete(
     body: CeremonyCompletion,
     request: Request,
-    admin: User = Depends(get_current_user),
+    admin: User = Depends(get_current_user_for_commissioning),
     db: Session = Depends(get_db),
 ):
     """Verify passkey re-authentication and mark the current session."""
