@@ -119,14 +119,15 @@ describe("AuthContext", () => {
       json: async () => ({
         ...mockUser,
         is_root_admin: true,
-        recovery_setup_required: true,
+        commissioning_required: true,
+        commissioning_stage: "recovery",
       }),
     });
 
     renderWithAuth();
 
     await waitFor(() => {
-      expect(mockHardNavigate).toHaveBeenCalledWith("/bootstrap");
+      expect(mockHardNavigate).toHaveBeenCalledWith("/setup");
     });
     expect(localStorage.getItem("mp_opt_offline_access")).toBeNull();
   });

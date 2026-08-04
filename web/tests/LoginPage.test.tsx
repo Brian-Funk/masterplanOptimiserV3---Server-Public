@@ -168,7 +168,7 @@ describe("LoginPage", () => {
       if (value.includes("/api/v1/auth/exchange")) {
         return Promise.resolve({
           ok: true,
-          json: async () => ({ recovery_setup_required: true }),
+          json: async () => ({ commissioning_required: true, commissioning_stage: "recovery" }),
         });
       }
       throw new Error(`Unexpected request: ${value}`);
@@ -185,7 +185,7 @@ describe("LoginPage", () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: /sign in with passkey/i }));
 
-    await waitFor(() => expect(mockHardNavigate).toHaveBeenCalledWith("/bootstrap"));
+    await waitFor(() => expect(mockHardNavigate).toHaveBeenCalledWith("/setup"));
     expect(mockRefreshUser).not.toHaveBeenCalled();
   });
 

@@ -36,7 +36,8 @@ export interface User {
   linked_person_id: number | null;
   event_id: number | null;
   offline_access_ttl_hours: number;
-  recovery_setup_required?: boolean;
+  commissioning_required?: boolean;
+  commissioning_stage?: "recovery" | "controller" | "governance" | "complete";
 }
 
 /** High-level authentication state, including offline session uncertainty. */
@@ -140,11 +141,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         authenticatedUserRef.current = userData;
         userIdRef.current = userData.id;
         setUser(userData);
-        if (userData.recovery_setup_required) {
+        if (userData.commissioning_required) {
           setOfflineAccess(null);
           const path = window.location.pathname;
-          if (path !== "/bootstrap" && path !== "/login") {
-            hardNavigate("/bootstrap");
+          if (path !== "/setup" && path !== "/login") {
+            hardNavigate("/setup");
           }
         } else {
           setOfflineAccess(storeOfflineAccessForUser(userData));

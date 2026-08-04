@@ -73,7 +73,7 @@ function Field({ label, value, onChange, multiline = false, type = "text", place
 }
 
 /** Root-only guided governance editor, exact preview and immutable publication gate. */
-export default function GovernanceAdminPage() {
+export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupMode?: boolean; onPublished?: () => void }) {
   const { user, isLoading } = useAuth();
   const importInput = useRef<HTMLInputElement>(null);
   const [form, setForm] = useState<GovernanceFormState>(empty);
@@ -91,14 +91,17 @@ export default function GovernanceAdminPage() {
     confirmed_permitted_data_policy: false,
     understands_no_legal_certification: false,
   });
+  const governancePath = setupMode ? "/api/v1/setup/governance" : "/api/v1/admin/governance";
 
   useEffect(() => {
     if (!user?.is_root_admin) return;
-    Promise.all([apiFetch("/api/v1/admin/governance"), apiFetch("/api/v1/admin/settings")]).then(async ([governanceResponse, settingsResponse]) => {
+    (async () => {
+      const governanceResponse = await apiFetch(governancePath);
+      const settingsResponse = setupMode ? null : await apiFetch("/api/v1/admin/settings");
       if (!governanceResponse.ok) throw new Error("Could not load governance settings");
       const data = await governanceResponse.json();
       const runtime = data.runtime_features as RuntimeFeatures;
-      const runtimeSettings = settingsResponse.ok ? await settingsResponse.json() as RuntimeSettings : {};
+      const runtimeSettings = settingsResponse?.ok ? await settingsResponse.json() as RuntimeSettings : {};
       if (data.draft) {
         const { structured: savedStructured, ...scalar } = data.draft;
         setForm({ ...empty, ...scalar, privacy_contact_phone: scalar.privacy_contact_phone || "", dpo_contact: scalar.dpo_contact || "" });
@@ -111,8 +114,8 @@ export default function GovernanceAdminPage() {
       setChecks(data.preflight.checks || []);
       setStatus(data.preflight.ready ? "The saved draft is ready for exact preview." : "Work through the guided sections, then save the private draft.");
       setStatusKind(data.preflight.ready ? "success" : "info");
-    }).catch((error) => { setStatus(error instanceof Error ? error.message : "Could not load governance settings"); setStatusKind("error"); });
-  }, [user]);
+    })().catch((error) => { setStatus(error instanceof Error ? error.message : "Could not load governance settings"); setStatusKind("error"); });
+  }, [user, governancePath, setupMode]);
 
   const ready = useMemo(() => checks.length > 0 && !checks.some((item) => ["missing", "contradiction", "requires_controller_decision"].includes(item.status)), [checks]);
   const confirmed = Object.values(confirmations).every(Boolean);
@@ -166,10 +169,11 @@ export default function GovernanceAdminPage() {
   const save = async (event: FormEvent) => {
     event.preventDefault();
     setStatus("Saving private draft..."); setStatusKind("info");
-    const response = await withReauth(() => apiFetch("/api/v1/admin/governance", {
+    const saveRequest = () => apiFetch(governancePath, {
       method: "PUT",
       body: JSON.stringify({ ...form, privacy_contact_phone: form.privacy_contact_phone || null, dpo_contact: form.dpo_contact || null, structured }),
-    }));
+    });
+    const response = setupMode ? await saveRequest() : await withReauth(saveRequest);
     const data = await response.json().catch(() => ({}));
     if (response.ok) { setChecks(data.preflight.checks || []); setPreviewReady(false); setStatus("Draft saved locally. It remains private until publication."); setStatusKind("success"); }
     else { setStatus(responseMessage(data, "Draft validation failed")); setStatusKind("error"); }
@@ -177,7 +181,7 @@ export default function GovernanceAdminPage() {
 
   const preview = async () => {
     setStatus("Loading exact preview and policy diff..."); setStatusKind("info");
-    const response = await apiFetch("/api/v1/admin/governance/preview");
+    const response = await apiFetch(`${governancePath}/preview`);
     const data = await response.json().catch(() => ({}));
     if (!response.ok) { setStatus(responseMessage(data, "Preview failed")); setStatusKind("error"); return; }
     setChecks(data.preflight.checks || []); setChanges(data.diff?.changes || []); setMaterialChange(Boolean(data.diff?.material_change)); setPreviewReady(Boolean(data.preflight.ready));
@@ -188,10 +192,11 @@ export default function GovernanceAdminPage() {
   const publish = async () => {
     if (!ready || !confirmed) { setStatus("Resolve every blocking preflight item and complete all four acknowledgements."); setStatusKind("error"); return; }
     setStatus("Publishing immutable policy version..."); setStatusKind("info");
-    const response = await withReauth(() => apiFetch("/api/v1/admin/governance/publish", { method: "POST", body: JSON.stringify(confirmations) }));
+    const response = await withReauth(() => apiFetch(`${governancePath}/publish`, { method: "POST", body: JSON.stringify(confirmations) }));
     const data = await response.json().catch(() => ({}));
     if (response.ok) {
       setPublishedVersion(data.version);
+      onPublished?.();
       setConfirmations((current) => Object.fromEntries(Object.keys(current).map((key) => [key, false])) as Record<ConfirmationKey, boolean>);
       setStatus(`Policy version ${data.version} is published with SHA-256 ${data.content_sha256}.`); setStatusKind("success");
     } else { setStatus(responseMessage(data, "Publication failed")); setStatusKind("error"); }
@@ -199,10 +204,10 @@ export default function GovernanceAdminPage() {
 
   const statusClasses = statusKind === "error" ? "border-red-300 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200" : statusKind === "success" ? "border-green-300 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950 dark:text-green-200" : "border-blue-300 bg-blue-50 text-blue-800 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-200";
 
-  return <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100">
-    <header className="border-b border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800"><div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3"><Logo height={32} href="https://info.mp-opt.net" /><ThemeToggle /></div></header>
-    <main className="mx-auto max-w-6xl space-y-6 px-4 py-8">
-      <AdminNavigation active="policies" isRootAdmin isIssuerOnly={false} canManagePublicLinks />
+  return <div className={setupMode ? "space-y-6 text-gray-900 dark:text-gray-100" : "min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100"}>
+    {!setupMode && <header className="border-b border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800"><div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3"><Logo height={32} href="https://info.mp-opt.net" /><ThemeToggle /></div></header>}
+    <div className={setupMode ? "space-y-6" : "mx-auto max-w-6xl space-y-6 px-4 py-8"}>
+      {!setupMode && <AdminNavigation active="policies" isRootAdmin isIssuerOnly={false} canManagePublicLinks />}
       <div><div className="flex items-start gap-3"><ShieldCheck size={30} className="mt-1 text-blue-600" aria-hidden="true" /><div><h1 className="text-3xl font-bold">Policies &amp; notices</h1><p className="mt-1 max-w-3xl text-sm text-gray-600 dark:text-gray-300">Build this deployment&apos;s controller-reviewed legal centre. Drafts stay local, and nothing is sent to the software maintainer.</p></div></div></div>
       <div role={statusKind === "error" ? "alert" : "status"} className={`rounded-lg border px-4 py-3 text-sm ${statusClasses}`}><strong>{status}</strong><span className="mt-1 block">{publishedVersion ? `Current public version: ${publishedVersion}.` : "No policy is published."} {checks.length > 0 ? `${blockingCount} blocking preflight item(s).` : "Save a draft to run preflight."}</span></div>
 
@@ -256,15 +261,19 @@ export default function GovernanceAdminPage() {
         <Button variant="outline" type="button" onClick={preview}>Generate exact preview and diff</Button>
         <ul className="space-y-2">{checks.map((check) => <li key={check.code} className={`flex items-start gap-2 rounded-lg p-3 text-sm ${check.status === "ready" ? "bg-green-50 text-green-800 dark:bg-green-950/40 dark:text-green-200" : check.status === "externally_unverifiable" ? "bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-200" : "bg-red-50 text-red-800 dark:bg-red-950/40 dark:text-red-200"}`}>{check.status === "ready" ? <CheckCircle2 size={17} className="mt-0.5 shrink-0" /> : <AlertTriangle size={17} className="mt-0.5 shrink-0" />}<span><strong>{check.status.replaceAll("_", " ")}</strong>: {check.message}</span></li>)}</ul>
         {changes.length > 0 && <div><h3 className="font-semibold">Draft changes {materialChange ? "(material)" : "(non-material)"}</h3><ul className="mt-2 list-disc pl-6 text-sm">{changes.slice(0, 50).map((change) => <li key={change.path}>{change.path}</li>)}</ul>{changes.length > 50 && <p className="text-sm">Plus {changes.length - 50} additional changed paths.</p>}</div>}
-        {previewReady && <nav aria-label="Governance draft preview pages" className="flex flex-wrap gap-2 text-sm">{[["privacy", "Privacy"], ["legal", "Legal"], ["terms", "Terms"], ["data-policy", "Permitted data"], ["retention", "Retention"], ["rights", "Rights"], ["processors", "Processors"]].map(([section, label]) => <a key={section} className="rounded-lg border border-gray-300 bg-white px-3 py-2 font-medium text-blue-700 hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-900 dark:text-blue-300" href={`/api/v1/admin/governance/preview/${section}.html`} target="_blank" rel="noreferrer">{label} draft preview</a>)}</nav>}
+        {previewReady && <nav aria-label="Governance draft preview pages" className="flex flex-wrap gap-2 text-sm">{[["privacy", "Privacy"], ["legal", "Legal"], ["terms", "Terms"], ["data-policy", "Permitted data"], ["retention", "Retention"], ["rights", "Rights"], ["processors", "Processors"]].map(([section, label]) => <a key={section} className="rounded-lg border border-gray-300 bg-white px-3 py-2 font-medium text-blue-700 hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-900 dark:text-blue-300" href={`${governancePath}/preview/${section}.html`} target="_blank" rel="noreferrer">{label} draft preview</a>)}</nav>}
       </Card>
 
       <Card className="space-y-4 p-5" aria-labelledby="publish-heading">
         <div><h2 id="publish-heading" className="text-xl font-semibold">9. Root acknowledgement and publication</h2><p className="mt-1 text-sm text-gray-500 dark:text-gray-400">Publication creates an immutable version of the exact reviewed draft and makes its generated pages public.</p></div>
-        <Guidance title="Publication is a controller act" link={{ href: "/admin/governance/trust", label: "Open Trust & keys" }}>A signed record proves the configured publication action and content hash. It is not legal certification and does not prove physical deletion or provider conduct. When controller trust is not ready, complete the controller-key ceremony under Trust &amp; keys.</Guidance>
+        <Guidance title="Publication is a controller act" link={setupMode ? undefined : { href: "/admin/governance/trust", label: "Open Trust & keys" }}>A signed record proves the configured publication action and content hash. It is not legal certification and does not prove physical deletion or provider conduct. Controller identity must be complete before this step.</Guidance>
         {Object.entries(confirmationLabels).map(([key, label]) => <label key={key} className="flex items-start gap-3 rounded-lg border border-gray-200 p-3 text-sm dark:border-gray-700"><input className="mt-1" type="checkbox" checked={confirmations[key as ConfirmationKey]} onChange={(event) => setConfirmations((current) => ({ ...current, [key]: event.target.checked }))} /><span>{label}</span></label>)}
         <div className="flex flex-wrap gap-3"><Button disabled={!ready || !confirmed} type="button" onClick={publish}>Publish immutable version</Button>{publishedVersion && <a className="inline-flex min-h-11 items-center rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium dark:border-gray-600 dark:bg-gray-900" href={`/api/v1/admin/governance/export/${publishedVersion}`}>Export current evidence JSON</a>}</div>
       </Card>
-    </main>
+    </div>
   </div>;
+}
+
+export default function GovernanceAdminPage() {
+  return <GovernanceWorkspace />;
 }

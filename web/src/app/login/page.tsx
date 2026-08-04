@@ -108,8 +108,8 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (!authLoading && authStatus === "authenticated" && user && isReady) {
-      if (user.recovery_setup_required) {
-        hardNavigate("/bootstrap");
+      if (user.commissioning_required) {
+        hardNavigate("/setup");
       } else if (user.is_admin || user.is_root_admin) {
         const requested = new URLSearchParams(window.location.search).get("next");
         router.push(
@@ -197,8 +197,8 @@ export default function LoginPage() {
         throw new Error(passkeyErrorMessage(err, "Failed to establish session"));
       }
       const exchangeData = await exchangeRes.json();
-      if (exchangeData.recovery_setup_required) {
-        hardNavigate("/bootstrap");
+      if (exchangeData.commissioning_required) {
+        hardNavigate("/setup");
         return;
       }
 
