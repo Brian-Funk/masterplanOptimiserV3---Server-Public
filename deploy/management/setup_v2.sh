@@ -117,28 +117,82 @@ mp_setup_present_bootstrap() {
     unset token body
 }
 
-mp_setup_wait_for_root_passkey() (
-    local interval attempt=1
+mp_setup_commissioning_stage() {
+    local stage
+    mp_compose_init || return 1
+    stage="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d masterplan -Atqc \
+        "SELECT CASE
+            WHEN NOT EXISTS (SELECT 1 FROM server_settings WHERE key='root_recovery_download_acknowledged_at') THEN 'recovery'
+            WHEN NOT EXISTS (
+                SELECT 1 FROM evidence_keys
+                WHERE role='controller' AND activated_at IS NOT NULL
+                  AND revoked_at IS NULL AND trust_establishment_sha256 IS NOT NULL
+            ) THEN 'controller'
+            WHEN NOT EXISTS (SELECT 1 FROM governance_publications WHERE version=1) THEN 'governance'
+            WHEN EXISTS (
+                SELECT 1 FROM server_settings
+                WHERE key='root_commissioning_completed_at' AND value <> ''
+            ) AND EXISTS (
+                SELECT 1 FROM server_settings
+                WHERE key='root_commissioning_receipt_sha256' AND value ~ '^[0-9a-f]{64}$'
+            ) THEN 'complete'
+            ELSE 'governance'
+        END" 2>/dev/null || true)"
+    case "$stage" in recovery|controller|governance|complete) printf '%s\n' "$stage" ;; *) return 1 ;; esac
+}
+
+mp_setup_sync_commissioning_recipient() {
+    local recipient
+    mp_compose_init || return 1
+    recipient="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d masterplan -Atqc \
+        "SELECT value FROM server_settings WHERE key='root_recovery_recipient'" 2>/dev/null || true)"
+    [[ "$recipient" =~ ^age1[0-9a-z]+$ ]] || return 1
+    if declare -F mp_ha_sync_recovery_recipient >/dev/null && [ -f "$MP_HA_CONFIG" ]; then
+        mp_ha_sync_recovery_recipient "$recipient"
+    else
+        mp_store_recovery_recipient_local "$recipient"
+    fi
+}
+
+mp_setup_wait_for_root_commissioning() (
+    local interval attempt=1 stage label action retired=0
     interval="${MP_ROOT_PASSKEY_POLL_INTERVAL_SECONDS:-5}"
     [[ "$interval" =~ ^[0-9]+$ ]] || interval=5
     trap 'return 130' INT TERM PIPE
-    while ! mp_root_bootstrap_is_disabled; do
-        printf '[%s] Root passkey is not registered yet (check %d). Retrying in %s seconds.\n' \
-            "$(date -u +%H:%M:%SZ)" "$attempt" "$interval"
+    while true; do
+        if ! mp_root_bootstrap_is_disabled; then
+            label="Root passkey registration"
+            action="Open the bootstrap page and register the root passkey."
+        else
+            if [ "$retired" -eq 0 ]; then
+                mp_retire_root_bootstrap_secret || return 1
+                retired=1
+            fi
+            stage="$(mp_setup_commissioning_stage 2>/dev/null || true)"
+            case "$stage" in
+                recovery) label="Step 1 of 3 — Recovery key"; action="Generate, download, reselect and verify the recovery file in the browser." ;;
+                controller) label="Step 2 of 3 — Controller identity"; action="Generate or import the encrypted controller key and approve its public identity." ;;
+                governance) label="Step 3 of 3 — Governance baseline"; action="Complete the draft, preview it, publish version 1 and run final checks." ;;
+                complete)
+                    mp_setup_sync_commissioning_recipient || return 1
+                    printf '[%s] Root commissioning is complete. The public recovery recipient is installed and the bootstrap secret is retired.\n' "$(date -u +%H:%M:%SZ)"
+                    return 0 ;;
+                *) label="Commissioning status"; action="The application is starting. The verified setup step will appear automatically." ;;
+            esac
+        fi
+        printf '[%s] %s (check %d). %s Retrying in %s seconds.\n' \
+            "$(date -u +%H:%M:%SZ)" "$label" "$attempt" "$action" "$interval"
         sleep "$interval" || return $?
         attempt=$((attempt + 1))
     done
-    mp_retire_root_bootstrap_secret || return 1
-    printf '[%s] Root passkey registration is complete and the bootstrap secret is retired.\n' \
-        "$(date -u +%H:%M:%SZ)"
 )
 
 mp_setup_register_root_passkey() {
     mp_setup_present_bootstrap || return 1
-    ui_run_command "Waiting for root passkey" \
-        "Complete registration in the browser. Setup checks every 5 seconds. Press Ctrl+C or close SSH to pause safely; commissioning will resume at this checkpoint." \
-        mp_setup_wait_for_root_passkey \
-        || { ui_message "Root passkey setup paused" "Registration has not been confirmed. No recovery key was created and commissioning will resume at this checkpoint."; return 1; }
+    ui_run_command "Waiting for root commissioning" \
+        "Complete all three browser steps. Setup reports the current verified step every 5 seconds. Press Ctrl+C or close SSH to pause safely; commissioning will resume at this checkpoint." \
+        mp_setup_wait_for_root_commissioning \
+        || { ui_message "Root commissioning paused" "Setup remains at its last verified browser step. Run mp-opt to resume the safe polling view."; return 1; }
 }
 
 mp_setup_apply_fresh_test_commit() {
@@ -874,8 +928,10 @@ mp_setup_primary_resume() {
         mp_setup_register_root_passkey || return 1
         mp_setup_state_mark root_passkey_registered
     fi
-    if ! mp_setup_state_has recovery_recipient; then
+    if [ "$mode" != ha-primary-new ] && ! mp_setup_state_has recovery_recipient; then
         [ -s "$MP_RECIPIENT_FILE" ] || mp_configure_recovery_recipient || return 1
+        mp_setup_state_mark recovery_recipient
+    elif [ "$mode" = ha-primary-new ]; then
         mp_setup_state_mark recovery_recipient
     fi
     if ! mp_setup_state_has replicated; then
@@ -933,10 +989,7 @@ mp_setup_standalone() {
         mp_setup_register_root_passkey || return 1
         mp_setup_state_mark root_passkey_registered
     fi
-    if ! mp_setup_state_has recovery_recipient; then
-        [ -s "$MP_RECIPIENT_FILE" ] || mp_configure_recovery_recipient || return 1
-        mp_setup_state_mark recovery_recipient
-    fi
+    mp_setup_state_mark recovery_recipient
     if ! mp_setup_state_has validated; then
         mp_validate_installation || return 1
         mp_setup_state_mark validated
@@ -946,7 +999,7 @@ mp_setup_standalone() {
         mp_setup_state_mark smtp_verified
     fi
     mp_setup_state_complete
-    ui_message "Standalone commissioning complete" "The application is live and the root passkey is registered. Open https://$(mp_env_get DOMAIN)/admin/governance to publish the controller-specific legal centre. Use Configuration > SMTP test for an end-to-end delivery check if SMTP was enabled."
+    ui_message "Standalone commissioning complete" "The application is live, root commissioning is sealed, and administration is available. SMTP is separate; use Configuration > SMTP test if it was enabled."
 }
 
 mp_setup_restore_full_loss() {
