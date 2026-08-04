@@ -68,7 +68,7 @@ require_fresh_commissioning_database() {
             AND (SELECT count(*) FROM users WHERE is_root_admin) = 1
             AND EXISTS (
                 SELECT 1 FROM users
-                WHERE is_root_admin AND is_active AND NOT is_activated
+                WHERE is_root_admin AND is_active AND is_activated
             )
             AND NOT EXISTS (SELECT 1 FROM webauthn_credentials)
             AND NOT EXISTS (SELECT 1 FROM auth_sessions)

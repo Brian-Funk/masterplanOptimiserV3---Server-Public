@@ -30,7 +30,7 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("NOT EXISTS (SELECT 1 FROM events)", SUPERVISOR)
         self.assertIn("NOT is_root_admin", SUPERVISOR)
         self.assertIn("count(*) FROM users WHERE is_root_admin) = 1", SUPERVISOR)
-        self.assertIn("is_root_admin AND is_active AND NOT is_activated", SUPERVISOR)
+        self.assertIn("is_root_admin AND is_active AND is_activated", SUPERVISOR)
         for table in (
             "webauthn_credentials",
             "auth_sessions",
