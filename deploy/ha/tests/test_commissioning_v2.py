@@ -232,9 +232,9 @@ class PairingCodeTests(unittest.TestCase):
         for earlier, later in (
             ("mp_guided_initial_configuration", "mp_setup_verify_standalone_dns"),
             ("mp_setup_verify_standalone_dns", 'deploy/deploy.sh" --no-pull'),
-            ('deploy/deploy.sh" --no-pull', "mp_setup_register_root_passkey"),
-            ("mp_setup_register_root_passkey", "mp_setup_apply_fresh_test_commit"),
-            ("mp_setup_apply_fresh_test_commit", "mp_configure_recovery_recipient"),
+            ('deploy/deploy.sh" --no-pull', "mp_setup_apply_fresh_test_commit"),
+            ("mp_setup_apply_fresh_test_commit", "mp_setup_register_root_passkey"),
+            ("mp_setup_register_root_passkey", "mp_configure_recovery_recipient"),
             ("mp_validate_installation", "mp_setup_verify_smtp_and_dns"),
         ):
             self.assertLess(standalone.index(earlier), standalone.index(later))
@@ -242,14 +242,14 @@ class PairingCodeTests(unittest.TestCase):
         primary_resume = shell_function(SETUP, "mp_setup_primary_resume")
         self.assertLess(
             primary_resume.index('deploy/deploy.sh" --no-pull'),
-            primary_resume.index("mp_setup_register_root_passkey"),
-        )
-        self.assertLess(
-            primary_resume.index("mp_setup_register_root_passkey"),
             primary_resume.index("mp_setup_apply_fresh_test_commit"),
         )
         self.assertLess(
             primary_resume.index("mp_setup_apply_fresh_test_commit"),
+            primary_resume.index("mp_setup_register_root_passkey"),
+        )
+        self.assertLess(
+            primary_resume.index("mp_setup_register_root_passkey"),
             primary_resume.index("mp_configure_recovery_recipient"),
         )
 

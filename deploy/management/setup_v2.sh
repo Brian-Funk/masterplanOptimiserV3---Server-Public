@@ -866,13 +866,13 @@ mp_setup_primary_resume() {
         python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null || return 1
         mp_setup_state_mark deployed
     fi
-    if [ "$mode" = ha-primary-new ] && ! mp_setup_state_has root_passkey_registered; then
-        mp_setup_register_root_passkey || return 1
-        mp_setup_state_mark root_passkey_registered
-    fi
     if [ "$mode" = ha-primary-new ] && ! mp_setup_state_has test_commit_deployed; then
         mp_setup_apply_fresh_test_commit || return 1
         mp_setup_state_mark test_commit_deployed
+    fi
+    if [ "$mode" = ha-primary-new ] && ! mp_setup_state_has root_passkey_registered; then
+        mp_setup_register_root_passkey || return 1
+        mp_setup_state_mark root_passkey_registered
     fi
     if ! mp_setup_state_has recovery_recipient; then
         [ -s "$MP_RECIPIENT_FILE" ] || mp_configure_recovery_recipient || return 1
@@ -925,13 +925,13 @@ mp_setup_standalone() {
         "$MP_ROOT/deploy/deploy.sh" --no-pull || return 1
         mp_setup_state_mark deployed
     fi
-    if ! mp_setup_state_has root_passkey_registered; then
-        mp_setup_register_root_passkey || return 1
-        mp_setup_state_mark root_passkey_registered
-    fi
     if ! mp_setup_state_has test_commit_deployed; then
         mp_setup_apply_fresh_test_commit || return 1
         mp_setup_state_mark test_commit_deployed
+    fi
+    if ! mp_setup_state_has root_passkey_registered; then
+        mp_setup_register_root_passkey || return 1
+        mp_setup_state_mark root_passkey_registered
     fi
     if ! mp_setup_state_has recovery_recipient; then
         [ -s "$MP_RECIPIENT_FILE" ] || mp_configure_recovery_recipient || return 1
