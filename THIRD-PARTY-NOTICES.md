@@ -375,7 +375,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | bidi-js | 1.0.3 | MIT | `web/package-lock.json` |
 | binary-extensions | 2.3.0 | MIT | `web/package-lock.json` |
 | blake3-wasm | 2.1.5 | MIT | `infra/cloudflare-ha-witness/package-lock.json` |
-| brace-expansion | 5.0.8 | MIT | `web/package-lock.json` |
+| brace-expansion | 5.0.9 | MIT | `web/package-lock.json` |
 | braces | 3.0.3 | MIT | `web/package-lock.json` |
 | browserslist | 4.28.7 | MIT | `web/package-lock.json` |
 | call-bind | 1.0.9 | MIT | `web/package-lock.json` |
@@ -624,7 +624,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | pify | 2.3.0 | MIT | `web/package-lock.json` |
 | pirates | 4.0.7 | MIT | `web/package-lock.json` |
 | possible-typed-array-names | 1.1.0 | MIT | `web/package-lock.json` |
-| postcss | 8.5.19 | MIT | `web/package-lock.json` |
+| postcss | 8.5.23 | MIT | `web/package-lock.json` |
 | postcss-import | 15.1.0 | MIT | `web/package-lock.json` |
 | postcss-js | 4.1.0 | MIT | `web/package-lock.json` |
 | postcss-load-config | 6.0.1 | MIT | `web/package-lock.json` |
