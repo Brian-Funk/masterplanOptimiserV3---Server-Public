@@ -47,7 +47,7 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
         self.assertIn("apk add --no-cache font-dejavu", dockerfile)
         self.assertIn("PIP_ROOT_USER_ACTION=ignore", dockerfile)
         self.assertIn("pip check", dockerfile)
-        self.assertIn("pip uninstall --yes setuptools wheel", dockerfile)
+        self.assertIn("python -m pip uninstall --yes pip", dockerfile)
 
     def test_runtime_images_are_hardened_without_replacing_entrypoints(self) -> None:
         caddy = (ROOT / "infra/Dockerfile.caddy").read_text(encoding="utf-8")
