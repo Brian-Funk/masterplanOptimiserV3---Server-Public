@@ -27,7 +27,11 @@ RECEIPT_FIELDS = {
     "live_data_purged_at",
     "package_sha256", "package_size", "archive_sha256", "recovery_key_id",
     "snapshot_created_at", "snapshot_evidence_head_sha256", "deep_verified_at",
-    "portable_confirmed_at", "local_snapshot_count",
+    "portable_confirmed_at", "local_snapshot_count", "superseded_portable_packages",
+}
+SUPERSEDED_PORTABLE_FIELDS = {
+    "package_id", "package_sha256", "package_size", "archive_sha256",
+    "recovery_key_id", "snapshot_created_at", "portable_confirmed_at",
 }
 
 
@@ -189,7 +193,7 @@ def verified_clean_backup_receipt(
     canonical = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     if raw != canonical or not isinstance(document, dict) or set(document) != RECEIPT_FIELDS:
         raise EvidenceUnavailable("The compliance receipt schema is invalid")
-    if document.get("format") != "mp-opt-clean-backup-receipt-v2":
+    if document.get("format") != "mp-opt-clean-backup-receipt-v3":
         raise EvidenceUnavailable("The compliance receipt format is invalid")
     for field in ("receipt_id", "job_id", "instance_id", "workflow_id", "event_ref", "privacy_action_id", "package_id"):
         _uuid(document.get(field), field)
@@ -224,5 +228,28 @@ def verified_clean_backup_receipt(
     confirmed_at = _timestamp(document.get("portable_confirmed_at"))
     if created_at < purged_at or verified_at < created_at or confirmed_at < verified_at:
         raise EvidenceUnavailable("The clean backup was not verified after the privacy action")
+    superseded = document.get("superseded_portable_packages")
+    if not isinstance(superseded, list) or len(superseded) > 128:
+        raise EvidenceUnavailable("The superseded portable-package inventory is invalid")
+    package_ids: set[str] = set()
+    for package in superseded:
+        if not isinstance(package, dict) or set(package) != SUPERSEDED_PORTABLE_FIELDS:
+            raise EvidenceUnavailable("The superseded portable-package inventory is invalid")
+        package_id = _uuid(package.get("package_id"), "superseded package_id")
+        if package_id == document["package_id"] or package_id in package_ids:
+            raise EvidenceUnavailable("The superseded portable-package inventory is inconsistent")
+        package_ids.add(package_id)
+        for field in ("package_sha256", "archive_sha256"):
+            if not SHA256.fullmatch(str(package.get(field, ""))):
+                raise EvidenceUnavailable("The superseded portable package contains an invalid digest")
+        if not RECOVERY_KEY_ID.fullmatch(str(package.get("recovery_key_id", ""))):
+            raise EvidenceUnavailable("The superseded portable package recovery key is invalid")
+        package_size = package.get("package_size")
+        if not isinstance(package_size, int) or isinstance(package_size, bool) or package_size < 1:
+            raise EvidenceUnavailable("The superseded portable package size is invalid")
+        package_created_at = _timestamp(package.get("snapshot_created_at"))
+        package_confirmed_at = _timestamp(package.get("portable_confirmed_at"))
+        if package_created_at >= purged_at or package_confirmed_at < package_created_at:
+            raise EvidenceUnavailable("The superseded portable package timeline is invalid")
     document["receipt_sha256"] = hashlib.sha256(raw).hexdigest()
     return document

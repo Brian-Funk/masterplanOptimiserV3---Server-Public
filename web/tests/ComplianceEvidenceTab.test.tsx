@@ -125,6 +125,33 @@ describe("ComplianceEvidenceTab", () => {
     expect(screen.queryByRole("button", { name: "Confirm completion" })).not.toBeInTheDocument();
   });
 
+  it("requires explicit resolution of known external backup copies", async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/deletion-requests") return json([{
+        ...workflow,
+        state: "awaiting_backup_resolution",
+        live_data_purged_at: "2026-08-05T11:51:37Z",
+        evidence: { clean_backup: "b".repeat(64) },
+        clean_backup_bridge: { job_id: "job-1", receipt_id: "receipt-1", local_snapshot_count: 1 },
+      }]);
+      if (path === "/api/v1/admin/evidence/backups") return json([{
+        package_id: "old-package-1",
+        package_sha256: "d".repeat(64),
+        status: "superseded_pending_deletion",
+        replacement_package_id: "new-package-1",
+      }]);
+      if (path === "/api/v1/admin/evidence") return json({ initialised: true, mode: "local", instance_id: "instance-1", head_sha256: "a".repeat(64) });
+      if (path === "/api/v1/admin/evidence/archive") return json({ enabled: false, authentication: "Disabled", repository: null, default_branch: null, latest_local_chain_head: null, latest_bundled_chain_head: null, latest_archived_chain_head: null, pending_submission_count: 0, submission_id: null, state: null, pull_request_number: null, pull_request_head_sha: null, merge_commit_sha: null, failure_reason: null });
+      throw new Error(`Unexpected path: ${path}`);
+    });
+    const { ComplianceEvidenceTab } = await import("@/components/ComplianceEvidenceTab");
+    render(<ComplianceEvidenceTab events={[]} />);
+
+    expect(await screen.findByText(/Delete every listed old external backup copy/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Confirm old external backup copies deleted" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Confirm completion" })).not.toBeInTheDocument();
+  });
+
   it("collapses completed cases to type, completion date, and final receipt SHA", async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === "/api/v1/admin/deletion-requests") return json([{

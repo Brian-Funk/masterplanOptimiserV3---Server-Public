@@ -21,6 +21,11 @@ REQUEST_FIELDS = {
     "event_ref", "subject_ref", "privacy_action_id", "privacy_action_sequence",
     "live_purge_receipt_sha256", "live_data_purged_at", "created_at",
 }
+PORTABLE_INVENTORY_FIELDS = {
+    "format", "state", "snapshot", "snapshot_created_at", "confirmed_at",
+    "package_id", "package_sha256", "package_size", "archive_sha256",
+    "recovery_key_id",
+}
 
 
 def timestamp(value: object) -> datetime:
@@ -134,6 +139,54 @@ def local_snapshot_count(root: Path, selected_receipt: Path) -> int:
     return count
 
 
+def superseded_portable_packages(root: Path, selected_package_id: str, request: dict) -> list[dict]:
+    """Return every known pre-deletion workstation package except the clean replacement."""
+
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("The portable export inventory is unsafe")
+    purged_at = timestamp(request["live_data_purged_at"])
+    packages: list[dict] = []
+    for path in sorted(root.glob("*.json")):
+        document = load_regular(path)
+        if set(document) != PORTABLE_INVENTORY_FIELDS:
+            raise ValueError("The portable export inventory schema is invalid")
+        if (
+            document.get("format") != "mp-opt-portable-export-inventory-v1"
+            or document.get("state") != "operator-sha256-confirmed"
+        ):
+            raise ValueError("The portable export inventory state is invalid")
+        package_id = canonical_uuid(document.get("package_id"))
+        if path.name != f"{package_id}.json":
+            raise ValueError("The portable export inventory filename is invalid")
+        created_at = timestamp(document.get("snapshot_created_at"))
+        confirmed_at = timestamp(document.get("confirmed_at"))
+        if confirmed_at < created_at:
+            raise ValueError("The portable export inventory timeline is invalid")
+        if package_id == selected_package_id or created_at >= purged_at:
+            continue
+        for field in ("package_sha256", "archive_sha256"):
+            if not SHA256.fullmatch(str(document.get(field, ""))):
+                raise ValueError("The portable export inventory digest is invalid")
+        key_id = document.get("recovery_key_id")
+        if not isinstance(key_id, str) or not KEY_ID.fullmatch(key_id):
+            raise ValueError("The portable export inventory recovery key is invalid")
+        size = document.get("package_size")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+            raise ValueError("The portable export inventory size is invalid")
+        packages.append({
+            "package_id": package_id,
+            "package_sha256": document["package_sha256"],
+            "package_size": size,
+            "archive_sha256": document["archive_sha256"],
+            "recovery_key_id": key_id,
+            "snapshot_created_at": created_at.isoformat(),
+            "portable_confirmed_at": confirmed_at.isoformat(),
+        })
+    if len(packages) > 128:
+        raise ValueError("The portable export inventory is too large")
+    return packages
+
+
 def atomic_write(path: Path, raw: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -224,7 +277,7 @@ def emit(args: argparse.Namespace) -> None:
                 "before recording the clean recovery receipt"
             )
         receipt = {
-            "format": "mp-opt-clean-backup-receipt-v2",
+            "format": "mp-opt-clean-backup-receipt-v3",
             "receipt_id": str(uuid.uuid5(uuid.UUID(request["job_id"]), facts["package_id"])),
             **{key: request[key] for key in (
                 "job_id", "instance_id", "workflow_type", "workflow_id", "event_ref",
@@ -233,6 +286,9 @@ def emit(args: argparse.Namespace) -> None:
             )},
             **facts,
             "local_snapshot_count": snapshot_count,
+            "superseded_portable_packages": superseded_portable_packages(
+                Path(args.portable_inventory), facts["package_id"], request,
+            ),
         }
         atomic_write(target, canonical(receipt))
         try:
@@ -250,6 +306,7 @@ def main() -> int:
     parser.add_argument("--requests", required=True)
     parser.add_argument("--receipts", required=True)
     parser.add_argument("--snapshots", required=True)
+    parser.add_argument("--portable-inventory", required=True)
     parser.add_argument("--snapshot-receipt", required=True)
     parser.add_argument("--instance-key", required=True)
     try:

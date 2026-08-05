@@ -111,6 +111,35 @@ def record_clean_backup(
     db.flush()
 
 
+def record_superseded_portable_backups(
+    db: Session, *, packages: list[dict], replacement_package_id: str,
+) -> None:
+    """Persist every known pre-deletion workstation package for explicit resolution."""
+
+    for package in packages:
+        existing = db.query(BackupInventoryRecord).filter(
+            BackupInventoryRecord.package_id == package["package_id"],
+        ).first()
+        if existing is not None and existing.package_sha256 != package["package_sha256"]:
+            raise ValueError("A superseded recovery package is registered with another digest")
+        if existing is None:
+            existing = BackupInventoryRecord(
+                package_id=package["package_id"],
+                package_sha256=package["package_sha256"],
+                archive_sha256=package["archive_sha256"],
+                recovery_key_id=package["recovery_key_id"],
+                status="superseded_pending_deletion",
+                created_at=datetime.fromisoformat(package["snapshot_created_at"]),
+                confirmed_at=datetime.fromisoformat(package["portable_confirmed_at"]),
+                replacement_package_id=replacement_package_id,
+            )
+            db.add(existing)
+        elif existing.status != "confirmed_deleted":
+            existing.status = "superseded_pending_deletion"
+            existing.replacement_package_id = replacement_package_id
+    db.flush()
+
+
 def _redact_person_from_json(raw: str | None, external_person_id: int) -> str | None:
     if not raw:
         return raw
@@ -499,6 +528,11 @@ def confirm_case_clean_backup(
         raise ValueError("The peer must confirm the privacy action before the clean backup")
     package_id = receipt["package_id"]
     package_sha256 = receipt["package_sha256"]
+    record_superseded_portable_backups(
+        db,
+        packages=receipt["superseded_portable_packages"],
+        replacement_package_id=package_id,
+    )
     record_clean_backup(
         db,
         package_id=package_id,
@@ -517,6 +551,9 @@ def confirm_case_clean_backup(
         "replacement_package_sha256": package_sha256,
         "receipt_sha256": receipt["receipt_sha256"],
         "local_snapshot_count": receipt["local_snapshot_count"],
+        "superseded_portable_package_ids": [
+            package["package_id"] for package in receipt["superseded_portable_packages"]
+        ],
         "verified_at": timestamp(utc_now()),
         "outcome": "verified",
         "status": "clean_backup_verified",

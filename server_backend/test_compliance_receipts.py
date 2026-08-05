@@ -70,15 +70,17 @@ def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_p
     receipts = tmp_path / "receipts"
     snapshots = tmp_path / "snapshots"
     selected = snapshots / "selected"
+    portable_inventory = tmp_path / "portable-inventory"
     requests.mkdir()
     receipts.mkdir()
     selected.mkdir(parents=True)
+    portable_inventory.mkdir()
     monkeypatch.setattr(compliance_receipts.settings, "COMPLIANCE_REQUEST_DIR", str(requests))
     monkeypatch.setattr(compliance_receipts.settings, "COMPLIANCE_RECEIPT_DIR", str(receipts))
 
     ids = {name: str(uuid.uuid4()) for name in (
         "job_id", "instance_id", "workflow_id", "event_ref", "subject_ref",
-        "privacy_action_id", "package_id",
+        "privacy_action_id", "package_id", "old_package_id",
     )}
     key = tmp_path / "instance-key"
     subprocess.run(
@@ -132,6 +134,20 @@ def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_p
     }
     snapshot_path = selected / "receipt.json"
     snapshot_path.write_text(json.dumps(snapshot_receipt), encoding="utf-8")
+    old_created_at = purged_at - timedelta(days=1)
+    old_confirmed_at = old_created_at + timedelta(minutes=1)
+    (portable_inventory / f"{ids['old_package_id']}.json").write_text(json.dumps({
+        "format": "mp-opt-portable-export-inventory-v1",
+        "state": "operator-sha256-confirmed",
+        "snapshot": "old-full-snapshot",
+        "snapshot_created_at": old_created_at.isoformat(),
+        "confirmed_at": old_confirmed_at.isoformat(),
+        "package_id": ids["old_package_id"],
+        "package_sha256": "1" * 64,
+        "package_size": 5678,
+        "archive_sha256": "2" * 64,
+        "recovery_key_id": "rk-" + "3" * 16,
+    }), encoding="utf-8")
     stale = snapshots / "stale"
     stale.mkdir()
     (stale / "receipt.json").write_text(json.dumps(snapshot_receipt), encoding="utf-8")
@@ -141,6 +157,7 @@ def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_p
             "--requests", str(requests),
             "--receipts", str(receipts),
             "--snapshots", str(snapshots),
+            "--portable-inventory", str(portable_inventory),
             "--snapshot-receipt", str(snapshot_path),
             "--instance-key", str(key),
         ],
@@ -159,13 +176,18 @@ def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_p
             "--requests", str(requests),
             "--receipts", str(receipts),
             "--snapshots", str(snapshots),
+            "--portable-inventory", str(portable_inventory),
             "--snapshot-receipt", str(snapshot_path),
             "--instance-key", str(key),
         ],
         check=True,
     )
     assert not (requests / f"{ids['job_id']}.json").exists()
-    assert json.loads((receipts / f"{ids['job_id']}.json").read_text())["local_snapshot_count"] == 1
+    host_receipt = json.loads((receipts / f"{ids['job_id']}.json").read_text())
+    assert host_receipt["local_snapshot_count"] == 1
+    assert [item["package_id"] for item in host_receipt["superseded_portable_packages"]] == [
+        ids["old_package_id"]
+    ]
 
     expected = {
         "job_id": ids["job_id"],

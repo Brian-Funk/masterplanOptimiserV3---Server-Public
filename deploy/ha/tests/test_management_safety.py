@@ -91,6 +91,14 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
         self.assertNotIn('mp_compliance_emit_backup_receipts "$selected" || true', export)
         self.assertIn("Deep-verify this snapshot now", export)
 
+    def test_portable_exports_are_durably_inventoried_for_deletion_cases(self) -> None:
+        record = function_body(PORTABLE_SOURCE, "mp_portable_record_confirmed_export")
+        bridge = function_body(PORTABLE_SOURCE, "mp_compliance_emit_backup_receipts")
+        self.assertIn("MP_PORTABLE_EXPORT_INVENTORY", PORTABLE_SOURCE)
+        self.assertIn('"$MP_PORTABLE_EXPORT_INVENTORY/${package_id}.json"', record)
+        self.assertIn('mp-opt-portable-export-inventory-v1', record)
+        self.assertIn('--portable-inventory "$MP_PORTABLE_EXPORT_INVENTORY"', bridge)
+
     def test_backend_secret_contract_is_group_readable_without_broadening_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

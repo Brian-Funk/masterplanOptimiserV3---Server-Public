@@ -521,6 +521,39 @@ def test_clean_backup_registration_is_reusable_across_deletion_cases(db):
     assert "pg_advisory_xact_lock" in source
 
 
+def test_pre_deletion_portable_exports_require_explicit_resolution(db):
+    old_package_id = "66666666-6666-4666-8666-666666666666"
+    replacement_package_id = "77777777-7777-4777-8777-777777777777"
+    deletion_workflow.record_superseded_portable_backups(
+        db,
+        packages=[{
+            "package_id": old_package_id,
+            "package_sha256": "a" * 64,
+            "archive_sha256": "b" * 64,
+            "recovery_key_id": "rk-" + "c" * 16,
+            "snapshot_created_at": "2026-08-01T10:00:00+00:00",
+            "portable_confirmed_at": "2026-08-01T10:05:00+00:00",
+        }],
+        replacement_package_id=replacement_package_id,
+    )
+    deletion_workflow.record_clean_backup(
+        db,
+        package_id=replacement_package_id,
+        package_sha256="d" * 64,
+        archive_sha256="e" * 64,
+        recovery_key_id="rk-" + "f" * 16,
+    )
+
+    old = db.query(BackupInventoryRecord).filter_by(package_id=old_package_id).one()
+    replacement = db.query(BackupInventoryRecord).filter_by(package_id=replacement_package_id).one()
+    assert old.status == "superseded_pending_deletion"
+    assert old.replacement_package_id == replacement_package_id
+    assert replacement.status == "active"
+    assert "backup_inventory_resolution" in deletion_cases.checklist_prerequisites(
+        _case(db, create_test_event(db)[0], case_type="event_erasure"), db,
+    )
+
+
 def test_admin_and_frontend_expose_only_the_current_deletion_case_workflow():
     """Retired event-purge and imported-attestation routes cannot return."""
 

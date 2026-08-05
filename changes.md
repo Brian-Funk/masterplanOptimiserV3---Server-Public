@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Retained a durable inventory of portable workstation exports and required
+  explicit resolution of every known pre-deletion external backup package.
 - Blocked deletion-case completion while superseded local recovery snapshots
   remain, and bound clean-backup receipts to an exact single-snapshot host state.
 - Added deterministic negative-path coverage for event-bound Desktop processor
