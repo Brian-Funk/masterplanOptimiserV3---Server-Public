@@ -750,6 +750,7 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
             selected = snapshots / "20260718T120000Z_full_baseline"
             selected.mkdir(parents=True)
             state.mkdir()
+            (state / "portable-export-inventory").mkdir()
             archive = selected / "snapshot.tar.age"
             archive.write_bytes(b"encrypted-test-archive")
             archive_hash = __import__("hashlib").sha256(archive.read_bytes()).hexdigest()
