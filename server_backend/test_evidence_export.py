@@ -9,7 +9,7 @@ from app.core.config import settings
 from app.services import evidence_export
 
 
-def test_complete_export_uses_fixed_tool_arguments_and_cleans_up(monkeypatch, tmp_path):
+def test_complete_export_uses_fixed_tool_arguments_and_cleans_up(monkeypatch, tmp_path, db):
     evidence_home = tmp_path / "evidence"
     evidence_home.mkdir(exist_ok=True)
     monkeypatch.setattr(settings, "EVIDENCE_HOME", str(evidence_home))
@@ -29,13 +29,15 @@ def test_complete_export_uses_fixed_tool_arguments_and_cleans_up(monkeypatch, tm
             "zip_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
         }
         assert command[2] == "create-zip"
-        assert command[command.index("--evidence-home") + 1] == str(evidence_home)
+        staged_home = Path(command[command.index("--evidence-home") + 1])
+        assert staged_home.name == "evidence"
+        assert staged_home.parent == output.parent
         assert "--trust-repository" not in command
         assert kwargs == {"check": False, "capture_output": True, "text": True, "timeout": 120}
         return CompletedProcess(command, 0, json.dumps(metadata), "")
 
     monkeypatch.setattr(evidence_export.subprocess, "run", run)
-    output, metadata = evidence_export.create_complete_evidence_export(instance_id)
+    output, metadata = evidence_export.create_complete_evidence_export(db, instance_id)
     directory = output.parent
 
     assert output.read_bytes() == b"synthetic zip"

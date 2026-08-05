@@ -137,13 +137,15 @@ def test_desktop_report_is_capability_authorised_exact_and_idempotent(db):
     with pytest.raises(ValueError, match="claim"):
         deletion_cases.apply_desktop_report(
             db, case, work_order, claim_capability="wrong", report=report,
-            signature_sha256="a" * 64, completed_key_id=work_order.processor_key_id,
+            signature_sha256="a" * 64, evidence_package_json="{}",
+            evidence_package_sha256="c" * 64, completed_key_id=work_order.processor_key_id,
             completed_public_key_sha256="f" * 64,
         )
 
     digest = deletion_cases.apply_desktop_report(
         db, case, work_order, claim_capability=capability, report=report,
-        signature_sha256="a" * 64, completed_key_id=work_order.processor_key_id,
+        signature_sha256="a" * 64, evidence_package_json="{}",
+        evidence_package_sha256="c" * 64, completed_key_id=work_order.processor_key_id,
         completed_public_key_sha256="f" * 64,
     )
     assert case.state == "ready_for_live_purge"
@@ -151,7 +153,8 @@ def test_desktop_report_is_capability_authorised_exact_and_idempotent(db):
     assert work_order.claim_capability_sha256 is None
     assert deletion_cases.apply_desktop_report(
         db, case, work_order, claim_capability="", report=report,
-        signature_sha256="a" * 64, completed_key_id=work_order.processor_key_id,
+        signature_sha256="a" * 64, evidence_package_json="{}",
+        evidence_package_sha256="c" * 64, completed_key_id=work_order.processor_key_id,
         completed_public_key_sha256="f" * 64,
     ) == digest
 
@@ -159,7 +162,8 @@ def test_desktop_report_is_capability_authorised_exact_and_idempotent(db):
     with pytest.raises(ValueError, match="different report"):
         deletion_cases.apply_desktop_report(
             db, case, work_order, claim_capability="", report=changed,
-            signature_sha256="a" * 64, completed_key_id=work_order.processor_key_id,
+            signature_sha256="a" * 64, evidence_package_json="{}",
+            evidence_package_sha256="c" * 64, completed_key_id=work_order.processor_key_id,
             completed_public_key_sha256="f" * 64,
         )
 
@@ -190,6 +194,7 @@ def test_expired_desktop_claim_can_be_reissued_without_replaying_old_capability(
             claim_capability=expired_capability,
             report=report,
             signature_sha256="a" * 64,
+            evidence_package_json="{}", evidence_package_sha256="c" * 64,
             completed_key_id=work_order.processor_key_id,
             completed_public_key_sha256="f" * 64,
         )
@@ -200,6 +205,7 @@ def test_expired_desktop_claim_can_be_reissued_without_replaying_old_capability(
         claim_capability=replacement_capability,
         report=report,
         signature_sha256="a" * 64,
+        evidence_package_json="{}", evidence_package_sha256="c" * 64,
         completed_key_id=work_order.processor_key_id,
         completed_public_key_sha256="f" * 64,
     )
@@ -225,7 +231,8 @@ def test_unknown_report_fields_and_external_copies_fail_closed(db):
     capability = deletion_cases.claim_work_order(work_order)
     deletion_cases.apply_desktop_report(
         db, case, work_order, claim_capability=capability, report=report,
-        signature_sha256="a" * 64, completed_key_id=work_order.processor_key_id,
+        signature_sha256="a" * 64, evidence_package_json="{}",
+        evidence_package_sha256="c" * 64, completed_key_id=work_order.processor_key_id,
         completed_public_key_sha256="f" * 64,
     )
     assert case.state == "ready_for_live_purge"

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -16,12 +17,16 @@ import uuid
 import zipfile
 
 import evidence_manifest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 
 FORMAT = "mp-opt-evidence-bundle-v1"
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 MAX_EVIDENCE_ZIP_BYTES = MAX_BUNDLE_BYTES + (2 * 1024 * 1024)
-INCLUDED_ROOTS = {"ledger", "public", "anchors"}
+INCLUDED_ROOTS = {"ledger", "public", "anchors", "artifacts"}
+SIGNED_DESKTOP_EVIDENCE_PACKAGE_FORMAT = "mp-opt-signed-desktop-evidence-v1"
+DESKTOP_EVIDENCE_NAMESPACE = "mp-opt-desktop-evidence-v1"
 BUNDLE_NAMESPACE = uuid.UUID("aa0c67fb-6a9c-4cf3-b712-c4cde822e7be")
 PUBLIC_VERIFIER_URL = "https://brian-funk.github.io/masterplanOptimiserV3---Evidence-Public/verify-evidence/"
 ZIP_MEMBERS = ("accountability.evidence", "accountability.evidence.sha256", "VERIFYING.txt")
@@ -176,6 +181,94 @@ def _read_member(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bytes:
     return raw
 
 
+def _canonical(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _verify_processor_artifacts(root: Path) -> int:
+    """Verify every Desktop proof referenced by the signed instance ledger."""
+
+    references: dict[str, dict] = {}
+    for path in sorted((root / "ledger").glob("[0-9]" * 12 + "_*.json")):
+        record = evidence_manifest.load_json_bytes(path.read_bytes())
+        digest = record["payload"].get("evidence_package_sha256")
+        if digest is not None:
+            if digest in references:
+                raise BundleError("an evidence artifact is referenced more than once")
+            references[digest] = record["payload"]
+
+    artifacts = root / "artifacts"
+    present = set()
+    if artifacts.exists():
+        present = {path.stem for path in artifacts.glob("*.json") if path.is_file()}
+        if any(path.suffix != ".json" or not path.is_file() for path in artifacts.iterdir()):
+            raise BundleError("the Desktop evidence artifact directory is invalid")
+    if present != set(references):
+        raise BundleError("Desktop evidence artifacts do not exactly match the signed ledger")
+
+    for digest, payload in references.items():
+        path = artifacts / f"{digest}.json"
+        raw = path.read_bytes()
+        if len(raw) > 128 * 1024 or hashlib.sha256(raw).hexdigest() != digest:
+            raise BundleError("a Desktop evidence artifact digest does not match")
+        try:
+            package = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise BundleError("a Desktop evidence artifact is invalid JSON") from exc
+        if (
+            not isinstance(package, dict)
+            or set(package) != {"format", "namespace", "document", "proof", "public_key"}
+            or package.get("format") != SIGNED_DESKTOP_EVIDENCE_PACKAGE_FORMAT
+            or package.get("namespace") != DESKTOP_EVIDENCE_NAMESPACE
+            or raw != _canonical(package)
+        ):
+            raise BundleError("a Desktop evidence artifact schema is invalid")
+        document = package["document"]
+        proof = package["proof"]
+        if not isinstance(document, dict) or not isinstance(proof, dict) or set(proof) != {
+            "format", "key_id", "namespace", "signature",
+        }:
+            raise BundleError("a Desktop evidence proof envelope is invalid")
+        try:
+            public_key = evidence_manifest.canonical_public_key(package["public_key"])
+            loaded = serialization.load_ssh_public_key(public_key.encode("ascii"))
+            signature = base64.b64decode(proof["signature"], validate=True)
+        except (ValueError, TypeError) as exc:
+            raise BundleError("a Desktop evidence public key or signature is invalid") from exc
+        if (
+            not isinstance(loaded, Ed25519PublicKey)
+            or len(signature) != 64
+            or proof.get("format") != "mp-opt-ed25519-signature-v1"
+            or proof.get("namespace") != DESKTOP_EVIDENCE_NAMESPACE
+            or proof.get("key_id") != evidence_manifest.key_id(public_key)
+        ):
+            raise BundleError("a Desktop evidence signature identity is invalid")
+        try:
+            loaded.verify(
+                signature,
+                DESKTOP_EVIDENCE_NAMESPACE.encode("ascii") + b"\0" + _canonical(document),
+            )
+        except Exception as exc:
+            raise BundleError("a Desktop evidence signature does not verify") from exc
+        document_digest = hashlib.sha256(_canonical(document)).hexdigest()
+        expected_document = next(
+            (payload[field] for field in ("document_sha256", "report_sha256", "copy_resolution_sha256") if field in payload),
+            None,
+        )
+        expected_key = payload.get("key_id", payload.get("processor_key_id"))
+        expected_fingerprint = payload.get("public_key_sha256", payload.get("completed_public_key_sha256"))
+        if (
+            expected_document != document_digest
+            or payload.get("signature_sha256") != hashlib.sha256(_canonical(proof)).hexdigest()
+            or expected_key != proof["key_id"]
+            or expected_fingerprint != hashlib.sha256(public_key.encode("ascii")).hexdigest()
+            or document.get("key_id") != proof["key_id"]
+            or document.get("public_key_sha256") != expected_fingerprint
+        ):
+            raise BundleError("a Desktop evidence artifact does not match its signed ledger record")
+    return len(references)
+
+
 def verify_bundle(bundle: Path) -> dict:
     metadata = bundle.lstat()
     if not stat.S_ISREG(metadata.st_mode) or bundle.is_symlink() or metadata.st_size > MAX_BUNDLE_BYTES:
@@ -237,6 +330,7 @@ def verify_bundle(bundle: Path) -> dict:
             or chain["records"] != document["record_count"]
         ):
             raise BundleError("bundle manifest does not match its signed chain")
+        processor_artifacts = _verify_processor_artifacts(root / "evidence")
         identity = "|".join((
             document["instance_id"],
             document["chain_id"],
@@ -252,6 +346,7 @@ def verify_bundle(bundle: Path) -> dict:
         "chain_id": document["chain_id"],
         "chain_head_sha256": document["chain_head_sha256"],
         "record_count": document["record_count"],
+        "processor_artifact_count": processor_artifacts,
     }
 
 

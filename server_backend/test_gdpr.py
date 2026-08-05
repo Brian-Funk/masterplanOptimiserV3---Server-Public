@@ -291,6 +291,7 @@ def test_gdpr_anonymise_removes_event_linked_identity_and_audit_name(db, reauth_
             "completed_at": "2026-07-28T10:30:00+00:00",
         },
         signature_sha256="a" * 64,
+        evidence_package_json="{}", evidence_package_sha256="c" * 64,
         completed_key_id=work_order.processor_key_id,
         completed_public_key_sha256="f" * 64,
     )

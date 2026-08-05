@@ -33,6 +33,7 @@ from app.core.operator_evidence import (
     key_id,
     processor_event_action_sha256,
     public_key_sha256,
+    signed_desktop_evidence_package,
     validate_desktop_evidence_document,
     validate_entity,
     validate_processor_event_registration,
@@ -747,11 +748,10 @@ def record_processor_policy_acknowledgement(
         if current is None or document.get("policy_version") != current[0] or document.get("policy_sha256") != current[1]:
             raise TrustEvidenceError("the permitted-data policy changed; review its current version")
         acknowledged_at = datetime.fromisoformat(str(document["acknowledged_at"]).replace("Z", "+00:00"))
-        signature_digest = verify_signature(
-            document, body.proof, key.public_key, namespace=DESKTOP_EVIDENCE_NAMESPACE,
+        package_json, package_digest, document_digest, signature_digest = (
+            signed_desktop_evidence_package(document, body.proof, key.public_key)
         )
         rendered = canonical_json(document)
-        document_digest = hashlib.sha256(rendered).hexdigest()
         existing = db.query(ProcessorPolicyAcknowledgement).filter(
             ProcessorPolicyAcknowledgement.event_evidence_id == event.evidence_id,
             ProcessorPolicyAcknowledgement.entity_id == identity.entity_id,
@@ -759,6 +759,8 @@ def record_processor_policy_acknowledgement(
             ProcessorPolicyAcknowledgement.policy_sha256 == current[1],
         ).first()
         if existing is not None:
+            if existing.evidence_package_sha256 != package_digest:
+                raise TrustEvidenceError("a different signed acknowledgement is already recorded")
             return {"status": "acknowledged", "document_sha256": existing.document_sha256, "instance_record_sha256": existing.instance_record_sha256}
         row = ProcessorPolicyAcknowledgement(
             instance_id=key.instance_id, event_evidence_id=event.evidence_id,
@@ -766,6 +768,8 @@ def record_processor_policy_acknowledgement(
             policy_version=current[0], policy_sha256=current[1],
             document_json=rendered.decode("utf-8"), document_sha256=document_digest,
             signature_sha256=signature_digest, acknowledged_at=acknowledged_at,
+            evidence_package_json=package_json,
+            evidence_package_sha256=package_digest,
         )
         db.add(row)
         db.flush()
@@ -777,6 +781,8 @@ def record_processor_policy_acknowledgement(
                 "key_id": key.key_id, "policy_version": current[0],
                 "policy_sha256": current[1], "document_sha256": document_digest,
                 "signature_sha256": signature_digest, "status": "verified",
+                "evidence_package_sha256": package_digest,
+                "public_key_sha256": key.public_key_sha256,
             },
         )
         db.commit()
@@ -1272,8 +1278,8 @@ def report_desktop_deletion_work_order(
             document, instance_id=key.instance_id, event_ref=event.evidence_id,
             entity_id=identity.entity_id, row_key_id=key.key_id, fingerprint=key.public_key_sha256,
         )
-        signature_digest = verify_signature(
-            document, body.proof, key.public_key, namespace=DESKTOP_EVIDENCE_NAMESPACE,
+        package_json, package_digest, _, signature_digest = (
+            signed_desktop_evidence_package(document, body.proof, key.public_key)
         )
         digest = apply_desktop_report(
             db,
@@ -1282,6 +1288,8 @@ def report_desktop_deletion_work_order(
             claim_capability=capability,
             report=document,
             signature_sha256=signature_digest,
+            evidence_package_json=package_json,
+            evidence_package_sha256=package_digest,
             completed_key_id=key.key_id,
             completed_public_key_sha256=key.public_key_sha256,
         )
@@ -1330,13 +1338,15 @@ def report_desktop_copy_resolution(
             document, instance_id=key.instance_id, event_ref=event.evidence_id,
             entity_id=identity.entity_id, row_key_id=key.key_id, fingerprint=key.public_key_sha256,
         )
-        signature_digest = verify_signature(
-            document, body.proof, key.public_key, namespace=DESKTOP_EVIDENCE_NAMESPACE,
+        package_json, package_digest, _, signature_digest = (
+            signed_desktop_evidence_package(document, body.proof, key.public_key)
         )
         digest = apply_desktop_copy_resolution(
             db, case, work_order, document=document,
             signature_sha256=signature_digest, completed_key_id=key.key_id,
             completed_public_key_sha256=key.public_key_sha256,
+            evidence_package_json=package_json,
+            evidence_package_sha256=package_digest,
         )
         db.commit()
         return {"status": "recorded", "work_order_id": work_order.work_order_id, "copy_resolution_sha256": digest, "case_state": case.state}

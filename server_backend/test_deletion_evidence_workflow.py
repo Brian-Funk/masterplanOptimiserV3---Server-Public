@@ -111,6 +111,7 @@ def _apply_desktop_report(db, case, event, *, already_absent=False):
     deletion_cases.apply_desktop_report(
         db, case, work_order, claim_capability=capability, report=report,
         signature_sha256="a" * 64,
+        evidence_package_json="{}", evidence_package_sha256="c" * 64,
         completed_key_id=work_order.processor_key_id,
         completed_public_key_sha256="f" * 64,
     )
@@ -133,6 +134,7 @@ def _apply_desktop_report(db, case, event, *, already_absent=False):
         db, case, work_order,
         document=copy_resolution,
         signature_sha256="b" * 64,
+        evidence_package_json="{}", evidence_package_sha256="d" * 64,
         completed_key_id=work_order.processor_key_id,
         completed_public_key_sha256="f" * 64,
     )

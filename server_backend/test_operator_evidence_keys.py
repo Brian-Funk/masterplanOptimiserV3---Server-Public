@@ -17,8 +17,23 @@ from webauthn.helpers import bytes_to_base64url
 
 from app.api.v1 import evidence_keys as trust_api
 from app.core.config import settings
-from app.core.operator_evidence import TRUST_NAMESPACE, action_sha256, canonical_json, key_id, signature_envelope
-from app.models.evidence import EvidenceKey, EvidenceKeyRegistrationChallenge, ProcessorIdentity, RootActionAuthorisation
+from app.core.operator_evidence import (
+    DESKTOP_EVIDENCE_NAMESPACE,
+    TRUST_NAMESPACE,
+    action_sha256,
+    canonical_json,
+    key_id,
+    signature_envelope,
+    signed_desktop_evidence_package,
+)
+from app.models.evidence import (
+    EvidenceKey,
+    EvidenceKeyRegistrationChallenge,
+    ProcessorIdentity,
+    ProcessorPolicyAcknowledgement,
+    RootActionAuthorisation,
+)
+from app.models.governance import GovernancePublication
 from app.models.user import WebAuthnCredential
 from deploy.management.instance_key import InstanceKeyError, commission, compare, verify
 from server_backend.conftest import _make_client, create_test_event, create_test_user
@@ -47,6 +62,40 @@ def _proof(private: Ed25519PrivateKey, document: dict) -> dict:
     public = private.public_key().public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode("ascii")
     signature = private.sign(TRUST_NAMESPACE.encode("ascii") + b"\0" + canonical_json(document))
     return signature_envelope(key_identifier=key_id(public), signature=signature)
+
+
+def test_signed_desktop_package_retains_a_repeatably_verifiable_public_proof():
+    private, public = _keypair()
+    document = {
+        "format": "mp-opt-desktop-policy-acknowledgement-v1",
+        "instance_id": "11111111-1111-4111-8111-111111111111",
+        "event_ref": "22222222-2222-4222-8222-222222222222",
+        "entity_id": "prc-synthetic0001",
+        "key_id": key_id(public),
+        "role": "processor",
+        "algorithm": "Ed25519",
+        "public_key_sha256": hashlib.sha256(public.encode("ascii")).hexdigest(),
+        "policy_version": 1,
+        "policy_sha256": "a" * 64,
+        "acknowledged_at": "2026-08-05T10:00:00Z",
+    }
+    signature = private.sign(
+        DESKTOP_EVIDENCE_NAMESPACE.encode("ascii") + b"\0" + canonical_json(document)
+    )
+    proof = signature_envelope(
+        key_identifier=key_id(public), signature=signature,
+        namespace=DESKTOP_EVIDENCE_NAMESPACE,
+    )
+    package_json, package_digest, document_digest, proof_digest = (
+        signed_desktop_evidence_package(document, proof, public)
+    )
+    package = json.loads(package_json)
+    assert package["document"] == document
+    assert package["proof"] == proof
+    assert package["public_key"] == public
+    assert hashlib.sha256(package_json.encode()).hexdigest() == package_digest
+    assert hashlib.sha256(canonical_json(document)).hexdigest() == document_digest
+    assert hashlib.sha256(canonical_json(proof)).hexdigest() == proof_digest
 
 
 def _begin(client, public: str, role: str, entity_id: str, **rotation) -> dict:
@@ -208,6 +257,43 @@ def test_event_processor_enrolment_is_publish_secret_bound_and_root_activated(db
     assert identity.event_evidence_id == event.evidence_id
     assert identity.entity_id == package["entity_id"]
     assert identity.status == "active"
+
+    policy = GovernancePublication(
+        version=1, content_json="{}", content_sha256="b" * 64,
+        source_json="{}", source_sha256="c" * 64,
+    )
+    db.add(policy)
+    db.commit()
+    acknowledged_at = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+    document = {
+        "format": "mp-opt-desktop-policy-acknowledgement-v1",
+        "instance_id": identity.instance_id,
+        "event_ref": event.evidence_id,
+        "entity_id": identity.entity_id,
+        "key_id": package["key_id"],
+        "role": "processor",
+        "algorithm": "Ed25519",
+        "public_key_sha256": fingerprint,
+        "policy_version": 1,
+        "policy_sha256": "b" * 64,
+        "acknowledged_at": acknowledged_at,
+    }
+    signature = private.sign(
+        DESKTOP_EVIDENCE_NAMESPACE.encode("ascii") + b"\0" + canonical_json(document)
+    )
+    proof = signature_envelope(
+        key_identifier=package["key_id"], signature=signature,
+        namespace=DESKTOP_EVIDENCE_NAMESPACE,
+    )
+    acknowledged = client.post(
+        "/api/v1/publish/processor-policy-acknowledgements",
+        json={"document": document, "proof": proof},
+        headers={"Authorization": f"Bearer {publish_secret}"},
+    )
+    assert acknowledged.status_code == 201, acknowledged.text
+    retained = db.query(ProcessorPolicyAcknowledgement).one()
+    assert retained.evidence_package_sha256
+    assert json.loads(retained.evidence_package_json)["proof"] == proof
 
 
 def test_routine_rotation_requires_old_and_new_proof_and_history_is_preserved(db, monkeypatch):

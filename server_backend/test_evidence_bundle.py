@@ -1,10 +1,15 @@
 """Portable public evidence bundle and Git staging tests."""
 
+import base64
+import hashlib
 import json
 from pathlib import Path
 import subprocess
 import sys
 import zipfile
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +20,7 @@ import evidence_bundle  # noqa: E402
 import evidence_manifest  # noqa: E402
 
 
-def _ledger(tmp_path: Path) -> Path:
+def _ledger(tmp_path: Path, *, with_processor_artifact: bool = False) -> Path:
     home = tmp_path / "evidence"
     private = tmp_path / "key"
     public = home / "public" / "instance_signing_key.pub"
@@ -34,6 +39,68 @@ def _ledger(tmp_path: Path) -> Path:
         private_key=private,
         public_key=public,
     )
+    if with_processor_artifact:
+        processor_private = Ed25519PrivateKey.generate()
+        processor_public = processor_private.public_key().public_bytes(
+            serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH,
+        ).decode("ascii")
+        processor_key_id = evidence_manifest.key_id(processor_public)
+        fingerprint = hashlib.sha256(processor_public.encode("ascii")).hexdigest()
+        document = {
+            "format": "mp-opt-desktop-policy-acknowledgement-v1",
+            "instance_id": "11111111-1111-4111-8111-111111111111",
+            "event_ref": "33333333-3333-4333-8333-333333333333",
+            "entity_id": "prc-synthetic0001",
+            "key_id": processor_key_id,
+            "role": "processor",
+            "algorithm": "Ed25519",
+            "public_key_sha256": fingerprint,
+            "policy_version": 1,
+            "policy_sha256": "a" * 64,
+            "acknowledged_at": evidence_manifest.utc_now(),
+        }
+        canonical_document = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+        signature = processor_private.sign(b"mp-opt-desktop-evidence-v1\0" + canonical_document)
+        proof = {
+            "format": "mp-opt-ed25519-signature-v1",
+            "key_id": processor_key_id,
+            "namespace": "mp-opt-desktop-evidence-v1",
+            "signature": base64.b64encode(signature).decode("ascii"),
+        }
+        package = {
+            "format": "mp-opt-signed-desktop-evidence-v1",
+            "namespace": "mp-opt-desktop-evidence-v1",
+            "document": document,
+            "proof": proof,
+            "public_key": processor_public,
+        }
+        raw = json.dumps(package, sort_keys=True, separators=(",", ":")).encode()
+        package_digest = hashlib.sha256(raw).hexdigest()
+        artifacts = home / "artifacts"
+        artifacts.mkdir()
+        (artifacts / f"{package_digest}.json").write_bytes(raw)
+        evidence_manifest.append_record(
+            home / "ledger",
+            instance_id="11111111-1111-4111-8111-111111111111",
+            chain_id="22222222-2222-4222-8222-222222222222",
+            record_type="desktop.policy_acknowledged",
+            payload={
+                "event_ref": document["event_ref"],
+                "entity_id": document["entity_id"],
+                "key_id": processor_key_id,
+                "policy_version": 1,
+                "policy_sha256": document["policy_sha256"],
+                "document_sha256": hashlib.sha256(canonical_document).hexdigest(),
+                "signature_sha256": hashlib.sha256(
+                    json.dumps(proof, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                "evidence_package_sha256": package_digest,
+                "public_key_sha256": fingerprint,
+                "status": "verified",
+            },
+            private_key=private,
+            public_key=public,
+        )
     return home
 
 
@@ -91,3 +158,23 @@ def test_bundle_tampering_is_rejected(tmp_path):
         pass
     else:
         raise AssertionError("tampered evidence bundle was accepted")
+
+
+def test_bundle_verifies_referenced_desktop_signature_and_rejects_tampering(tmp_path):
+    home = _ledger(tmp_path, with_processor_artifact=True)
+    bundle = tmp_path / "processor.evidence"
+    evidence_bundle.create_bundle(home, bundle)
+    assert evidence_bundle.verify_bundle(bundle)["processor_artifact_count"] == 1
+
+    artifact = next((home / "artifacts").glob("*.json"))
+    document = json.loads(artifact.read_text(encoding="utf-8"))
+    document["document"]["policy_version"] = 2
+    raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    artifact.write_bytes(raw)
+    tampered = tmp_path / "tampered.evidence"
+    try:
+        evidence_bundle.create_bundle(home, tampered)
+    except evidence_bundle.BundleError:
+        pass
+    else:
+        raise AssertionError("tampered Desktop evidence artifact was accepted")

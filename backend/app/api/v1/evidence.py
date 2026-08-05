@@ -164,7 +164,7 @@ def export_evidence(
         state = db.get(EvidenceChainState, 1)
         if state is None:
             raise EvidenceUnavailable("Evidence has not been initialised")
-        output, metadata = create_complete_evidence_export(state.instance_id)
+        output, metadata = create_complete_evidence_export(db, state.instance_id)
         if metadata.get("chain_head_sha256") != verified.get("head_sha256"):
             remove_complete_evidence_export(output)
             raise EvidenceUnavailable("The evidence chain changed while the export was created")

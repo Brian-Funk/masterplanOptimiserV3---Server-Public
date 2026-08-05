@@ -103,6 +103,8 @@ class ProcessorPolicyAcknowledgement(Base):
     document_json = Column(Text, nullable=False)
     document_sha256 = Column(String(64), nullable=False, unique=True)
     signature_sha256 = Column(String(64), nullable=False, unique=True)
+    evidence_package_json = Column(Text, nullable=True)
+    evidence_package_sha256 = Column(String(64), nullable=True, unique=True)
     acknowledged_at = Column(DateTime(timezone=True), nullable=False)
     instance_record_sha256 = Column(String(64), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

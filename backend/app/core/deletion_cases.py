@@ -320,6 +320,8 @@ def apply_desktop_report(
     claim_capability: str,
     report: dict[str, Any],
     signature_sha256: str,
+    evidence_package_json: str,
+    evidence_package_sha256: str,
     completed_key_id: str,
     completed_public_key_sha256: str,
 ) -> str:
@@ -328,7 +330,10 @@ def apply_desktop_report(
     canonical = canonical_json(report)
     digest = sha256_text(canonical)
     if work_order.report_sha256:
-        if work_order.report_sha256 != digest:
+        if (
+            work_order.report_sha256 != digest
+            or work_order.report_evidence_package_sha256 != evidence_package_sha256
+        ):
             raise ValueError("A different report is already recorded for this work order")
         return digest
     expires = work_order.claim_expires_at
@@ -347,6 +352,8 @@ def apply_desktop_report(
     work_order.report_json = canonical
     work_order.report_sha256 = digest
     work_order.report_signature_sha256 = signature_sha256
+    work_order.report_evidence_package_json = evidence_package_json
+    work_order.report_evidence_package_sha256 = evidence_package_sha256
     work_order.processor_key_id = completed_key_id
     work_order.reported_at = now
     work_order.claim_capability_sha256 = None
@@ -386,8 +393,10 @@ def apply_desktop_report(
         "event_ref": work_order.event_ref,
         "report_sha256": digest,
         "signature_sha256": signature_sha256,
+        "evidence_package_sha256": evidence_package_sha256,
         "processor_entity_id": work_order.processor_entity_id,
         "processor_key_id": completed_key_id,
+        "completed_public_key_sha256": completed_public_key_sha256,
         "outstanding_actions": report["outstanding_actions"],
         "status": case.state,
     }
@@ -448,6 +457,8 @@ def apply_desktop_copy_resolution(
     *,
     document: dict[str, Any],
     signature_sha256: str,
+    evidence_package_json: str,
+    evidence_package_sha256: str,
     completed_key_id: str,
     completed_public_key_sha256: str,
 ) -> str:
@@ -458,11 +469,16 @@ def apply_desktop_copy_resolution(
     canonical = canonical_json(document)
     digest = sha256_text(canonical)
     if work_order.copy_resolution_sha256:
-        if work_order.copy_resolution_sha256 != digest:
+        if (
+            work_order.copy_resolution_sha256 != digest
+            or work_order.copy_resolution_evidence_package_sha256 != evidence_package_sha256
+        ):
             raise ValueError("a different local-copy resolution is already recorded")
         return digest
     work_order.copy_resolution_sha256 = digest
     work_order.copy_resolution_signature_sha256 = signature_sha256
+    work_order.copy_resolution_evidence_package_json = evidence_package_json
+    work_order.copy_resolution_evidence_package_sha256 = evidence_package_sha256
     requirement = db.query(DeletionRequiredProcessor).filter(
         DeletionRequiredProcessor.case_id == case.id,
         DeletionRequiredProcessor.event_ref == work_order.event_ref,
@@ -484,6 +500,8 @@ def apply_desktop_copy_resolution(
             "processor_key_id": completed_key_id,
             "copy_resolution_sha256": digest,
             "signature_sha256": signature_sha256,
+            "evidence_package_sha256": evidence_package_sha256,
+            "completed_public_key_sha256": completed_public_key_sha256,
             "disposition": document["disposition"], "status": "verified",
         },
     )

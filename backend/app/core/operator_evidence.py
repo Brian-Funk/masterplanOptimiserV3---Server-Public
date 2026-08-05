@@ -28,6 +28,7 @@ DESKTOP_WORK_ORDER_CLAIM_FORMAT = "mp-opt-desktop-work-order-claim-v1"
 SIGNATURE_FORMAT = "mp-opt-ed25519-signature-v1"
 TRUST_NAMESPACE = "mp-opt-role-trust-v1"
 DESKTOP_EVIDENCE_NAMESPACE = "mp-opt-desktop-evidence-v1"
+SIGNED_DESKTOP_EVIDENCE_PACKAGE_FORMAT = "mp-opt-signed-desktop-evidence-v1"
 TRUST_ROLES = frozenset({"controller", "processor"})
 ROTATION_REASONS = frozenset({"routine", "lost", "compromised"})
 REVOCATION_REASONS = frozenset({"retired", "lost", "compromised", "role_changed"})
@@ -222,6 +223,37 @@ def verify_signature(
     try: key.verify(signature, signing_bytes(document, namespace=namespace))
     except Exception as exc: raise TrustEvidenceError("signature verification failed") from exc
     return hashlib.sha256(canonical_json(envelope)).hexdigest()
+
+
+def signed_desktop_evidence_package(
+    document: dict[str, Any], envelope: dict[str, Any], public_key: str,
+) -> tuple[str, str, str, str]:
+    """Return a canonical, independently verifiable public Desktop artifact.
+
+    The package contains no private key material. Its digest is suitable for
+    inclusion in the instance-signed ledger, while the package itself can be
+    retained in an evidence export for later offline verification.
+    """
+
+    canonical_key = canonical_public_key(public_key)
+    signature_digest = verify_signature(
+        document, envelope, canonical_key, namespace=DESKTOP_EVIDENCE_NAMESPACE,
+    )
+    document_digest = hashlib.sha256(canonical_json(document)).hexdigest()
+    package = {
+        "format": SIGNED_DESKTOP_EVIDENCE_PACKAGE_FORMAT,
+        "namespace": DESKTOP_EVIDENCE_NAMESPACE,
+        "document": document,
+        "proof": envelope,
+        "public_key": canonical_key,
+    }
+    rendered = canonical_json(package)
+    return (
+        rendered.decode("utf-8"),
+        hashlib.sha256(rendered).hexdigest(),
+        document_digest,
+        signature_digest,
+    )
 
 
 def processor_event_action_payload(document: dict[str, Any]) -> dict[str, Any]:
