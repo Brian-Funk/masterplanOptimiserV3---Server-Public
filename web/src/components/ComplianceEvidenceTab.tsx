@@ -6,7 +6,7 @@ import { apiFetch } from "@/lib/api";
 import { withReauth } from "@/lib/reauth";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { CheckCircle, Circle, Download, FileCheck2, HardDrive, Info, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
+import { CheckCircle, ChevronDown, Circle, Download, FileCheck2, HardDrive, Info, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
 
 const PUBLIC_EVIDENCE_VERIFIER = "https://brian-funk.github.io/masterplanOptimiserV3---Evidence-Public/verify-evidence/";
 
@@ -433,11 +433,26 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
           <summary className="cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100">Completed cases ({completedWorkflows.length})</summary>
           <div className="mt-3 divide-y divide-gray-200 dark:divide-gray-700">
             {completedWorkflows.map((item) => (
-              <div key={item.request_id} className="grid gap-2 py-3 text-sm md:grid-cols-[minmax(0,0.7fr)_minmax(0,1fr)_minmax(0,2fr)] md:items-center">
-                <p className="font-medium text-gray-900 dark:text-gray-100">{item.case_type === "event_erasure" ? "Event erasure" : "User erasure"}</p>
-                <p className="text-gray-600 dark:text-gray-300">{formatCompletionDate(item.completed_at)}</p>
-                <p className="break-all font-mono text-xs text-gray-500" title={item.evidence.final || ""}>{item.evidence.final || "Final receipt SHA unavailable"}</p>
-              </div>
+              <details key={item.request_id} className="group py-3">
+                <summary className="cursor-pointer list-none rounded-lg px-2 py-2 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-900/50 [&::-webkit-details-marker]:hidden">
+                  <div className="grid gap-2 text-sm md:grid-cols-[minmax(0,0.7fr)_minmax(0,1fr)_minmax(0,2fr)_auto] md:items-center">
+                    <p className="font-medium text-gray-900 dark:text-gray-100">{item.case_type === "event_erasure" ? "Event erasure" : "User erasure"}</p>
+                    <p className="text-gray-600 dark:text-gray-300">{formatCompletionDate(item.completed_at)}</p>
+                    <p className="break-all font-mono text-xs text-gray-500" title={item.evidence.final || ""}>{item.evidence.final || "Final receipt SHA unavailable"}</p>
+                    <span className="flex items-center gap-1 text-xs font-medium text-blue-700 dark:text-blue-300">View technical details<ChevronDown size={15} className="transition-transform group-open:rotate-180" aria-hidden="true" /></span>
+                  </div>
+                </summary>
+                <div className="mx-2 mt-2 rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-900/50">
+                  <dl className="grid gap-3 text-xs text-gray-600 sm:grid-cols-2 dark:text-gray-300">
+                    <div><dt className="font-medium text-gray-900 dark:text-gray-100">Case ID</dt><dd className="mt-1 break-all font-mono">{item.request_id}</dd></div>
+                    <div><dt className="font-medium text-gray-900 dark:text-gray-100">Event reference</dt><dd className="mt-1 break-all font-mono">{item.event_ref}</dd></div>
+                    {item.case_type === "personal_data_erasure" && <div><dt className="font-medium text-gray-900 dark:text-gray-100">Account reference</dt><dd className="mt-1 break-all font-mono">{item.subject_ref}</dd></div>}
+                    <div><dt className="font-medium text-gray-900 dark:text-gray-100">Desktop processor receipts</dt><dd className="mt-1">{item.required_processors.length}</dd></div>
+                    <div><dt className="font-medium text-gray-900 dark:text-gray-100">Checklist SHA-256</dt><dd className="mt-1 break-all font-mono">{item.checklist.sha256 || "Unavailable"}</dd></div>
+                    <div><dt className="font-medium text-gray-900 dark:text-gray-100">Signed evidence stages</dt><dd className="mt-1">{Object.values(item.evidence).filter(Boolean).length}</dd></div>
+                  </dl>
+                </div>
+              </details>
             ))}
           </div>
         </details>

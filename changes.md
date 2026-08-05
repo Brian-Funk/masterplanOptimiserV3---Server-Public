@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added accessible per-case technical disclosures to the compact completed
+  deletion-case list.
 - Verified Desktop deletion artifacts in evidence ZIPs with their established
   domain digest while retaining strict package-signature verification.
 - Accepted the bounded clean-recovery snapshot and superseded portable-package

@@ -182,7 +182,7 @@ describe("ComplianceEvidenceTab", () => {
     await waitFor(() => expect(mockApiFetch.mock.calls.filter(([path]) => path === advancePath)).toHaveLength(2));
   });
 
-  it("collapses completed cases to type, completion date, and final receipt SHA", async () => {
+  it("collapses completed cases and provides an accessible per-case detail disclosure", async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === "/api/v1/admin/deletion-requests") return json([{
         ...workflow,
@@ -203,5 +203,14 @@ describe("ComplianceEvidenceTab", () => {
     expect(screen.getByText("Event erasure")).toBeInTheDocument();
     expect(screen.getByText("f".repeat(64))).toBeInTheDocument();
     expect(screen.queryByText("Case progress")).not.toBeInTheDocument();
+    const disclosureLabel = screen.getByText("View technical details");
+    const disclosure = disclosureLabel.closest("details");
+    expect(disclosure).not.toHaveAttribute("open");
+    fireEvent.click(disclosureLabel.closest("summary")!);
+    expect(disclosure).toHaveAttribute("open");
+    expect(screen.getByText("Case ID")).toBeInTheDocument();
+    expect(screen.getByText("Checklist SHA-256")).toBeInTheDocument();
+    fireEvent.click(disclosureLabel.closest("summary")!);
+    expect(disclosure).not.toHaveAttribute("open");
   });
 });
