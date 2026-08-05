@@ -154,15 +154,29 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
         .filter((item) => item.state !== "complete")
         .map(async (item) => {
           try {
-            return await apiFetch(
+            const response = await apiFetch(
               `/api/v1/admin/deletion-requests/${item.request_id}/advance`,
               { method: "POST", body: "{}" },
             );
-          } catch {
-            return null;
+            if (!response.ok) {
+              return {
+                response: null,
+                error: messageFrom(await response.json().catch(() => null)),
+              };
+            }
+            return { response, error: null };
+          } catch (cause) {
+            return {
+              response: null,
+              error: cause instanceof Error ? cause.message : "Automatic case update failed.",
+            };
           }
         }));
-      if (results.some((response) => response?.ok)) {
+      const advanceError = results.find((result) => result.error)?.error;
+      if (advanceError) {
+        setError(`Automatic case update failed: ${advanceError}`);
+      }
+      if (results.some((result) => result.response?.ok)) {
         cases = (await checked(await apiFetch("/api/v1/admin/deletion-requests"))) as Workflow[];
       }
       setWorkflows(cases);
@@ -277,6 +291,8 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
     if (item.live_data_purged_at && (item.topology === "single_node" || item.evidence.peer) && !item.evidence.clean_backup && !item.evidence.backup_not_applicable) {
       if (!item.clean_backup_bridge.job_id) {
         buttons.push(<Button key="backup" size="sm" onClick={() => mutate(`${item.request_id}-backup`, `${prefix}/clean-backup-request`)} disabled={!!busy}>Create a recovery snapshot</Button>);
+      } else {
+        buttons.push(<Button key="check-backup" size="sm" onClick={() => mutate(`${item.request_id}-check-backup`, `${prefix}/advance`)} disabled={!!busy}>Check recovery receipt now</Button>);
       }
       if (backups.length === 0 && (item.clean_backup_bridge.local_snapshot_count ?? 0) === 0) {
         buttons.push(<Button key="no-backup" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-no-backup`, `${prefix}/no-controlled-backups`)} disabled={!!busy}>No recovery backups are used</Button>);

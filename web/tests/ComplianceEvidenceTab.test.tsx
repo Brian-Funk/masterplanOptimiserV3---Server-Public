@@ -152,6 +152,36 @@ describe("ComplianceEvidenceTab", () => {
     expect(screen.queryByRole("button", { name: "Confirm completion" })).not.toBeInTheDocument();
   });
 
+  it("surfaces automatic advancement failures and offers an explicit receipt retry", async () => {
+    const advancePath = "/api/v1/admin/deletion-requests/del-example-1/advance";
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/deletion-requests") return json([{
+        ...workflow,
+        state: "awaiting_clean_backup",
+        live_data_purged_at: "2026-08-05T11:51:37Z",
+        clean_backup_bridge: { job_id: "job-1", receipt_id: null, local_snapshot_count: 1 },
+      }]);
+      if (path === advancePath) {
+        return new Response(JSON.stringify({ detail: "The compliance receipt could not be applied" }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (path === "/api/v1/admin/evidence/backups") return json([]);
+      if (path === "/api/v1/admin/evidence") return json({ initialised: true, mode: "local", instance_id: "instance-1", head_sha256: "a".repeat(64) });
+      if (path === "/api/v1/admin/evidence/archive") return json({ enabled: false, authentication: "Disabled", repository: null, default_branch: null, latest_local_chain_head: null, latest_bundled_chain_head: null, latest_archived_chain_head: null, pending_submission_count: 0, submission_id: null, state: null, pull_request_number: null, pull_request_head_sha: null, merge_commit_sha: null, failure_reason: null });
+      throw new Error(`Unexpected path: ${path}`);
+    });
+    const { ComplianceEvidenceTab } = await import("@/components/ComplianceEvidenceTab");
+    render(<ComplianceEvidenceTab events={[]} />);
+
+    expect(await screen.findByText(/Automatic case update failed: The compliance receipt could not be applied/)).toBeInTheDocument();
+    const retry = screen.getByRole("button", { name: "Check recovery receipt now" });
+    fireEvent.click(retry);
+
+    await waitFor(() => expect(mockApiFetch.mock.calls.filter(([path]) => path === advancePath)).toHaveLength(2));
+  });
+
   it("collapses completed cases to type, completion date, and final receipt SHA", async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === "/api/v1/admin/deletion-requests") return json([{

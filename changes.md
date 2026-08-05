@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Surfaced deletion-case auto-advance failures and added an explicit guarded
+  retry for already-created clean recovery receipts.
 - Retained a durable inventory of portable workstation exports and required
   explicit resolution of every known pre-deletion external backup package.
 - Blocked deletion-case completion while superseded local recovery snapshots
