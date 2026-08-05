@@ -59,7 +59,9 @@ def _ledger(tmp_path: Path, *, with_processor_artifact: bool = False) -> Path:
             "policy_sha256": "a" * 64,
             "acknowledged_at": evidence_manifest.utc_now(),
         }
-        canonical_document = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+        canonical_document = (
+            json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
         signature = processor_private.sign(b"mp-opt-desktop-evidence-v1\0" + canonical_document)
         proof = {
             "format": "mp-opt-ed25519-signature-v1",
@@ -74,7 +76,7 @@ def _ledger(tmp_path: Path, *, with_processor_artifact: bool = False) -> Path:
             "proof": proof,
             "public_key": processor_public,
         }
-        raw = json.dumps(package, sort_keys=True, separators=(",", ":")).encode()
+        raw = (json.dumps(package, sort_keys=True, separators=(",", ":")) + "\n").encode()
         package_digest = hashlib.sha256(raw).hexdigest()
         artifacts = home / "artifacts"
         artifacts.mkdir()
@@ -92,7 +94,7 @@ def _ledger(tmp_path: Path, *, with_processor_artifact: bool = False) -> Path:
                 "policy_sha256": document["policy_sha256"],
                 "document_sha256": hashlib.sha256(canonical_document).hexdigest(),
                 "signature_sha256": hashlib.sha256(
-                    json.dumps(proof, sort_keys=True, separators=(",", ":")).encode()
+                    (json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n").encode()
                 ).hexdigest(),
                 "evidence_package_sha256": package_digest,
                 "public_key_sha256": fingerprint,

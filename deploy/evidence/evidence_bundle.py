@@ -182,7 +182,9 @@ def _read_member(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bytes:
 
 
 def _canonical(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return (
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+    ).encode("utf-8")
 
 
 def _verify_processor_artifacts(root: Path) -> int:
