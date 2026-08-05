@@ -1065,8 +1065,9 @@ def test_accountability_export_is_copyable_and_never_publishes_automatically():
     evidence = (root / "deploy/management/evidence.sh").read_text(encoding="utf-8")
     menu = (root / "manage.sh").read_text(encoding="utf-8")
     assert "ui_copyable_terminal_text \"Complete accountability evidence exported\"" in evidence
-    assert "create-zip" in evidence
-    assert "verify-zip" in evidence
+    assert "export-tui" in evidence
+    assert "zip_sha256" in evidence
+    assert "mounted evidence export changed after backend verification" in evidence
     assert "accountability.evidence.sha256" in evidence
     assert "VERIFYING.txt" in evidence
     assert "scp deploy@" in evidence
