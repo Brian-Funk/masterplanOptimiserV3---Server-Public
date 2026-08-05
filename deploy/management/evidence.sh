@@ -30,7 +30,7 @@ mp_trust_key_guidance() {
 mp_evidence_verify() {
     local result report
     report="$(mktemp "$MP_STATE/evidence-verify.XXXXXX")" || return 1
-    if ! result="$(sudo -n python3 "$MP_ROOT/deploy/evidence/evidence_manifest.py" verify-chain \
+    if ! result="$(sudo -n env PYTHONDONTWRITEBYTECODE=1 python3 "$MP_ROOT/deploy/evidence/evidence_manifest.py" verify-chain \
         "$MP_EVIDENCE_HOME/ledger" \
         "$MP_EVIDENCE_HOME/public/instance_signing_key.pub" 2>&1)"; then
         printf 'SIGNED EVIDENCE: INVALID OR UNAVAILABLE\n\n%s\n' "$result" > "$report"
