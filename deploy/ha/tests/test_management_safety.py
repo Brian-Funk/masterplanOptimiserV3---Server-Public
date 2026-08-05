@@ -755,6 +755,7 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
             archive_hash = __import__("hashlib").sha256(archive.read_bytes()).hexdigest()
             (selected / "receipt.json").write_text(json.dumps({
                 "format": "mp-opt-snapshot-receipt-v2",
+                "created_at": "2026-07-18T12:00:00Z",
                 "archive_sha256": archive_hash,
                 "verification": "deep-verified",
                 "encryption": {"recovery_key_id": "age-key-test"},
