@@ -20,6 +20,71 @@ import evidence_bundle  # noqa: E402
 import evidence_manifest  # noqa: E402
 
 
+def _bind_archive_trust(home: Path, instance_private: Path, instance_public_path: Path) -> None:
+    controller_private = Ed25519PrivateKey.generate()
+    controller_public = controller_private.public_key().public_bytes(
+        serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH,
+    ).decode("ascii")
+    instance_public = evidence_manifest.canonical_public_key(
+        instance_public_path.read_text(encoding="ascii")
+    )
+    controller_key_id = evidence_manifest.key_id(controller_public)
+    document = {
+        "format": "mp-opt-controller-archive-trust-v1",
+        "instance_id": "11111111-1111-4111-8111-111111111111",
+        "controller_id": "ctl-controller000001",
+        "controller_key_id": controller_key_id,
+        "controller_public_key_sha256": hashlib.sha256(controller_public.encode("ascii")).hexdigest(),
+        "instance_key_id": evidence_manifest.key_id(instance_public),
+        "instance_public_key_sha256": hashlib.sha256(instance_public.encode("ascii")).hexdigest(),
+        "scope": "accountability_evidence_archive",
+        "signed_at": "2026-08-05T10:00:00Z",
+    }
+    canonical_document = (
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    proof = {
+        "format": "mp-opt-ed25519-signature-v1",
+        "key_id": controller_key_id,
+        "namespace": "mp-opt-role-trust-v1",
+        "signature": base64.b64encode(
+            controller_private.sign(b"mp-opt-role-trust-v1\0" + canonical_document)
+        ).decode("ascii"),
+    }
+    package = {
+        "format": "mp-opt-signed-controller-archive-trust-v1",
+        "namespace": "mp-opt-role-trust-v1",
+        "document": document,
+        "proof": proof,
+        "controller_public_key": controller_public,
+        "instance_public_key": instance_public,
+    }
+    raw = (json.dumps(package, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    archive_trust = home / "archive-trust"
+    archive_trust.mkdir()
+    (archive_trust / f"{digest}.json").write_bytes(raw)
+    evidence_manifest.append_record(
+        home / "ledger",
+        instance_id=document["instance_id"],
+        chain_id="22222222-2222-4222-8222-222222222222",
+        record_type="evidence.archive_trust_bound",
+        payload={
+            "controller_id": document["controller_id"],
+            "controller_key_id": controller_key_id,
+            "key_id": document["instance_key_id"],
+            "public_key_sha256": document["instance_public_key_sha256"],
+            "statement_sha256": digest,
+            "proof_sha256": hashlib.sha256(
+                (json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            ).hexdigest(),
+            "status": "verified",
+        },
+        private_key=instance_private,
+        public_key=instance_public_path,
+    )
+
+
 def _ledger(tmp_path: Path, *, with_processor_artifact: bool = False) -> Path:
     home = tmp_path / "evidence"
     private = tmp_path / "key"
@@ -39,6 +104,7 @@ def _ledger(tmp_path: Path, *, with_processor_artifact: bool = False) -> Path:
         private_key=private,
         public_key=public,
     )
+    _bind_archive_trust(home, private, public)
     if with_processor_artifact:
         processor_private = Ed25519PrivateKey.generate()
         processor_public = processor_private.public_key().public_bytes(
@@ -117,7 +183,7 @@ def test_bundle_round_trip_and_idempotent_git_staging(tmp_path):
 
     assert created["bundle_sha256"] == evidence_bundle.sha256_file(bundle)
     assert verified["valid"] is True
-    assert verified["record_count"] == 1
+    assert verified["record_count"] == 2
     assert first["status"] == "staged"
     assert second["status"] == "already_staged"
 

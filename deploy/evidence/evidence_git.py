@@ -43,6 +43,7 @@ TEMPLATE_SCHEMA_FILES = {
 }
 TOOL_FILES = {
     "tools/evidence_archive_repository.py",
+    "tools/evidence_bundle.py",
     "tools/evidence_git.py",
     "tools/evidence_manifest.py",
     "tools/portable_bundle.py",
@@ -507,7 +508,7 @@ def export_template(source_root: Path, destination: Path) -> None:
     for name in ("verify_evidence_repo.py", "scan_evidence_repo.py", "validate_ingestion_paths.py"):
         shutil.copyfile(source_root / "tools" / name, tools / name)
     for name in (
-        "evidence_archive_repository.py", "evidence_git.py", "evidence_manifest.py",
+        "evidence_archive_repository.py", "evidence_bundle.py", "evidence_git.py", "evidence_manifest.py",
         "portable_bundle.py",
     ):
         shutil.copyfile(source_root / "deploy" / "evidence" / name, tools / name)

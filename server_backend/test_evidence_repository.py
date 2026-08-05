@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
 from pathlib import Path
 import subprocess
 import sys
 import uuid
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +52,61 @@ def _evidence_home(
         chain_id=chain_id,
         record_type="instance.initialised",
         payload={"status": "initialised"},
+        private_key=private,
+        public_key=public,
+    )
+    controller_private = Ed25519PrivateKey.generate()
+    controller_public = controller_private.public_key().public_bytes(
+        serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH,
+    ).decode("ascii")
+    instance_public = evidence_manifest.canonical_public_key(public.read_text(encoding="ascii"))
+    controller_key_id = evidence_manifest.key_id(controller_public)
+    document = {
+        "format": "mp-opt-controller-archive-trust-v1",
+        "instance_id": instance_id,
+        "controller_id": "ctl-controller000001",
+        "controller_key_id": controller_key_id,
+        "controller_public_key_sha256": hashlib.sha256(controller_public.encode("ascii")).hexdigest(),
+        "instance_key_id": evidence_manifest.key_id(instance_public),
+        "instance_public_key_sha256": hashlib.sha256(instance_public.encode("ascii")).hexdigest(),
+        "scope": "accountability_evidence_archive",
+        "signed_at": "2026-08-05T10:00:00Z",
+    }
+    proof = {
+        "format": "mp-opt-ed25519-signature-v1",
+        "key_id": controller_key_id,
+        "namespace": "mp-opt-role-trust-v1",
+        "signature": base64.b64encode(controller_private.sign(
+            b"mp-opt-role-trust-v1\0" + evidence_manifest.canonical_json(document)
+        )).decode("ascii"),
+    }
+    package = {
+        "format": "mp-opt-signed-controller-archive-trust-v1",
+        "namespace": "mp-opt-role-trust-v1",
+        "document": document,
+        "proof": proof,
+        "controller_public_key": controller_public,
+        "instance_public_key": instance_public,
+    }
+    raw = evidence_manifest.canonical_json(package)
+    digest = hashlib.sha256(raw).hexdigest()
+    archive_trust = home / "archive-trust"
+    archive_trust.mkdir()
+    (archive_trust / f"{digest}.json").write_bytes(raw)
+    evidence_manifest.append_record(
+        home / "ledger",
+        instance_id=instance_id,
+        chain_id=chain_id,
+        record_type="evidence.archive_trust_bound",
+        payload={
+            "controller_id": document["controller_id"],
+            "controller_key_id": controller_key_id,
+            "key_id": document["instance_key_id"],
+            "public_key_sha256": document["instance_public_key_sha256"],
+            "statement_sha256": digest,
+            "proof_sha256": hashlib.sha256(evidence_manifest.canonical_json(proof)).hexdigest(),
+            "status": "verified",
+        },
         private_key=private,
         public_key=public,
     )

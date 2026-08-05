@@ -259,7 +259,7 @@ class Provider:
 def test_durable_uploader_verifies_bundle_monitors_exact_sha_merges_and_cleans_branch(tmp_path, monkeypatch):
     bundle = tmp_path / "evidence.bundle"
     bundle.write_bytes(b"synthetic")
-    monkeypatch.setattr(evidence_git_uploader.portable_bundle, "sha256_file", lambda _path: BUNDLE_SHA)
+    monkeypatch.setattr(evidence_git_uploader.evidence_bundle, "sha256_file", lambda _path: BUNDLE_SHA)
     queued = row(bundle)
     provider = Provider()
     policy = evidence_git_uploader.UploaderPolicy(True, "42", "ctl-controller000001", INSTANCE_ID)
@@ -303,7 +303,7 @@ def test_transient_merge_retry_preserves_pull_request_and_exact_head(tmp_path):
 def test_transient_pull_request_failure_reuses_the_created_branch(tmp_path, monkeypatch):
     bundle = tmp_path / "bundle"
     bundle.write_bytes(b"synthetic")
-    monkeypatch.setattr(evidence_git_uploader.portable_bundle, "sha256_file", lambda _path: BUNDLE_SHA)
+    monkeypatch.setattr(evidence_git_uploader.evidence_bundle, "sha256_file", lambda _path: BUNDLE_SHA)
     queued = row(bundle)
     queued.state = "uploading"
     queued.base_sha = HEAD

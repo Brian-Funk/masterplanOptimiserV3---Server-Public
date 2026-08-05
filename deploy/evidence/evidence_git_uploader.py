@@ -10,7 +10,8 @@ import re
 import tarfile
 from typing import Any, Callable
 
-import portable_bundle
+import evidence_bundle
+import evidence_manifest
 from github_token_client import GitHubArchiveError
 
 
@@ -121,7 +122,7 @@ def advance_submission(
     client: Any,
     now: datetime | None = None,
     previous_archived_chain_head: str | None = None,
-    verifier: Callable[..., dict[str, Any]] = portable_bundle.verify_bundle,
+    verifier: Callable[..., dict[str, Any]] = evidence_bundle.verify_bundle,
 ) -> str:
     """Advance one durable step without ever executing code from the bundle."""
 
@@ -172,7 +173,7 @@ def advance_submission(
                 return row.state
             row.branch_name = branch
             bundle = Path(row.bundle_path)
-            if portable_bundle.sha256_file(bundle) != row.bundle_sha256:
+            if evidence_bundle.sha256_file(bundle) != row.bundle_sha256:
                 _set_failure(row, "bundle_changed_after_queue", blocked=True)
                 return row.state
             digest = f"{row.bundle_sha256}  evidence.bundle\n".encode("ascii")
@@ -240,9 +241,8 @@ def advance_submission(
 
         return row.state
     except (
-        portable_bundle.PortableBundleError,
-        portable_bundle.evidence_git.EvidenceGitError,
-        portable_bundle.evidence_manifest.EvidenceError,
+        evidence_bundle.BundleError,
+        evidence_manifest.EvidenceError,
         tarfile.TarError,
     ):
         _set_failure(row, "bundle_verification_failed", blocked=True)

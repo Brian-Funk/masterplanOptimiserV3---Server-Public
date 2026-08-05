@@ -23,7 +23,7 @@ EXPORT_TOOL = Path("/app/evidence/evidence_bundle.py")
 def _stage_evidence(db: Session, destination: Path) -> None:
     source = evidence_home()
     destination.mkdir(mode=0o700)
-    for name in ("ledger", "public", "anchors"):
+    for name in ("ledger", "public", "anchors", "archive-trust"):
         path = source / name
         if path.exists():
             shutil.copytree(path, destination / name, symlinks=True)

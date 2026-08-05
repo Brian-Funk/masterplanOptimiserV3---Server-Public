@@ -90,6 +90,7 @@ RECORD_TYPES = frozenset(
         "backup.export_confirmed",
         "backup.superseded",
         "evidence.bundle_exported",
+        "evidence.archive_trust_bound",
         "evidence.git_anchor_imported",
         "evidence.git_archive_completed",
         "privacy_action.created",
@@ -476,7 +477,7 @@ def _validate_payload(value: Any, *, path: str = "payload") -> None:
                 if not isinstance(item, str) or not re.fullmatch(r"sub-[0-9a-f]{32}", item):
                     raise EvidenceError(f"{child_path} must be an archive submission ID")
             elif field == "controller_id":
-                if not isinstance(item, str) or not re.fullmatch(r"ctl-[a-z0-9]{16}", item):
+                if not isinstance(item, str) or not re.fullmatch(r"ctl-[a-z0-9]{8,48}", item):
                     raise EvidenceError(f"{child_path} must be a controller ID")
             elif field == "pull_request_number":
                 if not isinstance(item, int) or isinstance(item, bool) or not 1 <= item <= 2147483647:

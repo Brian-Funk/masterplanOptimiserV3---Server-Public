@@ -6,15 +6,15 @@ Automatic archival is disabled by default. When a controller enables it, the ord
 
 ## Portable bundle
 
-The Server verifies the complete local ledger and controller trust declarations before creating a bundle. The bundle includes:
+The Server verifies the complete local ledger, every retained Desktop evidence package, and the controller's binding to the exact instance evidence key before creating a bundle. The bundle includes:
 
-- the controller, processor and deployment trust declarations;
+- the public controller-to-instance archive-trust package;
 - the complete signed chain through one exact head digest;
-- deterministic Markdown and accessible HTML summaries;
+- every Desktop policy, deletion and local-copy proof referenced by that chain;
 - public verification keys and integrity metadata;
-- offline verifier source for controller inspection.
+- a deterministic manifest suitable for browser or offline verification.
 
-The controller prepares and signs the public trust declarations outside the Server, then installs the complete `trust/` and `instances/<instance_id>/trust/` structure under the protected `/evidence/controller-trust` area. Controller private keys never enter the Server. Before accepting a token or enabling automation, the TUI performs a temporary local bundle preflight and requires its verified controller ID to match the entered controller ID.
+The root opens **Governance > Trust & keys** once, selects the active local controller private-key file, and authorises the exact deployment binding. Signing happens in browser memory; the Server receives only the canonical public package and signature, appends its digest to the instance-signed ledger, and never receives controller private material. Before accepting a token or enabling automation, the TUI builds the same database-backed bundle used by web and TUI export and requires its verified controller ID to match the entered controller ID.
 
 The integrated uploader never executes code from a bundle. It uses only its protected installed verifier. Identical verified input produces identical bundle bytes and SHA-256 digest. A bundle contains no token, private key, database, backup, name, personal email address, task content or schedule.
 
@@ -78,7 +78,7 @@ Retries use bounded exponential backoff with deterministic jitter and honour pro
 The controller can export and verify a portable bundle without a token. On a trusted workstation, stage it into a clone with:
 
 ```text
-python tools/portable_bundle.py stage-archive \
+python tools/evidence_bundle.py stage-git \
   --bundle /path/to/accountability.evidence \
   --archive /path/to/private-evidence-clone
 ```

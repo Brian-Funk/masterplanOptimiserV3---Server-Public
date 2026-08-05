@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import stat
 import tarfile
@@ -21,12 +22,16 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 
-FORMAT = "mp-opt-evidence-bundle-v1"
+FORMAT = "mp-opt-evidence-bundle-v2"
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 MAX_EVIDENCE_ZIP_BYTES = MAX_BUNDLE_BYTES + (2 * 1024 * 1024)
-INCLUDED_ROOTS = {"ledger", "public", "anchors", "artifacts"}
+INCLUDED_ROOTS = {"ledger", "public", "anchors", "artifacts", "archive-trust"}
 SIGNED_DESKTOP_EVIDENCE_PACKAGE_FORMAT = "mp-opt-signed-desktop-evidence-v1"
 DESKTOP_EVIDENCE_NAMESPACE = "mp-opt-desktop-evidence-v1"
+SIGNED_ARCHIVE_TRUST_PACKAGE_FORMAT = "mp-opt-signed-controller-archive-trust-v1"
+ARCHIVE_TRUST_DOCUMENT_FORMAT = "mp-opt-controller-archive-trust-v1"
+ARCHIVE_TRUST_SCOPE = "accountability_evidence_archive"
+TRUST_NAMESPACE = "mp-opt-role-trust-v1"
 BUNDLE_NAMESPACE = uuid.UUID("aa0c67fb-6a9c-4cf3-b712-c4cde822e7be")
 PUBLIC_VERIFIER_URL = "https://brian-funk.github.io/masterplanOptimiserV3---Evidence-Public/verify-evidence/"
 ZIP_MEMBERS = ("accountability.evidence", "accountability.evidence.sha256", "VERIFYING.txt")
@@ -78,6 +83,7 @@ def create_bundle(home: Path, output: Path) -> dict:
         raise BundleError("output already exists")
     public_key = home / "public" / "instance_signing_key.pub"
     chain = evidence_manifest.verify_chain(home / "ledger", public_key)
+    archive_trust = _verify_archive_trust(home, chain)
     files = evidence_files(home)
     payload = {
         path.relative_to(home).as_posix(): path.read_bytes()
@@ -94,9 +100,11 @@ def create_bundle(home: Path, output: Path) -> dict:
     latest = sorted((home / "ledger").glob("[0-9]" * 12 + "_*.json"))[-1]
     created_at = evidence_manifest.load_json_bytes(latest.read_bytes())["created_at"]
     identity = "|".join((
+        archive_trust["controller_id"],
         chain["instance_id"],
         chain["chain_id"],
         chain["head_sha256"],
+        archive_trust["statement_sha256"],
         hashlib.sha256((json.dumps({"files": rows}, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")).hexdigest(),
     ))
     document = {
@@ -104,6 +112,11 @@ def create_bundle(home: Path, output: Path) -> dict:
         "bundle_id": str(uuid.uuid5(BUNDLE_NAMESPACE, identity)),
         "created_at": created_at,
         "instance_id": chain["instance_id"],
+        "controller_id": archive_trust["controller_id"],
+        "controller_key_id": archive_trust["controller_key_id"],
+        "controller_public_key_sha256": archive_trust["controller_public_key_sha256"],
+        "instance_key_id": archive_trust["instance_key_id"],
+        "archive_trust_sha256": archive_trust["statement_sha256"],
         "chain_id": chain["chain_id"],
         "chain_head_sha256": chain["head_sha256"],
         "record_count": chain["records"],
@@ -217,6 +230,103 @@ def _document_binding(payload: dict, document: dict) -> tuple[str | None, str]:
     return payload[field], hashlib.sha256(rendered).hexdigest()
 
 
+def _verify_archive_trust(root: Path, chain: dict) -> dict:
+    """Verify controller authorisation of the exact instance evidence key."""
+
+    directory = root / "archive-trust"
+    if not directory.is_dir() or directory.is_symlink():
+        raise BundleError("controller archive trust is missing or unsafe")
+    paths = sorted(directory.glob("*.json"))
+    if not paths or any(not re.fullmatch(r"[0-9a-f]{64}\.json", path.name) for path in paths):
+        raise BundleError("controller archive trust files are invalid")
+    instance_public = evidence_manifest.canonical_public_key(
+        (root / "public" / "instance_signing_key.pub").read_text(encoding="ascii")
+    )
+    instance_key_id = evidence_manifest.key_id(instance_public)
+    instance_fingerprint = hashlib.sha256(instance_public.encode("ascii")).hexdigest()
+    ledger_bindings: list[str] = []
+    for record_path in sorted((root / "ledger").glob("[0-9]" * 12 + "_*.json")):
+        record = evidence_manifest.load_json_bytes(record_path.read_bytes())
+        if record.get("record_type") == "evidence.archive_trust_bound":
+            digest = record["payload"].get("statement_sha256")
+            if isinstance(digest, str):
+                ledger_bindings.append(digest)
+    binding_set = set(ledger_bindings)
+    verified: dict[str, dict] = {}
+    for path in paths:
+        raw = path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest != path.stem or len(raw) > 128 * 1024:
+            raise BundleError("controller archive trust digest does not match")
+        try:
+            package = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise BundleError("controller archive trust package is invalid JSON") from exc
+        if (
+            raw != _canonical(package)
+            or not isinstance(package, dict)
+            or set(package) != {"format", "namespace", "document", "proof", "controller_public_key", "instance_public_key"}
+            or package.get("format") != SIGNED_ARCHIVE_TRUST_PACKAGE_FORMAT
+            or package.get("namespace") != TRUST_NAMESPACE
+        ):
+            raise BundleError("controller archive trust package schema is invalid")
+        document = package["document"]
+        proof = package["proof"]
+        expected_document_fields = {
+            "format", "instance_id", "controller_id", "controller_key_id",
+            "controller_public_key_sha256", "instance_key_id",
+            "instance_public_key_sha256", "scope", "signed_at",
+        }
+        if not isinstance(document, dict) or set(document) != expected_document_fields or not isinstance(proof, dict) or set(proof) != {"format", "key_id", "namespace", "signature"}:
+            raise BundleError("controller archive trust document or proof is invalid")
+        try:
+            controller_public = evidence_manifest.canonical_public_key(package["controller_public_key"])
+            package_instance_public = evidence_manifest.canonical_public_key(package["instance_public_key"])
+            loaded = serialization.load_ssh_public_key(controller_public.encode("ascii"))
+            signature = base64.b64decode(proof["signature"], validate=True)
+        except (ValueError, TypeError) as exc:
+            raise BundleError("controller archive trust key or signature is invalid") from exc
+        controller_key_id = evidence_manifest.key_id(controller_public)
+        controller_fingerprint = hashlib.sha256(controller_public.encode("ascii")).hexdigest()
+        if (
+            not isinstance(loaded, Ed25519PublicKey)
+            or len(signature) != 64
+            or proof["format"] != "mp-opt-ed25519-signature-v1"
+            or proof["namespace"] != TRUST_NAMESPACE
+            or proof["key_id"] != controller_key_id
+            or document["format"] != ARCHIVE_TRUST_DOCUMENT_FORMAT
+            or document["scope"] != ARCHIVE_TRUST_SCOPE
+            or document["instance_id"] != chain["instance_id"]
+            or document["controller_key_id"] != controller_key_id
+            or document["controller_public_key_sha256"] != controller_fingerprint
+            or document["instance_key_id"] != instance_key_id
+            or document["instance_public_key_sha256"] != instance_fingerprint
+            or package_instance_public != instance_public
+            or not re.fullmatch(r"ctl-[a-z0-9]{8,48}", str(document["controller_id"]))
+            or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", str(document["signed_at"]))
+        ):
+            raise BundleError("controller archive trust identity does not match the evidence chain")
+        try:
+            loaded.verify(signature, TRUST_NAMESPACE.encode("ascii") + b"\0" + _canonical(document))
+        except Exception as exc:
+            raise BundleError("controller archive trust signature does not verify") from exc
+        if digest not in binding_set:
+            raise BundleError("controller archive trust is not bound into the signed ledger")
+        verified[digest] = {
+            "controller_id": document["controller_id"],
+            "controller_key_id": controller_key_id,
+            "controller_public_key_sha256": controller_fingerprint,
+            "instance_key_id": instance_key_id,
+            "statement_sha256": digest,
+        }
+    if not ledger_bindings or set(verified) != binding_set:
+        raise BundleError("controller archive trust history is incomplete")
+    current = verified.get(ledger_bindings[-1])
+    if current is None:
+        raise BundleError("controller archive trust is unavailable")
+    return current
+
+
 def _verify_processor_artifacts(root: Path) -> int:
     """Verify every Desktop proof referenced by the signed instance ledger."""
 
@@ -297,7 +407,12 @@ def _verify_processor_artifacts(root: Path) -> int:
     return len(references)
 
 
-def verify_bundle(bundle: Path) -> dict:
+def verify_bundle(
+    bundle: Path,
+    *,
+    expected_controller_id: str | None = None,
+    expected_instance_id: str | None = None,
+) -> dict:
     metadata = bundle.lstat()
     if not stat.S_ISREG(metadata.st_mode) or bundle.is_symlink() or metadata.st_size > MAX_BUNDLE_BYTES:
         raise BundleError("bundle is unavailable, unsafe or too large")
@@ -311,8 +426,10 @@ def verify_bundle(bundle: Path) -> dict:
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise BundleError("bundle manifest is invalid") from exc
             required = {
-                "format", "bundle_id", "created_at", "instance_id", "chain_id",
-                "chain_head_sha256", "record_count", "files",
+                "format", "bundle_id", "created_at", "controller_id",
+                "controller_key_id", "controller_public_key_sha256",
+                "instance_id", "instance_key_id", "archive_trust_sha256",
+                "chain_id", "chain_head_sha256", "record_count", "files",
             }
             if not isinstance(document, dict) or set(document) != required or document.get("format") != FORMAT:
                 raise BundleError("bundle manifest schema is invalid")
@@ -351,29 +468,52 @@ def verify_bundle(bundle: Path) -> dict:
             root / "evidence" / "ledger",
             root / "evidence" / "public" / "instance_signing_key.pub",
         )
+        archive_trust = _verify_archive_trust(root / "evidence", chain)
         if (
             chain["instance_id"] != document["instance_id"]
             or chain["chain_id"] != document["chain_id"]
             or chain["head_sha256"] != document["chain_head_sha256"]
             or chain["records"] != document["record_count"]
+            or archive_trust["controller_id"] != document["controller_id"]
+            or archive_trust["controller_key_id"] != document["controller_key_id"]
+            or archive_trust["controller_public_key_sha256"] != document["controller_public_key_sha256"]
+            or archive_trust["instance_key_id"] != document["instance_key_id"]
+            or archive_trust["statement_sha256"] != document["archive_trust_sha256"]
         ):
             raise BundleError("bundle manifest does not match its signed chain")
         processor_artifacts = _verify_processor_artifacts(root / "evidence")
         identity = "|".join((
+            document["controller_id"],
             document["instance_id"],
             document["chain_id"],
             document["chain_head_sha256"],
+            document["archive_trust_sha256"],
             hashlib.sha256((json.dumps({"files": document["files"]}, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")).hexdigest(),
         ))
         if document["bundle_id"] != str(uuid.uuid5(BUNDLE_NAMESPACE, identity)):
             raise BundleError("bundle deterministic identity does not match")
+        if expected_controller_id is not None and document["controller_id"] != expected_controller_id:
+            raise BundleError("bundle controller identity does not match the configured archive")
+        if expected_instance_id is not None and document["instance_id"] != expected_instance_id:
+            raise BundleError("bundle instance identity does not match the configured archive")
+        record_sha256s = [
+            hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted((root / "evidence" / "ledger").glob("[0-9]" * 12 + "_*.json"))
+        ]
     return {
         "valid": True,
+        "bundle_sha256": sha256_file(bundle),
         "bundle_id": document["bundle_id"],
+        "controller_id": document["controller_id"],
+        "controller_key_id": document["controller_key_id"],
+        "controller_public_key_sha256": document["controller_public_key_sha256"],
         "instance_id": document["instance_id"],
+        "instance_key_id": document["instance_key_id"],
+        "archive_trust_sha256": document["archive_trust_sha256"],
         "chain_id": document["chain_id"],
         "chain_head_sha256": document["chain_head_sha256"],
         "record_count": document["record_count"],
+        "record_sha256s": record_sha256s,
         "processor_artifact_count": processor_artifacts,
     }
 
