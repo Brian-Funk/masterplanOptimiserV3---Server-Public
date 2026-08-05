@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Verified Desktop deletion artifacts in evidence ZIPs with their established
+  domain digest while retaining strict package-signature verification.
 - Accepted the bounded clean-recovery snapshot and superseded portable-package
   inventory in strict signed evidence records.
 - Surfaced deletion-case auto-advance failures and added an explicit guarded

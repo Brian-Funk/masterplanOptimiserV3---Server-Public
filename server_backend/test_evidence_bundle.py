@@ -180,3 +180,109 @@ def test_bundle_verifies_referenced_desktop_signature_and_rejects_tampering(tmp_
         pass
     else:
         raise AssertionError("tampered Desktop evidence artifact was accepted")
+
+
+def test_complete_zip_verifies_deletion_domain_digests(tmp_path):
+    home = _ledger(tmp_path)
+    private = tmp_path / "key"
+    public = home / "public" / "instance_signing_key.pub"
+    artifacts = home / "artifacts"
+    artifacts.mkdir()
+    processor_private = Ed25519PrivateKey.generate()
+    processor_public = processor_private.public_key().public_bytes(
+        serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH,
+    ).decode("ascii")
+    processor_key_id = evidence_manifest.key_id(processor_public)
+    fingerprint = hashlib.sha256(processor_public.encode("ascii")).hexdigest()
+    case_id = "44444444-4444-4444-8444-444444444444"
+    event_ref = "33333333-3333-4333-8333-333333333333"
+
+    def append_artifact(record_type, operation_id, digest_field, document, extra_payload):
+        signed_document = (
+            json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        signature = processor_private.sign(b"mp-opt-desktop-evidence-v1\0" + signed_document)
+        proof = {
+            "format": "mp-opt-ed25519-signature-v1",
+            "key_id": processor_key_id,
+            "namespace": "mp-opt-desktop-evidence-v1",
+            "signature": base64.b64encode(signature).decode("ascii"),
+        }
+        package = {
+            "format": "mp-opt-signed-desktop-evidence-v1",
+            "namespace": "mp-opt-desktop-evidence-v1",
+            "document": document,
+            "proof": proof,
+            "public_key": processor_public,
+        }
+        raw = (json.dumps(package, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        package_digest = hashlib.sha256(raw).hexdigest()
+        (artifacts / f"{package_digest}.json").write_bytes(raw)
+        domain_document = json.dumps(
+            document,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        evidence_manifest.append_record(
+            home / "ledger",
+            instance_id="11111111-1111-4111-8111-111111111111",
+            chain_id="22222222-2222-4222-8222-222222222222",
+            record_type=record_type,
+            payload={
+                "case_id": case_id,
+                "event_ref": event_ref,
+                "processor_entity_id": "prc-synthetic0001",
+                "processor_key_id": processor_key_id,
+                "completed_public_key_sha256": fingerprint,
+                digest_field: hashlib.sha256(domain_document).hexdigest(),
+                "signature_sha256": hashlib.sha256(
+                    (json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                ).hexdigest(),
+                "evidence_package_sha256": package_digest,
+                "status": "verified",
+                **extra_payload,
+            },
+            private_key=private,
+            public_key=public,
+            record_id=operation_id,
+        )
+
+    append_artifact(
+        "deletion.desktop_report_received",
+        "55555555-5555-4555-8555-555555555555",
+        "report_sha256",
+        {
+            "format": "mp-opt-desktop-deletion-receipt-v2",
+            "event_ref": event_ref,
+            "key_id": processor_key_id,
+            "public_key_sha256": fingerprint,
+        },
+        {
+            "work_order_id": "66666666-6666-4666-8666-666666666666",
+            "outstanding_actions": [],
+        },
+    )
+    append_artifact(
+        "deletion.desktop_copy_resolution",
+        "77777777-7777-4777-8777-777777777777",
+        "copy_resolution_sha256",
+        {
+            "format": "mp-opt-desktop-copy-resolution-v1",
+            "event_ref": event_ref,
+            "key_id": processor_key_id,
+            "public_key_sha256": fingerprint,
+        },
+        {
+            "work_order_id": "66666666-6666-4666-8666-666666666666",
+            "disposition": "no_known_local_copies",
+        },
+    )
+
+    output = tmp_path / "deletion-evidence.zip"
+    created = evidence_bundle.create_evidence_zip(home, output)
+    verified = evidence_bundle.verify_evidence_zip(output)
+
+    assert created["processor_artifact_count"] == 2
+    assert verified["processor_artifact_count"] == 2

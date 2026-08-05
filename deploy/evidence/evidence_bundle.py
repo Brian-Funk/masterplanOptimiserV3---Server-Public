@@ -187,6 +187,36 @@ def _canonical(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def _document_binding(payload: dict, document: dict) -> tuple[str | None, str]:
+    """Return the recorded and independently recalculated document digests.
+
+    Policy acknowledgements use the signed-package canonical form. Deletion
+    report and copy-resolution digests predate that package and intentionally
+    use their domain canonical form without a trailing LF. The signature still
+    covers the signed-package canonical document in every case.
+    """
+
+    fields = [
+        field
+        for field in ("document_sha256", "report_sha256", "copy_resolution_sha256")
+        if field in payload
+    ]
+    if len(fields) != 1:
+        return None, ""
+    field = fields[0]
+    if field == "document_sha256":
+        rendered = _canonical(document)
+    else:
+        rendered = json.dumps(
+            document,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    return payload[field], hashlib.sha256(rendered).hexdigest()
+
+
 def _verify_processor_artifacts(root: Path) -> int:
     """Verify every Desktop proof referenced by the signed instance ledger."""
 
@@ -252,11 +282,7 @@ def _verify_processor_artifacts(root: Path) -> int:
             )
         except Exception as exc:
             raise BundleError("a Desktop evidence signature does not verify") from exc
-        document_digest = hashlib.sha256(_canonical(document)).hexdigest()
-        expected_document = next(
-            (payload[field] for field in ("document_sha256", "report_sha256", "copy_resolution_sha256") if field in payload),
-            None,
-        )
+        expected_document, document_digest = _document_binding(payload, document)
         expected_key = payload.get("key_id", payload.get("processor_key_id"))
         expected_fingerprint = payload.get("public_key_sha256", payload.get("completed_public_key_sha256"))
         if (
