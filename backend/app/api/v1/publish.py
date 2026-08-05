@@ -761,7 +761,12 @@ def record_processor_policy_acknowledgement(
         if existing is not None:
             if existing.evidence_package_sha256 != package_digest:
                 raise TrustEvidenceError("a different signed acknowledgement is already recorded")
-            return {"status": "acknowledged", "document_sha256": existing.document_sha256, "instance_record_sha256": existing.instance_record_sha256}
+            return {
+                "status": "acknowledged",
+                "document_sha256": existing.document_sha256,
+                "instance_record_sha256": existing.instance_record_sha256,
+                "evidence_package_sha256": existing.evidence_package_sha256,
+            }
         row = ProcessorPolicyAcknowledgement(
             instance_id=key.instance_id, event_evidence_id=event.evidence_id,
             entity_id=identity.entity_id, key_id=key.key_id,
@@ -786,10 +791,51 @@ def record_processor_policy_acknowledgement(
             },
         )
         db.commit()
-        return {"status": "acknowledged", "document_sha256": document_digest, "instance_record_sha256": row.instance_record_sha256}
+        return {
+            "status": "acknowledged",
+            "document_sha256": document_digest,
+            "instance_record_sha256": row.instance_record_sha256,
+            "evidence_package_sha256": package_digest,
+        }
     except (EvidenceUnavailable, TrustEvidenceError, ValueError) as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail={"code": "PROCESSOR_POLICY_REJECTED", "message": str(exc)}) from exc
+
+
+@router.get("/processor-policy-acknowledgements/current")
+@limiter.limit("60/minute")
+def current_processor_policy_acknowledgement(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Return the Server-authoritative acknowledgement for this event and policy."""
+
+    event = _authenticate_event(request, db)
+    current = current_policy_identity(db)
+    if current is None:
+        return {"acknowledged": False, "policy_version": None, "policy_sha256": None}
+    row = db.query(ProcessorPolicyAcknowledgement).filter(
+        ProcessorPolicyAcknowledgement.event_evidence_id == event.evidence_id,
+        ProcessorPolicyAcknowledgement.policy_version == current[0],
+        ProcessorPolicyAcknowledgement.policy_sha256 == current[1],
+        ProcessorPolicyAcknowledgement.evidence_package_sha256.isnot(None),
+    ).order_by(ProcessorPolicyAcknowledgement.id.desc()).first()
+    if row is None:
+        return {
+            "acknowledged": False,
+            "policy_version": current[0],
+            "policy_sha256": current[1],
+        }
+    return {
+        "acknowledged": True,
+        "policy_version": row.policy_version,
+        "policy_sha256": row.policy_sha256,
+        "entity_id": row.entity_id,
+        "key_id": row.key_id,
+        "document_sha256": row.document_sha256,
+        "instance_record_sha256": row.instance_record_sha256,
+        "evidence_package_sha256": row.evidence_package_sha256,
+    }
 
 
 # ---------------------------------------------------------------------------

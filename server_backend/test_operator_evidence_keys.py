@@ -264,6 +264,12 @@ def test_event_processor_enrolment_is_publish_secret_bound_and_root_activated(db
     )
     db.add(policy)
     db.commit()
+    status = client.get(
+        "/api/v1/publish/processor-policy-acknowledgements/current",
+        headers={"Authorization": f"Bearer {publish_secret}"},
+    )
+    assert status.status_code == 200
+    assert status.json()["acknowledged"] is False
     acknowledged_at = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
     document = {
         "format": "mp-opt-desktop-policy-acknowledgement-v1",
@@ -294,6 +300,13 @@ def test_event_processor_enrolment_is_publish_secret_bound_and_root_activated(db
     retained = db.query(ProcessorPolicyAcknowledgement).one()
     assert retained.evidence_package_sha256
     assert json.loads(retained.evidence_package_json)["proof"] == proof
+    status = client.get(
+        "/api/v1/publish/processor-policy-acknowledgements/current",
+        headers={"Authorization": f"Bearer {publish_secret}"},
+    )
+    assert status.status_code == 200
+    assert status.json()["document_sha256"] == retained.document_sha256
+    assert status.json()["evidence_package_sha256"] == retained.evidence_package_sha256
 
 
 def test_routine_rotation_requires_old_and_new_proof_and_history_is_preserved(db, monkeypatch):
