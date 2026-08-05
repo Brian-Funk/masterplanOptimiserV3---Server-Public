@@ -32,6 +32,28 @@ def test_create_event_minimal(db, admin_client):
     assert r.json()["event"]["name"] == "Minimal Event"
 
 
+def test_create_event_rejects_end_date_before_start_date(db, admin_client):
+    response = admin_client.post("/api/v1/admin/events", json={
+        "name": "Invalid date range",
+        "start_date": "2031-08-20",
+        "end_date": "2031-08-12",
+    })
+
+    assert response.status_code == 422
+    assert "End date must be on or after start date" in response.text
+
+
+def test_create_event_allows_same_day_range(db, admin_client):
+    response = admin_client.post("/api/v1/admin/events", json={
+        "name": "Same-day event",
+        "start_date": "2031-08-20",
+        "end_date": "2031-08-20",
+    })
+
+    assert response.status_code == 200
+    assert response.json()["event"]["end_date"] == "2031-08-20"
+
+
 # ── GET /admin/events ──
 
 

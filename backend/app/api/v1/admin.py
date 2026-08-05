@@ -12,7 +12,7 @@ import zipfile
 import os
 from pathlib import Path
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -51,6 +51,7 @@ from app.core.activation_email import (
 )
 from app.core.audit import audit
 from app.core.config import settings
+from app.core.event_dates import require_valid_event_date_range
 from app.core.ha_replication import protect_current_state, request_ha_replication
 from app.core.retention import materialise_event_purge_deadline, retention_status
 from app.core.governance import current_policy_identity, require_current_policy_identity
@@ -259,10 +260,15 @@ class EventCreateIn(BaseModel):
         pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     )
     location: Optional[str] = Field(None, max_length=256)
-    start_date: Optional[str] = None  # YYYY-MM-DD
-    end_date: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
     policy_version: Optional[int] = Field(None, ge=1)
     policy_sha256: Optional[str] = Field(None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> "EventCreateIn":
+        require_valid_event_date_range(self.start_date, self.end_date)
+        return self
 
 
 class EventOut(BaseModel):
@@ -711,8 +717,8 @@ def create_event(
         evidence_id=body.evidence_id,
         name=body.name,
         location=body.location,
-        start_date=datetime.strptime(body.start_date, "%Y-%m-%d").date() if body.start_date else None,
-        end_date=datetime.strptime(body.end_date, "%Y-%m-%d").date() if body.end_date else None,
+        start_date=body.start_date,
+        end_date=body.end_date,
         status="draft",
         publish_secret_hash=secret_hash,
         secret_created_at=datetime.now(timezone.utc),
@@ -2643,10 +2649,15 @@ class ImportEventIn(BaseModel):
     )
     name: str = Field(..., max_length=128)
     location: Optional[str] = Field(None, max_length=256)
-    start_date: Optional[str] = Field(None, max_length=16)  # YYYY-MM-DD
-    end_date: Optional[str] = Field(None, max_length=16)
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
 
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> "ImportEventIn":
+        require_valid_event_date_range(self.start_date, self.end_date)
+        return self
 
 
 class ImportSetupIn(BaseModel):
@@ -2690,8 +2701,8 @@ def import_setup(
         evidence_id=body.event.evidence_id,
         name=body.event.name,
         location=body.event.location,
-        start_date=datetime.strptime(body.event.start_date, "%Y-%m-%d").date() if body.event.start_date else None,
-        end_date=datetime.strptime(body.event.end_date, "%Y-%m-%d").date() if body.event.end_date else None,
+        start_date=body.event.start_date,
+        end_date=body.event.end_date,
         status="draft",
         publish_secret_hash=secret_hash,
     )

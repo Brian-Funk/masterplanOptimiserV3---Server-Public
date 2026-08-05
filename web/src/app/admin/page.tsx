@@ -17,6 +17,7 @@ import {
 } from "@/lib/activationCampaign";
 import { withReauth } from "@/lib/reauth";
 import { responseMessage } from "@/lib/responseMessage";
+import { eventDateRangeError } from "@/lib/eventDates";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -706,6 +707,10 @@ function EventsTab({
   const [eventError, setEventError] = useState("");
   const [importLoading, setImportLoading] = useState(false);
   const router = useRouter();
+  const dateRangeError = eventDateRangeError(
+    newEvent.start_date,
+    newEvent.end_date,
+  );
 
   useEffect(() => {
     apiFetch("/api/v1/governance/public")
@@ -727,6 +732,10 @@ function EventsTab({
 
   const handleCreate = async () => {
     if (!newEvent.name.trim()) return;
+    if (dateRangeError) {
+      setEventError(dateRangeError);
+      return;
+    }
     setEventError("");
     setCreating(true);
     try {
@@ -1070,6 +1079,11 @@ function EventsTab({
               }
             />
           </div>
+          {dateRangeError && (
+            <p className="mb-3 text-sm font-medium text-red-700 dark:text-red-300" role="alert">
+              {dateRangeError}
+            </p>
+          )}
           {eventPolicy && <section className="mb-3 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
             <h3 className="font-semibold">Permitted data for this event</h3>
             <p className="mt-1"><strong>Controller:</strong> {eventPolicy.controller}</p>
@@ -1089,7 +1103,7 @@ function EventsTab({
             variant="primary"
             size="sm"
             onClick={handleCreate}
-            disabled={creating || !newEvent.name.trim() || (Boolean(eventPolicy) && !eventPolicyAcknowledged)}
+            disabled={creating || Boolean(dateRangeError) || !newEvent.name.trim() || (Boolean(eventPolicy) && !eventPolicyAcknowledged)}
           >
             {creating ? "Creating..." : "Create Event"}
           </Button>

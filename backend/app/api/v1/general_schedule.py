@@ -1,15 +1,16 @@
 ﻿"""Authenticated General Schedule publish and status endpoints."""
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.api.v1.publish import _authenticate_event, _require_publishing_allowed
 from app.core.audit import audit
+from app.core.event_dates import require_valid_event_date_range
 from app.core.rate_limit import limiter, runtime_limit
 from app.core.retention import materialise_event_purge_deadline
 from app.core.schedule_days import (
@@ -75,10 +76,15 @@ class GeneralScheduleItemIn(BaseModel):
 
 class GeneralScheduleEventIn(BaseModel):
     name: Optional[str] = Field(None, max_length=256)
-    start_date: Optional[str] = Field(None, max_length=16)
-    end_date: Optional[str] = Field(None, max_length=16)
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
     day_aliases: Optional[Dict[str, str]] = None
     schedule_day_range: Optional[Dict[str, int]] = None
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> "GeneralScheduleEventIn":
+        require_valid_event_date_range(self.start_date, self.end_date)
+        return self
 
 
 class GeneralSchedulePublishPayload(BaseModel):
@@ -268,9 +274,9 @@ def publish_general_schedule(
         if payload.event.name:
             event.name = payload.event.name
         if payload.event.start_date:
-            event.start_date = datetime.strptime(payload.event.start_date, "%Y-%m-%d").date()
+            event.start_date = payload.event.start_date
         if payload.event.end_date:
-            new_end_date = datetime.strptime(payload.event.end_date, "%Y-%m-%d").date()
+            new_end_date = payload.event.end_date
             end_date_changed = event.end_date != new_end_date
             event.end_date = new_end_date
             materialise_event_purge_deadline(

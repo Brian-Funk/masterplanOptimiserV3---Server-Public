@@ -288,6 +288,24 @@ def test_imported_setup_materialises_and_returns_the_event_deadline(
     assert event["purge_due_at"].startswith("2026-10-31T00:00:00")
 
 
+def test_import_setup_rejects_an_invalid_event_date_range(db, reauth_admin_client):
+    response = reauth_admin_client.post(
+        "/api/v1/admin/import-setup",
+        json={
+            "event": {
+                "evidence_id": "11111111-1111-4111-8111-111111111113",
+                "name": "Invalid imported event",
+                "start_date": "2026-08-10",
+                "end_date": "2026-08-01",
+            },
+            "users": [],
+        },
+    )
+
+    assert response.status_code == 422
+    assert "End date must be on or after start date" in response.text
+
+
 def test_schedule_publish_is_blocked_after_event_purge_case_starts(db):
     event, secret = create_test_event(db, name="Synthetic purge pending")
     event.purge_case_request_id = "11111111-1111-4111-8111-111111111111"
@@ -324,3 +342,26 @@ def test_general_schedule_publish_reschedules_an_event_deadline(db):
     assert event.purge_due_at.replace(tzinfo=timezone.utc) == datetime(
         2026, 11, 9, tzinfo=timezone.utc
     )
+
+
+def test_general_schedule_rejects_an_invalid_event_date_range(db):
+    event, secret = create_test_event(db, name="Synthetic invalid schedule")
+
+    response = _publish_client(secret).post(
+        "/api/v1/publish/general-schedule",
+        json={
+            "event": {
+                "start_date": "2026-08-10",
+                "end_date": "2026-08-01",
+            },
+            "fingerprint": "synthetic-invalid-retention-range",
+            "schedule_views": [],
+            "items": [],
+        },
+    )
+
+    assert response.status_code == 422
+    assert "End date must be on or after start date" in response.text
+    db.refresh(event)
+    assert event.start_date is None
+    assert event.end_date is None
