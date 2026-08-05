@@ -263,6 +263,68 @@ def test_runtime_retention_settings_are_authoritative_and_require_republication(
     assert client.get("/api/v1/admin/governance").json()["runtime_impact"]["publication_required"] is False
 
 
+def test_runtime_retention_reversion_clears_stale_governance_impact(db):
+    from app.models.server_setting import ServerSetting
+
+    client, _root = _root_with_reauth(db)
+    saved = client.put("/api/v1/admin/governance", json=PROFILE)
+    assert saved.status_code == 200, saved.json()
+    published = client.post("/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION)
+    assert published.status_code == 200, published.json()
+
+    changed = client.put(
+        "/api/v1/admin/settings",
+        json={"settings": {"event_purge_grace_days": settings.EVENT_PURGE_GRACE_DAYS + 1}},
+    )
+    assert changed.status_code == 200, changed.json()
+    assert changed.json()["governance_impact"]["publication_required"] is True
+
+    restored = client.put(
+        "/api/v1/admin/settings",
+        json={"settings": {"event_purge_grace_days": settings.EVENT_PURGE_GRACE_DAYS}},
+    )
+    assert restored.status_code == 200, restored.json()
+    assert restored.json()["governance_impact"] == {
+        "draft_updated": False,
+        "publication_required": False,
+        "changed_at": None,
+        "changes": [],
+    }
+    draft = client.get("/api/v1/admin/governance").json()
+    assert draft["runtime_impact"]["publication_required"] is False
+    assert draft["runtime_impact"]["changes"] == []
+    preview = client.get("/api/v1/admin/governance/preview").json()
+    assert preview["diff"]["changes"] == []
+    assert (
+        client.get("/api/v1/governance/public").json()["retention"]["event_grace_days"]
+        == settings.EVENT_PURGE_GRACE_DAYS
+    )
+
+    # Deploying the fix must also hide a no-op marker already persisted by the
+    # previous implementation; operators should not have to repeat the change.
+    changed_fields = db.query(ServerSetting).filter(
+        ServerSetting.key == "governance_runtime_changed_fields"
+    ).one()
+    changed_fields.value = json.dumps([{
+        "setting": "event_purge_grace_days",
+        "governance_field": "retention.event_grace_days",
+        "label": "Event purge grace",
+        "previous": settings.EVENT_PURGE_GRACE_DAYS,
+        "current": settings.EVENT_PURGE_GRACE_DAYS,
+    }])
+    publication_required = db.query(ServerSetting).filter(
+        ServerSetting.key == "governance_runtime_publication_required"
+    ).one()
+    publication_required.value = "true"
+    db.commit()
+
+    reconciled = client.get("/api/v1/admin/governance").json()["runtime_impact"]
+    assert reconciled["draft_updated"] is False
+    assert reconciled["publication_required"] is False
+    assert reconciled["changed_at"] is None
+    assert reconciled["changes"] == []
+
+
 def test_preflight_reports_required_controller_trust_before_publication(monkeypatch, db):
     monkeypatch.setattr(settings, "KEY_SEPARATION_ENFORCED", True)
     client, _root = _root_with_reauth(db)

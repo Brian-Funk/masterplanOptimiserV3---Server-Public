@@ -154,22 +154,33 @@ def _sync_governance_draft(db: Session) -> dict[str, Any]:
         existing = json.loads(existing_raw)
     except json.JSONDecodeError:
         existing = []
-    by_field = {item.get("governance_field"): item for item in existing if isinstance(item, dict)}
+    by_field = {
+        item.get("governance_field"): item
+        for item in existing
+        if isinstance(item, dict) and item.get("current") != item.get("previous")
+    }
     for change in changes:
         original = by_field.get(change["governance_field"])
         if original and "previous" in original:
             change["previous"] = original["previous"]
-        by_field[change["governance_field"]] = change
-    changed_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    publication_required = db.query(GovernancePublication.id).first() is not None
-    _set_internal(db, "governance_runtime_draft_changed_at", changed_at)
-    _set_internal(db, "governance_runtime_changed_fields", json.dumps(list(by_field.values()), separators=(",", ":"), sort_keys=True))
+        if change["current"] == change["previous"]:
+            by_field.pop(change["governance_field"], None)
+        else:
+            by_field[change["governance_field"]] = change
+    outstanding = list(by_field.values())
+    changed_at = (
+        datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        if outstanding else None
+    )
+    publication_required = bool(outstanding) and db.query(GovernancePublication.id).first() is not None
+    _set_internal(db, "governance_runtime_draft_changed_at", changed_at or "")
+    _set_internal(db, "governance_runtime_changed_fields", json.dumps(outstanding, separators=(",", ":"), sort_keys=True))
     _set_internal(db, "governance_runtime_publication_required", "true" if publication_required else "false")
     return {
-        "draft_updated": True,
+        "draft_updated": bool(outstanding),
         "publication_required": publication_required,
         "changed_at": changed_at,
-        "changes": changes,
+        "changes": outstanding,
     }
 
 
@@ -179,11 +190,15 @@ def governance_impact(db: Session) -> dict[str, Any]:
         changes = json.loads(values.get("governance_runtime_changed_fields", "[]"))
     except json.JSONDecodeError:
         changes = []
+    changes = [
+        item for item in changes
+        if isinstance(item, dict) and item.get("current") != item.get("previous")
+    ]
     return {
         "draft_updated": bool(changes),
-        "publication_required": values.get("governance_runtime_publication_required") == "true",
-        "changed_at": values.get("governance_runtime_draft_changed_at"),
-        "changes": changes if isinstance(changes, list) else [],
+        "publication_required": bool(changes) and values.get("governance_runtime_publication_required") == "true",
+        "changed_at": values.get("governance_runtime_draft_changed_at") or None if changes else None,
+        "changes": changes,
     }
 
 
