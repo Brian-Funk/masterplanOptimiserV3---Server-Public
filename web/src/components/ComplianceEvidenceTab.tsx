@@ -35,6 +35,7 @@ type Approval = { role: "executor" | "controller" | "processor"; approval_sha256
 type Workflow = {
   request_id: string;
   case_type: "personal_data_erasure" | "event_erasure";
+  initiation_reason: string;
   state: string;
   event_ref: string;
   event_name: string | null;
@@ -282,6 +283,20 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
     const approved = new Set(item.approvals.map((approval) => approval.role));
     const buttons = [];
 
+    if (item.state === "submitted" || item.state === "under_review") {
+      buttons.push(
+        <Button
+          key="accept"
+          size="sm"
+          onClick={() => mutate(`${item.request_id}-accept`, `${prefix}/accept`)}
+          disabled={!!busy}
+        >
+          {item.initiation_reason === "retention_schedule"
+            ? "Accept scheduled erasure"
+            : "Accept deletion request"}
+        </Button>,
+      );
+    }
     if (outstanding.length > 0) {
       buttons.push(<Button key="external" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-external`, `${prefix}/resolve-outstanding-actions`, { actions: outstanding })} disabled={!!busy}>Confirm exact external actions</Button>);
     }
@@ -336,6 +351,11 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
     const approved = new Set(item.approvals.map((approval) => approval.role));
     const desktopComplete = !item.desktop_deletion_required
       || item.required_processors.every((processor) => processor.state === "complete");
+    if (item.state === "submitted" || item.state === "under_review") {
+      return item.initiation_reason === "retention_schedule"
+        ? "Review the stored retention deadline. Nothing has been deleted; accept only when the controller is ready to start the controlled erasure workflow."
+        : "Review the deletion request. Nothing has been deleted; accept only when the controller is ready to start the controlled erasure workflow.";
+    }
     if (!desktopComplete) return "Open each listed event processor in Desktop. Desktop records controlled data removal and resolves its local copies; root cannot substitute for a processor.";
     if (item.state === "ready_for_live_purge") return "Deleting the controlled Server copy now.";
     if (item.retention.outstanding_actions.length > 0) return "Record the outcome of each named external action. Confirm only actions the controller has actually verified.";

@@ -15,6 +15,7 @@ function json(body: unknown): Response {
 const workflow = {
   request_id: "del-example-1",
   case_type: "event_erasure",
+  initiation_reason: "manual_root",
   state: "ready_for_live_purge",
   event_ref: "event-example",
   event_name: "Synthetic Event",
@@ -71,6 +72,39 @@ describe("ComplianceEvidenceTab", () => {
 
     expect(screen.queryByText("Advanced evidence archive and signing-key administration")).not.toBeInTheDocument();
     await waitFor(() => expect(mockApiFetch).toHaveBeenCalledTimes(5));
+  });
+
+  it("exposes but never automatically invokes root acceptance for a scheduled case", async () => {
+    const scheduled = {
+      ...workflow,
+      initiation_reason: "retention_schedule",
+      state: "submitted",
+      desktop_deletion_required: false,
+      desktop_work_orders: [],
+      required_processors: [],
+    };
+    const acceptPath = "/api/v1/admin/deletion-requests/del-example-1/accept";
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/deletion-requests") return json([scheduled]);
+      if (path === "/api/v1/admin/evidence/backups") return json([]);
+      if (path === "/api/v1/admin/evidence") return json({ initialised: true, mode: "local", instance_id: "instance-1", head_sha256: "a".repeat(64) });
+      if (path === "/api/v1/admin/evidence/archive") return json({ enabled: false, authentication: "Disabled", repository: null, default_branch: null, latest_local_chain_head: null, latest_bundled_chain_head: null, latest_archived_chain_head: null, pending_submission_count: 0, submission_id: null, state: null, pull_request_number: null, pull_request_head_sha: null, merge_commit_sha: null, failure_reason: null });
+      if (path.endsWith("/advance")) return json({ advanced: [] });
+      if (path === acceptPath) return json({ ...scheduled, state: "ready_for_live_purge" });
+      throw new Error(`Unexpected path: ${path}`);
+    });
+    const { ComplianceEvidenceTab } = await import("@/components/ComplianceEvidenceTab");
+    render(<ComplianceEvidenceTab events={[]} />);
+
+    expect(await screen.findByText(/Review the stored retention deadline/)).toBeInTheDocument();
+    const accept = screen.getByRole("button", { name: "Accept scheduled erasure" });
+    expect(mockApiFetch.mock.calls.some(([path]) => path === acceptPath)).toBe(false);
+
+    fireEvent.click(accept);
+    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledWith(
+      acceptPath,
+      { method: "POST", body: "{}" },
+    ));
   });
 
   it("verifies the complete chain from the signed ledger card", async () => {
