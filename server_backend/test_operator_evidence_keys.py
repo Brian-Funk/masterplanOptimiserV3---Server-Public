@@ -222,6 +222,7 @@ def test_new_controller_attempt_invalidates_the_previous_pending_ceremony(db):
 
 def test_event_processor_enrolment_is_publish_secret_bound_and_root_activated(db, monkeypatch):
     event, publish_secret = create_test_event(db, name="Processor event")
+    _other_event, other_publish_secret = create_test_event(db, name="Other processor event")
     private, public = _keypair()
     fingerprint = hashlib.sha256(public.encode("ascii")).hexdigest()
     package = {
@@ -239,6 +240,12 @@ def test_event_processor_enrolment_is_publish_secret_bound_and_root_activated(db
     assert started.status_code == 202, started.text
     challenge = started.json()["challenge"]
     assert challenge["event_ref"] == event.evidence_id
+    wrong_event = client.post(
+        f"/api/v1/publish/processor-keys/enrolments/{challenge['challenge_id']}/proof",
+        json={"challenge": challenge, "proof": _proof(private, challenge), "previous_proof": None},
+        headers={"Authorization": f"Bearer {other_publish_secret}"},
+    )
+    assert wrong_event.status_code == 409
     submitted = client.post(
         f"/api/v1/publish/processor-keys/enrolments/{challenge['challenge_id']}/proof",
         json={"challenge": challenge, "proof": _proof(private, challenge), "previous_proof": None},
@@ -246,17 +253,6 @@ def test_event_processor_enrolment_is_publish_secret_bound_and_root_activated(db
     )
     assert submitted.status_code == 202, submitted.text
     assert db.query(ProcessorIdentity).count() == 0
-    begin = client.post(f"{BASE}/trust-keys/{challenge['challenge_id']}/root-authorisation/begin", json={})
-    _install_passkey_success(monkeypatch)
-    completed = client.post(
-        f"{BASE}/trust-keys/{challenge['challenge_id']}/root-authorisation/complete",
-        json=_auth_body(credential_id, root.id, begin.json()["ceremony_id"]),
-    )
-    assert completed.status_code == 200, completed.text
-    identity = db.query(ProcessorIdentity).one()
-    assert identity.event_evidence_id == event.evidence_id
-    assert identity.entity_id == package["entity_id"]
-    assert identity.status == "active"
 
     policy = GovernancePublication(
         version=1, content_json="{}", content_sha256="b" * 64,
@@ -264,18 +260,12 @@ def test_event_processor_enrolment_is_publish_secret_bound_and_root_activated(db
     )
     db.add(policy)
     db.commit()
-    status = client.get(
-        "/api/v1/publish/processor-policy-acknowledgements/current",
-        headers={"Authorization": f"Bearer {publish_secret}"},
-    )
-    assert status.status_code == 200
-    assert status.json()["acknowledged"] is False
     acknowledged_at = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
     document = {
         "format": "mp-opt-desktop-policy-acknowledgement-v1",
-        "instance_id": identity.instance_id,
+        "instance_id": challenge["instance_id"],
         "event_ref": event.evidence_id,
-        "entity_id": identity.entity_id,
+        "entity_id": package["entity_id"],
         "key_id": package["key_id"],
         "role": "processor",
         "algorithm": "Ed25519",
@@ -291,6 +281,37 @@ def test_event_processor_enrolment_is_publish_secret_bound_and_root_activated(db
         key_identifier=package["key_id"], signature=signature,
         namespace=DESKTOP_EVIDENCE_NAMESPACE,
     )
+    before_activation = client.post(
+        "/api/v1/publish/processor-policy-acknowledgements",
+        json={"document": document, "proof": proof},
+        headers={"Authorization": f"Bearer {publish_secret}"},
+    )
+    assert before_activation.status_code == 409
+
+    begin = client.post(f"{BASE}/trust-keys/{challenge['challenge_id']}/root-authorisation/begin", json={})
+    _install_passkey_success(monkeypatch)
+    completed = client.post(
+        f"{BASE}/trust-keys/{challenge['challenge_id']}/root-authorisation/complete",
+        json=_auth_body(credential_id, root.id, begin.json()["ceremony_id"]),
+    )
+    assert completed.status_code == 200, completed.text
+    identity = db.query(ProcessorIdentity).one()
+    assert identity.event_evidence_id == event.evidence_id
+    assert identity.entity_id == package["entity_id"]
+    assert identity.status == "active"
+    replayed_proof = client.post(
+        f"/api/v1/publish/processor-keys/enrolments/{challenge['challenge_id']}/proof",
+        json={"challenge": challenge, "proof": _proof(private, challenge), "previous_proof": None},
+        headers={"Authorization": f"Bearer {publish_secret}"},
+    )
+    assert replayed_proof.status_code == 409
+
+    status = client.get(
+        "/api/v1/publish/processor-policy-acknowledgements/current",
+        headers={"Authorization": f"Bearer {publish_secret}"},
+    )
+    assert status.status_code == 200
+    assert status.json()["acknowledged"] is False
     acknowledged = client.post(
         "/api/v1/publish/processor-policy-acknowledgements",
         json={"document": document, "proof": proof},

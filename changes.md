@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added deterministic negative-path coverage for event-bound Desktop processor
+  enrolment, proof replay and pre-activation policy acknowledgement.
 - Added an HA-fenced, restart-safe retention scheduler with a complete record
   inventory, explicit event grace deadlines, signed automatic event-erasure
   queueing, root status telemetry and exact boundary/idempotency tests.
