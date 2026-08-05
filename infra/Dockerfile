@@ -20,7 +20,7 @@ COPY backend/requirements.txt /app/requirements.txt
 COPY backend/requirements.lock.txt /app/requirements.lock.txt
 RUN pip install --constraint requirements.lock.txt -r requirements.txt \
     && pip check \
-    && pip uninstall --yes setuptools wheel
+    && python -m pip uninstall --yes pip
 
 # Copy backend code
 COPY backend/app /app/app
