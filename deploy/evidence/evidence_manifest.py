@@ -223,6 +223,8 @@ PAYLOAD_FIELDS = frozenset(
         "server_receipts",
         "clean_backup_sha256",
         "backup_not_applicable_sha256",
+        "local_snapshot_count",
+        "superseded_portable_package_ids",
         "policy_version",
         "disposition",
         "signed_at",
@@ -479,6 +481,9 @@ def _validate_payload(value: Any, *, path: str = "payload") -> None:
             elif field == "pull_request_number":
                 if not isinstance(item, int) or isinstance(item, bool) or not 1 <= item <= 2147483647:
                     raise EvidenceError(f"{child_path} must be a positive pull request number")
+            elif field == "local_snapshot_count":
+                if not isinstance(item, int) or isinstance(item, bool) or item != 1:
+                    raise EvidenceError(f"{child_path} must be exactly one")
             elif isinstance(item, dict):
                 _validate_payload(item, path=child_path)
             elif isinstance(item, list):
@@ -487,7 +492,11 @@ def _validate_payload(value: Any, *, path: str = "payload") -> None:
                 for index, entry in enumerate(item):
                     if isinstance(entry, dict):
                         _validate_payload(entry, path=f"{child_path}[{index}]")
-                    elif field in {"package_ids", "outstanding_backup_ids"}:
+                    elif field in {
+                        "package_ids",
+                        "outstanding_backup_ids",
+                        "superseded_portable_package_ids",
+                    }:
                         _canonical_uuid(entry, f"{child_path}[{index}]")
                     elif not isinstance(entry, str) or not SAFE_ENUM_RE.fullmatch(entry):
                         raise EvidenceError(f"{child_path} entries must be bounded enums")

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Accepted the bounded clean-recovery snapshot and superseded portable-package
+  inventory in strict signed evidence records.
 - Surfaced deletion-case auto-advance failures and added an explicit guarded
   retry for already-created clean recovery receipts.
 - Retained a durable inventory of portable workstation exports and required
