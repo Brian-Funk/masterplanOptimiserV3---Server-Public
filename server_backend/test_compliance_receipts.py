@@ -68,10 +68,11 @@ def test_pending_clean_backup_request_can_be_cancelled_before_a_receipt(monkeypa
 def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_path):
     requests = tmp_path / "requests"
     receipts = tmp_path / "receipts"
-    snapshots = tmp_path / "snapshot"
+    snapshots = tmp_path / "snapshots"
+    selected = snapshots / "selected"
     requests.mkdir()
     receipts.mkdir()
-    snapshots.mkdir()
+    selected.mkdir(parents=True)
     monkeypatch.setattr(compliance_receipts.settings, "COMPLIANCE_REQUEST_DIR", str(requests))
     monkeypatch.setattr(compliance_receipts.settings, "COMPLIANCE_RECEIPT_DIR", str(receipts))
 
@@ -129,19 +130,42 @@ def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_p
             "confirmed_at": confirmed_at.isoformat(),
         }},
     }
-    snapshot_path = snapshots / "receipt.json"
+    snapshot_path = selected / "receipt.json"
     snapshot_path.write_text(json.dumps(snapshot_receipt), encoding="utf-8")
+    stale = snapshots / "stale"
+    stale.mkdir()
+    (stale / "receipt.json").write_text(json.dumps(snapshot_receipt), encoding="utf-8")
+    blocked = subprocess.run(
+        [
+            sys.executable, "deploy/management/compliance_receipts.py",
+            "--requests", str(requests),
+            "--receipts", str(receipts),
+            "--snapshots", str(snapshots),
+            "--snapshot-receipt", str(snapshot_path),
+            "--instance-key", str(key),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert blocked.returncode == 1
+    assert "Superseded local snapshots remain" in blocked.stderr
+    assert (requests / f"{ids['job_id']}.json").exists()
+    (stale / "receipt.json").unlink()
+    stale.rmdir()
     subprocess.run(
         [
             sys.executable, "deploy/management/compliance_receipts.py",
             "--requests", str(requests),
             "--receipts", str(receipts),
+            "--snapshots", str(snapshots),
             "--snapshot-receipt", str(snapshot_path),
             "--instance-key", str(key),
         ],
         check=True,
     )
     assert not (requests / f"{ids['job_id']}.json").exists()
+    assert json.loads((receipts / f"{ids['job_id']}.json").read_text())["local_snapshot_count"] == 1
 
     expected = {
         "job_id": ids["job_id"],

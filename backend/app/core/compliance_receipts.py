@@ -27,7 +27,7 @@ RECEIPT_FIELDS = {
     "live_data_purged_at",
     "package_sha256", "package_size", "archive_sha256", "recovery_key_id",
     "snapshot_created_at", "snapshot_evidence_head_sha256", "deep_verified_at",
-    "portable_confirmed_at",
+    "portable_confirmed_at", "local_snapshot_count",
 }
 
 
@@ -189,7 +189,7 @@ def verified_clean_backup_receipt(
     canonical = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     if raw != canonical or not isinstance(document, dict) or set(document) != RECEIPT_FIELDS:
         raise EvidenceUnavailable("The compliance receipt schema is invalid")
-    if document.get("format") != "mp-opt-clean-backup-receipt-v1":
+    if document.get("format") != "mp-opt-clean-backup-receipt-v2":
         raise EvidenceUnavailable("The compliance receipt format is invalid")
     for field in ("receipt_id", "job_id", "instance_id", "workflow_id", "event_ref", "privacy_action_id", "package_id"):
         _uuid(document.get(field), field)
@@ -216,6 +216,8 @@ def verified_clean_backup_receipt(
     size = document.get("package_size")
     if not isinstance(size, int) or isinstance(size, bool) or size < 1:
         raise EvidenceUnavailable("The compliance receipt package size is invalid")
+    if document.get("local_snapshot_count") != 1:
+        raise EvidenceUnavailable("Superseded local recovery snapshots remain")
     purged_at = _timestamp(expected["live_data_purged_at"])
     created_at = _timestamp(document.get("snapshot_created_at"))
     verified_at = _timestamp(document.get("deep_verified_at"))

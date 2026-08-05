@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Blocked deletion-case completion while superseded local recovery snapshots
+  remain, and bound clean-backup receipts to an exact single-snapshot host state.
 - Added deterministic negative-path coverage for event-bound Desktop processor
   enrolment, proof replay and pre-activation policy acknowledgement.
 - Added an HA-fenced, restart-safe retention scheduler with a complete record

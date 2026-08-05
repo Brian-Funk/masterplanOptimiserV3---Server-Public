@@ -516,6 +516,7 @@ def confirm_case_clean_backup(
         "replacement_package_id": package_id,
         "replacement_package_sha256": package_sha256,
         "receipt_sha256": receipt["receipt_sha256"],
+        "local_snapshot_count": receipt["local_snapshot_count"],
         "verified_at": timestamp(utc_now()),
         "outcome": "verified",
         "status": "clean_backup_verified",

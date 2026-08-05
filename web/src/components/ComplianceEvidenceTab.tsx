@@ -285,7 +285,7 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
     if (item.evidence.clean_backup && unresolvedPackages.length > 0 && !item.evidence.backup_resolution) {
       buttons.push(<Button key="old-backups" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-old-backups`, `${prefix}/resolve-backups`, { package_ids: unresolvedPackages })} disabled={!!busy}>Confirm superseded packages deleted</Button>);
     }
-    if (item.checklist.sha256) {
+    if (item.checklist.sha256 && item.clean_backup_bridge.local_snapshot_count === 1) {
       if (!approved.has("executor")) {
         buttons.push(<Button key="completion" size="sm" onClick={() => confirmCompletion(item)} disabled={!!busy}>Confirm completion</Button>);
       }
@@ -327,6 +327,7 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
     if (item.clean_backup_bridge.job_id && !item.evidence.clean_backup) return item.clean_backup_bridge.local_snapshot_count
       ? "Finish the recovery snapshot in mp-opt. This page will detect it automatically."
       : "Finish the recovery snapshot in mp-opt, or confirm that this deployment uses no recovery backups.";
+    if (item.evidence.clean_backup && item.clean_backup_bridge.local_snapshot_count !== 1) return "Delete every superseded local snapshot in mp-opt. Final confirmation remains blocked until only the clean replacement snapshot remains.";
     if (item.live_data_purged_at && (item.topology === "single_node" || item.evidence.peer) && !item.evidence.clean_backup && !item.evidence.backup_not_applicable) return "Choose whether this deployment uses recovery backups.";
     if (item.evidence.clean_backup && unresolvedPackages.length > 0 && !item.evidence.backup_resolution) return "Resolve the listed superseded backup packages only after their deletion has been verified.";
     if ((item.evidence.clean_backup || item.evidence.backup_not_applicable) && unresolvedPackages.length === 0 && !item.checklist.sha256) return "Preparing the final review now.";

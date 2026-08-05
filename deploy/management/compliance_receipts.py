@@ -111,6 +111,29 @@ def snapshot_facts(receipt: dict, request: dict) -> dict:
     }
 
 
+def local_snapshot_count(root: Path, selected_receipt: Path) -> int:
+    """Count completed local snapshots without following substituted paths."""
+
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("The local snapshot inventory is unsafe")
+    selected_directory = selected_receipt.parent
+    if selected_directory.is_symlink() or selected_directory.parent.resolve() != root.resolve():
+        raise ValueError("The selected snapshot is outside the local inventory")
+    count = 0
+    for directory in root.iterdir():
+        if directory.name.startswith("."):
+            continue
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError("The local snapshot inventory contains an unsafe entry")
+        receipt = load_regular(directory / "receipt.json")
+        if receipt.get("format") != "mp-opt-snapshot-receipt-v2":
+            raise ValueError("The local snapshot inventory contains an unsupported receipt")
+        count += 1
+    if not selected_directory.exists():
+        raise ValueError("The selected snapshot is unavailable")
+    return count
+
+
 def atomic_write(path: Path, raw: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -174,7 +197,9 @@ def sign_receipt(path: Path, instance_key: Path) -> None:
 
 
 def emit(args: argparse.Namespace) -> None:
-    snapshot = load_regular(Path(args.snapshot_receipt))
+    snapshot_path = Path(args.snapshot_receipt)
+    snapshot = load_regular(snapshot_path)
+    snapshot_count = local_snapshot_count(Path(args.snapshots), snapshot_path)
     requests = Path(args.requests)
     receipts = Path(args.receipts)
     receipts.mkdir(parents=True, exist_ok=True, mode=0o755)
@@ -193,8 +218,13 @@ def emit(args: argparse.Namespace) -> None:
             facts = snapshot_facts(snapshot, request)
         except ValueError:
             continue
+        if snapshot_count != 1:
+            raise ValueError(
+                "Superseded local snapshots remain. Delete every older local snapshot "
+                "before recording the clean recovery receipt"
+            )
         receipt = {
-            "format": "mp-opt-clean-backup-receipt-v1",
+            "format": "mp-opt-clean-backup-receipt-v2",
             "receipt_id": str(uuid.uuid5(uuid.UUID(request["job_id"]), facts["package_id"])),
             **{key: request[key] for key in (
                 "job_id", "instance_id", "workflow_type", "workflow_id", "event_ref",
@@ -202,6 +232,7 @@ def emit(args: argparse.Namespace) -> None:
                 "live_purge_receipt_sha256", "live_data_purged_at",
             )},
             **facts,
+            "local_snapshot_count": snapshot_count,
         }
         atomic_write(target, canonical(receipt))
         try:
@@ -218,6 +249,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--requests", required=True)
     parser.add_argument("--receipts", required=True)
+    parser.add_argument("--snapshots", required=True)
     parser.add_argument("--snapshot-receipt", required=True)
     parser.add_argument("--instance-key", required=True)
     try:

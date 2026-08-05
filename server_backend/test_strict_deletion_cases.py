@@ -37,6 +37,15 @@ def _case(db, event, *, case_type="personal_data_erasure", subject_ref=None):
     return case
 
 
+def _set_snapshot_count(monkeypatch, tmp_path, count: int) -> None:
+    status = tmp_path / "snapshot-status.json"
+    status.write_text(
+        f'{{"format":"mp-opt-ha-snapshot-status-v1","local_snapshot_count":{count}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(deletion_cases.settings, "HA_SNAPSHOT_STATUS_PATH", str(status))
+
+
 def _activate_processor(db, event, *, entity_id="prc-synthetic0001"):
     alternate = entity_id != "prc-synthetic0001"
     key = EvidenceKey(
@@ -295,7 +304,22 @@ def test_no_backup_confirmation_rejects_recorded_host_snapshots(db, monkeypatch,
         deletion_cases.confirm_no_controlled_backups(db, case)
 
 
-def test_checklist_is_content_bound_and_requires_all_approvals(db):
+def test_checklist_rejects_superseded_local_snapshots(db, monkeypatch, tmp_path):
+    event, _ = create_test_event(db)
+    case = _case(db, event, case_type="event_erasure")
+    deletion_cases.ensure_case_scope(db, case, event=event, subject_ref=None)
+    case.desktop_deletion_required = False
+    case.live_purge_receipt_sha256 = "b" * 64
+    case.replacement_package_sha256 = "c" * 64
+    case.outstanding_actions_json = "[]"
+    _set_snapshot_count(monkeypatch, tmp_path, 2)
+
+    assert "local_snapshot_resolution" in deletion_cases.checklist_prerequisites(case, db)
+    with pytest.raises(ValueError, match="required actions remain"):
+        deletion_cases.build_checklist(case, db)
+
+
+def test_checklist_is_content_bound_and_requires_all_approvals(db, monkeypatch, tmp_path):
     """A frozen checklist cannot complete before its required passkey approvals."""
 
     event, _ = create_test_event(db)
@@ -309,6 +333,7 @@ def test_checklist_is_content_bound_and_requires_all_approvals(db):
     case.live_purge_receipt_sha256 = "b" * 64
     case.replacement_package_sha256 = "c" * 64
     case.outstanding_actions_json = "[]"
+    _set_snapshot_count(monkeypatch, tmp_path, 1)
     checklist = deletion_cases.build_checklist(case, db)
     first_hash = case.checklist_sha256
     assert deletion_cases.build_checklist(case, db) == checklist
@@ -325,7 +350,7 @@ def test_checklist_is_content_bound_and_requires_all_approvals(db):
     assert scope.state == "complete"
 
 
-def test_non_root_completion_approvals_are_rejected(db):
+def test_non_root_completion_approvals_are_rejected(db, monkeypatch, tmp_path):
     """Processor receipts are automatic; only root confirms Server closure."""
 
     event, _ = create_test_event(db)
@@ -337,6 +362,7 @@ def test_non_root_completion_approvals_are_rejected(db):
     case.live_purge_receipt_sha256 = "b" * 64
     case.replacement_package_sha256 = "c" * 64
     case.outstanding_actions_json = "[]"
+    _set_snapshot_count(monkeypatch, tmp_path, 1)
     deletion_cases.build_checklist(case, db)
 
     deletion_cases.record_checklist_approval(
@@ -350,7 +376,7 @@ def test_non_root_completion_approvals_are_rejected(db):
             )
 
 
-def test_completion_revalidates_checklist_content_and_approval_rows(db):
+def test_completion_revalidates_checklist_content_and_approval_rows(db, monkeypatch, tmp_path):
     """Finalisation fails closed if approved evidence or approval rows change."""
 
     event, _ = create_test_event(db)
@@ -362,6 +388,7 @@ def test_completion_revalidates_checklist_content_and_approval_rows(db):
     case.live_purge_receipt_sha256 = "b" * 64
     case.replacement_package_sha256 = "c" * 64
     case.outstanding_actions_json = "[]"
+    _set_snapshot_count(monkeypatch, tmp_path, 1)
     deletion_cases.build_checklist(case, db)
     deletion_cases.record_checklist_approval(
         db, case, role="executor", user_id=None, credential_sha256="d" * 64,

@@ -12,6 +12,7 @@ mp_compliance_emit_backup_receipts() {
     python3 "$MP_ROOT/deploy/management/compliance_receipts.py" \
         --requests "$MP_ROOT/runtime/compliance-requests" \
         --receipts "$MP_ROOT/runtime/compliance-receipts" \
+        --snapshots "$MP_SNAPSHOTS" \
         --snapshot-receipt "$selected/receipt.json" \
         --instance-key "$MP_ROOT/secrets/evidence_signing_key"
 }
