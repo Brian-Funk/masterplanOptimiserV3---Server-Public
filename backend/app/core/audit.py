@@ -34,6 +34,7 @@ AUDIT_ACTIONS = frozenset({
     "evidence.trust_key.challenge", "evidence.trust_key.proof_verified",
     "evidence.trust_key.root_authorised", "evidence.trust_key.register",
     "evidence.trust_key.rotate", "evidence.trust_key.revoke",
+    "evidence.archive_trust.bound",
     "evidence.git_anchor.import", "evidence.archive_retry",
     "gdpr.accept_deletion", "gdpr.accept_event_erasure", "gdpr.clean_backup_receipt_applied",
     "gdpr.clean_backup_requested", "gdpr.create_checklist", "gdpr.create_event_erasure",

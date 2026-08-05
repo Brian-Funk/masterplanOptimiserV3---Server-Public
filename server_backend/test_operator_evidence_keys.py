@@ -358,6 +358,35 @@ def test_controller_registration_directly_establishes_governance_trust(db, monke
     assert removed.status_code == 404
 
 
+def test_controller_binds_exact_instance_key_for_portable_archive(db, monkeypatch, evidence_test_key):
+    controller = _activate(db, monkeypatch, role="controller", entity_id="ctl-archive000000001")
+    del evidence_test_key
+    instance = db.query(EvidenceKey).filter(EvidenceKey.role == "instance").one()
+
+    before = controller["client"].get(f"{BASE}/trust-keys/archive-trust")
+    assert before.status_code == 200 and before.json()["ready"] is False
+    prepared = controller["client"].post(f"{BASE}/trust-keys/archive-trust/prepare", json={})
+    assert prepared.status_code == 200, prepared.text
+    document = prepared.json()["document"]
+    assert document["instance_key_id"] == instance.key_id
+    assert document["controller_key_id"] == controller["key"]["key_id"]
+
+    completed = controller["client"].post(
+        f"{BASE}/trust-keys/archive-trust/complete",
+        json={"document": document, "proof": _proof(controller["private"], document)},
+    )
+    assert completed.status_code == 200, completed.text
+    result = completed.json()
+    assert result["ready"] is True
+    retained = Path(settings.EVIDENCE_HOME) / "archive-trust" / f"{result['statement_sha256']}.json"
+    assert retained.is_file()
+    package = json.loads(retained.read_text(encoding="utf-8"))
+    assert package["controller_public_key"] == controller["public"]
+    assert "private" not in retained.read_text(encoding="utf-8").lower()
+    after = controller["client"].get(f"{BASE}/trust-keys/archive-trust")
+    assert after.status_code == 200 and after.json()["ready"] is True
+
+
 def test_instance_key_commissioning_is_exactly_once_fail_closed_and_ha_consistent(tmp_path):
     instance_id = str(uuid.uuid4()); local = tmp_path / "local"; peer = tmp_path / "peer"
     first = commission(local, instance_id)

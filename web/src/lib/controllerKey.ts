@@ -133,6 +133,16 @@ export async function signControllerRegistration(keyPackage: ControllerPrivatePa
   return { format: "mp-opt-ed25519-signature-v1", key_id: publicPackage.key_id, namespace: NAMESPACE, signature: bytesToBase64(signature) };
 }
 
+export async function signControllerArchiveTrust(keyPackage: ControllerPrivatePackage, document: Record<string, unknown>) {
+  const { privateKey, publicPackage } = await loadControllerKey(keyPackage);
+  if (document.format !== "mp-opt-controller-archive-trust-v1" || document.scope !== "accountability_evidence_archive") throw new Error("The Server requested an unsupported archive-trust action.");
+  if (document.controller_id !== publicPackage.entity_id || document.controller_key_id !== publicPackage.key_id || document.controller_public_key_sha256 !== publicPackage.public_key_sha256) throw new Error("The archive-trust action targets a different controller key.");
+  if (typeof document.instance_id !== "string" || typeof document.instance_key_id !== "string" || typeof document.instance_public_key_sha256 !== "string") throw new Error("The archive-trust action has no bounded instance identity.");
+  const payload = concat(encoder.encode(NAMESPACE), new Uint8Array([0]), canonicalBytes(document));
+  const signature = await crypto.subtle.sign({ name: "Ed25519" }, privateKey, asArrayBuffer(payload));
+  return { format: "mp-opt-ed25519-signature-v1", key_id: publicPackage.key_id, namespace: NAMESPACE, signature: bytesToBase64(signature) };
+}
+
 export function downloadJson(name: string, value: unknown): void {
   const url = URL.createObjectURL(new Blob([`${JSON.stringify(value, null, 2)}\n`], { type: "application/json" }));
   const link = document.createElement("a"); link.href = url; link.download = name; link.click();

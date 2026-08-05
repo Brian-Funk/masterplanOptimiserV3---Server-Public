@@ -29,6 +29,9 @@ SIGNATURE_FORMAT = "mp-opt-ed25519-signature-v1"
 TRUST_NAMESPACE = "mp-opt-role-trust-v1"
 DESKTOP_EVIDENCE_NAMESPACE = "mp-opt-desktop-evidence-v1"
 SIGNED_DESKTOP_EVIDENCE_PACKAGE_FORMAT = "mp-opt-signed-desktop-evidence-v1"
+ARCHIVE_TRUST_FORMAT = "mp-opt-controller-archive-trust-v1"
+SIGNED_ARCHIVE_TRUST_PACKAGE_FORMAT = "mp-opt-signed-controller-archive-trust-v1"
+ARCHIVE_TRUST_SCOPE = "accountability_evidence_archive"
 TRUST_ROLES = frozenset({"controller", "processor"})
 ROTATION_REASONS = frozenset({"routine", "lost", "compromised"})
 REVOCATION_REASONS = frozenset({"retired", "lost", "compromised", "role_changed"})
@@ -315,6 +318,44 @@ def validate_processor_event_registration(document: dict[str, Any]) -> None:
     expires = parse_timestamp(document["expires_at"], "expires_at")
     if expires <= created or expires > created + timedelta(minutes=15):
         raise TrustEvidenceError("processor event registration lifetime is invalid")
+    canonical_json(document)
+
+
+def validate_archive_trust_document(
+    document: dict[str, Any], *, instance_id: str,
+    controller_entity_id: str, controller_key_id: str,
+    controller_fingerprint: str, instance_key_id: str,
+    instance_fingerprint: str, require_fresh: bool = True,
+) -> None:
+    """Validate one controller-signed binding for portable evidence archives."""
+
+    fields = {
+        "format", "instance_id", "controller_id", "controller_key_id",
+        "controller_public_key_sha256", "instance_key_id",
+        "instance_public_key_sha256", "scope", "signed_at",
+    }
+    if set(document) != fields or document.get("format") != ARCHIVE_TRUST_FORMAT:
+        raise TrustEvidenceError("archive trust document fields are invalid")
+    _uuid(document["instance_id"], "instance_id")
+    validate_entity("controller", document["controller_id"])
+    if (
+        document["instance_id"] != instance_id
+        or document["controller_id"] != controller_entity_id
+        or document["controller_key_id"] != controller_key_id
+        or document["controller_public_key_sha256"] != controller_fingerprint
+        or document["instance_key_id"] != instance_key_id
+        or document["instance_public_key_sha256"] != instance_fingerprint
+        or document["scope"] != ARCHIVE_TRUST_SCOPE
+    ):
+        raise TrustEvidenceError("archive trust document targets another controller or deployment")
+    if not KEY_ID_RE.fullmatch(str(document["controller_key_id"])) or not KEY_ID_RE.fullmatch(str(document["instance_key_id"])):
+        raise TrustEvidenceError("archive trust key identity is invalid")
+    if not SHA256_RE.fullmatch(str(document["controller_public_key_sha256"])) or not SHA256_RE.fullmatch(str(document["instance_public_key_sha256"])):
+        raise TrustEvidenceError("archive trust fingerprint is invalid")
+    signed_at = parse_timestamp(document["signed_at"], "signed_at")
+    now = datetime.now(timezone.utc)
+    if require_fresh and (signed_at < now - timedelta(minutes=15) or signed_at > now + timedelta(minutes=2)):
+        raise TrustEvidenceError("archive trust document is stale or dated in the future")
     canonical_json(document)
 
 

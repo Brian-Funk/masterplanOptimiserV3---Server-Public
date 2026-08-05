@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { startAuthentication } from "@simplewebauthn/browser";
 import { ArrowDown, CheckCircle2, Info, KeyRound, Laptop, RefreshCw, Server, ShieldCheck, UserRoundCheck } from "lucide-react";
 
@@ -8,6 +8,7 @@ import { apiFetch } from "@/lib/api";
 import { withReauth } from "@/lib/reauth";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { ControllerPrivatePackage, loadControllerKey, signControllerArchiveTrust } from "@/lib/controllerKey";
 
 type TrustKey = {
   instance_id: string;
@@ -36,6 +37,16 @@ type PendingEnrolment = {
   public_key_sha256: string;
   purpose: "register" | "rotate";
   expires_at: string;
+};
+
+type ArchiveTrust = {
+  ready: boolean;
+  message?: string;
+  statement_sha256?: string;
+  controller_id?: string;
+  controller_key_id?: string;
+  instance_key_id?: string;
+  signed_at?: string;
 };
 
 function messageFrom(value: unknown): string {
@@ -78,16 +89,19 @@ export function TrustKeysPanel() {
   const [controllerEntity, setControllerEntity] = useState("");
   const [challenge, setChallenge] = useState("");
   const [signedRegistration, setSignedRegistration] = useState("");
+  const [archiveTrust, setArchiveTrust] = useState<ArchiveTrust>({ ready: false });
 
   const load = useCallback(async () => {
     setError("");
     try {
-      const [keysResponse, pendingResponse] = await Promise.all([
+      const [keysResponse, pendingResponse, archiveResponse] = await Promise.all([
         apiFetch("/api/v1/admin/evidence/trust-keys"),
         apiFetch("/api/v1/admin/evidence/trust-keys/pending-enrolments"),
+        apiFetch("/api/v1/admin/evidence/trust-keys/archive-trust"),
       ]);
       setKeys(await checked(keysResponse) as TrustKey[]);
       setPending(await checked(pendingResponse) as PendingEnrolment[]);
+      setArchiveTrust(await checked(archiveResponse) as ArchiveTrust);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Trust status could not be loaded.");
     }
@@ -150,6 +164,23 @@ export function TrustKeysPanel() {
     finally { setBusy(""); }
   }
 
+  async function bindArchiveTrust(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]; event.target.value = "";
+    if (!file) return;
+    setBusy("archive-trust"); setError(""); setNotice("");
+    try {
+      const keyPackage = JSON.parse(await file.text()) as ControllerPrivatePackage;
+      await loadControllerKey(keyPackage);
+      const prepared = await checked(await withReauth(() => apiFetch("/api/v1/admin/evidence/trust-keys/archive-trust/prepare", { method: "POST", body: "{}" }))) as { ready: boolean; document: Record<string, unknown> };
+      if (prepared.ready) { setNotice("Portable evidence archive trust is already ready."); await load(); return; }
+      const proof = await signControllerArchiveTrust(keyPackage, prepared.document);
+      await checked(await withReauth(() => apiFetch("/api/v1/admin/evidence/trust-keys/archive-trust/complete", { method: "POST", body: JSON.stringify({ document: prepared.document, proof }) })));
+      setNotice("Portable evidence archives are now bound to this controller and deployment. The selected private file stayed in this browser session only.");
+      await load();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Archive trust could not be established."); }
+    finally { setBusy(""); }
+  }
+
   return <div className="space-y-6">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="flex items-center gap-2 text-3xl font-bold"><KeyRound className="text-blue-600" />Trust &amp; keys</h1><p className="mt-1 max-w-3xl text-sm text-gray-600 dark:text-gray-300">Set up trust once, then return here only for enrolment, rotation, recovery, or revocation.</p></div><Button size="sm" variant="outline" onClick={() => void load()} disabled={!!busy}><RefreshCw size={15} />Refresh</Button></div>
     {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200">{error}</p>}
@@ -172,6 +203,7 @@ export function TrustKeysPanel() {
 
     <section aria-labelledby="controller-keys" className="space-y-3"><h2 id="controller-keys" className="text-lg font-semibold">Controller keys</h2><div className="grid gap-3 lg:grid-cols-2">{controllers.map((key) => <KeyCard key={key.key_id} title={key.entity_id || key.key_id} subtitle={`${key.key_id} · ${key.trust_establishment_sha256 ? "trust established" : "pending activation"}`} scope="Controller trust and governance statements only. Each publication still requires the root passkey." icon={<UserRoundCheck size={20} />} status={key.validity_status} fingerprint={key.public_key_sha256}>{key.validity_status === "active" && <Button size="sm" variant="outline" onClick={() => void revoke(key)} disabled={!!busy}>Revoke</Button>}</KeyCard>)}</div>
       {controllers.some((key) => key.validity_status === "active" && key.trust_establishment_sha256) && <p className="flex items-center gap-2 text-sm text-green-700 dark:text-green-300"><CheckCircle2 size={16} />Controller identity and possession were established during registration.</p>}
+      <Card className={`space-y-3 border-l-4 p-4 ${archiveTrust.ready ? "border-l-green-500" : "border-l-amber-500"}`}><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-semibold">Portable evidence archive trust</h3><p className="mt-1 max-w-2xl text-sm text-gray-600 dark:text-gray-300">This one-time binding lets an offline verifier prove that the controller authorised this deployment&apos;s exact instance evidence key. No private key is uploaded or retained.</p></div><Status value={archiveTrust.ready ? "ready" : "required"} /></div>{archiveTrust.ready ? <><p className="text-sm text-green-700 dark:text-green-300">Ready for verified manual or guarded private archival.</p><p className="truncate font-mono text-xs text-gray-500" title={archiveTrust.statement_sha256}>SHA-256 {archiveTrust.statement_sha256}</p></> : <><p className="text-sm text-amber-800 dark:text-amber-200">{archiveTrust.message || "Authorisation is required before a portable archive can be created."}</p><label className="inline-flex min-h-11 w-fit cursor-pointer items-center rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium dark:border-gray-600">Select active controller private-key file<input type="file" accept="application/json,.json" className="sr-only" onChange={(event) => void bindArchiveTrust(event)} disabled={!!busy} /></label></>}</Card>
       <details className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800"><summary className="cursor-pointer text-sm font-semibold">Advanced controller key ceremony</summary><div className="mt-4 space-y-3"><p className="text-sm text-gray-600 dark:text-gray-300">The controller custody tool signs the exact challenge. Never paste a private key into this page.</p><label className="block text-sm font-medium">Controller entity ID<input value={controllerEntity} onChange={(event) => setControllerEntity(event.target.value)} className="mt-1 min-h-11 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-900" /></label><label className="block text-sm font-medium">OpenSSH public key<textarea value={controllerPublicKey} onChange={(event) => setControllerPublicKey(event.target.value)} rows={3} className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-900" /></label><Button variant="outline" onClick={() => void beginControllerRegistration()} disabled={!!busy || !controllerEntity || !controllerPublicKey}>Create exact challenge</Button>{challenge && <label className="block text-sm font-medium">Challenge to sign<textarea readOnly value={challenge} rows={8} className="mt-1 w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-950" /></label>}<label className="block text-sm font-medium">Signed registration package<textarea value={signedRegistration} onChange={(event) => setSignedRegistration(event.target.value)} rows={8} className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-900" /></label><Button onClick={() => void completeControllerRegistration()} disabled={!!busy || !signedRegistration}>Verify and activate with root passkey</Button></div></details>
     </section>
     <p className="flex items-center gap-2 text-xs text-gray-500"><CheckCircle2 size={14} />Rotation and revocation preserve earlier public keys and signatures for historical verification.</p>

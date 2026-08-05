@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
+from pathlib import Path
 import secrets
 from typing import Any, Literal
 import uuid
@@ -21,10 +22,14 @@ from webauthn.helpers.structs import UserVerificationRequirement
 from app.api.v1.passkey import CeremonyCompletion, _credential_id, _verify_user_handle
 from app.core.audit import audit
 from app.core.config import settings
-from app.core.evidence import EvidenceUnavailable, append_record, initialise
+from app.core.evidence import EvidenceUnavailable, _atomic_write, append_record, evidence_home, initialise
 from app.core.operator_evidence import (
+    ARCHIVE_TRUST_FORMAT,
+    ARCHIVE_TRUST_SCOPE,
     REVOCATION_REASONS,
     ROTATION_REASONS,
+    SIGNED_ARCHIVE_TRUST_PACKAGE_FORMAT,
+    TRUST_NAMESPACE,
     TrustEvidenceError,
     action_payload,
     action_sha256,
@@ -33,6 +38,7 @@ from app.core.operator_evidence import (
     key_id,
     public_key_sha256,
     validate_entity,
+    validate_archive_trust_document,
     validate_processor_event_registration,
     validate_registration_document,
     verify_signature,
@@ -76,12 +82,89 @@ class RevokeTrustKeyRequest(BaseModel):
     confirmation: Literal["ROOT PASSKEY AUTHORISED"]
 
 
+class CompleteArchiveTrust(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    document: dict[str, Any]
+    proof: dict[str, Any]
+
+
 def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 def _reject(exc: Exception) -> HTTPException:
     return HTTPException(status_code=409, detail={"code": "TRUST_EVIDENCE_REJECTED", "message": str(exc)})
+
+
+def _active_role_key(db: Session, role: str) -> EvidenceKey:
+    row = db.query(EvidenceKey).filter(
+        EvidenceKey.role == role,
+        EvidenceKey.activated_at.isnot(None),
+        EvidenceKey.revoked_at.is_(None),
+    ).order_by(EvidenceKey.activated_at.desc(), EvidenceKey.id.desc()).first()
+    if row is None:
+        raise TrustEvidenceError(f"an active {role} evidence key is required")
+    return row
+
+
+def _archive_trust_directory() -> Path:
+    return evidence_home() / "archive-trust"
+
+
+def _archive_trust_package(db: Session) -> tuple[dict[str, Any], str] | None:
+    try:
+        controller = _active_role_key(db, "controller")
+        instance = _active_role_key(db, "instance")
+    except TrustEvidenceError:
+        return None
+    directory = _archive_trust_directory()
+    if not directory.is_dir() or directory.is_symlink():
+        return None
+    for path in sorted(directory.glob("[0-9a-f]" * 64 + ".json"), reverse=True):
+        try:
+            raw = path.read_bytes()
+            package = json.loads(raw.decode("utf-8"))
+            if raw != canonical_json(package) or hashlib.sha256(raw).hexdigest() != path.stem:
+                continue
+            if not isinstance(package, dict) or set(package) != {
+                "format", "namespace", "document", "proof",
+                "controller_public_key", "instance_public_key",
+            }:
+                continue
+            document = package["document"]
+            validate_archive_trust_document(
+                document,
+                instance_id=instance.instance_id,
+                controller_entity_id=str(controller.entity_id),
+                controller_key_id=controller.key_id,
+                controller_fingerprint=controller.public_key_sha256,
+                instance_key_id=instance.key_id,
+                instance_fingerprint=instance.public_key_sha256,
+                require_fresh=False,
+            )
+            if (
+                package["format"] != SIGNED_ARCHIVE_TRUST_PACKAGE_FORMAT
+                or package["namespace"] != TRUST_NAMESPACE
+                or canonical_public_key(package["controller_public_key"]) != controller.public_key
+                or canonical_public_key(package["instance_public_key"]) != instance.public_key
+            ):
+                continue
+            verify_signature(document, package["proof"], controller.public_key)
+            bound = False
+            for record_path in sorted((evidence_home() / "ledger").glob("[0-9]" * 12 + "_*.json")):
+                record = json.loads(record_path.read_text(encoding="utf-8"))
+                if (
+                    record.get("record_type") == "evidence.archive_trust_bound"
+                    and record.get("payload", {}).get("statement_sha256") == path.stem
+                ):
+                    bound = True
+                    break
+            if not bound:
+                continue
+            return package, path.stem
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TrustEvidenceError, TypeError, ValueError):
+            continue
+    return None
 
 
 def _public_key_row(row: EvidenceKey, identity: ProcessorIdentity | None = None) -> dict[str, Any]:
@@ -140,6 +223,129 @@ def _load_challenge(db: Session, document: dict[str, Any]) -> EvidenceKeyRegistr
 def list_trust_keys(_root: User = Depends(require_root_admin), db: Session = Depends(get_db)):
     identities = {row.entity_id: row for row in db.query(ProcessorIdentity).all()}
     return [_public_key_row(row, identities.get(row.entity_id)) for row in db.query(EvidenceKey).order_by(EvidenceKey.registered_at, EvidenceKey.id).all()]
+
+
+@router.get("/trust-keys/archive-trust")
+def archive_trust_status(_root: User = Depends(require_root_admin), db: Session = Depends(get_db)):
+    binding = _archive_trust_package(db)
+    if binding is None:
+        return {"ready": False, "message": "Select the active controller key once to authorise portable evidence archives."}
+    package, digest = binding
+    document = package["document"]
+    return {
+        "ready": True,
+        "statement_sha256": digest,
+        "controller_id": document["controller_id"],
+        "controller_key_id": document["controller_key_id"],
+        "instance_key_id": document["instance_key_id"],
+        "signed_at": document["signed_at"],
+    }
+
+
+@router.post("/trust-keys/archive-trust/prepare")
+def prepare_archive_trust(
+    request: Request,
+    root: User = Depends(require_root_recent_reauth),
+    db: Session = Depends(get_db),
+):
+    del request
+    controller = _active_role_key(db, "controller")
+    instance = _active_role_key(db, "instance")
+    existing = _archive_trust_package(db)
+    if existing is not None:
+        return {"ready": True, "document": existing[0]["document"]}
+    document = {
+        "format": ARCHIVE_TRUST_FORMAT,
+        "instance_id": instance.instance_id,
+        "controller_id": controller.entity_id,
+        "controller_key_id": controller.key_id,
+        "controller_public_key_sha256": controller.public_key_sha256,
+        "instance_key_id": instance.key_id,
+        "instance_public_key_sha256": instance.public_key_sha256,
+        "scope": ARCHIVE_TRUST_SCOPE,
+        "signed_at": datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    validate_archive_trust_document(
+        document,
+        instance_id=instance.instance_id,
+        controller_entity_id=str(controller.entity_id),
+        controller_key_id=controller.key_id,
+        controller_fingerprint=controller.public_key_sha256,
+        instance_key_id=instance.key_id,
+        instance_fingerprint=instance.public_key_sha256,
+    )
+    return {"ready": False, "document": document}
+
+
+@router.post("/trust-keys/archive-trust/complete")
+def complete_archive_trust(
+    body: CompleteArchiveTrust,
+    request: Request,
+    root: User = Depends(require_root_recent_reauth),
+    db: Session = Depends(get_db),
+):
+    try:
+        controller = _active_role_key(db, "controller")
+        instance = _active_role_key(db, "instance")
+        validate_archive_trust_document(
+            body.document,
+            instance_id=instance.instance_id,
+            controller_entity_id=str(controller.entity_id),
+            controller_key_id=controller.key_id,
+            controller_fingerprint=controller.public_key_sha256,
+            instance_key_id=instance.key_id,
+            instance_fingerprint=instance.public_key_sha256,
+        )
+        proof_sha256 = verify_signature(body.document, body.proof, controller.public_key)
+        package = {
+            "format": SIGNED_ARCHIVE_TRUST_PACKAGE_FORMAT,
+            "namespace": TRUST_NAMESPACE,
+            "document": body.document,
+            "proof": body.proof,
+            "controller_public_key": controller.public_key,
+            "instance_public_key": instance.public_key,
+        }
+        raw = canonical_json(package)
+        statement_sha256 = hashlib.sha256(raw).hexdigest()
+        path = _archive_trust_directory() / f"{statement_sha256}.json"
+        created = False
+        if path.exists():
+            if path.is_symlink() or path.read_bytes() != raw:
+                raise TrustEvidenceError("the archive trust identity conflicts with retained evidence")
+        else:
+            _atomic_write(path, raw)
+            created = True
+        try:
+            record_sha256 = append_record(
+                db,
+                workflow_type="evidence_archive_trust",
+                workflow_id=instance.key_id,
+                operation_type=f"bound_{controller.key_id}",
+                record_type="evidence.archive_trust_bound",
+                payload={
+                    "controller_id": controller.entity_id,
+                    "controller_key_id": controller.key_id,
+                    "key_id": instance.key_id,
+                    "public_key_sha256": instance.public_key_sha256,
+                    "statement_sha256": statement_sha256,
+                    "proof_sha256": proof_sha256,
+                    "status": "verified",
+                },
+            )
+        except Exception:
+            if created:
+                path.unlink(missing_ok=True)
+            raise
+        audit(
+            db, user=root, action="evidence.archive_trust.bound",
+            resource_type="evidence", request=request,
+            detail=json.dumps({"schema_version": 1, "statement_sha256": statement_sha256}),
+        )
+        db.commit()
+        return {"ready": True, "statement_sha256": statement_sha256, "record_sha256": record_sha256}
+    except (EvidenceUnavailable, TrustEvidenceError, OSError, TypeError, ValueError) as exc:
+        db.rollback()
+        raise _reject(exc) from exc
 
 
 @router.get("/trust-keys/pending-enrolments")
