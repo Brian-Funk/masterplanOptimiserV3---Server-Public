@@ -264,6 +264,20 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn("const exactPairingRetry", WORKER)
         self.assertNotIn("delete cluster.pairing", WORKER)
 
+    def test_witness_secrets_are_deployed_atomically_and_binding_is_repairable(self) -> None:
+        deploy = shell_function(SETUP, "mp_setup_deploy_witness")
+        repair = shell_function(SETUP, "mp_setup_repair_witness_admin_secret")
+        primary = shell_function(SETUP, "mp_setup_primary_create")
+        self.assertIn("--secrets-file /run/mp-opt-witness-secrets.json", deploy)
+        self.assertIn("ADMIN_TOKEN:$admin", deploy)
+        self.assertIn("CLOUDFLARE_DNS_API_TOKEN:$dns", deploy)
+        self.assertNotIn("secret put", deploy)
+        self.assertIn("--secrets-file /run/mp-opt-witness-secrets.json", repair)
+        self.assertIn("{ADMIN_TOKEN:$admin}", repair)
+        self.assertNotIn("CLOUDFLARE_DNS_API_TOKEN:$dns", repair)
+        self.assertIn("remote API returned HTTP (401|403)", primary)
+        self.assertIn("mp_setup_repair_witness_admin_secret", primary)
+
     def test_local_pending_receipts_cover_both_remote_commit_boundaries(self) -> None:
         self.assertIn("pending-witness-bootstrap.json", SETUP)
         self.assertIn("mp-opt-pending-witness-bootstrap-v1", SETUP)

@@ -446,9 +446,40 @@ mp_setup_witness_call() {
             "$action" "$witness" "$cluster"
 }
 
+mp_setup_repair_witness_admin_secret() {
+    local cluster_id="$1" admin_token="$2" deploy_token tools_image worker_name secrets_file output
+    ui_message "Repair HA witness access" \
+        "The deployed witness rejected its protected administrator binding. Re-enter the temporary Worker deployment token to atomically rebind that one secret. The existing long-lived DNS secret is preserved."
+    deploy_token="$(ui_password "Cloudflare" "Temporary Worker deployment API token")" || return 1
+    [ "${#deploy_token}" -ge 32 ] \
+        || { unset deploy_token; ui_error "The Cloudflare token appears incomplete."; return 1; }
+    tools_image="$(sed -n 's/^MP_TOOLS_IMAGE=//p' "$MP_ROOT/.release.env" | head -1)"
+    [[ "$tools_image" =~ ^ghcr\.io/brian-funk/masterplanoptimiserv3---server/tools@sha256:[0-9a-f]{64}$ ]] \
+        || { unset deploy_token; ui_error "The signed release does not contain the commissioning tools image."; return 1; }
+    worker_name="mp-opt-ha-$(tr -cd 'a-z0-9' <<< "${cluster_id:0:12}")"
+    secrets_file="$(mktemp "$MP_STATE/wrangler-secrets.XXXXXX")" || return 1
+    output="$(mktemp "$MP_STATE/wrangler-repair.XXXXXX")" \
+        || { mp_secure_remove_file "$secrets_file"; return 1; }
+    jq -n --arg admin "$admin_token" '{ADMIN_TOKEN:$admin}' > "$secrets_file" \
+        && chmod 600 "$secrets_file" \
+        || { mp_secure_remove_file "$secrets_file"; rm -f "$output"; unset deploy_token; return 1; }
+    docker run --rm \
+        -e CLOUDFLARE_API_TOKEN="$deploy_token" \
+        -v "$MP_ROOT/infra/cloudflare-ha-witness:/worker:ro" \
+        -v "$secrets_file:/run/mp-opt-witness-secrets.json:ro" \
+        "$tools_image" deploy /worker/src/index.ts --config /worker/wrangler.toml \
+            --name "$worker_name" --secrets-file /run/mp-opt-witness-secrets.json \
+        > "$output" 2>&1 \
+        || { ui_text_file "Worker credential repair failed" "$output"; \
+            mp_secure_remove_file "$secrets_file"; rm -f "$output"; unset deploy_token; return 1; }
+    mp_secure_remove_file "$secrets_file"
+    rm -f "$output"
+    unset deploy_token
+}
+
 mp_setup_deploy_witness() {
     local domain="$1" cluster_id="$2" deploy_token dns_token admin_token worker_name tools_image
-    local output witness zone_id
+    local output witness zone_id secrets_file
     deploy_token="$(ui_password "Cloudflare" "Temporary Worker deployment API token")" || return 1
     dns_token="$(ui_password "Cloudflare" "Long-lived zone-scoped DNS Edit + Zone Read API token")" || return 1
     [ "${#deploy_token}" -ge 32 ] && [ "${#dns_token}" -ge 32 ] \
@@ -456,31 +487,36 @@ mp_setup_deploy_witness() {
     tools_image="$(sed -n 's/^MP_TOOLS_IMAGE=//p' "$MP_ROOT/.release.env" | head -1)"
     [[ "$tools_image" =~ ^ghcr\.io/brian-funk/masterplanoptimiserv3---server/tools@sha256:[0-9a-f]{64}$ ]] \
         || { unset deploy_token dns_token; ui_error "The signed release does not contain the commissioning tools image."; return 1; }
+    zone_id="$(printf '%s' "$dns_token" \
+        | python3 "$MP_ROOT/deploy/ha/commission_api.py" zone-id "$domain")" \
+        || { unset deploy_token dns_token; ui_error "Cloudflare zone discovery failed. The DNS token needs Zone Read and DNS Edit for this zone."; return 1; }
     worker_name="mp-opt-ha-$(tr -cd 'a-z0-9' <<< "${cluster_id:0:12}")"
-    output="$(mktemp "$MP_STATE/wrangler-deploy.XXXXXX")" || return 1
+    admin_token="$(mp_random_secret)"
+    secrets_file="$(mktemp "$MP_STATE/wrangler-secrets.XXXXXX")" || return 1
+    output="$(mktemp "$MP_STATE/wrangler-deploy.XXXXXX")" \
+        || { mp_secure_remove_file "$secrets_file"; \
+            unset deploy_token dns_token admin_token; return 1; }
+    jq -n --arg admin "$admin_token" --arg dns "$dns_token" \
+        '{ADMIN_TOKEN:$admin,CLOUDFLARE_DNS_API_TOKEN:$dns}' > "$secrets_file" \
+        && chmod 600 "$secrets_file" \
+        || { mp_secure_remove_file "$secrets_file"; rm -f "$output"; \
+            unset deploy_token dns_token admin_token; return 1; }
     docker run --rm \
         -e CLOUDFLARE_API_TOKEN="$deploy_token" \
         -v "$MP_ROOT/infra/cloudflare-ha-witness:/worker:ro" \
-        "$tools_image" deploy /worker/src/index.ts --config /worker/wrangler.toml --name "$worker_name" \
+        -v "$secrets_file:/run/mp-opt-witness-secrets.json:ro" \
+        "$tools_image" deploy /worker/src/index.ts --config /worker/wrangler.toml \
+            --name "$worker_name" --secrets-file /run/mp-opt-witness-secrets.json \
         > "$output" 2>&1 \
-        || { ui_text_file "Worker deployment failed" "$output"; rm -f "$output"; return 1; }
+        || { ui_text_file "Worker deployment failed" "$output"; \
+            mp_secure_remove_file "$secrets_file"; rm -f "$output"; \
+            unset deploy_token dns_token admin_token; return 1; }
+    mp_secure_remove_file "$secrets_file"
     witness="$(grep -Eo 'https://[^[:space:]]+\.workers\.dev' "$output" | tail -1)"
     rm -f "$output"
     [ -n "$witness" ] || witness="$(ui_input "Cloudflare Worker" "Deployed Worker HTTPS URL")" || return 1
     [[ "$witness" =~ ^https://[^[:space:]]+\.workers\.dev/?$ ]] \
         || { ui_error "The deployed Worker URL is invalid."; return 1; }
-    admin_token="$(mp_random_secret)"
-    printf '%s' "$admin_token" \
-        | docker run --rm -i -e CLOUDFLARE_API_TOKEN="$deploy_token" \
-            "$tools_image" secret put ADMIN_TOKEN --name "$worker_name" >/dev/null \
-        || { unset deploy_token dns_token admin_token; ui_error "Worker administrator secret could not be installed."; return 1; }
-    printf '%s' "$dns_token" \
-        | docker run --rm -i -e CLOUDFLARE_API_TOKEN="$deploy_token" \
-            "$tools_image" secret put CLOUDFLARE_DNS_API_TOKEN --name "$worker_name" >/dev/null \
-        || { unset deploy_token dns_token admin_token; ui_error "Worker DNS secret could not be installed."; return 1; }
-    zone_id="$(printf '%s' "$dns_token" \
-        | python3 "$MP_ROOT/deploy/ha/commission_api.py" zone-id "$domain")" \
-        || { unset deploy_token dns_token admin_token; ui_error "Cloudflare zone discovery failed. The DNS token needs Zone Read and DNS Edit for this zone."; return 1; }
     MP_SETUP_WITNESS_URL="${witness%/}"
     MP_SETUP_ZONE_ID="$zone_id"
     MP_SETUP_WITNESS_ADMIN_TOKEN="$admin_token"
@@ -575,7 +611,7 @@ mp_setup_verify_standalone_dns() {
 
 mp_setup_primary_create() {
     local mode="$1" domain cluster_id node_token pairing_secret body pending join_code bootstrap_tmp
-    local bootstrap_ok attempt
+    local bootstrap_ok attempt bootstrap_error repair_attempted
     if [ ! -f "$MP_SETUP_V2_STATE" ]; then
         if [ "$mode" = ha-primary-new ] && [ -f "$MP_ROOT/.env" ]; then
             ui_error "A live standalone configuration already exists. Choose Convert this existing standalone server to Node A so an off-VPS recovery copy is required."
@@ -665,17 +701,31 @@ mp_setup_primary_create() {
             > "$body"
         mp_setup_state_action "Registering Node A with HA witness" || { rm -f "$body"; return 1; }
         bootstrap_ok=false
+        repair_attempted=false
+        bootstrap_error="$(mktemp "$MP_STATE/witness-bootstrap-error.XXXXXX")" \
+            || { rm -f "$body"; return 1; }
         for attempt in 1 2 3 4 5; do
             if mp_setup_witness_call bootstrap "$MP_SETUP_WITNESS_URL" "$cluster_id" \
-                "$MP_SETUP_WITNESS_ADMIN_TOKEN" "$body" >/dev/null; then
+                "$MP_SETUP_WITNESS_ADMIN_TOKEN" "$body" >/dev/null 2> "$bootstrap_error"; then
                 bootstrap_ok=true
                 break
+            fi
+            if [ "$repair_attempted" = false ] \
+                && grep -Eq 'remote API returned HTTP (401|403)' "$bootstrap_error"; then
+                mp_setup_repair_witness_admin_secret "$cluster_id" \
+                    "$MP_SETUP_WITNESS_ADMIN_TOKEN" \
+                    || { rm -f "$body" "$bootstrap_error"; \
+                        unset node_token pairing_secret MP_SETUP_WITNESS_ADMIN_TOKEN; return 1; }
+                repair_attempted=true
+                continue
             fi
             [ "$attempt" -eq 5 ] || sleep 2
         done
         [ "$bootstrap_ok" = true ] \
-            || { rm -f "$body"; unset node_token pairing_secret MP_SETUP_WITNESS_ADMIN_TOKEN; return 1; }
-        rm -f "$body"
+            || { ui_text_file "Worker registration failed" "$bootstrap_error"; \
+                rm -f "$body" "$bootstrap_error"; \
+                unset node_token pairing_secret MP_SETUP_WITNESS_ADMIN_TOKEN; return 1; }
+        rm -f "$body" "$bootstrap_error"
         mp_setup_install_ha_identity node-a node-b "$cluster_id" "$MP_SETUP_WITNESS_URL" "$node_token" || return 1
         pending="$(mktemp "$MP_STATE/pending-ha-join.XXXXXX")" || return 1
         jq -n --arg cluster "$cluster_id" --arg domain "$domain" \
