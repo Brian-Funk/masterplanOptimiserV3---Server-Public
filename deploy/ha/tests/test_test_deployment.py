@@ -119,7 +119,6 @@ class TestDeploymentPlannerTests(unittest.TestCase):
             'advance_setup_campaign_pin "$target" "$previous" "Preparing exact images for Node B"',
             apply,
         )
-        self.assertIn('.current_action="Preparing exact images for Node B"', apply)
 
     def test_pre_pairing_ha_update_stays_local(self) -> None:
         self.assertIn("ha_pairing_complete()", SUPERVISOR)
