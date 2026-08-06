@@ -62,6 +62,23 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn('internal-activate "$target" "$components" "$fresh_commissioning"', SUPERVISOR)
         self.assertIn("Node B did not record the exact pinned deployment receipt", SUPERVISOR)
         self.assertIn('write_state "$target" "" "$plan" ""', SUPERVISOR)
+        peer_activate = SUPERVISOR.split("internal_activate()", 1)[1].split(
+            "deploy_witness()", 1
+        )[0]
+        self.assertIn('.campaign_commit=$target', peer_activate)
+        self.assertIn('.campaign_commit != $previous', peer_activate)
+
+    def test_successful_exact_update_advances_setup_pin_after_pair_readiness(self) -> None:
+        self.assertIn("advance_setup_campaign_pin()", SUPERVISOR)
+        apply = SUPERVISOR.split("apply_commit()", 1)[1].split("restore_signed()", 1)[0]
+        self.assertLess(
+            apply.index("mp_ha_active_verification_readiness"),
+            apply.rindex('advance_setup_campaign_pin "$target" "$previous"'),
+        )
+        self.assertIn(
+            '.campaign_commit != $previous and .campaign_commit != $target',
+            SUPERVISOR,
+        )
 
     def test_initial_peer_is_prepared_before_replication_and_finalised_afterward(self) -> None:
         self.assertIn("prepare_initial_peer()", SUPERVISOR)

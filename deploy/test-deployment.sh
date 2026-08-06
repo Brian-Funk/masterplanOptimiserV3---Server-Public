@@ -356,6 +356,24 @@ write_state() {
     mv "$temporary" "$MP_TEST_STATE_FILE"
 }
 
+advance_setup_campaign_pin() {
+    local target="$1" previous="$2" action="${3:-}" setup_state temporary
+    setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
+    [ -s "$setup_state" ] || return 0
+    temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")"
+    jq --arg target "$target" --arg previous "$previous" --arg action "$action" \
+        --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        if .format != "mp-opt-setup-state-v2" or .deployment_lane != "unsigned" then
+          error("test deployment cannot advance a non-unsigned setup state")
+        elif .campaign_commit != $previous and .campaign_commit != $target then
+          error("campaign pin changed during exact deployment")
+        else . end |
+        .campaign_commit=$target | .updated_at=$now | .last_failure=null |
+        if $action == "" then . else .current_action=$action end
+    ' "$setup_state" > "$temporary" || { rm -f "$temporary"; return 1; }
+    chmod 600 "$temporary"; mv "$temporary" "$setup_state"
+}
+
 peer_copy_image() {
     local image="$1" local_id peer_id
     docker save "$image" | gzip -1 | ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
@@ -498,7 +516,7 @@ internal_finalize_peer() {
 }
 
 internal_activate() {
-    local target="$1" components="$2" fresh_commissioning="${3:-false}" plan setup_state temporary
+    local target="$1" components="$2" fresh_commissioning="${3:-false}" plan setup_state temporary previous
     require_test_policy
     [ "$fresh_commissioning" != true ] || require_fresh_commissioning_database "$target"
     mp_lock
@@ -513,16 +531,24 @@ internal_activate() {
         sync_frontend "$MP_TEST_HOME/peer-assets"
     fi
     compose_activate "$components" "$fresh_commissioning"
+    previous="$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)"
     plan="$(jq -n --arg components "$components" \
         '{base:"",target:"",full:true,migrations:true,components:($components|split(" "))}')"
     write_state "$target" "" "$plan" ""
     setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
     if [ -s "$setup_state" ]; then
         temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")"
-        jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '.completed=((.completed+["application_deployed"])|unique) |
+        jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg target "$target" \
+            --arg previous "$previous" '
+             if .format != "mp-opt-setup-state-v2" or .deployment_lane != "unsigned"
+                or (.campaign_commit != $previous and .campaign_commit != $target) then
+               error("peer setup pin changed during exact deployment")
+             else . end |
+             .campaign_commit=$target |
+             .completed=((.completed+["application_deployed"])|unique) |
              .state="complete" | .completed_at=$now |
-             .current_action="Waiting for root commissioning on Node A" | .updated_at=$now' \
+             .current_action="Waiting for root commissioning on Node A" |
+             .updated_at=$now | .last_failure=null' \
             "$setup_state" > "$temporary"
         chmod 600 "$temporary"; mv "$temporary" "$setup_state"
     fi
@@ -699,13 +725,7 @@ apply_commit() {
     set_apply_stage deployment-receipt
     write_state "$target" "$previous" "$plan" "$snapshot"
     if [ "$pre_activation_pair" = true ]; then
-        temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")"
-        jq --arg previous "$previous" --arg commit "$target" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            'if .campaign_commit != $previous then error("campaign pin changed during update") else . end |
-             .campaign_commit=$commit | .updated_at=$now |
-             .current_action="Preparing exact images for Node B" | .last_failure=null' \
-            "$setup_state" > "$temporary"
-        chmod 600 "$temporary"; mv "$temporary" "$setup_state"
+        advance_setup_campaign_pin "$target" "$previous" "Preparing exact images for Node B"
     fi
     if [ "$peer_ready" = true ]; then
         mp_ha_replicate_now
@@ -715,6 +735,12 @@ apply_commit() {
             python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic enabled >/dev/null
             mp_ha_set_config_value HA_AUTOMATIC_FAILOVER enabled
         fi
+    fi
+    if [ "$pre_activation_pair" != true ]; then
+        # Advance the authoritative pin only after local activation and every
+        # paired replication/readiness gate succeeded. A failure before here
+        # restores the previous receipt and leaves the previous pin intact.
+        advance_setup_campaign_pin "$target" "$previous"
     fi
     mp_audit "deploy.test" "success" "$target"
     rm -f "$MP_TEST_FAILURE_FILE" "$MP_TEST_STAGE_FILE"
