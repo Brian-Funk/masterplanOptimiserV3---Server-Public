@@ -743,8 +743,12 @@ def create_event(
 
     protection = protect_current_state("publisher-secret-create")
     if not protection.protected:
-        db.delete(event)
-        db.commit()
+        event_id = event.id
+        db.expire_all()
+        persisted_event = db.query(Event).filter(Event.id == event_id).first()
+        if persisted_event is not None:
+            db.delete(persisted_event)
+            db.commit()
         request_ha_replication("publisher-secret-create-rollback")
         raise HTTPException(
             status_code=503,
@@ -1006,9 +1010,12 @@ def regenerate_event_secret(
 
     protection = protect_current_state("publisher-secret-rotation")
     if not protection.protected:
-        event.publish_secret_hash = previous_hash
-        event.secret_created_at = previous_created_at
-        db.commit()
+        db.expire_all()
+        persisted_event = db.query(Event).filter(Event.id == event_id).first()
+        if persisted_event is not None:
+            persisted_event.publish_secret_hash = previous_hash
+            persisted_event.secret_created_at = previous_created_at
+            db.commit()
         request_ha_replication("publisher-secret-rotation-rollback")
         raise HTTPException(
             status_code=503,

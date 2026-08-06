@@ -693,6 +693,7 @@ function EventsTab({
   const [regeneratedSecrets, setRegeneratedSecrets] = useState<
     Record<number, string>
   >({});
+  const [regeneratingSecretId, setRegeneratingSecretId] = useState<number | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [startingDeletion, setStartingDeletion] = useState(false);
   const [deletionCase, setDeletionCase] = useState<{
@@ -773,6 +774,7 @@ function EventsTab({
 
   const handleRegenerate = async (eventId: number) => {
     setEventError("");
+    setRegeneratingSecretId(eventId);
     try {
       const res = await withReauth(() =>
         apiFetch(`/api/v1/admin/events/${eventId}/regenerate-secret`, {
@@ -782,6 +784,11 @@ function EventsTab({
       );
       const data = await res.json().catch(() => null);
       if (!res.ok) {
+        if (res.status === 404) {
+          onRefresh();
+          setEventError("This event no longer exists. The event list was refreshed.");
+          return;
+        }
         setEventError(
           responseMessage(
             data,
@@ -798,6 +805,8 @@ function EventsTab({
       setEventError(
         "Publisher token rotation was cancelled or reauthentication failed.",
       );
+    } finally {
+      setRegeneratingSecretId(null);
     }
   };
 
@@ -1105,8 +1114,13 @@ function EventsTab({
             onClick={handleCreate}
             disabled={creating || Boolean(dateRangeError) || !newEvent.name.trim() || (Boolean(eventPolicy) && !eventPolicyAcknowledged)}
           >
-            {creating ? "Creating..." : "Create Event"}
+            {creating ? "Creating and protecting on standby..." : "Create Event"}
           </Button>
+          {creating && (
+            <p className="mt-2 text-xs text-blue-700 dark:text-blue-300" role="status">
+              Keep this page open. In two-node HA, the one-time publisher token appears only after the peer accepts and verifies the protected event state.
+            </p>
+          )}
         </Card>
       )}
 
@@ -1182,8 +1196,9 @@ function EventsTab({
                   </Button>
                   <button
                     onClick={() => handleRegenerate(ev.id)}
-                    className="p-1.5 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                    title="Regenerate publish secret"
+                    disabled={regeneratingSecretId !== null}
+                    className="p-1.5 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-100 disabled:cursor-wait disabled:opacity-50 dark:hover:bg-gray-700 transition-colors"
+                    title={regeneratingSecretId === ev.id ? "Protecting publisher token on standby" : "Regenerate publish secret"}
                   >
                     <Key size={16} />
                   </button>
@@ -1201,6 +1216,11 @@ function EventsTab({
                   )}
                 </div>
               </div>
+              {regeneratingSecretId === ev.id && (
+                <p className="mt-2 text-xs text-blue-700 dark:text-blue-300" role="status">
+                  Rotating the publisher token and waiting for the standby to verify the protected state. Keep this page open.
+                </p>
+              )}
               {/* Accountable deletion-case confirmation */}
               {confirmDeleteId === ev.id && (
                 <div className="mt-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded p-3">

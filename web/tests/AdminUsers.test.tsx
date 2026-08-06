@@ -180,6 +180,33 @@ describe("Admin users", () => {
     expect(screen.getByRole("button", { name: "Open deletion progress" })).toBeInTheDocument();
   });
 
+  it("explains the HA protection wait while creating an event", async () => {
+    let finishCreate: ((response: Response) => void) | undefined;
+    mockApiFetch.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === "/api/v1/admin/events" && options?.method === "POST") {
+        return new Promise<Response>((resolve) => { finishCreate = resolve; });
+      }
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      if (path === "/api/v1/governance/public") return jsonResponse({ configured: false });
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+    await user.click(await screen.findByRole("button", { name: "Events" }));
+    await user.click(screen.getByRole("button", { name: "New Event" }));
+    await user.type(screen.getByLabelText("Participant-visible event name"), "HA event");
+    await user.click(screen.getByRole("button", { name: "Create Event" }));
+
+    expect(screen.getByRole("button", { name: "Creating and protecting on standby..." })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "the one-time publisher token appears only after the peer accepts",
+    );
+
+    finishCreate?.(jsonResponse({ publish_secret: "synthetic-secret" }));
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+  });
+
   it("shows the server reason when an event deletion case is rejected", async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === "/api/v1/admin/events") return jsonResponse([event]);

@@ -1,4 +1,7 @@
 """Tests for admin event endpoints."""
+from app.api.v1 import admin as admin_api
+from app.core.ha_replication import HAProtectionResult
+from app.models.event import Event
 from server_backend.conftest import (
     create_test_event, create_test_user, _make_client,
 )
@@ -30,6 +33,21 @@ def test_create_event_minimal(db, admin_client):
     })
     assert r.status_code == 200
     assert r.json()["event"]["name"] == "Minimal Event"
+
+
+def test_create_event_handles_concurrent_protection_rollback(db, admin_client, monkeypatch):
+    def fail_after_removal(_reason: str) -> HAProtectionResult:
+        event = db.query(Event).filter(Event.name == "Rolled back event").one()
+        db.delete(event)
+        db.commit()
+        return HAProtectionResult(False, error_code="synthetic_capture_failure")
+
+    monkeypatch.setattr(admin_api, "protect_current_state", fail_after_removal)
+    response = admin_client.post("/api/v1/admin/events", json={"name": "Rolled back event"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "standby_protection_failed"
+    assert db.query(Event).filter(Event.name == "Rolled back event").first() is None
 
 
 def test_create_event_rejects_end_date_before_start_date(db, admin_client):
@@ -170,3 +188,23 @@ def test_regenerate_secret(db, reauth_admin_client):
     new_secret = r.json()["publish_secret"]
     assert new_secret != old_secret
     assert len(new_secret) > 20
+
+
+def test_regenerate_secret_handles_event_removed_during_protection(
+    db, reauth_admin_client, monkeypatch,
+):
+    event, _old_secret = create_test_event(db, name="Concurrent removal")
+
+    def fail_after_removal(_reason: str) -> HAProtectionResult:
+        current = db.query(Event).filter(Event.id == event.id).one()
+        db.delete(current)
+        db.commit()
+        return HAProtectionResult(False, error_code="synthetic_capture_failure")
+
+    monkeypatch.setattr(admin_api, "protect_current_state", fail_after_removal)
+    response = reauth_admin_client.post(
+        f"/api/v1/admin/events/{event.id}/regenerate-secret"
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "standby_protection_failed"
