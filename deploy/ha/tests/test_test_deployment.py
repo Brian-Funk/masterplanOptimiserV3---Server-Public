@@ -115,7 +115,10 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("pre_activation_pair=true", apply)
         self.assertIn('index("replicated") == null', apply)
         self.assertIn("before initial HA replication", apply)
-        self.assertIn('.campaign_commit=$commit', apply)
+        self.assertIn(
+            'advance_setup_campaign_pin "$target" "$previous" "Preparing exact images for Node B"',
+            apply,
+        )
         self.assertIn('.current_action="Preparing exact images for Node B"', apply)
 
     def test_pre_pairing_ha_update_stays_local(self) -> None:
