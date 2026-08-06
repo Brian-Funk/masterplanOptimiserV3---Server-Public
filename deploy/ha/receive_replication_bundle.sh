@@ -188,6 +188,7 @@ fi
 
 mp_compose_init
 "${MP_COMPOSE[@]}" up -d db >/dev/null
+mp_wait_for_database 30 || { echo "The replication peer database did not become ready." >&2; exit 1; }
 stage_db="mp_stage_${bundle_id//[^A-Za-z0-9]/}"
 stage_db="${stage_db:0:48}"
 rollback_db="mp_rollback_${bundle_id//[^A-Za-z0-9]/}"

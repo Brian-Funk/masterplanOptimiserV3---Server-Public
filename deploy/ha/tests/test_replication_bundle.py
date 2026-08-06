@@ -281,6 +281,17 @@ class ReplicationBundleTests(unittest.TestCase):
             sender,
         )
 
+    def test_receiver_waits_for_a_cold_database_before_staging(self) -> None:
+        receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        database_start = receiver.index('"${MP_COMPOSE[@]}" up -d db')
+        database_ready = receiver.index("mp_wait_for_database 30", database_start)
+        first_drop = receiver.index('exec -T db dropdb', database_start)
+        self.assertLess(database_start, database_ready)
+        self.assertLess(database_ready, first_drop)
+        self.assertIn("The replication peer database did not become ready.", receiver)
+
 
 if __name__ == "__main__":
     unittest.main()
