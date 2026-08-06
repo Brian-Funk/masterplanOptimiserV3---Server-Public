@@ -45,7 +45,7 @@ mp_setup_install_signed_release() {
 }
 
 mp_setup_state_begin() {
-    local mode="$1" temporary lane="" policy commit=""
+    local mode="$1" temporary lane="" policy commit="" receipt="" pinned="" checkout=""
     if [ -f "$MP_SETUP_V2_STATE" ]; then
         jq -e '.format == "mp-opt-setup-state-v2" and .state == "in_progress"' \
             "$MP_SETUP_V2_STATE" >/dev/null || {
@@ -56,6 +56,30 @@ mp_setup_state_begin() {
             ui_error "Another commissioning workflow is already in progress. Resume it and complete its guarded checkpoints before starting a different mode."
             return 1
         }
+        if [ "$(jq -r '.deployment_lane // empty' "$MP_SETUP_V2_STATE")" = unsigned ] \
+            && [ -f "$MP_ROOT/.env" ]; then
+            receipt="$(jq -r '.current_commit // empty' \
+                "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)"
+            [[ "$receipt" =~ ^[0-9a-f]{40}$ ]] || {
+                ui_error "The active unsigned application has no valid exact deployment receipt. Commissioning will not infer a commit from the management checkout."
+                return 1
+            }
+            pinned="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
+            if [ "$pinned" != "$receipt" ]; then
+                checkout="$(git -C "$MP_ROOT" rev-parse HEAD 2>/dev/null || true)"
+                if [ "$pinned" != "$checkout" ] \
+                    || jq -e '.completed | index("witness_bootstrap") != null' \
+                        "$MP_SETUP_V2_STATE" >/dev/null 2>&1 \
+                    || [ -s "$MP_SETUP_V2_PENDING_JOIN" ]; then
+                    ui_error "The unsigned commissioning pin does not match the active exact deployment receipt. Pairing has stopped rather than changing an established campaign target."
+                    return 1
+                fi
+                git -C "$MP_ROOT" fetch --no-tags --force origin "$receipt" >/dev/null 2>&1 \
+                    && [ "$(git -C "$MP_ROOT" rev-parse FETCH_HEAD 2>/dev/null || true)" = "$receipt" ] \
+                    || { ui_error "The active exact deployment receipt is not available from origin. Push that exact commit before resuming commissioning."; return 1; }
+                mp_setup_state_update '.campaign_commit=$commit' --arg commit "$receipt" || return 1
+            fi
+        fi
         return 0
     fi
     policy="$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)"
@@ -63,7 +87,16 @@ mp_setup_state_begin() {
         production) lane=signed ;;
         test)
             lane=unsigned
-            commit="$(git -C "$MP_ROOT" rev-parse HEAD 2>/dev/null || true)"
+            if [ -f "$MP_ROOT/.env" ]; then
+                commit="$(jq -r '.current_commit // empty' \
+                    "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)"
+                [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || {
+                    ui_error "A live unsigned installation requires an exact deployment receipt. Commissioning will not pin the management checkout."
+                    return 1
+                }
+            else
+                commit="$(git -C "$MP_ROOT" rev-parse HEAD 2>/dev/null || true)"
+            fi
             [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || {
                 ui_error "Unsigned commissioning requires a lowercase 40-character checkout HEAD."
                 return 1
@@ -542,6 +575,7 @@ mp_setup_verify_standalone_dns() {
 
 mp_setup_primary_create() {
     local mode="$1" domain cluster_id node_token pairing_secret body pending join_code bootstrap_tmp
+    local bootstrap_ok attempt
     if [ ! -f "$MP_SETUP_V2_STATE" ]; then
         if [ "$mode" = ha-primary-new ] && [ -f "$MP_ROOT/.env" ]; then
             ui_error "A live standalone configuration already exists. Choose Convert this existing standalone server to Node A so an off-VPS recovery copy is required."
@@ -565,10 +599,12 @@ mp_setup_primary_create() {
     fi
     domain="$(mp_env_get DOMAIN)" || return 1
     if [ "$mode" = convert-ha ] && ! mp_setup_state_has recovery_recipient; then
+        mp_setup_state_action "Verifying recovery identity" || return 1
         [ -s "$MP_RECIPIENT_FILE" ] || mp_configure_recovery_recipient || return 1
         mp_setup_state_mark recovery_recipient
     fi
     if [ "$mode" = convert-ha ] && ! mp_setup_state_has migration_snapshot; then
+        mp_setup_state_action "Creating migration safety snapshot" || return 1
         mp_prepare_guard_snapshot "single-to-ha" || return 1
         if [ "$(mp_recovery_storage_mode)" = manual_portable ]; then
             mp_snapshot_export_portable_interactive || return 1
@@ -579,6 +615,7 @@ mp_setup_primary_create() {
         mp_setup_state_mark migration_snapshot
     fi
     if ! mp_setup_state_has witness_bootstrap; then
+        mp_setup_state_action "Deploying HA witness" || return 1
         if [ ! -s "$MP_SETUP_V2_PENDING_BOOTSTRAP" ]; then
             mp_setup_prepare_node_material node-a || return 1
             cluster_id="mp-opt-$(cat /proc/sys/kernel/random/uuid)"
@@ -626,8 +663,17 @@ mp_setup_primary_create() {
               zone_id:$zone,hostname:$domain,node_a_ipv4:$ipv4,node_a_ipv6:$ipv6,
               node_a_ssh_public_key:$ssh,node_a_ssh_host_key:$host,node_a_age_recipient:$age}' \
             > "$body"
-        mp_setup_witness_call bootstrap "$MP_SETUP_WITNESS_URL" "$cluster_id" \
-            "$MP_SETUP_WITNESS_ADMIN_TOKEN" "$body" >/dev/null \
+        mp_setup_state_action "Registering Node A with HA witness" || { rm -f "$body"; return 1; }
+        bootstrap_ok=false
+        for attempt in 1 2 3 4 5; do
+            if mp_setup_witness_call bootstrap "$MP_SETUP_WITNESS_URL" "$cluster_id" \
+                "$MP_SETUP_WITNESS_ADMIN_TOKEN" "$body" >/dev/null; then
+                bootstrap_ok=true
+                break
+            fi
+            [ "$attempt" -eq 5 ] || sleep 2
+        done
+        [ "$bootstrap_ok" = true ] \
             || { rm -f "$body"; unset node_token pairing_secret MP_SETUP_WITNESS_ADMIN_TOKEN; return 1; }
         rm -f "$body"
         mp_setup_install_ha_identity node-a node-b "$cluster_id" "$MP_SETUP_WITNESS_URL" "$node_token" || return 1
@@ -645,6 +691,7 @@ mp_setup_primary_create() {
         rm -f "$MP_SETUP_V2_PENDING_BOOTSTRAP"
         unset node_token pairing_secret MP_SETUP_WITNESS_ADMIN_TOKEN
     fi
+    mp_setup_state_action "Waiting for Node B join" || return 1
     join_code="$(python3 "$MP_ROOT/deploy/ha/pairing.py" encode < "$MP_SETUP_V2_PENDING_JOIN")" || return 1
     ui_copyable_terminal_text "Node B join code" "$join_code" \
         "On the second VPS, start mp-opt, choose Join an existing HA pair with a one-time code, and paste this code within 15 minutes. Then return here and choose Resume setup." || return 1

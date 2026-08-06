@@ -95,6 +95,56 @@ class PairingCodeTests(unittest.TestCase):
             state_begin.index('format:"mp-opt-setup-state-v2"'),
         )
 
+    @unittest.skipIf(os.name == "nt", "POSIX shell state contract")
+    def test_convert_ha_pins_active_exact_receipt_not_management_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            state = work / "state"
+            fake_bin = work / "bin"
+            state.mkdir()
+            (state / "test-deployments").mkdir()
+            fake_bin.mkdir()
+            checkout = "a" * 40
+            receipt = "c" * 40
+            (work / ".env").write_text("DOMAIN=example.test\n", encoding="ascii")
+            (state / "test-deployments/current.json").write_text(
+                json.dumps({"current_commit": receipt}), encoding="utf-8"
+            )
+            fetched = work / "fetched"
+            fake_git = fake_bin / "git"
+            fake_git.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"$*\" == *'rev-parse HEAD'* ]]; then printf '%s\\n' \"$FAKE_CHECKOUT\"; exit 0; fi\n"
+                "if [[ \"$*\" == *'fetch --no-tags --force origin'* ]]; then printf '%s' \"${@: -1}\" > \"$FAKE_FETCHED\"; exit 0; fi\n"
+                "if [[ \"$*\" == *'rev-parse FETCH_HEAD'* ]]; then cat \"$FAKE_FETCHED\"; exit 0; fi\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake_git.chmod(0o755)
+            policy = work / "policy"
+            policy.write_text("test\n", encoding="ascii")
+            script = r'''
+                export MP_ROOT="$1" MP_STATE="$2" MP_SETUP_V2_STATE="$2/setup.json"
+                export MP_DEPLOYMENT_POLICY_FILE="$3" FAKE_CHECKOUT="$4" FAKE_FETCHED="$5"
+                export PATH="$6:$PATH"
+                source "$7/deploy/management/setup_v2.sh"
+                ui_error() { printf '%s\n' "$*" >&2; }
+                mp_setup_state_begin convert-ha
+                jq -r .campaign_commit "$MP_SETUP_V2_STATE"
+                jq --arg stale "$FAKE_CHECKOUT" '.campaign_commit=$stale' \
+                    "$MP_SETUP_V2_STATE" > "$MP_SETUP_V2_STATE.stale"
+                mv "$MP_SETUP_V2_STATE.stale" "$MP_SETUP_V2_STATE"
+                mp_setup_state_begin convert-ha
+                jq -r .campaign_commit "$MP_SETUP_V2_STATE"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(work),
+                 str(state), str(policy), checkout, str(fetched), str(fake_bin),
+                 str(ROOT)], text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), [receipt, receipt])
+
     def test_state_update_preserves_the_jq_now_variable_for_jq(self) -> None:
         state_update = shell_function(SETUP, "mp_setup_state_update")
         self.assertIn('"$filter | .updated_at=\\$now"', state_update)
@@ -388,6 +438,8 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn('format:"mp-opt-setup-state-v2"', state)
         self.assertIn('deployment_lane:$lane', state)
         self.assertIn('campaign_commit:', state)
+        self.assertIn('test-deployments/current.json', state)
+        self.assertIn('Commissioning will not pin the management checkout', state)
         self.assertIn('fetch --no-tags --force origin "$commit"', state)
         self.assertIn('rev-parse FETCH_HEAD', state)
         self.assertNotIn("test_commit_deployed", SETUP)
@@ -417,6 +469,9 @@ class PairingCodeTests(unittest.TestCase):
                 workflow.index('mp_setup_state_action "Protected configuration"'),
                 workflow.index("mp_guided_initial_configuration"),
             )
+        self.assertIn('mp_setup_state_action "Deploying HA witness"', primary)
+        self.assertIn('mp_setup_state_action "Registering Node A with HA witness"', primary)
+        self.assertIn('mp_setup_state_action "Waiting for Node B join"', primary)
 
     def test_standalone_dns_wait_retries_at_thirty_second_intervals(self) -> None:
         script = r'''
