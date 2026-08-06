@@ -76,6 +76,14 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn('tar -C "$MP_ROOT" -czf - web/out runtime/frontend-csp.caddy', initial)
         self.assertNotIn('tar -C "$MP_TEST_SOURCE" -czf - web/out', initial)
 
+    def test_paired_pre_activation_updates_are_operations_only(self) -> None:
+        apply = SUPERVISOR.split("apply_commit()", 1)[1].split("restore_signed()", 1)[0]
+        self.assertIn("pre_activation_pair=true", apply)
+        self.assertIn('index("application_deployed") == null', apply)
+        self.assertIn("Only operations files may advance after pairing", apply)
+        self.assertIn('.campaign_commit=$commit', apply)
+        self.assertIn('.current_action="Preparing exact images for Node B"', apply)
+
     def test_pre_pairing_ha_update_stays_local(self) -> None:
         self.assertIn("ha_pairing_complete()", SUPERVISOR)
         self.assertIn("ha_pair_transport_ready()", SUPERVISOR)

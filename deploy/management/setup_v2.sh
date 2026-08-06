@@ -388,6 +388,7 @@ mp_setup_reconcile_primary_campaign_pin() {
 
 mp_setup_activate_converted_unsigned_pair() {
     local commit key image
+    mp_setup_state_action "Preparing exact images for Node B" || return 1
     commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
     [ "$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)" = "$commit" ] \
         || { ui_error "Node A's verified deployment receipt does not match the reconciled campaign pin."; return 1; }
@@ -398,12 +399,15 @@ mp_setup_activate_converted_unsigned_pair() {
             || { ui_error "${key} is unavailable for the verified converted deployment."; return 1; }
     done
     "$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit" || return 1
+    mp_setup_state_action "Installing Node A HA services" || return 1
     "$MP_ROOT/deploy/ha/install_services.sh" || return 1
+    mp_setup_state_action "Activating HA routing" || return 1
     python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null || return 1
     mp_prepare_backend_secret_permissions || return 1
     mp_compose_init || return 1
     mp_compose_validate || return 1
     "${MP_COMPOSE[@]}" up -d db backend caddy || return 1
+    mp_setup_state_action "Verifying Node A HA health" || return 1
     mp_wait_for_database 30 && mp_verify_database_schema_contract && mp_wait_for_health 45 \
         || { ui_error "Node A could not activate the reconciled unsigned HA topology."; return 1; }
 }

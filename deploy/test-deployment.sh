@@ -521,7 +521,8 @@ deploy_witness() {
 apply_commit() {
     local target="$1" confirm_full="$2" confirm_migrations="$3" fresh_commissioning="$4"
     local plan previous components snapshot="" automatic=false role component image verified_before=""
-    local peer_ready=false pre_pairing=false holder="" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
+    local peer_ready=false pre_pairing=false pre_activation_pair=false holder="" temporary
+    local setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
     local -a remote_args
     require_test_policy
     plan="$(create_plan "$target")"
@@ -552,14 +553,25 @@ apply_commit() {
                 ui_error "HA pairing is recorded, but the verified peer transport is unavailable. No node was updated."
                 return 1
             }
-            peer_ready=true
             holder="$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
             if [ -z "$holder" ]; then
-                jq -e '.state == "in_progress" and ((.completed // []) | index("paired") != null)' \
+                jq -e --arg previous "$previous" \
+                    '.state == "in_progress"
+                     and ((.completed // []) | index("paired") != null)
+                     and ((.completed // []) | index("application_deployed") == null)
+                     and .campaign_commit == $previous' \
                     "$setup_state" >/dev/null 2>&1 || {
                     ui_error "HA pairing is complete, but no current lease observation is available. No node was updated."
                     return 1
                 }
+                pre_activation_pair=true
+                pre_pairing=true
+                for component in backend frontend caddy database tools witness; do
+                    if grep -qw "$component" <<< "$components"; then
+                        ui_error "Only operations files may advance after pairing and before initial HA activation. No node was updated."
+                        return 1
+                    fi
+                done
             elif [ "$holder" != "$HA_NODE_ID" ]; then
                 remote_args=(apply "$target")
                 [ "$confirm_full" != true ] || remote_args+=(--confirm-full)
@@ -572,6 +584,8 @@ apply_commit() {
                 fi
                 exec ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
                     env MP_ROOT=/opt/masterplan /opt/masterplan/deploy/test-deployment.sh "${remote_args[@]}"
+            else
+                peer_ready=true
             fi
         else
             pre_pairing=true
@@ -653,6 +667,15 @@ apply_commit() {
     fi
     set_apply_stage deployment-receipt
     write_state "$target" "$previous" "$plan" "$snapshot"
+    if [ "$pre_activation_pair" = true ]; then
+        temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")"
+        jq --arg previous "$previous" --arg commit "$target" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            'if .campaign_commit != $previous then error("campaign pin changed during update") else . end |
+             .campaign_commit=$commit | .updated_at=$now |
+             .current_action="Preparing exact images for Node B" | .last_failure=null' \
+            "$setup_state" > "$temporary"
+        chmod 600 "$temporary"; mv "$temporary" "$setup_state"
+    fi
     if [ "$peer_ready" = true ]; then
         mp_ha_replicate_now
         mp_ha_refresh_witness_observations
