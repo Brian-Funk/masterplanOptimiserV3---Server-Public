@@ -79,6 +79,12 @@ class TerminalExitSafetyTests(unittest.TestCase):
         self.assertIn("clear </dev/tty >/dev/tty", cleanup)
         self.assertIn("trap mp_cleanup EXIT TERM", MENU_SOURCE)
 
+    def test_command_log_clear_never_opens_tty_without_a_terminal(self) -> None:
+        clear_terminal = function_body(COMMON_SOURCE, "ui_clear_terminal")
+        self.assertIn("if mp_has_terminal", clear_terminal)
+        self.assertNotIn("if [ -w /dev/tty ]", clear_terminal)
+        self.assertIn("clear 2>/dev/null || true", clear_terminal)
+
 
 class SnapshotServiceSafetyTests(unittest.TestCase):
     def test_deep_verify_retries_pending_deletion_recovery_receipts(self) -> None:

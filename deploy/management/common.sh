@@ -569,7 +569,7 @@ mp_sanitise_terminal_stream() {
 
 # Run a long command inside the preferred TUI output window.
 ui_clear_terminal() {
-    if [ -w /dev/tty ]; then
+    if mp_has_terminal; then
         printf '\033[2J\033[3J\033[H' >/dev/tty 2>/dev/null || true
     else
         clear 2>/dev/null || true
