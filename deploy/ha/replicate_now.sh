@@ -93,8 +93,9 @@ python3 "$MP_ROOT/deploy/ha/replication_bundle.py" prepare-recovery-state \
     --output "$stage/payload/recovery/manual-recovery-export.json"
 for secret in secret_key ip_hmac_key vapid_private_key root_bootstrap_token smtp_token evidence_signing_key; do
     source_secret="$MP_ROOT/secrets/$secret"
+    expected_mode="$(mp_expected_protected_file_mode "$source_secret")"
     [ -f "$source_secret" ] && [ ! -L "$source_secret" ] \
-        && [ "$(stat -c '%a' "$source_secret")" = 600 ] \
+        && [ "$(stat -c '%a' "$source_secret")" = "$expected_mode" ] \
         || { echo "Shared secret is missing or unsafe: $secret" >&2; exit 1; }
     install -m 0600 "$source_secret" "$stage/payload/config/secrets/$secret"
 done

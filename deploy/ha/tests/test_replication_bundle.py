@@ -266,6 +266,21 @@ class ReplicationBundleTests(unittest.TestCase):
             receiver,
         )
 
+    def test_sender_uses_the_shared_protected_secret_mode_contract(self) -> None:
+        sender = (HA_DIR / "replicate_now.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            'expected_mode="$(mp_expected_protected_file_mode "$source_secret")"',
+            sender,
+        )
+        self.assertIn(
+            '[ "$(stat -c \'%a\' "$source_secret")" = "$expected_mode" ]',
+            sender,
+        )
+        self.assertNotIn(
+            '[ "$(stat -c \'%a\' "$source_secret")" = 600 ]',
+            sender,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
