@@ -11,12 +11,17 @@ ui_error() { printf 'ERROR: %s\n' "$*" >&2; }
 ui_message() { printf '%s\n' "$*"; }
 ui_confirm() { return 1; }
 
+if [ "${MP_TEST_APPLY_REEXEC:-0}" = 1 ]; then
+    MP_TEST_OPERATIONS_ROOT="$SCRIPT_DIR"
+else
+    MP_TEST_OPERATIONS_ROOT="$MP_ROOT/deploy"
+fi
 # shellcheck source=management/common.sh
-source "$MP_ROOT/deploy/management/common.sh"
+source "$MP_TEST_OPERATIONS_ROOT/management/common.sh"
 # shellcheck source=management/snapshots.sh
-source "$MP_ROOT/deploy/management/snapshots.sh"
+source "$MP_TEST_OPERATIONS_ROOT/management/snapshots.sh"
 # shellcheck source=management/ha.sh
-source "$MP_ROOT/deploy/management/ha.sh"
+source "$MP_TEST_OPERATIONS_ROOT/management/ha.sh"
 
 MP_TEST_HOME="${MP_TEST_HOME:-$HOME/.local/share/mp-opt-test-deploy}"
 MP_TEST_SOURCE="$MP_TEST_HOME/source"
@@ -596,6 +601,18 @@ apply_commit() {
     local setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
     local -a remote_args
     require_test_policy
+    if [ "${MP_TEST_APPLY_REEXEC:-0}" != 1 ]; then
+        # Fetch the immutable target with the currently trusted supervisor, then
+        # start the deployment anew through that exact target. No locks or
+        # service changes have occurred, so the re-entry is side-effect free.
+        prepare_source "$target"
+        remote_args=(apply "$target")
+        [ "$confirm_full" != true ] || remote_args+=(--confirm-full)
+        [ "$confirm_migrations" != true ] || remote_args+=(--confirm-migrations)
+        [ "$fresh_commissioning" != true ] || remote_args+=(--fresh-commissioning)
+        exec env MP_ROOT="$MP_ROOT" MP_TEST_APPLY_REEXEC=1 \
+            "$MP_TEST_SOURCE/deploy/test-deployment.sh" "${remote_args[@]}"
+    fi
     plan="$(create_plan "$target")"
     if [ "$fresh_commissioning" = true ]; then
         require_fresh_commissioning_database "$target"

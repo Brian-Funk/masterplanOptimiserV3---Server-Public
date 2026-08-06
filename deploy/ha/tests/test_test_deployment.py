@@ -46,6 +46,15 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         )
         self.assertIn('compose_activate "$components" "$fresh_commissioning"', SUPERVISOR)
 
+    def test_apply_reenters_fetched_target_before_lock_or_service_changes(self) -> None:
+        self.assertIn('MP_TEST_APPLY_REEXEC', SUPERVISOR)
+        self.assertIn('MP_TEST_OPERATIONS_ROOT="$SCRIPT_DIR"', SUPERVISOR)
+        apply = SUPERVISOR.split("apply_commit()", 1)[1].split("restore_signed()", 1)[0]
+        self.assertIn('prepare_source "$target"', apply)
+        self.assertIn('"$MP_TEST_SOURCE/deploy/test-deployment.sh" "${remote_args[@]}"', apply)
+        self.assertLess(apply.index('exec env MP_ROOT="$MP_ROOT"'), apply.index('plan="$(create_plan'))
+        self.assertLess(apply.index('exec env MP_ROOT="$MP_ROOT"'), apply.index("mp_lock"))
+
     def test_failure_is_staged_and_previous_exact_receipt_is_recovered(self) -> None:
         self.assertIn("mp-opt-test-deployment-failure-v1", SUPERVISOR)
         self.assertIn("record_apply_failure", SUPERVISOR)
