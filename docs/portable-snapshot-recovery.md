@@ -118,7 +118,10 @@ the peer only when the peer is healthy, has an accepted bundle for the current
 generation, reports the same release and has no active transfer or write
 permit. Promotion increments the generation, replaces local state, revokes
 bearer access and changes Cloudflare routing only after the new holder reports
-ready. Writes after the last accepted replication may be lost.
+ready. Ordinary writes after the last accepted periodic replication may be
+lost. The documented critical publisher, public-link, and deletion-confirmation
+operations are not reported as successful until their exact marker is present
+in an accepted peer bundle.
 
 With automatic failover disabled, scheduled/manual replication and planned
 switchovers still work. Sudden holder loss does not promote the peer. The peer

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import stat
@@ -87,6 +88,39 @@ class ReplicationBundleTests(unittest.TestCase):
             replication_bundle.validate(self.validate_args(root))
             document = json.loads((root / "manifest.json").read_text())
             self.assertTrue(all(item["mode"] == "0600" for item in document["files"]))
+
+    def test_v2_manifest_binds_and_validates_operation_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = self.payload(root)
+            marker = {
+                "operation_id": "72a24e65-6f20-45bd-bf87-338f5fcf8f93",
+                "mutation_sequence": 9,
+                "operation_type": "publisher-secret-create",
+                "resource_type": "event",
+                "resource_id": "12",
+            }
+            marker["marker_sha256"] = hashlib.sha256(
+                json.dumps(marker, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            request = root / "batch.json"
+            request.write_text(json.dumps({
+                "format": "mp-opt-replication-batch-v2",
+                "operations": [{"marker": marker}],
+            }))
+            manifest = root / "manifest.json"
+            replication_bundle.create(argparse.Namespace(
+                payload=str(payload), cluster="cluster-test", source="node-a",
+                target="node-b", bundle="bundle-operations", generation=3,
+                release="a" * 40, output=str(manifest), request=str(request),
+            ))
+            replication_bundle.validate(self.validate_args(root))
+            document = json.loads(manifest.read_text())
+            self.assertEqual(document["protection_operations"][0]["marker"], marker)
+            document["protection_operations"][0]["marker"]["resource_id"] = "13"
+            manifest.write_text(json.dumps(document))
+            with self.assertRaisesRegex(ValueError, "marker digest"):
+                replication_bundle.validate(self.validate_args(root))
 
     def test_tamper_and_unsafe_mode_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

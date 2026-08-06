@@ -466,6 +466,8 @@ def test_setup_import_requires_and_preserves_current_evidence_identities():
     subject_ref = "66666666-6666-4666-8666-666666666666"
     parsed = ImportSetupIn.model_validate({
         "event": {"evidence_id": event_ref, "name": "Current event"},
+        "publish_secret": "p" * 48,
+        "idempotency_key": "77777777-7777-4777-8777-777777777777",
         "users": [{
             "username": "current.person",
             "display_name": "Current Person",
@@ -479,6 +481,8 @@ def test_setup_import_requires_and_preserves_current_evidence_identities():
     with pytest.raises(ValidationError):
         ImportSetupIn.model_validate({
             "event": {"name": "Legacy event"},
+            "publish_secret": "p" * 48,
+            "idempotency_key": "88888888-8888-4888-8888-888888888888",
             "users": [{"username": "legacy", "display_name": "Legacy"}],
         })
 

@@ -251,6 +251,8 @@ def test_admin_event_contract_exposes_materialised_deadline_and_inventory(
         json={
             "name": "Synthetic scheduled event",
             "end_date": "2026-08-01",
+            "publish_secret": "p" * 48,
+            "idempotency_key": "33333333-3333-4333-8333-333333333333",
         },
     )
     assert response.status_code == 200, response.json()
@@ -279,6 +281,8 @@ def test_imported_setup_materialises_and_returns_the_event_deadline(
                 "end_date": "2026-08-01",
             },
             "users": [],
+            "publish_secret": "q" * 48,
+            "idempotency_key": "44444444-4444-4444-8444-444444444444",
         },
     )
 
@@ -299,6 +303,8 @@ def test_import_setup_rejects_an_invalid_event_date_range(db, reauth_admin_clien
                 "end_date": "2026-08-01",
             },
             "users": [],
+            "publish_secret": "r" * 48,
+            "idempotency_key": "55555555-5555-4555-8555-555555555555",
         },
     )
 

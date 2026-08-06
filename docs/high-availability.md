@@ -30,11 +30,26 @@ hashed, manifest-validated, restored into a staging database, checked for
 cluster/generation identity, and atomically swapped. The former peer database
 is retained as an immediate rollback point.
 
-This is a five-minute recovery-point target, not synchronous replication. A
-catastrophic primary loss can lose changes since the last accepted copy. The
-root HA panel reports the latest accepted copy and current potential data-loss
-age. Independent disaster recovery still requires an encrypted portable
-snapshot whose private identity is held outside both VPSs.
+This is a hybrid protection model. Ordinary writes retain a five-minute
+recovery-point target and a catastrophic primary loss can lose ordinary
+changes since the last accepted copy. The following narrow operations do not
+report success until the standby verifies their exact database marker inside a
+complete encrypted copy:
+
+- event creation, publisher-secret setup/import, and publisher-secret rotation;
+- public schedule-link creation, update, invalidation, and deletion; and
+- deletion-case peer confirmation.
+
+Each such mutation and its idempotent protection operation commit in one local
+database transaction. While protection is pending, the resource is durable but
+locked and the UI shows the capture, transfer, and verification stage. A timeout
+never deletes or reverses it. A minimal UUID-addressed result is readable by the
+backend from a non-listable runtime directory; detailed diagnostics remain in
+the private host-management directory. If an acknowledgement is lost, the
+sender reconciles the exact bundle hash and operation-marker list with the
+receiver state. The root HA panel reports the latest accepted copy and current
+potential data-loss age. Independent disaster recovery still requires an
+encrypted portable snapshot whose private identity is held outside both VPSs.
 
 ## Automatic failover
 
@@ -44,6 +59,7 @@ witness may promote the peer only when all safety gates pass:
 - the candidate is healthy and has the current generation's complete copy;
 - both nodes report the same signed release identity;
 - no critical replication/configuration operation is pending;
+- no unresolved critical-operation witness guard is active;
 - no write permit or transfer guard remains active;
 - SMTP configuration is either disabled on both nodes or verified and
   fingerprint-identical on both;
@@ -59,6 +75,12 @@ witness updates DNS. A stale former primary cannot regain writes merely by
 receiving traffic. Mutations need a short witness permit at both middleware and
 database-commit boundaries. When the witness is unavailable, writes fail
 closed while already-saved schedules remain readable in the browser.
+
+The holder opens a bounded witness guard before committing a critical
+operation. Planned and automatic promotion remain blocked until the standby
+accepts the exact operation or the holder proves the database transaction did
+not commit. An expired unresolved guard is retained as a bounded witness
+incident; it never turns an unverified mutation into a successful result.
 
 Normal users see a small generic availability message and can open their saved
 read-only schedule. Root administrators additionally see the active transition
