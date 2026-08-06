@@ -168,6 +168,15 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
         self.assertIn("printf '600\\n'", expected_mode)
         self.assertIn('expected="$(mp_expected_protected_file_mode "$file")"', mode_validation)
 
+    def test_runtime_bind_sources_reclaim_only_safe_exact_directories(self) -> None:
+        runtime = function_body(COMMON_SOURCE, "mp_prepare_frontend_csp_runtime")
+        self.assertIn("Refusing unsafe runtime request path", runtime)
+        self.assertIn('[ ! -d "$directory" ] || [ -L "$directory" ]', runtime)
+        self.assertIn('stat -c \'%u:%g\' "$directory"', runtime)
+        self.assertIn('sudo -n chown "$owner" "$directory"', runtime)
+        self.assertIn('chmod 1733 "$compliance_request_dir"', runtime)
+        self.assertIn('chmod 0755 "$compliance_receipt_dir"', runtime)
+
     def test_snapshot_payload_permissions_do_not_depend_on_operator_umask(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
