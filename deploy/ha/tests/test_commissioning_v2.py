@@ -70,6 +70,8 @@ class PairingCodeTests(unittest.TestCase):
         self.assertLess(activate.index("install_services.sh"), activate.index("witness_control.py\" ready"))
         self.assertLess(activate.index("witness_control.py\" ready"), activate.index('up -d db backend caddy'))
         self.assertLess(resume.index("internal-repin-setup"), resume.index("mp_setup_state_mark paired"))
+        self.assertIn('mp_setup_state_action "Replicating complete application state to Node B"', resume)
+        self.assertIn('mp_setup_state_action "Finalising Node B exact deployment"', resume)
         self.assertLess(resume.index("mp_ha_replicate_now"), resume.index("internal-finalize-peer"))
 
     @unittest.skipIf(os.name == "nt", "POSIX shell state contract")

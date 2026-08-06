@@ -553,45 +553,46 @@ apply_commit() {
                 ui_error "HA pairing is recorded, but the verified peer transport is unavailable. No node was updated."
                 return 1
             }
-            holder="$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
-            if [ -z "$holder" ]; then
-                jq -e --arg previous "$previous" \
-                    '.state == "in_progress"
-                     and ((.completed // []) | index("paired") != null)
-                     and ((.completed // []) | index("application_deployed") == null)
-                     and .campaign_commit == $previous' \
-                    "$setup_state" >/dev/null 2>&1 || {
-                    ui_error "HA pairing is complete, but no current lease observation is available. No node was updated."
-                    return 1
-                }
+            if jq -e --arg previous "$previous" \
+                '.state == "in_progress"
+                 and ((.completed // []) | index("paired") != null)
+                 and ((.completed // []) | index("replicated") == null)
+                 and .campaign_commit == $previous' \
+                "$setup_state" >/dev/null 2>&1; then
                 pre_activation_pair=true
                 pre_pairing=true
                 for component in backend frontend caddy database tools witness; do
                     if grep -qw "$component" <<< "$components"; then
-                        ui_error "Only operations files may advance after pairing and before initial HA activation. No node was updated."
+                        ui_error "Only operations files may advance after pairing and before initial HA replication. No node was updated."
                         return 1
                     fi
                 done
-            elif [ "$holder" != "$HA_NODE_ID" ]; then
-                remote_args=(apply "$target")
-                [ "$confirm_full" != true ] || remote_args+=(--confirm-full)
-                [ "$confirm_migrations" != true ] || remote_args+=(--confirm-migrations)
-                if grep -qw witness <<< "$components" && [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
-                    remote_args+=(--cloudflare-worker "${MP_TEST_WORKER_NAME:-}" --cloudflare-token-stdin)
-                    printf '%s\n' "$CLOUDFLARE_API_TOKEN" | ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
-                        env MP_ROOT=/opt/masterplan /opt/masterplan/deploy/test-deployment.sh "${remote_args[@]}"
-                    return
-                fi
-                exec ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
-                    env MP_ROOT=/opt/masterplan /opt/masterplan/deploy/test-deployment.sh "${remote_args[@]}"
             else
-                peer_ready=true
+                holder="$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
+                if [ -z "$holder" ]; then
+                    ui_error "HA pairing is complete, but no current lease observation is available. No node was updated."
+                    return 1
+                elif [ "$holder" != "$HA_NODE_ID" ]; then
+                    remote_args=(apply "$target")
+                    [ "$confirm_full" != true ] || remote_args+=(--confirm-full)
+                    [ "$confirm_migrations" != true ] || remote_args+=(--confirm-migrations)
+                    if grep -qw witness <<< "$components" && [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+                        remote_args+=(--cloudflare-worker "${MP_TEST_WORKER_NAME:-}" --cloudflare-token-stdin)
+                        printf '%s\n' "$CLOUDFLARE_API_TOKEN" | ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+                            env MP_ROOT=/opt/masterplan /opt/masterplan/deploy/test-deployment.sh "${remote_args[@]}"
+                        return
+                    fi
+                    exec ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+                        env MP_ROOT=/opt/masterplan /opt/masterplan/deploy/test-deployment.sh "${remote_args[@]}"
+                else
+                    peer_ready=true
+                fi
             fi
         else
             pre_pairing=true
             for component in backend frontend caddy database tools; do
                 if grep -qw "$component" <<< "$components"; then
-                    ui_error "Complete HA pairing before applying an unsigned runtime-component update. No service was changed."
+                        ui_error "Complete HA pairing before applying an unsigned runtime-component update. No service was changed."
                     return 1
                 fi
             done

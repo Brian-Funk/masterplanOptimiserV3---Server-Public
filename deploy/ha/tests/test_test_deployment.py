@@ -79,8 +79,8 @@ class TestDeploymentPlannerTests(unittest.TestCase):
     def test_paired_pre_activation_updates_are_operations_only(self) -> None:
         apply = SUPERVISOR.split("apply_commit()", 1)[1].split("restore_signed()", 1)[0]
         self.assertIn("pre_activation_pair=true", apply)
-        self.assertIn('index("application_deployed") == null', apply)
-        self.assertIn("Only operations files may advance after pairing", apply)
+        self.assertIn('index("replicated") == null', apply)
+        self.assertIn("before initial HA replication", apply)
         self.assertIn('.campaign_commit=$commit', apply)
         self.assertIn('.current_action="Preparing exact images for Node B"', apply)
 

@@ -1278,12 +1278,14 @@ mp_setup_primary_resume() {
         mp_setup_state_mark recovery_recipient
     fi
     if ! mp_setup_state_has replicated; then
+        mp_setup_state_action "Replicating complete application state to Node B" || return 1
         mp_ha_replicate_now || return 1
         mp_setup_state_mark replicated
     fi
     if [ "$mode" = convert-ha ] \
         && [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ]; then
         commit="$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")"
+        mp_setup_state_action "Finalising Node B exact deployment" || return 1
         ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
             env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
             /opt/masterplan/deploy/test-deployment.sh internal-finalize-peer "$commit" \
