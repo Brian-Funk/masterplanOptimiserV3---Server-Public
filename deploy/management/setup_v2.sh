@@ -719,7 +719,7 @@ mp_setup_primary_create() {
                 break
             fi
             if [ "$repair_attempted" = false ] \
-                && grep -Eq 'remote API returned HTTP (401|403)' "$bootstrap_error"; then
+                && grep -Eq 'remote API returned HTTP 401([^0-9]|$)' "$bootstrap_error"; then
                 mp_setup_repair_witness_admin_secret "$cluster_id" \
                     "$MP_SETUP_WITNESS_ADMIN_TOKEN" \
                     || { rm -f "$body" "$bootstrap_error"; \

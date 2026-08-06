@@ -283,7 +283,7 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn("--secrets-file /run/mp-opt-witness-secrets.json", repair)
         self.assertIn("{ADMIN_TOKEN:$admin}", repair)
         self.assertNotIn("CLOUDFLARE_DNS_API_TOKEN:$dns", repair)
-        self.assertIn("remote API returned HTTP (401|403)", primary)
+        self.assertIn("remote API returned HTTP 401([^0-9]|$)", primary)
         self.assertIn("mp_setup_repair_witness_admin_secret", primary)
 
     def test_local_pending_receipts_cover_both_remote_commit_boundaries(self) -> None:

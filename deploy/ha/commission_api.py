@@ -19,6 +19,7 @@ import urllib.request
 def request_json(url: str, token: str, *, body: dict | None = None) -> dict:
     data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
     request = urllib.request.Request(url, data=data)
+    request.add_header("User-Agent", "Masterplan-Optimiser-HA/1")
     request.add_header("Authorization", f"Bearer {token}")
     if data is not None:
         request.add_header("Content-Type", "application/json")
@@ -28,7 +29,13 @@ def request_json(url: str, token: str, *, body: dict | None = None) -> dict:
             raw = response.read(1_048_577)
     except urllib.error.HTTPError as exc:
         # Do not echo a provider response which might contain request details.
-        raise RuntimeError(f"remote API returned HTTP {exc.code}") from exc
+        provider_error = re.search(rb"error code:\s*([0-9]{3,5})", exc.read(512))
+        suffix = (
+            f" (provider error {provider_error.group(1).decode('ascii')})"
+            if provider_error
+            else ""
+        )
+        raise RuntimeError(f"remote API returned HTTP {exc.code}{suffix}") from exc
     if len(raw) > 1_048_576:
         raise RuntimeError("remote API response was unexpectedly large")
     result = json.loads(raw)
