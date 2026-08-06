@@ -86,6 +86,15 @@ require_test_policy() {
     }
 }
 
+ha_pairing_complete() {
+    local setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
+    jq -e '(.completed // []) | index("paired") != null' "$setup_state" >/dev/null 2>&1
+}
+
+ha_pair_transport_ready() {
+    ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer true >/dev/null 2>&1
+}
+
 require_fresh_commissioning_database() {
     local target="$1" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
     [ -s "$setup_state" ] || { ui_error "Fresh commissioning state is missing."; return 1; }
@@ -415,6 +424,7 @@ deploy_witness() {
 apply_commit() {
     local target="$1" confirm_full="$2" confirm_migrations="$3" fresh_commissioning="$4"
     local plan previous components snapshot="" automatic=false role component image verified_before=""
+    local peer_ready=false holder="" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
     local -a remote_args
     require_test_policy
     plan="$(create_plan "$target")"
@@ -440,20 +450,35 @@ apply_commit() {
     mp_load_ha_config
     role="$HA_ROLE"
     if [ "$role" = dynamic ] && [ "${MP_TEST_PEER:-0}" != 1 ]; then
-        if [ "$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json")" != "$HA_NODE_ID" ]; then
-            remote_args=(apply "$target")
-            [ "$confirm_full" != true ] || remote_args+=(--confirm-full)
-            [ "$confirm_migrations" != true ] || remote_args+=(--confirm-migrations)
-            if grep -qw witness <<< "$components" && [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
-                remote_args+=(--cloudflare-worker "${MP_TEST_WORKER_NAME:-}" --cloudflare-token-stdin)
-                printf '%s\n' "$CLOUDFLARE_API_TOKEN" | ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+        if ha_pairing_complete; then
+            ha_pair_transport_ready || {
+                ui_error "HA pairing is recorded, but the verified peer transport is unavailable. No node was updated."
+                return 1
+            }
+            peer_ready=true
+            holder="$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
+            if [ -z "$holder" ]; then
+                jq -e '.state == "in_progress" and ((.completed // []) | index("paired") != null)' \
+                    "$setup_state" >/dev/null 2>&1 || {
+                    ui_error "HA pairing is complete, but no current lease observation is available. No node was updated."
+                    return 1
+                }
+            elif [ "$holder" != "$HA_NODE_ID" ]; then
+                remote_args=(apply "$target")
+                [ "$confirm_full" != true ] || remote_args+=(--confirm-full)
+                [ "$confirm_migrations" != true ] || remote_args+=(--confirm-migrations)
+                if grep -qw witness <<< "$components" && [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+                    remote_args+=(--cloudflare-worker "${MP_TEST_WORKER_NAME:-}" --cloudflare-token-stdin)
+                    printf '%s\n' "$CLOUDFLARE_API_TOKEN" | ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+                        env MP_ROOT=/opt/masterplan /opt/masterplan/deploy/test-deployment.sh "${remote_args[@]}"
+                    return
+                fi
+                exec ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
                     env MP_ROOT=/opt/masterplan /opt/masterplan/deploy/test-deployment.sh "${remote_args[@]}"
-                return
             fi
-            exec ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
-                env MP_ROOT=/opt/masterplan /opt/masterplan/deploy/test-deployment.sh "${remote_args[@]}"
         fi
-        if [ "$(jq -r '.automatic_failover // false' "$MP_ROOT/runtime/ha-control.json")" = true ]; then
+        if [ "$peer_ready" = true ] \
+            && [ "$(jq -r '.automatic_failover // false' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || printf false)" = true ]; then
             automatic=true
             python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic disabled >/dev/null
             mp_ha_set_config_value HA_AUTOMATIC_FAILOVER disabled
@@ -484,7 +509,7 @@ apply_commit() {
                 database) env_set "$MP_TEST_STATE_DIR/next.env" MP_POSTGRES_IMAGE "$image" ;;
                 tools) env_set "$MP_TEST_STATE_DIR/next.env" MP_TOOLS_IMAGE "$image" ;;
             esac
-            [ "$role" != dynamic ] || peer_copy_image "$image"
+            [ "$peer_ready" != true ] || peer_copy_image "$image"
         fi
     done
     if grep -qw frontend <<< "$components"; then
@@ -492,7 +517,7 @@ apply_commit() {
         build_frontend
     fi
     install -m 0600 "$MP_TEST_STATE_DIR/next.env" "$MP_TEST_ENV"
-    if [ "$role" = dynamic ]; then
+    if [ "$peer_ready" = true ]; then
         peer_activate "$target" "$components" "$fresh_commissioning"
     fi
     if grep -qw operations <<< "$components" || grep -qw caddy <<< "$components"; then
@@ -510,7 +535,7 @@ apply_commit() {
     compose_activate "$components" "$fresh_commissioning"
     set_apply_stage deployment-receipt
     write_state "$target" "$previous" "$plan" "$snapshot"
-    if [ "$role" = dynamic ]; then
+    if [ "$peer_ready" = true ]; then
         mp_ha_replicate_now
         mp_ha_refresh_witness_observations
         mp_ha_active_verification_readiness

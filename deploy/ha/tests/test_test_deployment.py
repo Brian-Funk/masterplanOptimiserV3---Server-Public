@@ -57,6 +57,17 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("Node B did not record the exact pinned deployment receipt", SUPERVISOR)
         self.assertIn('write_state "$target" "" "$plan" ""', SUPERVISOR)
 
+    def test_pre_pairing_ha_update_stays_local(self) -> None:
+        self.assertIn("ha_pairing_complete()", SUPERVISOR)
+        self.assertIn("ha_pair_transport_ready()", SUPERVISOR)
+        self.assertIn('if ha_pairing_complete; then', SUPERVISOR)
+        self.assertIn('[ "$peer_ready" != true ] || peer_copy_image "$image"', SUPERVISOR)
+        self.assertIn('if [ "$peer_ready" = true ]; then\n        peer_activate', SUPERVISOR)
+        self.assertIn(
+            "HA pairing is recorded, but the verified peer transport is unavailable.",
+            SUPERVISOR,
+        )
+
     def test_frontend_build_uses_host_resolved_exact_source_identity(self) -> None:
         common = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
         self.assertIn("mp_build_frontend_container", SUPERVISOR)
