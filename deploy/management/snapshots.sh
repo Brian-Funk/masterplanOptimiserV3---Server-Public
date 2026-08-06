@@ -82,6 +82,13 @@ mp_snapshot_copy_configuration() {
         : > "$payload/metadata/compose-override-absent" || return 1
     fi
     caddy_mode="$(mp_caddy_mode)"
+    case "$caddy_mode" in
+        container|host) ;;
+        *)
+            printf '%s\n' 'Snapshot creation stopped: the active Caddy topology could not be resolved.' >&2
+            return 1
+            ;;
+    esac
     printf '%s\n' "$caddy_mode" > "$payload/metadata/caddy-topology" || return 1
     if [ "$include_caddy" = "yes" ] \
         && [ "$caddy_mode" = "host" ] \
@@ -773,7 +780,7 @@ mp_snapshot_restore_database() {
 mp_snapshot_restore_configuration() {
     local payload="$1"
     local target_password escaped_password secrets_stage secrets_old secret_file
-    local snapshot_caddy_mode current_caddy_mode
+    local snapshot_caddy_mode current_caddy_mode optional_evidence_token
     [ -f "$payload/config/.env" ] || return 0
     if [ -f "$payload/metadata/caddy-topology" ]; then
         snapshot_caddy_mode="$(tr -d '\r\n' < "$payload/metadata/caddy-topology")"
@@ -825,6 +832,18 @@ mp_snapshot_restore_configuration() {
     fi
     chmod 700 "$MP_ROOT/secrets" || return 1
     find "$MP_ROOT/secrets" -maxdepth 1 -type f -exec chmod 600 {} + || return 1
+    optional_evidence_token="$MP_ROOT/secrets/evidence_github_fine_grained_token"
+    if [ -e "$optional_evidence_token" ] \
+        && { [ -L "$optional_evidence_token" ] || [ ! -f "$optional_evidence_token" ]; }; then
+        printf '%s\n' 'The optional Evidence archive credential path is unsafe.' >&2
+        return 1
+    fi
+    # The credential is intentionally excluded from snapshots. Compose still
+    # requires a regular bind source, so restore recreates only the empty,
+    # disabled-state placeholder and never invents or recovers a token.
+    if [ ! -e "$optional_evidence_token" ]; then
+        install -m 0600 /dev/null "$optional_evidence_token" || return 1
+    fi
     if [ -f "$payload/config/docker-compose.override.yml" ]; then
         cp -a "$payload/config/docker-compose.override.yml" "$MP_ROOT/infra/docker-compose.override.yml" || return 1
         chmod 600 "$MP_ROOT/infra/docker-compose.override.yml" || return 1
@@ -926,6 +945,36 @@ mp_snapshot_guard_evidence_head() {
     fi
 }
 
+# Reject a cross-topology or unresolved configuration snapshot before stopping
+# services or replacing the database. The same check remains in the
+# configuration-restore function as defence in depth.
+mp_snapshot_guard_caddy_topology() {
+    local extracted="$1" marker snapshot_mode current_mode
+    [ -f "$extracted/payload/config/.env" ] || return 0
+    marker="$extracted/payload/metadata/caddy-topology"
+    if [ ! -s "$marker" ] || [ -L "$marker" ]; then
+        printf '%s\n' 'Restore blocked: snapshot Caddy topology is missing.' >&2
+        return 1
+    fi
+    snapshot_mode="$(tr -d '\r\n' < "$marker")"
+    current_mode="$(mp_caddy_mode)"
+    case "$snapshot_mode" in container|host) ;; *)
+        printf 'Restore blocked: snapshot Caddy topology is invalid: %s.\n' "$snapshot_mode" >&2
+        return 1
+        ;;
+    esac
+    case "$current_mode" in container|host) ;; *)
+        printf '%s\n' 'Restore blocked: current Caddy topology is unavailable.' >&2
+        return 1
+        ;;
+    esac
+    if [ "$snapshot_mode" != "$current_mode" ]; then
+        printf 'Restore blocked: snapshot Caddy topology is %s, but this installation uses %s.\n' \
+            "$snapshot_mode" "$current_mode" >&2
+        return 1
+    fi
+}
+
 # Ensure replaying an older standalone database cannot revive bearer access or
 # publishing credentials. Registered passkeys are deliberately preserved.
 mp_snapshot_revoke_restored_access() {
@@ -975,6 +1024,11 @@ mp_snapshot_apply() {
     }
     MP_SNAPSHOT_APPLY_STAGE="privacy-action-preflight"
     mp_snapshot_guard_privacy_actions "$temporary" || {
+        rm -rf "$temporary"
+        return 1
+    }
+    MP_SNAPSHOT_APPLY_STAGE="caddy-topology-preflight"
+    mp_snapshot_guard_caddy_topology "$temporary" || {
         rm -rf "$temporary"
         return 1
     }

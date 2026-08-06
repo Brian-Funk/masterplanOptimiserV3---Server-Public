@@ -695,6 +695,25 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
         self.assertIn('sudo -n cat "$current"', body)
         self.assertNotIn('jq -r \'.head_sha256 // empty\' "$current"', body)
 
+    def test_snapshot_topology_is_resolved_and_checked_before_mutation(self) -> None:
+        copy_body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_copy_configuration")
+        self.assertIn("container|host", copy_body)
+        self.assertIn("active Caddy topology could not be resolved", copy_body)
+        guard_body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_guard_caddy_topology")
+        self.assertIn('snapshot_mode="$(tr -d', guard_body)
+        self.assertIn('current_mode="$(mp_caddy_mode)"', guard_body)
+        apply_body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_apply")
+        self.assertLess(
+            apply_body.index('mp_snapshot_guard_caddy_topology "$temporary"'),
+            apply_body.index("MP_SNAPSHOT_APPLY_MUTATED=true"),
+        )
+
+    def test_restore_recreates_only_empty_optional_evidence_token_source(self) -> None:
+        body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_restore_configuration")
+        self.assertIn('optional_evidence_token="$MP_ROOT/secrets/evidence_github_fine_grained_token"', body)
+        self.assertIn('install -m 0600 /dev/null "$optional_evidence_token"', body)
+        self.assertIn("intentionally excluded from snapshots", body)
+
     def test_database_snapshot_pauses_writes_and_records_evidence_anchor(self) -> None:
         body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_create")
         self.assertLess(body.index('stop backend'), body.index('mp_snapshot_dump_database'))
