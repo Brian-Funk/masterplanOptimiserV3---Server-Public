@@ -424,7 +424,7 @@ deploy_witness() {
 apply_commit() {
     local target="$1" confirm_full="$2" confirm_migrations="$3" fresh_commissioning="$4"
     local plan previous components snapshot="" automatic=false role component image verified_before=""
-    local peer_ready=false holder="" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
+    local peer_ready=false pre_pairing=false holder="" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
     local -a remote_args
     require_test_policy
     plan="$(create_plan "$target")"
@@ -476,6 +476,14 @@ apply_commit() {
                 exec ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
                     env MP_ROOT=/opt/masterplan /opt/masterplan/deploy/test-deployment.sh "${remote_args[@]}"
             fi
+        else
+            pre_pairing=true
+            for component in backend frontend caddy database tools; do
+                if grep -qw "$component" <<< "$components"; then
+                    ui_error "Complete HA pairing before applying an unsigned runtime-component update. No service was changed."
+                    return 1
+                fi
+            done
         fi
         if [ "$peer_ready" = true ] \
             && [ "$(jq -r '.automatic_failover // false' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || printf false)" = true ]; then
@@ -532,7 +540,20 @@ apply_commit() {
     if [ "$role" = dynamic ] && grep -qw witness <<< "$components"; then
         deploy_witness "$target"
     fi
-    compose_activate "$components" "$fresh_commissioning"
+    if [ "$pre_pairing" = true ]; then
+        # Node A deliberately keeps serving through its standalone topology
+        # until Node B has exchanged trust and the witness has issued a lease.
+        # Operations-only fixes are safe to install now, but recreating Caddy
+        # would activate the fail-closed HA overlay and make the site return 503.
+        env MP_ROOT="$MP_ROOT" bash -c '
+            set -Eeuo pipefail
+            source "$MP_ROOT/deploy/management/common.sh"
+            mp_prepare_backend_secret_permissions
+            mp_validate_protected_file_modes
+        '
+    else
+        compose_activate "$components" "$fresh_commissioning"
+    fi
     set_apply_stage deployment-receipt
     write_state "$target" "$previous" "$plan" "$snapshot"
     if [ "$peer_ready" = true ]; then

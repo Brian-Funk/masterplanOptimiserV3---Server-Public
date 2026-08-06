@@ -761,6 +761,7 @@ mp_prepare_backend_secret_permissions() {
         "$MP_ROOT/secrets/smtp_token"
         "$MP_ROOT/secrets/evidence_signing_key"
         "$MP_ROOT/secrets/evidence_github_fine_grained_token"
+        "$MP_HA_HOME/secrets/node_token"
     )
     for file in "${files[@]}"; do
         [ -e "$file" ] || continue
@@ -792,7 +793,7 @@ mp_prepare_evidence_store() {
 mp_expected_protected_file_mode() {
     local file="$1"
     case "$file" in
-        "$MP_ROOT/secrets/database_password"|"$MP_ROOT/secrets/ip_hmac_key"|"$MP_ROOT/secrets/secret_key"|"$MP_ROOT/secrets/vapid_private_key"|"$MP_ROOT/secrets/root_bootstrap_token"|"$MP_ROOT/secrets/smtp_token"|"$MP_ROOT/secrets/evidence_signing_key"|"$MP_ROOT/secrets/evidence_github_fine_grained_token")
+        "$MP_ROOT/secrets/database_password"|"$MP_ROOT/secrets/ip_hmac_key"|"$MP_ROOT/secrets/secret_key"|"$MP_ROOT/secrets/vapid_private_key"|"$MP_ROOT/secrets/root_bootstrap_token"|"$MP_ROOT/secrets/smtp_token"|"$MP_ROOT/secrets/evidence_signing_key"|"$MP_ROOT/secrets/evidence_github_fine_grained_token"|"$MP_HA_HOME/secrets/node_token")
             printf '640\n'
             ;;
         *)
@@ -811,7 +812,11 @@ mp_validate_protected_file_modes() {
             printf 'UNSAFE MODE: %s is %s (expected %s)\n' "$file" "$mode" "$expected"
             failed=1
         fi
-    done < <(find "$MP_ROOT/secrets" -maxdepth 1 -type f -print; printf '%s\n' "$MP_ROOT/.env")
+    done < <(
+        find "$MP_ROOT/secrets" -maxdepth 1 -type f -print
+        printf '%s\n' "$MP_ROOT/.env"
+        [ ! -f "$MP_HA_HOME/secrets/node_token" ] || printf '%s\n' "$MP_HA_HOME/secrets/node_token"
+    )
     return "$failed"
 }
 

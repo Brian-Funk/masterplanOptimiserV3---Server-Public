@@ -113,10 +113,17 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
                 path = secrets / name
                 path.write_text("synthetic", encoding="utf-8")
                 path.chmod(0o600)
+            ha_home = root / "ha"
+            ha_secrets = ha_home / "secrets"
+            ha_secrets.mkdir(parents=True, mode=0o700)
+            ha_token = ha_secrets / "node_token"
+            ha_token.write_text("synthetic-ha-token", encoding="utf-8")
+            ha_token.chmod(0o600)
             log = root / "sudo.log"
             command = f'''
                 set -Eeuo pipefail
                 export MP_ROOT={shlex.quote(str(root))}
+                export MP_HA_HOME={shlex.quote(str(ha_home))}
                 export TEST_SUDO_LOG={shlex.quote(str(log))}
                 source {shlex.quote(str(ROOT / "deploy/management/common.sh"))}
                 sudo() {{
@@ -135,8 +142,9 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
                 stat.S_IMODE((secrets / name).stat().st_mode) == 0o640
                 for name in names
             ))
+            self.assertEqual(stat.S_IMODE(ha_token.stat().st_mode), 0o640)
             chowns = log.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(len(chowns), len(names))
+            self.assertEqual(len(chowns), len(names) + 1)
             self.assertTrue(all(
                 line.startswith("chown :10001 -- ")
                 for line in chowns
@@ -155,6 +163,7 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
             "evidence_signing_key", "evidence_github_fine_grained_token",
         ):
             self.assertIn(f'"$MP_ROOT/secrets/{name}"', expected_mode)
+        self.assertIn('"$MP_HA_HOME/secrets/node_token"', expected_mode)
         self.assertIn("printf '640\\n'", expected_mode)
         self.assertIn("printf '600\\n'", expected_mode)
         self.assertIn('expected="$(mp_expected_protected_file_mode "$file")"', mode_validation)

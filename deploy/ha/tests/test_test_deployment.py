@@ -63,6 +63,17 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn('if ha_pairing_complete; then', SUPERVISOR)
         self.assertIn('[ "$peer_ready" != true ] || peer_copy_image "$image"', SUPERVISOR)
         self.assertIn('if [ "$peer_ready" = true ]; then\n        peer_activate', SUPERVISOR)
+        self.assertIn('pre_pairing=true', SUPERVISOR)
+        self.assertIn('if [ "$pre_pairing" = true ]; then', SUPERVISOR)
+        self.assertIn(
+            "Complete HA pairing before applying an unsigned runtime-component update.",
+            SUPERVISOR,
+        )
+        pre_pairing = SUPERVISOR.split('if [ "$pre_pairing" = true ]; then', 1)[1]
+        self.assertLess(
+            pre_pairing.index("mp_prepare_backend_secret_permissions"),
+            pre_pairing.index('else\n        compose_activate'),
+        )
         self.assertIn(
             "HA pairing is recorded, but the verified peer transport is unavailable.",
             SUPERVISOR,
