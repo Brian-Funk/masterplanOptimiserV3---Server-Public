@@ -568,6 +568,14 @@ mp_sanitise_terminal_stream() {
 }
 
 # Run a long command inside the preferred TUI output window.
+ui_clear_terminal() {
+    if [ -w /dev/tty ]; then
+        printf '\033[2J\033[3J\033[H' >/dev/tty 2>/dev/null || true
+    else
+        clear 2>/dev/null || true
+    fi
+}
+
 ui_run_command() {
     local title="$1"
     local message="$2"
@@ -578,6 +586,7 @@ ui_run_command() {
     read -r info_height info_width unused < <(mp_ui_geometry info)
     report="$(mktemp "${MP_STATE}/command-output.XXXXXX")" || return 1
     chmod 600 "$report" || { rm -f "$report"; return 1; }
+    ui_clear_terminal
     status=0
     case "$(mp_tui_backend)" in
         dialog)

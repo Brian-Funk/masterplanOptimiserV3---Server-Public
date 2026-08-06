@@ -743,6 +743,12 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
         self.assertIn('mp_snapshot_apply "$pre_snapshot" "$rollback_identity"', body)
         self.assertIn('MP_SNAPSHOT_APPLY_MUTATED', body)
         self.assertIn('No database, configuration, or service state was changed.', body)
+        self.assertLess(body.index("ui_clear_terminal"), body.index("mp_snapshot_create full"))
+
+    def test_snapshot_delete_uses_a_short_fixed_confirmation_phrase(self) -> None:
+        body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_delete_interactive")
+        self.assertIn('"DELETE SNAPSHOT"', body)
+        self.assertNotIn('"DELETE $label"', body)
 
     def test_restore_preflight_failure_does_not_attempt_rollback(self) -> None:
         body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_restore_interactive")

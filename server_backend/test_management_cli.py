@@ -977,6 +977,19 @@ def test_restore_verifies_then_creates_verified_rollback_before_apply():
     apply_selected = body.index('mp_snapshot_apply "$selected"')
     assert first_verify < pre_create < pre_verify < apply_selected
     assert 'mp_snapshot_apply "$pre_snapshot"' in body
+    assert body.index("ui_clear_terminal") < pre_create
+
+
+def test_snapshot_deletion_uses_fixed_confirmation_phrase():
+    """Deleting the selected snapshot must not require retyping its long generated name."""
+
+    snapshots = _read("deploy/management/snapshots.sh")
+    start = snapshots.index("mp_snapshot_delete_interactive()")
+    end = snapshots.index("mp_snapshot_list_interactive()")
+    body = snapshots[start:end]
+
+    assert '"DELETE SNAPSHOT"' in body
+    assert '"DELETE $label"' not in body
 
 
 def test_management_audit_chain_verifier_detects_tampering(tmp_path: Path):

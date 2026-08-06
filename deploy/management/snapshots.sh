@@ -1150,6 +1150,7 @@ mp_snapshot_restore_interactive() {
         [ "$rollback_identity" = "$identity" ] || mp_remove_identity_file "$rollback_identity"
         return 1
     fi
+    ui_clear_terminal
     pre_name="pre-restore-$(date -u +%Y%m%dT%H%M%SZ)"
     pre_snapshot="$(mp_snapshot_create full "$pre_name")" || {
         mp_remove_identity_file "$identity"
@@ -1236,8 +1237,8 @@ mp_snapshot_delete_interactive() {
     selected="$(mp_snapshot_select "Choose a snapshot to delete permanently" any)" || return 1
     label="$(basename "$selected")"
     if ! ui_require_phrase "Delete snapshot" \
-        "This permanently deletes the encrypted archive and its receipt." \
-        "DELETE $label"; then
+        "This permanently deletes $label, including its encrypted archive and receipt." \
+        "DELETE SNAPSHOT"; then
         return 1
     fi
     rm -rf -- "$selected"
