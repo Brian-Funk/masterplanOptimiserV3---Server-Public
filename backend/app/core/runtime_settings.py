@@ -119,6 +119,7 @@ def apply_governance_runtime_values(structured: dict[str, Any], db: Session) -> 
     """Overlay only settings the Server actually enforces onto a draft."""
     result = json.loads(json.dumps(structured))
     retention = result.setdefault("retention", {})
+    features = result.setdefault("optional_features", {})
     changes: list[dict[str, Any]] = []
     for setting_key, (field, label) in GOVERNANCE_RUNTIME_FIELDS.items():
         effective = get_int(setting_key, db)
@@ -129,6 +130,22 @@ def apply_governance_runtime_values(structured: dict[str, Any], db: Session) -> 
                 "setting": setting_key,
                 "governance_field": f"retention.{field}",
                 "label": label,
+                "previous": previous,
+                "current": effective,
+            })
+    # Deployment features are runtime facts, not controller-editable claims.
+    # Importing or resaving an older draft must therefore refresh them just as
+    # it refreshes the Server-enforced retention periods.
+    from app.core.governance_rendering import runtime_feature_state
+
+    for field, effective in runtime_feature_state().items():
+        previous = features.get(field)
+        features[field] = effective
+        if previous != effective:
+            changes.append({
+                "setting": f"deployment.{field}",
+                "governance_field": f"optional_features.{field}",
+                "label": field.replace("_", " ").title(),
                 "previous": previous,
                 "current": effective,
             })

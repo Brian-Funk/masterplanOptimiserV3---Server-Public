@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
+from app.core import governance_rendering
 from app.core.config import settings
 from server_backend.conftest import _make_client, create_test_event, create_test_user
 
@@ -218,6 +219,37 @@ def test_retention_needs_periods_or_clear_controller_criteria(db):
     check = next(item for item in saved.json()["preflight"]["checks"] if item["code"] == "retention_configuration")
     assert check["status"] == "missing"
     assert saved.json()["preflight"]["ready"] is False
+
+
+def test_runtime_feature_declarations_are_authoritative_on_draft_save(db, monkeypatch):
+    client, _root = _root_with_reauth(db)
+    imported = deepcopy(PROFILE)
+    imported["structured"]["optional_features"]["ha_enabled"] = False
+    monkeypatch.setattr(
+        governance_rendering,
+        "runtime_feature_state",
+        lambda: {
+            "smtp_enabled": False,
+            "push_enabled": False,
+            "ha_enabled": True,
+            "dns_mode": "dns_only",
+        },
+    )
+
+    saved = client.put("/api/v1/admin/governance", json=imported)
+
+    assert saved.status_code == 200, saved.json()
+    assert saved.json()["draft"]["structured"]["optional_features"]["ha_enabled"] is True
+    assert any(
+        item["governance_field"] == "optional_features.ha_enabled"
+        and item["previous"] is False
+        and item["current"] is True
+        for item in saved.json()["runtime_enforced_changes"]
+    )
+    ha_check = next(
+        item for item in saved.json()["preflight"]["checks"] if item["code"] == "ha_enabled"
+    )
+    assert ha_check["status"] == "ready"
 
 
 def test_runtime_retention_settings_are_authoritative_and_require_republication(db):
