@@ -255,6 +255,7 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
                 jq() {{
                     case "$*" in
                         *holder_node_id*//*) printf '%s\n' node-a ;;
+                        *generation*//*) printf '%s\n' 7 ;;
                         *automatic_failover*) printf '%s\n' false ;;
                         *) cat >/dev/null ;;
                     esac
