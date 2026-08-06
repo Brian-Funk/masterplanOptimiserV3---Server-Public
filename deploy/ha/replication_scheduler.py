@@ -7,9 +7,11 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
+import uuid
 
 
 ROOT = Path(os.getenv("MP_ROOT", "/opt/masterplan"))
@@ -19,6 +21,8 @@ CONTROL = ROOT / "runtime/ha-control.json"
 REQUESTS = ROOT / "runtime/ha-requests"
 DEFERRED = ROOT / "runtime/ha-deferred-requests"
 JOBS = ROOT / "runtime/ha-jobs"
+RESULTS = ROOT / "runtime/ha-operation-results"
+BATCHES = ROOT / "runtime/ha-batches"
 
 
 def now() -> datetime:
@@ -48,6 +52,84 @@ def write_job_receipt(job_id: str, value: dict) -> None:
     temporary.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(temporary, 0o644)
     temporary.replace(target)
+
+
+def write_operation_result(operation: dict, *, state: str, stage: str, **values: object) -> None:
+    RESULTS.mkdir(parents=True, exist_ok=True, mode=0o711)
+    os.chmod(RESULTS, 0o711)
+    operation_id = str(operation["operation_id"])
+    document = {
+        "format": "mp-opt-ha-operation-result-v1",
+        "operation_id": operation_id,
+        "mutation_sequence": int(operation["mutation_sequence"]),
+        "state": state,
+        "stage": stage,
+        "bundle_id": values.get("bundle_id"),
+        "bundle_sha256": values.get("bundle_sha256"),
+        "generation": values.get("generation"),
+        "error_code": values.get("error_code"),
+        "updated_at": now().isoformat(),
+        "accepted_at": values.get("accepted_at"),
+    }
+    temporary = RESULTS / f".{operation_id}.tmp"
+    target = RESULTS / f"{operation_id}.json"
+    temporary.write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o644)
+    temporary.replace(target)
+
+
+def critical_request(path: Path) -> tuple[dict, dict] | None:
+    document = read_json(path)
+    marker = document.get("operation")
+    if document.get("format") != "mp-opt-replication-request-v2" or not isinstance(marker, dict):
+        return None
+    if marker.get("operation_id") != path.stem:
+        return None
+    return document, marker
+
+
+def compose_command() -> list[str]:
+    command = ["docker", "compose", "--env-file", ".env"]
+    if (ROOT / ".release.env").is_file():
+        command.extend(["--env-file", ".release.env"])
+    test_environment = ROOT / ".test-deployment.env"
+    if test_environment.is_file():
+        command.extend(["--env-file", ".test-deployment.env"])
+    command.extend([
+        "-f", "infra/docker-compose.yml", "-f", "infra/docker-compose.prod.yml",
+        "-f", "infra/docker-compose.ha.yml",
+    ])
+    return command
+
+
+def accept_source_operation(
+    marker: dict,
+    *,
+    bundle_id: str,
+    bundle_sha256: str,
+    generation: int,
+    cfg: dict[str, str],
+) -> bool:
+    sql = (
+        "UPDATE ha_protection_operations SET state='accepted',stage='accepted',"
+        "accepted_bundle_id=:'bundle_id',accepted_bundle_sha256=:'bundle_sha256',"
+        "accepted_generation=:'generation'::bigint,accepted_at=CURRENT_TIMESTAMP,"
+        "updated_at=CURRENT_TIMESTAMP,error_code=NULL "
+        "WHERE id=:'operation_id' AND mutation_sequence=:'mutation_sequence'::bigint "
+        "AND state IN ('pending','indeterminate');"
+    )
+    result = subprocess.run(
+        [
+            *compose_command(), "exec", "-T", "db", "psql", "-v", "ON_ERROR_STOP=1",
+            "-U", "masterplan", "-d", "masterplan",
+            f"--set=operation_id={marker['operation_id']}",
+            f"--set=mutation_sequence={int(marker['mutation_sequence'])}",
+            f"--set=bundle_id={bundle_id}", f"--set=bundle_sha256={bundle_sha256}",
+            f"--set=generation={int(generation)}", "-c", sql,
+        ], cwd=ROOT, check=False, capture_output=True, text=True, timeout=30,
+        env={**os.environ, **cfg},
+    )
+    return result.returncode == 0
 
 
 def prune_job_receipts(current: datetime) -> None:
@@ -112,6 +194,31 @@ def timestamp(value: object) -> datetime | None:
         return None
 
 
+def private_diagnostics(entries: list[tuple[Path, tuple[dict, dict]]], current: datetime) -> dict:
+    documents = [parsed[0] for _path, parsed in entries]
+    queued = [timestamp(document.get("created_at")) for document in documents]
+    oldest = min((value for value in queued if value is not None), default=None)
+    return {
+        "critical": bool(entries),
+        "critical_operation_count": len(entries),
+        "reasons": sorted({str(document.get("reason") or "unknown")[:64] for document in documents}),
+        "oldest_request_created_at": oldest.isoformat() if oldest else None,
+        "queue_seconds": max(0, round((current - oldest).total_seconds(), 3)) if oldest else None,
+    }
+
+
+def replication_timings(stderr: str) -> dict[str, int]:
+    allowed = {
+        "capture_ms", "transfer_round_trip_ms", "restore_ms",
+        "verification_activation_ms", "total_ms",
+    }
+    result: dict[str, int] = {}
+    for key, raw_value in re.findall(r"([a-z_]+_ms)=(\d+)", stderr):
+        if key in allowed:
+            result[key] = min(int(raw_value), 3_600_000)
+    return result
+
+
 def main() -> int:
     cfg = config()
     control = read_json(CONTROL)
@@ -123,7 +230,18 @@ def main() -> int:
     # Newly queued work runs immediately through the path unit. Failed
     # noncritical work lives outside that watched directory and is retried by
     # the minute timer without creating a tight systemd activation loop.
-    request_files = sorted(REQUESTS.glob("*.json")) or sorted(DEFERRED.glob("*.json"))
+    queued_files = sorted(REQUESTS.glob("*.json")) + sorted(DEFERRED.glob("*.json"))
+    critical_entries = [
+        (path, parsed)
+        for path in queued_files
+        if (parsed := critical_request(path)) is not None
+    ]
+    critical_entries.sort(key=lambda entry: int(entry[1][1].get("mutation_sequence", 0)))
+    request_files = (
+        [entry[0] for entry in critical_entries]
+        if critical_entries
+        else (sorted(REQUESTS.glob("*.json")) or sorted(DEFERRED.glob("*.json")))[:1]
+    )
     request_document = read_json(request_files[0]) if request_files else {}
     privacy_assertion = request_document.get("privacy_assertion")
     last_success = timestamp(previous.get("last_success_at"))
@@ -137,7 +255,35 @@ def main() -> int:
         previous["potential_data_loss_seconds"] = int((current - last_success).total_seconds()) if last_success else None
         write_status(previous)
         return 0
-    job_id = str(request_document.get("job_id") or current.strftime("auto-%Y%m%dT%H%M%SZ"))
+    job_id = (
+        str(uuid.uuid4())
+        if critical_entries
+        else str(request_document.get("job_id") or current.strftime("auto-%Y%m%dT%H%M%SZ"))
+    )
+    batch_path: Path | None = None
+    operation_markers = [entry[1][1] for entry in critical_entries]
+    if critical_entries:
+        BATCHES.mkdir(parents=True, exist_ok=True, mode=0o700)
+        batch_path = BATCHES / f"{job_id}.json"
+        batch_document = {
+            "format": "mp-opt-replication-batch-v2",
+            "bundle_id": job_id,
+            "created_at": current.isoformat(),
+            "operations": [
+                {
+                    "marker": parsed[1],
+                    **(
+                        {"privacy_assertion": parsed[0]["privacy_assertion"]}
+                        if parsed[0].get("privacy_assertion") is not None else {}
+                    ),
+                }
+                for _path, parsed in critical_entries
+            ],
+        }
+        temporary_batch = BATCHES / f".{job_id}.tmp"
+        temporary_batch.write_text(json.dumps(batch_document, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(temporary_batch, 0o600)
+        temporary_batch.replace(batch_path)
     state = {
         **previous,
         "mode": "ha", "node_id": cfg.get("HA_NODE_ID"),
@@ -151,14 +297,17 @@ def main() -> int:
     write_status(state)
     receipt_state = {
         **state,
+        "diagnostics": private_diagnostics(critical_entries, current),
         **({"privacy_assertion": privacy_assertion} if privacy_assertion is not None else {}),
     }
     write_job_receipt(job_id, receipt_state)
+    for marker in operation_markers:
+        write_operation_result(marker, state="pending", stage="capturing", bundle_id=job_id)
     result = subprocess.run(
         [
             str(ROOT / "deploy/ha/replicate_now.sh"),
             job_id,
-            str(request_files[0]) if request_files and privacy_assertion is not None else "",
+            str(batch_path or (request_files[0] if request_files and privacy_assertion is not None else "")),
         ], cwd=ROOT,
         check=False, capture_output=True, text=True, timeout=3600,
         env={**os.environ, **cfg},
@@ -178,6 +327,25 @@ def main() -> int:
             "bundle_generation": control.get("generation"),
             "accepted_at": completed.isoformat(),
         })
+        for marker in operation_markers:
+            accept_source_operation(
+                marker, bundle_id=job_id,
+                bundle_sha256=parts[-1] if len(parts) == 3 else "",
+                generation=int(control.get("generation") or 0), cfg=cfg,
+            )
+            write_operation_result(
+                marker, state="accepted", stage="accepted", bundle_id=job_id,
+                bundle_sha256=parts[-1] if len(parts) == 3 else None,
+                generation=control.get("generation"), accepted_at=completed.isoformat(),
+            )
+            subprocess.run(
+                [
+                    sys.executable, str(ROOT / "deploy/ha/witness_control.py"),
+                    "critical-complete", str(marker["operation_id"]), job_id,
+                    parts[-1] if len(parts) == 3 else "",
+                ], cwd=ROOT, check=False, capture_output=True, text=True, timeout=30,
+                env={**os.environ, **cfg},
+            )
     else:
         last_success = timestamp(state.get("last_success_at"))
         potential_loss = int((completed - last_success).total_seconds()) if last_success else None
@@ -212,27 +380,38 @@ def main() -> int:
             "potential_data_loss_seconds": potential_loss, "error_code": error_code,
             "message": message,
         })
+        for marker in operation_markers:
+            write_operation_result(
+                marker, state="indeterminate", stage="attention_required",
+                bundle_id=job_id, generation=control.get("generation"),
+                error_code=error_code,
+            )
     write_status(state)
     receipt_state = {
         **state,
+        "diagnostics": {
+            **private_diagnostics(critical_entries, current),
+            **replication_timings(result.stderr),
+        },
         **({"privacy_assertion": privacy_assertion} if privacy_assertion is not None else {}),
     }
     write_job_receipt(job_id, receipt_state)
-    # Synchronous API secret changes are critical: report the failed receipt
-    # immediately so the API restores its previous database state. Operator
-    # and rollback copies remain pending until the peer accepts them, which
-    # also prevents the witness from promoting a stale standby.
-    deferred_request = bool(
-        request_files and result.returncode != 0
-        and request_document.get("critical") is not True
-    )
+    # Critical mutations remain durable and locked while their requests are
+    # deferred. Nothing here compensates or deletes a committed mutation.
+    # The witness guard remains open until an exact bundle is accepted.
+    deferred_request = bool(request_files and result.returncode != 0)
     if request_files:
-        request_path = request_files[0]
+        for request_path in request_files:
+            try:
+                if deferred_request and request_path.parent == REQUESTS:
+                    request_path.replace(DEFERRED / request_path.name)
+                elif not deferred_request:
+                    request_path.unlink()
+            except OSError:
+                pass
+    if batch_path is not None:
         try:
-            if deferred_request and request_path.parent == REQUESTS:
-                request_path.replace(DEFERRED / request_path.name)
-            elif not deferred_request:
-                request_path.unlink()
+            batch_path.unlink()
         except OSError:
             pass
     if deferred_request and result.returncode in {23, 74}:

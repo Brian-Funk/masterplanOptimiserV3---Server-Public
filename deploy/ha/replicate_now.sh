@@ -8,8 +8,42 @@ MP_HA_HOME="${MP_HA_HOME:-/etc/mp-opt-ha}"
 MP_HA_STATE="${MP_HA_STATE:-$HOME/.local/state/mp-opt-ha-replication}"
 job_id="${1:-$(cat /proc/sys/kernel/random/uuid)}"
 request_file="${2:-}"
+sender_started_ms="$(date +%s%3N)"
 [[ "$job_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || exit 1
 [ -z "$request_file" ] || { [ -f "$request_file" ] && [ ! -L "$request_file" ]; } || exit 1
+
+update_operation_stage() {
+    local stage_name="$1" state_name="${2:-pending}" operation_id="" operation_sequence=""
+    [ -n "$request_file" ] || return 0
+    [ "$(jq -r '.format // empty' "$request_file" 2>/dev/null)" = "mp-opt-replication-batch-v2" ] || return 0
+    install -d -m 0711 "$MP_ROOT/runtime/ha-operation-results"
+    while IFS=$'\t' read -r operation_id operation_sequence; do
+        [ -n "$operation_id" ] || continue
+        jq -n --arg operation "$operation_id" --arg state "$state_name" \
+            --arg stage "$stage_name" --arg bundle "$job_id" \
+            --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson sequence "$operation_sequence" \
+            '{format:"mp-opt-ha-operation-result-v1",operation_id:$operation,state:$state,stage:$stage,mutation_sequence:$sequence,bundle_id:$bundle,bundle_sha256:null,generation:null,error_code:null,updated_at:$updated,accepted_at:null}' \
+            > "$MP_ROOT/runtime/ha-operation-results/.${operation_id}.tmp"
+        chmod 0644 "$MP_ROOT/runtime/ha-operation-results/.${operation_id}.tmp"
+        mv "$MP_ROOT/runtime/ha-operation-results/.${operation_id}.tmp" \
+            "$MP_ROOT/runtime/ha-operation-results/${operation_id}.json"
+    done < <(jq -r '.operations[]? | [.marker.operation_id,.marker.mutation_sequence] | @tsv' "$request_file")
+}
+
+peer_confirms_bundle() {
+    local receiver="" expected_operations="" confirmed_operations=""
+    receiver="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$HA_PEER_SSH" \
+        "cat /opt/masterplan/runtime/ha-receiver.json" 2>/dev/null || true)"
+    [ "$(jq -r '.last_bundle_id // empty' <<< "$receiver" 2>/dev/null)" = "$job_id" ] || return 1
+    [ "$(jq -r '.last_bundle_sha256 // empty' <<< "$receiver" 2>/dev/null)" = "$archive_hash" ] || return 1
+    if [ -n "$request_file" ] && [ "$(jq -r '.format // empty' "$request_file")" = "mp-opt-replication-batch-v2" ]; then
+        expected_operations="$(jq -c '[.operations[]?.marker | {operation_id,mutation_sequence}] | sort_by(.mutation_sequence)' "$request_file")"
+        confirmed_operations="$(jq -c '[.protection_operations[]?] | sort_by(.mutation_sequence)' <<< "$receiver" 2>/dev/null)"
+        [ "$expected_operations" = "$confirmed_operations" ] || return 1
+    fi
+    return 0
+}
 
 # shellcheck source=../management/common.sh
 source "$MP_ROOT/deploy/management/common.sh"
@@ -144,18 +178,27 @@ manifest_args=(create \
     --output "$stage/manifest.json")
 [ -z "$request_file" ] || manifest_args+=(--request "$request_file")
 python3 "$MP_ROOT/deploy/ha/replication_bundle.py" "${manifest_args[@]}"
+update_operation_stage transferring
 
 recipient="$(tr -d '\r\n' < "$MP_HA_HOME/peer-age-recipient")"
 [[ "$recipient" =~ ^age1[0-9a-z]{58}$ ]] || { echo "Peer age recipient is invalid." >&2; exit 1; }
 tar -C "$stage" -cf - manifest.json payload \
     | age -r "$recipient" -o "$stage/bundle.age"
 archive_hash="$(sha256sum "$stage/bundle.age" | awk '{print $1}')"
+capture_completed_ms="$(date +%s%3N)"
 set +e
 response="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$HA_PEER_SSH" \
     "/opt/masterplan/deploy/ha/receive_replication_bundle.sh '$job_id' '$archive_hash'" \
     < "$stage/bundle.age")"
 ssh_status="$?"
+transfer_completed_ms="$(date +%s%3N)"
 set -e
+if [ "$ssh_status" -ne 0 ] || [ "$response" != "ACCEPTED:$job_id:$archive_hash" ]; then
+    if peer_confirms_bundle; then
+        response="ACCEPTED:$job_id:$archive_hash"
+        ssh_status=0
+    fi
+fi
 if [ "$ssh_status" -eq 255 ]; then
     echo "The replication peer is unreachable." >&2
     exit 20
@@ -170,4 +213,8 @@ if [ "$ssh_status" -ne 0 ]; then
 fi
 [ "$response" = "ACCEPTED:$job_id:$archive_hash" ] \
     || { echo "The replication acknowledgement was invalid." >&2; exit 22; }
+update_operation_stage verifying
+printf 'MP_SENDER_TIMING capture_ms=%s transfer_round_trip_ms=%s\n' \
+    "$((capture_completed_ms - sender_started_ms))" \
+    "$((transfer_completed_ms - capture_completed_ms))" >&2
 printf '%s\n' "$response"

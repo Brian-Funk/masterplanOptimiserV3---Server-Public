@@ -898,6 +898,7 @@ mp_prepare_frontend_csp_runtime() {
     local runtime_dir="$MP_ROOT/runtime"
     local policy_path="$runtime_dir/frontend-csp.caddy"
     local request_dir="$runtime_dir/ha-requests"
+    local operation_result_dir="$runtime_dir/ha-operation-results"
     local compliance_request_dir="$runtime_dir/compliance-requests"
     local compliance_receipt_dir="$runtime_dir/compliance-receipts"
     local owner directory
@@ -940,6 +941,18 @@ mp_prepare_frontend_csp_runtime() {
     # The unprivileged API may enqueue opaque replication jobs without being
     # able to list or replace requests created by another process.
     chmod 1733 "$request_dir" || return 1
+    if [ -e "$operation_result_dir" ] && { [ ! -d "$operation_result_dir" ] || [ -L "$operation_result_dir" ]; }; then
+        printf 'Refusing unsafe HA operation-result path: %s\n' "$operation_result_dir" >&2
+        return 1
+    fi
+    mkdir -p "$operation_result_dir" 2>/dev/null || true
+    [ -d "$operation_result_dir" ] || return 1
+    [ "$(stat -c '%u:%g' "$operation_result_dir")" = "$owner" ] \
+        || sudo -n chown "$owner" "$operation_result_dir" \
+        || return 1
+    # UUID filenames are known only to the authenticated caller. The backend
+    # may traverse and read a named 0644 result but cannot list the directory.
+    chmod 0711 "$operation_result_dir" || return 1
     chmod 1733 "$compliance_request_dir" || return 1
     # Receipts contain only UUIDs, timestamps and public digests. The host TUI
     # writes them and the unprivileged backend reads them through a read-only

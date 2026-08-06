@@ -43,6 +43,8 @@ evidence_state_existed=false
 lease_service_active=false
 backend_service_active=false
 caddy_service_active=false
+caddy_configuration_changed=false
+receiver_started_ms="$(date +%s%3N)"
 mp_compose_init
 if "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx backend; then
     backend_service_active=true
@@ -228,14 +230,56 @@ rollback_db="mp_rollback_${bundle_id//[^A-Za-z0-9]/}"
 rollback_db="${rollback_db:0:48}"
 "${MP_COMPOSE[@]}" exec -T db dropdb -U masterplan --if-exists "$stage_db"
 "${MP_COMPOSE[@]}" exec -T db createdb -U masterplan -T template0 "$stage_db"
+restore_started_ms="$(date +%s%3N)"
 "${MP_COMPOSE[@]}" exec -T db pg_restore -U masterplan -d "$stage_db" \
     --no-owner --no-acl < "$stage/extracted/payload/database/masterplan.dump"
+restore_completed_ms="$(date +%s%3N)"
 db_identity="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d "$stage_db" -Atqc \
     "SELECT cluster_id || ':' || generation::text || ':' || active_node_id FROM ha_cluster_state WHERE id=1")"
 [ "$db_identity" = "${HA_CLUSTER_ID}:${manifest_generation}:${HA_PEER_NODE_ID}" ] \
     || { echo "The database writer identity does not match the authorized bundle." >&2; exit 1; }
 "${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d "$stage_db" -Atqc \
     "SELECT 1 FROM users LIMIT 1" >/dev/null
+
+# Critical-operation acknowledgement is bound to rows inside this exact
+# restored database. A request file or sender claim alone is never enough.
+operation_count="$(jq -r '.protection_operations // [] | length' <<< "$manifest")"
+operation_index=0
+while [ "$operation_index" -lt "$operation_count" ]; do
+    operation="$(jq -c ".protection_operations[$operation_index]" <<< "$manifest")"
+    operation_id="$(jq -r '.marker.operation_id' <<< "$operation")"
+    operation_sequence="$(jq -r '.marker.mutation_sequence' <<< "$operation")"
+    operation_type="$(jq -r '.marker.operation_type' <<< "$operation")"
+    resource_type="$(jq -r '.marker.resource_type' <<< "$operation")"
+    resource_id="$(jq -r '.marker.resource_id // ""' <<< "$operation")"
+    operation_verified="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d "$stage_db" -At \
+        --set=operation_id="$operation_id" --set=mutation_sequence="$operation_sequence" \
+        --set=operation_type="$operation_type" --set=resource_type="$resource_type" \
+        --set=resource_id="$resource_id" -c \
+        "SELECT EXISTS (SELECT 1 FROM ha_protection_operations WHERE id=:'operation_id' AND mutation_sequence=:'mutation_sequence'::bigint AND operation_type=:'operation_type' AND resource_type=:'resource_type' AND COALESCE(resource_id,'')=:'resource_id' AND state IN ('pending','indeterminate'))")"
+    [ "$operation_verified" = "t" ] \
+        || { echo "The staged database does not contain a requested protection marker." >&2; exit 1; }
+
+    privacy_workflow="$(jq -r '.privacy_assertion.workflow_type // empty' <<< "$operation")"
+    if [ -n "$privacy_workflow" ]; then
+        privacy_workflow_id="$(jq -r '.privacy_assertion.workflow_id' <<< "$operation")"
+        privacy_action_id="$(jq -r '.privacy_assertion.privacy_action_id' <<< "$operation")"
+        privacy_sequence="$(jq -r '.privacy_assertion.privacy_action_sequence' <<< "$operation")"
+        privacy_purge_digest="$(jq -r '.privacy_assertion.live_purge_receipt_sha256' <<< "$operation")"
+        privacy_verified="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d "$stage_db" -At \
+            --set=workflow_id="$privacy_workflow_id" --set=action_id="$privacy_action_id" \
+            --set=action_sequence="$privacy_sequence" --set=purge_digest="$privacy_purge_digest" \
+            -c "SELECT EXISTS (SELECT 1 FROM deletion_cases c JOIN privacy_action_receipts p ON p.privacy_action_id=c.privacy_action_id WHERE c.request_id=:'workflow_id' AND c.privacy_action_id=:'action_id' AND c.privacy_action_sequence=:'action_sequence'::integer AND c.live_purge_receipt_sha256=:'purge_digest' AND c.live_data_purged_at IS NOT NULL AND p.sequence=:'action_sequence'::integer AND p.local_applied_at IS NOT NULL)")"
+        [ "$privacy_verified" = "t" ] \
+            || { echo "The staged database does not prove the requested privacy action." >&2; exit 1; }
+    fi
+    "${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U masterplan -d "$stage_db" \
+        --set=operation_id="$operation_id" --set=bundle_id="$bundle_id" \
+        --set=bundle_sha256="$expected_hash" --set=generation="$manifest_generation" \
+        -c "UPDATE ha_protection_operations SET state='accepted', stage='accepted', accepted_bundle_id=:'bundle_id', accepted_bundle_sha256=:'bundle_sha256', accepted_generation=:'generation'::bigint, accepted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP, error_code=NULL WHERE id=:'operation_id'" \
+        >/dev/null
+    operation_index="$((operation_index + 1))"
+done
 
 # A privacy confirmation is valid only when this exact staged database has the
 # asserted applied action and signed live-purge receipt. The sender cannot turn
@@ -260,6 +304,9 @@ python3 "$MP_ROOT/deploy/ha/replication_bundle.py" merge-env \
     --local "$MP_ROOT/.env" --shared "$stage/extracted/payload/config/shared.env" \
     --output "$stage/.env"
 cp -a "$MP_ROOT/.env" "$stage/.env.previous"
+previous_domain="$(sed -n 's/^DOMAIN=//p' "$stage/.env.previous" | tail -n 1)"
+next_domain="$(sed -n 's/^DOMAIN=//p' "$stage/.env" | tail -n 1)"
+[ "$previous_domain" = "$next_domain" ] || caddy_configuration_changed=true
 mkdir "$stage/secrets.previous"
 cp -a "$MP_ROOT/secrets/." "$stage/secrets.previous/"
 
@@ -309,7 +356,9 @@ sudo -n rm -rf "$MP_ROOT/state/evidence"
 sudo -n mv "$stage/evidence.new" "$MP_ROOT/state/evidence"
 mp_snapshot_publish_status
 mp_prepare_backend_secret_permissions
-"${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend caddy >/dev/null
+services_to_recreate=(backend)
+[ "$caddy_configuration_changed" = false ] || services_to_recreate+=(caddy)
+"${MP_COMPOSE[@]}" up -d --no-deps --force-recreate "${services_to_recreate[@]}" >/dev/null
 "${MP_COMPOSE[@]}" exec -T db pg_isready -U masterplan -d masterplan >/dev/null
 "${MP_COMPOSE[@]}" exec -T caddy \
     caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
@@ -329,7 +378,8 @@ received_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 jq -n --arg bundle "$bundle_id" --arg hash "$expected_hash" --arg received "$received_at" \
     --arg created "$manifest_created_at" --arg source "$HA_PEER_NODE_ID" --argjson generation "$manifest_generation" \
     --argjson privacy "$(jq '.privacy_assertion // null' <<< "$manifest")" \
-    '{format:"mp-opt-receiver-state-v1",last_bundle_id:$bundle,last_bundle_sha256:$hash,last_received_at:$received,bundle_created_at:$created,source_node_id:$source,generation:$generation,privacy_assertion:$privacy}' \
+    --argjson operations "$(jq '[.protection_operations[]?.marker | {operation_id,mutation_sequence}]' <<< "$manifest")" \
+    '{format:"mp-opt-receiver-state-v2",last_bundle_id:$bundle,last_bundle_sha256:$hash,last_received_at:$received,bundle_created_at:$created,source_node_id:$source,generation:$generation,privacy_assertion:$privacy,protection_operations:$operations}' \
     > "$stage/receiver.json"
 install -m 0600 "$stage/receiver.json" "$MP_ROOT/runtime/ha-receiver.json"
 # The old database is intentionally retained until the next successful copy;
@@ -353,4 +403,9 @@ database_swap_started=false
 # failover delay and the fully applied, hash-verified copy remains valid.
 python3 "$MP_ROOT/deploy/ha/witness_control.py" complete-transfer \
     "$bundle_id" "$expected_hash" >/dev/null 2>&1 || true
+receiver_completed_ms="$(date +%s%3N)"
+printf 'MP_RECEIVER_TIMING restore_ms=%s verification_activation_ms=%s total_ms=%s\n' \
+    "$((restore_completed_ms - restore_started_ms))" \
+    "$((receiver_completed_ms - restore_completed_ms))" \
+    "$((receiver_completed_ms - receiver_started_ms))" >&2
 printf 'ACCEPTED:%s:%s\n' "$bundle_id" "$expected_hash"
