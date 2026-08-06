@@ -69,6 +69,12 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("internal-repin-setup", SUPERVISOR)
         self.assertIn("internal-finalize-peer", SUPERVISOR)
         self.assertIn("peer_copy_image", SUPERVISOR)
+        initial = SUPERVISOR.split("prepare_initial_peer()", 1)[1].split(
+            "internal_prepare_peer()", 1
+        )[0]
+        self.assertIn('[ -d "$MP_ROOT/web/out" ]', initial)
+        self.assertIn('tar -C "$MP_ROOT" -czf - web/out runtime/frontend-csp.caddy', initial)
+        self.assertNotIn('tar -C "$MP_TEST_SOURCE" -czf - web/out', initial)
 
     def test_pre_pairing_ha_update_stays_local(self) -> None:
         self.assertIn("ha_pairing_complete()", SUPERVISOR)

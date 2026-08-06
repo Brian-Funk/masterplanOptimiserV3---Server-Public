@@ -387,7 +387,15 @@ prepare_initial_peer() {
         peer_copy_image "$image"
     done
     scp -q "$MP_TEST_ENV" mp-opt-ha-peer:/tmp/mp-opt-test-deployment.env
-    tar -C "$MP_TEST_SOURCE" -czf - web/out runtime/frontend-csp.caddy \
+    # A conversion can advance through operations-only commits. Generated
+    # frontend output is therefore not guaranteed to exist in the temporary
+    # source checkout, while the verified active deployment always carries the
+    # exact assets currently served by Node A. Seed Node B from that installed
+    # deployment so initial HA preparation does not require an unrelated
+    # frontend rebuild.
+    [ -d "$MP_ROOT/web/out" ] && [ -s "$MP_ROOT/runtime/frontend-csp.caddy" ] \
+        || { ui_error "The verified active frontend assets are unavailable for initial peer preparation."; return 1; }
+    tar -C "$MP_ROOT" -czf - web/out runtime/frontend-csp.caddy \
         | ssh -T -o BatchMode=yes mp-opt-ha-peer \
             "rm -rf '$MP_TEST_HOME/peer-assets' && mkdir -p '$MP_TEST_HOME/peer-assets' && tar -C '$MP_TEST_HOME/peer-assets' -xzf -"
     ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
