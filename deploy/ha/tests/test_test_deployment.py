@@ -67,6 +67,9 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         )[0]
         self.assertIn('.campaign_commit=$target', peer_activate)
         self.assertIn('.campaign_commit != $previous', peer_activate)
+        self.assertIn('/opt/masterplan/deploy/test-deployment.sh status', SUPERVISOR)
+        self.assertIn("jq -r '.current_commit // empty' <<< \"$peer_state\"", SUPERVISOR)
+        self.assertNotIn('env MP_ROOT=/opt/masterplan bash -c', peer_activate)
 
     def test_peer_reexecutes_installed_exact_operations_before_activation(self) -> None:
         peer_activate = SUPERVISOR.split("internal_activate()", 1)[1].split(

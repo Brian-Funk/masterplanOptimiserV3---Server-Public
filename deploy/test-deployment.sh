@@ -384,7 +384,7 @@ peer_copy_image() {
 }
 
 peer_activate() {
-    local target="$1" components="$2" fresh_commissioning="${3:-false}"
+    local target="$1" components="$2" fresh_commissioning="${3:-false}" peer_state
     scp -q "$MP_TEST_ENV" mp-opt-ha-peer:/tmp/mp-opt-test-deployment.env
     if grep -qw frontend <<< "$components"; then
         tar -C "$MP_TEST_SOURCE" -czf - web/out runtime/frontend-csp.caddy \
@@ -394,9 +394,11 @@ peer_activate() {
     ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
         env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
         /opt/masterplan/deploy/test-deployment.sh internal-activate "$target" "$components" "$fresh_commissioning"
-    [ "$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
-        env MP_ROOT=/opt/masterplan bash -c \
-        'source "$MP_ROOT/deploy/management/common.sh"; jq -r ".current_commit // empty" "$MP_STATE/test-deployments/current.json"' 2>/dev/null)" = "$target" ] \
+    peer_state="$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+        env MP_ROOT=/opt/masterplan \
+        /opt/masterplan/deploy/test-deployment.sh status 2>/dev/null)" \
+        || { ui_error "Node B's exact deployment receipt could not be read."; return 1; }
+    [ "$(jq -r '.current_commit // empty' <<< "$peer_state")" = "$target" ] \
         || { ui_error "Node B did not record the exact pinned deployment receipt."; return 1; }
 }
 
