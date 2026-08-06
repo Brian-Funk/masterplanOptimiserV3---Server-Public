@@ -45,7 +45,7 @@ mp_setup_install_signed_release() {
 }
 
 mp_setup_state_begin() {
-    local mode="$1" temporary lane="" policy commit="" receipt="" pinned="" checkout=""
+    local mode="$1" temporary lane="" policy commit="" receipt="" pinned="" checkout="" previous=""
     if [ -f "$MP_SETUP_V2_STATE" ]; then
         jq -e '.format == "mp-opt-setup-state-v2" and .state == "in_progress"' \
             "$MP_SETUP_V2_STATE" >/dev/null || {
@@ -67,7 +67,9 @@ mp_setup_state_begin() {
             pinned="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
             if [ "$pinned" != "$receipt" ]; then
                 checkout="$(git -C "$MP_ROOT" rev-parse HEAD 2>/dev/null || true)"
-                if [ "$pinned" != "$checkout" ] \
+                previous="$(jq -r '.previous_commit // empty' \
+                    "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)"
+                if { [ "$pinned" != "$checkout" ] && [ "$pinned" != "$previous" ]; } \
                     || jq -e '.completed | index("witness_bootstrap") != null' \
                         "$MP_SETUP_V2_STATE" >/dev/null 2>&1 \
                     || [ -s "$MP_SETUP_V2_PENDING_JOIN" ]; then

@@ -136,6 +136,13 @@ class PairingCodeTests(unittest.TestCase):
                 mv "$MP_SETUP_V2_STATE.stale" "$MP_SETUP_V2_STATE"
                 mp_setup_state_begin convert-ha
                 jq -r .campaign_commit "$MP_SETUP_V2_STATE"
+                old_pin="$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")"
+                next_commit="$(printf 'd%.0s' {1..40})"
+                jq -n --arg current "$next_commit" --arg previous "$old_pin" \
+                    '{current_commit:$current,previous_commit:$previous}' \
+                    > "$MP_STATE/test-deployments/current.json"
+                mp_setup_state_begin convert-ha
+                jq -r .campaign_commit "$MP_SETUP_V2_STATE"
             '''
             result = subprocess.run(
                 ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(work),
@@ -143,7 +150,7 @@ class PairingCodeTests(unittest.TestCase):
                  str(ROOT)], text=True, capture_output=True, check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.splitlines(), [receipt, receipt])
+            self.assertEqual(result.stdout.splitlines(), [receipt, receipt, "d" * 40])
 
     def test_state_update_preserves_the_jq_now_variable_for_jq(self) -> None:
         state_update = shell_function(SETUP, "mp_setup_state_update")
