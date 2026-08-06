@@ -51,7 +51,14 @@ from app.core.passkey_ceremonies import (
     create_ceremony,
 )
 from app.core.governance import stable_instance_id
-from app.core.ha_replication import observe_ha_replication, protect_current_state
+from app.core.ha_replication import (
+    HAProtectionResult,
+    cancel_uncommitted_protection,
+    create_protection_operation,
+    queue_protection_operation,
+    sync_protection_operation,
+)
+from app.core.ha_witness import HAWritePermitError
 from app.core.security import (
     ensure_recent_reauth,
     get_current_user,
@@ -71,6 +78,7 @@ from app.models.deletion import (
 )
 from app.models.evidence import BackupInventoryRecord, ProcessorIdentity
 from app.models.event import Event
+from app.models.ha import HAProtectionOperation
 from app.models.notification import PushSubscription
 from app.models.published import (
     PublishedPerson,
@@ -886,33 +894,64 @@ def confirm_deletion_peer(
         "privacy_action_sequence": job.privacy_action_sequence,
         "live_purge_receipt_sha256": job.live_purge_receipt_sha256,
     }
-    protection = (
-        observe_ha_replication(
-            job.peer_replication_job_id,
-            privacy_assertion=assertion,
-        )
-        if job.peer_replication_job_id
-        else None
+    operation = (
+        db.query(HAProtectionOperation)
+        .filter(HAProtectionOperation.id == job.peer_replication_job_id)
+        .first()
+        if job.peer_replication_job_id else None
     )
-    if protection is None and job.peer_replication_job_id is None:
-        protection = protect_current_state(
-            "privacy-case-purge",
-            critical=False,
-            privacy_assertion=assertion,
-        )
-        job.peer_replication_job_id = protection.job_id
+    if operation is None and job.peer_replication_job_id is None:
+        try:
+            operation = create_protection_operation(
+                db,
+                idempotency_key=f"deletion-peer:{job.request_id}:{job.privacy_action_sequence}",
+                operation_type="privacy-case-purge",
+                resource_type="deletion_case",
+                resource_id=job.request_id,
+            )
+            if operation is not None:
+                job.peer_replication_job_id = operation.id
+            audit(db, user=admin, action="gdpr.peer_replication_requested",
+                  resource_type="deletion_request",
+                  detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
+            db.commit()
+        except HAWritePermitError as exc:
+            db.rollback()
+            cancel_uncommitted_protection(operation)
+            raise HTTPException(status_code=503, detail="The standby protection guard is unavailable") from exc
+        except Exception:
+            db.rollback()
+            cancel_uncommitted_protection(operation)
+            raise
+        if operation is not None and not queue_protection_operation(
+            operation, privacy_assertion=assertion,
+        ):
+            operation.state = "indeterminate"
+            operation.stage = "attention_required"
+            operation.error_code = "replication_agent_unavailable"
+            db.commit()
+    protection: HAProtectionResult | None = None
+    if operation is not None:
+        sync_protection_operation(db, operation)
+        if operation.state == "accepted":
+            protection = HAProtectionResult(
+                protected=True,
+                job_id=operation.id,
+                bundle_id=operation.accepted_bundle_id,
+                bundle_sha256=operation.accepted_bundle_sha256,
+                generation=operation.accepted_generation,
+                accepted_at=operation.accepted_at,
+            )
     try:
         if protection is not None and protection.protected:
             confirm_case_peer(db, job, protection)
     except (EvidenceUnavailable, ValueError) as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    audit(db, user=admin, action=(
-        "gdpr.peer_replication_confirmed"
-        if job.peer_confirmation_sha256
-        else "gdpr.peer_replication_requested"
-    ), resource_type="deletion_request",
-          detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
+    if job.peer_confirmation_sha256:
+        audit(db, user=admin, action="gdpr.peer_replication_confirmed",
+              resource_type="deletion_request",
+              detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
     db.commit()
     if not job.peer_confirmation_sha256:
         response.status_code = 202

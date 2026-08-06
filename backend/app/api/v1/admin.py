@@ -15,7 +15,7 @@ import uuid
 from datetime import date, datetime, timezone
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 from sqlalchemy.exc import IntegrityError
@@ -52,7 +52,15 @@ from app.core.activation_email import (
 from app.core.audit import audit
 from app.core.config import settings
 from app.core.event_dates import require_valid_event_date_range
-from app.core.ha_replication import protect_current_state, request_ha_replication
+from app.core.ha_replication import (
+    cancel_uncommitted_protection,
+    create_protection_operation,
+    find_protection_operation,
+    queue_protection_operation,
+    request_ha_replication,
+    sync_protection_operation,
+)
+from app.core.ha_witness import HAWritePermitError
 from app.core.retention import materialise_event_purge_deadline, retention_status
 from app.core.governance import current_policy_identity, require_current_policy_identity
 from app.core.web_edits import (
@@ -92,6 +100,7 @@ from app.core.passkey_ceremonies import (
     create_ceremony,
 )
 from app.models.event import Event
+from app.models.ha import HAProtectionOperation
 from app.models.audit import AuditLog
 from app.models.deletion import DeletionCase
 from app.models.governance import DataPolicyAcknowledgement, GovernancePublication
@@ -264,6 +273,8 @@ class EventCreateIn(BaseModel):
     end_date: Optional[date] = None
     policy_version: Optional[int] = Field(None, ge=1)
     policy_sha256: Optional[str] = Field(None, pattern=r"^[0-9a-f]{64}$")
+    publish_secret: str = Field(..., min_length=32, max_length=128)
+    idempotency_key: str = Field(..., pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
 
     @model_validator(mode="after")
     def validate_date_range(self) -> "EventCreateIn":
@@ -290,6 +301,9 @@ class EventOut(BaseModel):
     secret_age_days: Optional[int] = None
     logo_color_1: Optional[str] = None
     logo_color_2: Optional[str] = None
+    protection_operation_id: Optional[str] = None
+    protection_state: Optional[str] = None
+    protection_stage: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -298,7 +312,39 @@ class EventCreateResponse(BaseModel):
     """Event creation response that includes the one-time publish secret."""
 
     event: EventOut
-    publish_secret: str  # Raw secret  -  shown ONCE
+    publish_secret: Optional[str] = None
+    protection_operation_id: Optional[str] = None
+    protection_state: Optional[str] = None
+    protection_stage: Optional[str] = None
+
+
+class HAProtectionStatusOut(BaseModel):
+    operation_id: str
+    operation_type: str
+    resource_type: str
+    resource_id: Optional[str] = None
+    mutation_sequence: int
+    state: str
+    stage: str
+    error_code: Optional[str] = None
+    accepted_bundle_id: Optional[str] = None
+    accepted_bundle_sha256: Optional[str] = None
+    accepted_generation: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+    accepted_at: Optional[datetime] = None
+
+
+class ProtectedSecretMutationIn(BaseModel):
+    publish_secret: str = Field(..., min_length=32, max_length=128)
+    idempotency_key: str = Field(..., pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
+
+
+class ProtectedSecretMutationOut(BaseModel):
+    publish_secret: Optional[str] = None
+    protection_operation_id: Optional[str] = None
+    protection_state: Optional[str] = None
+    protection_stage: Optional[str] = None
 
 
 class WebEditItemOut(BaseModel):
@@ -686,10 +732,102 @@ class UserTagActionOut(BaseModel):
 # Event endpoints
 # ---------------------------------------------------------------------------
 
+def _operation_out(operation: HAProtectionOperation) -> HAProtectionStatusOut:
+    return HAProtectionStatusOut(
+        operation_id=operation.id,
+        operation_type=operation.operation_type,
+        resource_type=operation.resource_type,
+        resource_id=operation.resource_id,
+        mutation_sequence=int(operation.mutation_sequence),
+        state=operation.state,
+        stage=operation.stage,
+        error_code=operation.error_code,
+        accepted_bundle_id=operation.accepted_bundle_id,
+        accepted_bundle_sha256=operation.accepted_bundle_sha256,
+        accepted_generation=operation.accepted_generation,
+        created_at=operation.created_at,
+        updated_at=operation.updated_at,
+        accepted_at=operation.accepted_at,
+    )
+
+
+def _event_operation(event_id: int, db: Session) -> HAProtectionOperation | None:
+    return (
+        db.query(HAProtectionOperation)
+        .filter(
+            HAProtectionOperation.resource_type == "event",
+            HAProtectionOperation.resource_id == str(event_id),
+            HAProtectionOperation.operation_type.in_([
+                "publisher-secret-create", "publisher-secret-import",
+            ]),
+        )
+        .order_by(HAProtectionOperation.mutation_sequence.desc())
+        .first()
+    )
+
+
+def _event_out(event: Event, db: Session, *, now: datetime | None = None) -> EventOut:
+    operation = _event_operation(event.id, db) if settings.HA_MODE == "ha" else None
+    if operation is not None and operation.state not in {"accepted", "cancelled"}:
+        sync_protection_operation(db, operation)
+    display_status = (
+        "securing"
+        if operation is not None and operation.state in {"pending", "indeterminate"}
+        else event.status
+    )
+    current = now or datetime.now(timezone.utc)
+    return EventOut(
+        id=event.id,
+        evidence_id=event.evidence_id,
+        name=event.name,
+        location=event.location,
+        start_date=event.start_date.isoformat() if event.start_date else None,
+        end_date=event.end_date.isoformat() if event.end_date else None,
+        status=display_status,
+        purge_grace_days=event.purge_grace_days,
+        purge_due_at=event.purge_due_at,
+        purge_case_request_id=event.purge_case_request_id,
+        purge_started_at=event.purge_started_at,
+        created_at=event.created_at,
+        secret_created_at=event.secret_created_at,
+        secret_age_days=(current - _ensure_aware_utc(event.secret_created_at)).days
+        if event.secret_created_at else None,
+        logo_color_1=None,
+        logo_color_2=None,
+        protection_operation_id=operation.id if operation else None,
+        protection_state=operation.state if operation else None,
+        protection_stage=operation.stage if operation else None,
+    )
+
+
+@router.get("/ha-protection-operations/{operation_id}", response_model=HAProtectionStatusOut)
+def get_ha_protection_operation(
+    operation_id: str,
+    admin: User = Depends(require_root_admin_read_only),
+    db: Session = Depends(get_db),
+):
+    """Return the durable status of one standby-protected mutation."""
+
+    del admin
+    try:
+        parsed = uuid.UUID(operation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Protection operation not found") from exc
+    if str(parsed) != operation_id:
+        raise HTTPException(status_code=404, detail="Protection operation not found")
+    operation = db.query(HAProtectionOperation).filter(HAProtectionOperation.id == operation_id).first()
+    if operation is None:
+        raise HTTPException(status_code=404, detail="Protection operation not found")
+    sync_protection_operation(db, operation)
+    db.commit()
+    db.refresh(operation)
+    return _operation_out(operation)
+
 @router.post("/events", response_model=EventCreateResponse)
 @limiter.limit("20/minute")
 def create_event(
     request: Request,
+    response: Response,
     body: EventCreateIn,
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
@@ -710,8 +848,27 @@ def create_event(
         policy_version, policy_sha256 = require_current_policy_identity(
             body.policy_version, body.policy_sha256, db
         )
-    raw_secret = secrets.token_urlsafe(48)
-    secret_hash = hashlib.sha256(raw_secret.encode()).hexdigest()
+    secret_hash = hashlib.sha256(body.publish_secret.encode()).hexdigest()
+    if settings.HA_MODE == "ha":
+        try:
+            existing_operation = find_protection_operation(db, body.idempotency_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid idempotency key") from exc
+        if existing_operation is not None:
+            if existing_operation.operation_type != "publisher-secret-create":
+                raise HTTPException(status_code=409, detail="Idempotency key is already in use")
+            event = db.query(Event).filter(Event.id == int(existing_operation.resource_id or 0)).first()
+            if event is None or event.publish_secret_hash != secret_hash:
+                raise HTTPException(status_code=409, detail="Idempotent event request does not match")
+            sync_protection_operation(db, existing_operation)
+            db.commit()
+            response.status_code = status.HTTP_202_ACCEPTED
+            return EventCreateResponse(
+                event=_event_out(event, db),
+                protection_operation_id=existing_operation.id,
+                protection_state=existing_operation.state,
+                protection_stage=existing_operation.stage,
+            )
 
     event = Event(
         evidence_id=body.evidence_id,
@@ -734,50 +891,45 @@ def create_event(
             policy_sha256=policy_sha256,
             scope="event_creator",
         ))
-    db.commit()
-    db.refresh(event)
-
     audit(db, user=admin, action="event.create", resource_type="event",
           resource_id=event.id, request=request)
-    db.commit()
-
-    protection = protect_current_state("publisher-secret-create")
-    if not protection.protected:
-        event_id = event.id
-        db.expire_all()
-        persisted_event = db.query(Event).filter(Event.id == event_id).first()
-        if persisted_event is not None:
-            db.delete(persisted_event)
-            db.commit()
-        request_ha_replication("publisher-secret-create-rollback")
+    protection: HAProtectionOperation | None = None
+    try:
+        protection = create_protection_operation(
+            db,
+            idempotency_key=body.idempotency_key,
+            operation_type="publisher-secret-create",
+            resource_type="event",
+            resource_id=str(event.id),
+        )
+        db.commit()
+    except HAWritePermitError as exc:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
         raise HTTPException(
             status_code=503,
-            detail={
-                "code": "standby_protection_failed",
-                "message": "The event was not created because its publisher token could not be protected on the standby.",
-            },
-        )
+            detail={"code": "ha_guard_unavailable", "message": "The standby protection guard is unavailable."},
+        ) from exc
+    except Exception:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise
+    db.refresh(event)
+    if protection is not None:
+        db.refresh(protection)
+        if not queue_protection_operation(protection):
+            protection.state = "indeterminate"
+            protection.stage = "attention_required"
+            protection.error_code = "replication_agent_unavailable"
+            db.commit()
+        response.status_code = status.HTTP_202_ACCEPTED
 
     return EventCreateResponse(
-        event=EventOut(
-            id=event.id,
-            evidence_id=event.evidence_id,
-            name=event.name,
-            location=event.location,
-            start_date=event.start_date.isoformat() if event.start_date else None,
-            end_date=event.end_date.isoformat() if event.end_date else None,
-            status=event.status,
-            purge_grace_days=event.purge_grace_days,
-            purge_due_at=event.purge_due_at,
-            purge_case_request_id=event.purge_case_request_id,
-            purge_started_at=event.purge_started_at,
-            created_at=event.created_at,
-            secret_created_at=event.secret_created_at,
-            secret_age_days=0,
-            logo_color_1=None,
-            logo_color_2=None,
-        ),
-        publish_secret=raw_secret,
+        event=_event_out(event, db),
+        publish_secret=body.publish_secret if protection is None else None,
+        protection_operation_id=protection.id if protection else None,
+        protection_state=protection.state if protection else None,
+        protection_stage=protection.stage if protection else None,
     )
 
 
@@ -790,27 +942,9 @@ def list_events(
 
     events = db.query(Event).order_by(Event.created_at.desc()).all()
     now = datetime.now(timezone.utc)
-    return [
-        EventOut(
-            id=e.id,
-            evidence_id=e.evidence_id,
-            name=e.name,
-            location=e.location,
-            start_date=e.start_date.isoformat() if e.start_date else None,
-            end_date=e.end_date.isoformat() if e.end_date else None,
-            status=e.status,
-            purge_grace_days=e.purge_grace_days,
-            purge_due_at=e.purge_due_at,
-            purge_case_request_id=e.purge_case_request_id,
-            purge_started_at=e.purge_started_at,
-            created_at=e.created_at,
-            secret_created_at=e.secret_created_at,
-            secret_age_days=(now - _ensure_aware_utc(e.secret_created_at)).days if e.secret_created_at else None,
-            logo_color_1=None,
-            logo_color_2=None,
-        )
-        for e in events
-    ]
+    values = [_event_out(event, db, now=now) for event in events]
+    db.commit()
+    return values
 
 
 def _web_edit_audit_entries(
@@ -979,10 +1113,12 @@ def revert_event_web_edits(
     )
 
 
-@router.post("/events/{event_id}/regenerate-secret")
+@router.post("/events/{event_id}/regenerate-secret", response_model=ProtectedSecretMutationOut)
 def regenerate_event_secret(
     event_id: int,
     request: Request,
+    response: Response,
+    body: ProtectedSecretMutationIn,
     admin: User = Depends(require_admin_recent_reauth),
     db: Session = Depends(get_db),
 ):
@@ -999,33 +1135,67 @@ def regenerate_event_secret(
             },
         )
 
-    previous_hash = event.publish_secret_hash
-    previous_created_at = event.secret_created_at
-    raw_secret = secrets.token_urlsafe(48)
-    event.publish_secret_hash = hashlib.sha256(raw_secret.encode()).hexdigest()
+    secret_hash = hashlib.sha256(body.publish_secret.encode()).hexdigest()
+    if settings.HA_MODE == "ha":
+        existing_operation = find_protection_operation(db, body.idempotency_key)
+        if existing_operation is not None:
+            if existing_operation.operation_type != "publisher-secret-rotation" or existing_operation.resource_id != str(event.id):
+                raise HTTPException(status_code=409, detail="Idempotency key is already in use")
+            if event.publish_secret_hash != secret_hash:
+                raise HTTPException(status_code=409, detail="Idempotent rotation request does not match")
+            sync_protection_operation(db, existing_operation)
+            db.commit()
+            response.status_code = status.HTTP_202_ACCEPTED
+            return ProtectedSecretMutationOut(
+                protection_operation_id=existing_operation.id,
+                protection_state=existing_operation.state,
+                protection_stage=existing_operation.stage,
+            )
+        pending = db.query(HAProtectionOperation).filter(
+            HAProtectionOperation.operation_type == "publisher-secret-rotation",
+            HAProtectionOperation.resource_type == "event",
+            HAProtectionOperation.resource_id == str(event.id),
+            HAProtectionOperation.state.in_(["pending", "indeterminate"]),
+        ).first()
+        if pending is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "protection_pending", "operation_id": pending.id},
+            )
+    event.publish_secret_hash = secret_hash
     event.secret_created_at = datetime.now(timezone.utc)
     audit(db, user=admin, action="event.regenerate_secret", resource_type="event",
           resource_id=event.id, request=request)
-    db.commit()
-
-    protection = protect_current_state("publisher-secret-rotation")
-    if not protection.protected:
-        db.expire_all()
-        persisted_event = db.query(Event).filter(Event.id == event_id).first()
-        if persisted_event is not None:
-            persisted_event.publish_secret_hash = previous_hash
-            persisted_event.secret_created_at = previous_created_at
-            db.commit()
-        request_ha_replication("publisher-secret-rotation-rollback")
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "standby_protection_failed",
-                "message": "The publisher token was not rotated because the standby did not accept the protected state.",
-            },
+    protection: HAProtectionOperation | None = None
+    try:
+        protection = create_protection_operation(
+            db, idempotency_key=body.idempotency_key,
+            operation_type="publisher-secret-rotation", resource_type="event",
+            resource_id=str(event.id),
         )
-
-    return {"publish_secret": raw_secret}
+        db.commit()
+    except HAWritePermitError as exc:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise HTTPException(status_code=503, detail="The standby protection guard is unavailable") from exc
+    except Exception:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise
+    if protection is not None:
+        db.refresh(protection)
+        if not queue_protection_operation(protection):
+            protection.state = "indeterminate"
+            protection.stage = "attention_required"
+            protection.error_code = "replication_agent_unavailable"
+            db.commit()
+        response.status_code = status.HTTP_202_ACCEPTED
+    return ProtectedSecretMutationOut(
+        publish_secret=body.publish_secret if protection is None else None,
+        protection_operation_id=protection.id if protection else None,
+        protection_state=protection.state if protection else None,
+        protection_stage=protection.stage if protection else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2672,6 +2842,8 @@ class ImportSetupIn(BaseModel):
 
     event: ImportEventIn
     users: List[ImportUserIn] = Field(default_factory=list, max_length=1000)
+    publish_secret: str = Field(..., min_length=32, max_length=128)
+    idempotency_key: str = Field(..., pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
 
     model_config = ConfigDict(extra="forbid")
 
@@ -2687,22 +2859,41 @@ class ImportSetupResponse(BaseModel):
     """Import response with generated publish secret and user links."""
 
     event: EventOut
-    publish_secret: str
+    publish_secret: Optional[str] = None
     users: List[ImportUserOut]
+    protection_operation_id: Optional[str] = None
+    protection_state: Optional[str] = None
+    protection_stage: Optional[str] = None
 
 
 @router.post("/import-setup", response_model=ImportSetupResponse)
 @limiter.limit("5/minute")
 def import_setup(
     request: Request,
+    response: Response,
     body: ImportSetupIn,
     admin: User = Depends(require_admin_recent_reauth),
     db: Session = Depends(get_db),
 ):
-    """Import event + users from a JSON export. Server generates the publish secret."""
-    # Create event
-    raw_secret = secrets.token_urlsafe(48)
-    secret_hash = hashlib.sha256(raw_secret.encode()).hexdigest()
+    """Import event + users with a browser/Desktop-generated publish secret."""
+    secret_hash = hashlib.sha256(body.publish_secret.encode()).hexdigest()
+    if settings.HA_MODE == "ha":
+        existing_operation = find_protection_operation(db, body.idempotency_key)
+        if existing_operation is not None:
+            if existing_operation.operation_type != "publisher-secret-import":
+                raise HTTPException(status_code=409, detail="Idempotency key is already in use")
+            event = db.query(Event).filter(Event.id == int(existing_operation.resource_id or 0)).first()
+            if event is None or event.publish_secret_hash != secret_hash:
+                raise HTTPException(status_code=409, detail="Idempotent setup import does not match")
+            sync_protection_operation(db, existing_operation)
+            db.commit()
+            response.status_code = status.HTTP_202_ACCEPTED
+            return ImportSetupResponse(
+                event=_event_out(event, db), users=[],
+                protection_operation_id=existing_operation.id,
+                protection_state=existing_operation.state,
+                protection_stage=existing_operation.stage,
+            )
 
     event = Event(
         evidence_id=body.event.evidence_id,
@@ -2739,11 +2930,13 @@ def import_setup(
         db.add(user)
         db.flush()
 
-        raw_token, _link = create_activation_link(
+        raw_token, activation_link = create_activation_link(
             user_id=user.id,
             created_by_id=admin.id,
             db=db,
         )
+        if settings.HA_MODE == "ha":
+            activation_link.delivery_pending = True
 
         user_results.append(ImportUserOut(
             user=UserOut(
@@ -2770,48 +2963,38 @@ def import_setup(
 
     audit(db, user=admin, action="event.import_setup", resource_type="event",
           resource_id=event.id, request=request)
-    db.commit()
-
-    protection = protect_current_state("publisher-secret-import")
-    if not protection.protected:
-        imported_user_ids = [result.user.id for result in user_results]
-        if imported_user_ids:
-            db.query(ActivationLink).filter(
-                ActivationLink.user_id.in_(imported_user_ids)
-            ).delete(synchronize_session=False)
-            db.query(User).filter(User.id.in_(imported_user_ids)).delete(
-                synchronize_session=False
-            )
-        db.delete(event)
-        db.commit()
-        request_ha_replication("publisher-secret-import-rollback")
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "standby_protection_failed",
-                "message": "The setup was not imported because its publisher token could not be protected on the standby.",
-            },
+    protection: HAProtectionOperation | None = None
+    try:
+        protection = create_protection_operation(
+            db, idempotency_key=body.idempotency_key,
+            operation_type="publisher-secret-import", resource_type="event",
+            resource_id=str(event.id),
         )
+        db.commit()
+    except HAWritePermitError as exc:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise HTTPException(status_code=503, detail="The standby protection guard is unavailable") from exc
+    except Exception:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise
+    if protection is not None:
+        db.refresh(protection)
+        if not queue_protection_operation(protection):
+            protection.state = "indeterminate"
+            protection.stage = "attention_required"
+            protection.error_code = "replication_agent_unavailable"
+            db.commit()
+        response.status_code = status.HTTP_202_ACCEPTED
 
     return ImportSetupResponse(
-        event=EventOut(
-            id=event.id,
-            evidence_id=event.evidence_id,
-            name=event.name,
-            location=event.location,
-            start_date=event.start_date.isoformat() if event.start_date else None,
-            end_date=event.end_date.isoformat() if event.end_date else None,
-            status=event.status,
-            purge_grace_days=event.purge_grace_days,
-            purge_due_at=event.purge_due_at,
-            purge_case_request_id=event.purge_case_request_id,
-            purge_started_at=event.purge_started_at,
-            created_at=event.created_at,
-            logo_color_1=None,
-            logo_color_2=None,
-        ),
-        publish_secret=raw_secret,
+        event=_event_out(event, db),
+        publish_secret=body.publish_secret if protection is None else None,
         users=user_results,
+        protection_operation_id=protection.id if protection else None,
+        protection_state=protection.state if protection else None,
+        protection_stage=protection.stage if protection else None,
     )
 
 

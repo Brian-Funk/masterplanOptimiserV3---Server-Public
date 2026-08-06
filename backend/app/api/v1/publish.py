@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.core.rate_limit import limiter, runtime_limit
+from app.core.config import settings
 from app.core.retention import materialise_event_purge_deadline
 from app.core.audit import audit
 from app.core.evidence import EvidenceUnavailable, append_record, initialise
@@ -47,6 +48,7 @@ from app.core.schedule_days import (
 )
 from app.db.database import get_db
 from app.models.event import Event
+from app.models.ha import HAProtectionOperation
 from app.models.published import (
     PublishedPerson,
     PublishedPersonUnavailability,
@@ -503,6 +505,24 @@ def _authenticate_event(request: Request, db: Session) -> Event:
     )
     if event is None:
         raise HTTPException(status_code=401, detail="Invalid publish secret")
+    if settings.HA_MODE == "ha":
+        pending_protection = db.query(HAProtectionOperation).filter(
+            HAProtectionOperation.resource_type == "event",
+            HAProtectionOperation.resource_id == str(event.id),
+            HAProtectionOperation.operation_type.in_([
+                "publisher-secret-create", "publisher-secret-rotation", "publisher-secret-import",
+            ]),
+            HAProtectionOperation.state.in_(["pending", "indeterminate"]),
+        ).first()
+        if pending_protection is not None:
+            raise HTTPException(
+                status_code=423,
+                detail={
+                    "code": "STANDBY_PROTECTION_PENDING",
+                    "operation_id": pending_protection.id,
+                    "message": "This publisher credential is still being secured on the standby.",
+                },
+            )
 
     # Check secret rotation policy
     from app.core import runtime_settings
