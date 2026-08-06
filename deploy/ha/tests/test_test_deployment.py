@@ -59,6 +59,7 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("mp-opt-test-deployment-failure-v1", SUPERVISOR)
         self.assertIn("record_apply_failure", SUPERVISOR)
         self.assertIn("restore_verified_previous_deployment", SUPERVISOR)
+        self.assertIn("preflight|build-*|peer-activation", SUPERVISOR)
         self.assertIn("mp_wait_for_health 45", SUPERVISOR)
 
     def test_local_tls_health_is_retried_before_recording_the_receipt(self) -> None:
@@ -68,7 +69,13 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("after 30 attempts", SUPERVISOR)
 
     def test_ha_peer_receives_same_commit_and_writes_a_matching_receipt(self) -> None:
-        self.assertIn('internal-activate "$target" "$components" "$fresh_commissioning"', SUPERVISOR)
+        self.assertIn('peer_components="${components// /,}"', SUPERVISOR)
+        self.assertIn(
+            'internal-activate "$target" "$peer_components" "$fresh_commissioning"',
+            SUPERVISOR,
+        )
+        self.assertIn('components="${component_token//,/ }"', SUPERVISOR)
+        self.assertIn("The peer component set is invalid.", SUPERVISOR)
         self.assertIn("Node B did not record the exact pinned deployment receipt", SUPERVISOR)
         self.assertIn('write_state "$target" "" "$plan" ""', SUPERVISOR)
         peer_activate = SUPERVISOR.split("internal_activate()", 1)[1].split(

@@ -74,7 +74,7 @@ restore_verified_previous_deployment() {
     local verified_before="$1" previous_commit stage
     [ -n "$verified_before" ] || return 0
     stage="$(head -1 "$MP_TEST_STAGE_FILE" 2>/dev/null || printf unknown)"
-    case "$stage" in preflight|build-*) ;; *) return 0 ;; esac
+    case "$stage" in preflight|build-*|peer-activation) ;; *) return 0 ;; esac
     [ -s "$MP_TEST_STATE_DIR/previous.env" ] || return 0
     previous_commit="$(sed -n 's/^MP_TEST_COMMIT=//p' "$MP_TEST_STATE_DIR/previous.env" | head -1)"
     [ "$previous_commit" = "$verified_before" ] || return 0
@@ -415,7 +415,15 @@ peer_copy_image() {
 }
 
 peer_activate() {
-    local target="$1" components="$2" fresh_commissioning="${3:-false}" peer_state
+    local target="$1" components="$2" fresh_commissioning="${3:-false}" peer_state peer_components
+    # OpenSSH joins command arguments into a remote shell command without
+    # preserving the caller's argument boundaries. A space-delimited component
+    # list would therefore arrive as multiple arguments and the peer command
+    # would exit before activation. Transport the validated list as one
+    # comma-delimited token and decode it inside internal_activate().
+    peer_components="${components// /,}"
+    [[ "$peer_components" =~ ^(backend|frontend|caddy|database|tools|operations|witness)(,(backend|frontend|caddy|database|tools|operations|witness))*$ ]] \
+        || { ui_error "The peer component set is invalid."; return 1; }
     scp -q "$MP_TEST_ENV" mp-opt-ha-peer:/tmp/mp-opt-test-deployment.env
     if grep -qw frontend <<< "$components"; then
         tar -C "$MP_TEST_SOURCE" -czf - web/out runtime/frontend-csp.caddy \
@@ -424,7 +432,7 @@ peer_activate() {
     fi
     ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
         env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
-        /opt/masterplan/deploy/test-deployment.sh internal-activate "$target" "$components" "$fresh_commissioning"
+        /opt/masterplan/deploy/test-deployment.sh internal-activate "$target" "$peer_components" "$fresh_commissioning"
     peer_state="$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
         env MP_ROOT=/opt/masterplan \
         /opt/masterplan/deploy/test-deployment.sh status 2>/dev/null)" \
@@ -549,7 +557,10 @@ internal_finalize_peer() {
 }
 
 internal_activate() {
-    local target="$1" components="$2" fresh_commissioning="${3:-false}" plan setup_state temporary previous
+    local target="$1" component_token="$2" fresh_commissioning="${3:-false}" plan setup_state temporary previous components
+    [[ "$component_token" =~ ^(backend|frontend|caddy|database|tools|operations|witness)(,(backend|frontend|caddy|database|tools|operations|witness))*$ ]] \
+        || { ui_error "The peer component set is invalid."; return 1; }
+    components="${component_token//,/ }"
     require_test_policy
     [ "$fresh_commissioning" != true ] || require_fresh_commissioning_database "$target"
     mp_lock
@@ -751,10 +762,12 @@ apply_commit() {
         set_apply_stage build-frontend
         build_frontend
     fi
+    set_apply_stage peer-activation
     install -m 0600 "$MP_TEST_STATE_DIR/next.env" "$MP_TEST_ENV"
     if [ "$peer_ready" = true ]; then
         peer_activate "$target" "$components" "$fresh_commissioning"
     fi
+    set_apply_stage local-assets
     if grep -qw operations <<< "$components" || grep -qw caddy <<< "$components"; then
         sync_operations "$MP_TEST_SOURCE"
     fi
