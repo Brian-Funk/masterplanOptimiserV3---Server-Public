@@ -187,6 +187,14 @@ class TestDeploymentPlannerTests(unittest.TestCase):
             SUPERVISOR,
         )
 
+    def test_paired_replication_reuses_the_deployment_management_lock(self) -> None:
+        self.assertIn("MP_MANAGEMENT_LOCK_HELD=1 mp_ha_replicate_now", SUPERVISOR)
+        replication = (ROOT / "deploy" / "ha" / "replicate_now.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('if [ "${MP_MANAGEMENT_LOCK_HELD:-0}" != 1 ]; then', replication)
+        self.assertIn('flock -n 8', replication)
+
     def test_terminal_dimensions_have_a_non_tty_fallback(self) -> None:
         common = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
         dimensions = common.split("mp_terminal_dimensions()", 1)[1].split("}", 1)[0]

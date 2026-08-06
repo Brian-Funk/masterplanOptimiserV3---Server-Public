@@ -760,7 +760,7 @@ apply_commit() {
         advance_setup_campaign_pin "$target" "$previous" "Preparing exact images for Node B"
     fi
     if [ "$peer_ready" = true ]; then
-        mp_ha_replicate_now
+        MP_MANAGEMENT_LOCK_HELD=1 mp_ha_replicate_now
         mp_ha_refresh_witness_observations
         mp_ha_active_verification_readiness
         if [ "$automatic" = true ]; then
@@ -812,7 +812,8 @@ restore_signed() {
     mp_unlock
     trap - EXIT
     if [ "$role" = dynamic ] && [ "${MP_TEST_PEER:-0}" != 1 ]; then
-        mp_ha_replicate_now || { ui_error "Baseline restored, but replication failed. Automatic failover remains disabled."; return 1; }
+        MP_MANAGEMENT_LOCK_HELD=1 mp_ha_replicate_now \
+            || { ui_error "Baseline restored, but replication failed. Automatic failover remains disabled."; return 1; }
         mp_ha_refresh_witness_observations || { ui_error "Baseline restored, but witness refresh failed. Automatic failover remains disabled."; return 1; }
         mp_ha_active_verification_readiness || { ui_error "Baseline restored, but HA readiness did not converge. Automatic failover remains disabled."; return 1; }
         if [ "$automatic" = true ]; then

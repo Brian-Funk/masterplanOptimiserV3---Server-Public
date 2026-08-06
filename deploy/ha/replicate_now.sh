@@ -24,8 +24,10 @@ generation="$(jq -r '.generation // 0' "$MP_ROOT/runtime/ha-control.json")"
 # can change their relationship.
 mkdir -p "$MP_STATE"
 chmod 700 "$MP_STATE"
-exec 8>"$MP_LOCK_FILE"
-flock -n 8 || { echo "A management operation is running; replication was deferred." >&2; exit 74; }
+if [ "${MP_MANAGEMENT_LOCK_HELD:-0}" != 1 ]; then
+    exec 8>"$MP_LOCK_FILE"
+    flock -n 8 || { echo "A management operation is running; replication was deferred." >&2; exit 74; }
+fi
 
 mkdir -p "$MP_HA_STATE/outgoing"
 chmod 700 "$MP_HA_STATE" "$MP_HA_STATE/outgoing"
