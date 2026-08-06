@@ -40,11 +40,21 @@ manual_export_state_existed=false
 snapshot_status_existed=false
 evidence_state_existed=false
 lease_service_active=false
+backend_service_active=false
+caddy_service_active=false
+mp_compose_init
+if "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx backend; then
+    backend_service_active=true
+fi
+if "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx caddy; then
+    caddy_service_active=true
+fi
 if systemctl is-active --quiet mp-opt-ha-lease.service; then
     lease_service_active=true
 fi
 cleanup() {
     local result="$?" previous_exists="" stage_exists="" rollback_source=""
+    local -a restore_services=()
     set +e
     if [ "$result" -ne 0 ] && [ "$database_swap_started" = true ]; then
         mp_compose_init
@@ -122,11 +132,24 @@ SQL
         else
             sudo -n rm -rf "$MP_ROOT/state/evidence"
         fi
-        "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend caddy >/dev/null 2>&1 || true
+        if [ "$backend_service_active" = true ]; then
+            restore_services+=(backend)
+        else
+            "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
+        fi
+        if [ "$caddy_service_active" = true ]; then
+            restore_services+=(caddy)
+        else
+            "${MP_COMPOSE[@]}" stop caddy >/dev/null 2>&1 || true
+        fi
+        [ "${#restore_services[@]}" -eq 0 ] \
+            || "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate "${restore_services[@]}" >/dev/null 2>&1 \
+            || true
     elif [ "$result" -ne 0 ] && [ -n "$stage_db" ]; then
         mp_compose_init
         "${MP_COMPOSE[@]}" exec -T db dropdb -U masterplan --if-exists "$stage_db" >/dev/null 2>&1 || true
     fi
+    sudo -n rm -rf "$stage/evidence.new"
     rm -rf "$stage"
     exit "$result"
 }
@@ -264,6 +287,9 @@ sudo -n rm -rf "$stage/evidence.new"
 sudo -n cp -a "$stage/extracted/payload/evidence" "$stage/evidence.new"
 sudo -n chown -R 10001:10001 "$stage/evidence.new"
 sudo -n chmod 700 "$stage/evidence.new"
+[ ! -e "$MP_ROOT/state" ] || { [ -d "$MP_ROOT/state" ] && [ ! -L "$MP_ROOT/state" ]; } \
+    || { echo "The evidence parent directory is unsafe." >&2; exit 1; }
+sudo -n install -d -o root -g root -m 0755 "$MP_ROOT/state"
 sudo -n rm -rf "$MP_ROOT/state/evidence"
 sudo -n mv "$stage/evidence.new" "$MP_ROOT/state/evidence"
 mp_snapshot_publish_status

@@ -292,6 +292,28 @@ class ReplicationBundleTests(unittest.TestCase):
         self.assertLess(database_ready, first_drop)
         self.assertIn("The replication peer database did not become ready.", receiver)
 
+    def test_fresh_receiver_prepares_evidence_parent_and_preserves_service_state(self) -> None:
+        receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        evidence_copy = receiver.index(
+            'cp -a "$stage/extracted/payload/evidence" "$stage/evidence.new"'
+        )
+        parent_install = receiver.index(
+            'install -d -o root -g root -m 0755 "$MP_ROOT/state"', evidence_copy
+        )
+        evidence_move = receiver.index(
+            'mv "$stage/evidence.new" "$MP_ROOT/state/evidence"', parent_install
+        )
+        self.assertLess(evidence_copy, parent_install)
+        self.assertLess(parent_install, evidence_move)
+        self.assertIn("The evidence parent directory is unsafe.", receiver)
+        self.assertIn('sudo -n rm -rf "$stage/evidence.new"', receiver)
+        self.assertIn("backend_service_active=false", receiver)
+        self.assertIn("caddy_service_active=false", receiver)
+        self.assertIn('restore_services+=(backend)', receiver)
+        self.assertIn('restore_services+=(caddy)', receiver)
+
 
 if __name__ == "__main__":
     unittest.main()
