@@ -365,6 +365,49 @@ mp_setup_deploy_application() {
     esac
 }
 
+mp_setup_reconcile_primary_campaign_pin() {
+    local receipt pinned temporary
+    [ "$(jq -r '.deployment_lane // empty' "$MP_SETUP_V2_STATE")" = unsigned ] || return 0
+    receipt="$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)"
+    pinned="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
+    [ "$receipt" != "$pinned" ] || return 0
+    [[ "$receipt" =~ ^[0-9a-f]{40}$ ]] && [[ "$pinned" =~ ^[0-9a-f]{40}$ ]] \
+        && ! mp_setup_state_has paired && ! mp_setup_state_has application_deployed \
+        && git -C "$MP_ROOT" fetch --no-tags --force origin "$receipt" >/dev/null 2>&1 \
+        && [ "$(git -C "$MP_ROOT" rev-parse FETCH_HEAD 2>/dev/null || true)" = "$receipt" ] \
+        && git -C "$MP_ROOT" merge-base --is-ancestor "$pinned" "$receipt" >/dev/null 2>&1 \
+        || { ui_error "The active unsigned receipt cannot safely fast-forward the unpaired campaign pin."; return 1; }
+    mp_setup_state_update '.campaign_commit=$commit' --arg commit "$receipt" || return 1
+    if [ -s "$MP_SETUP_V2_PENDING_JOIN" ]; then
+        temporary="$(mktemp "$MP_STATE/pending-ha-join.XXXXXX")" || return 1
+        jq --arg commit "$receipt" '.campaign_commit=$commit' \
+            "$MP_SETUP_V2_PENDING_JOIN" > "$temporary" || { rm -f "$temporary"; return 1; }
+        chmod 600 "$temporary"; mv "$temporary" "$MP_SETUP_V2_PENDING_JOIN"
+    fi
+}
+
+mp_setup_activate_converted_unsigned_pair() {
+    local commit key image
+    commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
+    [ "$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)" = "$commit" ] \
+        || { ui_error "Node A's verified deployment receipt does not match the reconciled campaign pin."; return 1; }
+    for key in MP_BACKEND_IMAGE MP_CADDY_IMAGE MP_POSTGRES_IMAGE MP_TOOLS_IMAGE; do
+        image="$(sed -n "s/^${key}=//p" "$MP_ROOT/.test-deployment.env" | head -1)"
+        [[ "$image" =~ ^masterplan-(backend|caddy|postgres|tools):test-[0-9a-f]{12}$ ]] \
+            && docker image inspect "$image" >/dev/null 2>&1 \
+            || { ui_error "${key} is unavailable for the verified converted deployment."; return 1; }
+    done
+    "$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit" || return 1
+    "$MP_ROOT/deploy/ha/install_services.sh" || return 1
+    python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null || return 1
+    mp_prepare_backend_secret_permissions || return 1
+    mp_compose_init || return 1
+    mp_compose_validate || return 1
+    "${MP_COMPOSE[@]}" up -d db backend caddy || return 1
+    mp_wait_for_database 30 && mp_verify_database_schema_contract && mp_wait_for_health 45 \
+        || { ui_error "Node A could not activate the reconciled unsigned HA topology."; return 1; }
+}
+
 mp_setup_prepare_node_material() {
     local node_id="$1" identity ssh_key public_ip public_ipv6 confirmed observed_ipv4=""
     mp_require_commands age age-keygen jq openssl ssh ssh-keygen || return 1
@@ -1143,8 +1186,9 @@ mp_setup_decommission_cloudflare() {
 }
 
 mp_setup_primary_resume() {
-    local cluster witness token body response peer mode pairing_expires pairing_secret join_code domain pending
+    local cluster witness token body response peer mode pairing_expires pairing_secret join_code domain pending commit
     [ -s "$MP_SETUP_V2_PENDING_JOIN" ] || { ui_error "The protected pending join record is missing."; return 1; }
+    mp_setup_reconcile_primary_campaign_pin || return 1
     mp_load_ha_config || return 1
     mode="$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE")" || return 1
     cluster="$HA_CLUSTER_ID"; witness="$HA_WITNESS_URL"
@@ -1197,14 +1241,26 @@ mp_setup_primary_resume() {
     mp_setup_install_peer_trust "$(jq -r .ipv4 <<< "$peer")" \
         "$(jq -r .ssh_public_key <<< "$peer")" "$(jq -r .ssh_host_key <<< "$peer")" \
         "$(jq -r .age_recipient <<< "$peer")" || return 1
+    if [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ]; then
+        commit="$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")"
+        ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+            env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+            /opt/masterplan/deploy/test-deployment.sh internal-repin-setup "$commit" \
+            || { ui_error "Node B could not record Node A's verified fast-forwarded campaign pin."; return 1; }
+    fi
     mp_setup_state_mark paired
     if [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ] \
         || ! mp_setup_state_has application_deployed; then
         if [ "$mode" = convert-ha ] && [ -f "$MP_ROOT/infra/docker-compose.override.yml" ]; then
             mp_ha_convert_host_caddy || return 1
         fi
-        mp_setup_deploy_application || return 1
-        python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null || return 1
+        if [ "$mode" = convert-ha ] \
+            && [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ]; then
+            mp_setup_activate_converted_unsigned_pair || return 1
+        else
+            mp_setup_deploy_application || return 1
+            python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null || return 1
+        fi
         mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed
     fi
     if [ "$mode" = ha-primary-new ] && ! mp_setup_state_has root_commissioning_complete; then
@@ -1220,6 +1276,14 @@ mp_setup_primary_resume() {
     if ! mp_setup_state_has replicated; then
         mp_ha_replicate_now || return 1
         mp_setup_state_mark replicated
+    fi
+    if [ "$mode" = convert-ha ] \
+        && [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ]; then
+        commit="$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")"
+        ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+            env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+            /opt/masterplan/deploy/test-deployment.sh internal-finalize-peer "$commit" \
+            || { ui_error "Node B accepted the replication bundle but could not record the exact deployment receipt."; return 1; }
     fi
     if ! mp_setup_state_has validated; then
         mp_validate_installation || return 1

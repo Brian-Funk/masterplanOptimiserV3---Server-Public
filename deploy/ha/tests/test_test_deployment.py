@@ -57,6 +57,19 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("Node B did not record the exact pinned deployment receipt", SUPERVISOR)
         self.assertIn('write_state "$target" "" "$plan" ""', SUPERVISOR)
 
+    def test_initial_peer_is_prepared_before_replication_and_finalised_afterward(self) -> None:
+        self.assertIn("prepare_initial_peer()", SUPERVISOR)
+        self.assertIn("internal_prepare_peer()", SUPERVISOR)
+        self.assertIn("internal_finalize_peer()", SUPERVISOR)
+        prepare = SUPERVISOR.split("internal_prepare_peer()", 1)[1].split(
+            "internal_repin_setup()", 1
+        )[0]
+        self.assertIn("mp_compose_validate", prepare)
+        self.assertNotIn('up -d', prepare)
+        self.assertIn("internal-repin-setup", SUPERVISOR)
+        self.assertIn("internal-finalize-peer", SUPERVISOR)
+        self.assertIn("peer_copy_image", SUPERVISOR)
+
     def test_pre_pairing_ha_update_stays_local(self) -> None:
         self.assertIn("ha_pairing_complete()", SUPERVISOR)
         self.assertIn("ha_pair_transport_ready()", SUPERVISOR)

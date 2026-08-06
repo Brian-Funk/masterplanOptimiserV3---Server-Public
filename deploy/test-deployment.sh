@@ -370,6 +370,95 @@ peer_activate() {
         || { ui_error "Node B did not record the exact pinned deployment receipt."; return 1; }
 }
 
+prepare_initial_peer() {
+    local target="$1" key image
+    require_test_policy
+    [ "$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)" = "$target" ] \
+        || { ui_error "The local verified deployment receipt does not match the requested peer preparation."; return 1; }
+    mp_load_ha_config
+    [ "$HA_ROLE" = dynamic ] && ha_pairing_complete && ha_pair_transport_ready \
+        || { ui_error "The verified HA peer transport is not ready for initial preparation."; return 1; }
+    prepare_source "$target"
+    for key in MP_BACKEND_IMAGE MP_CADDY_IMAGE MP_POSTGRES_IMAGE MP_TOOLS_IMAGE; do
+        image="$(sed -n "s/^${key}=//p" "$MP_TEST_ENV" | head -1)"
+        [[ "$image" =~ ^masterplan-(backend|caddy|postgres|tools):test-[0-9a-f]{12}$ ]] \
+            && docker image inspect "$image" >/dev/null 2>&1 \
+            || { ui_error "${key} is not a verified local test image."; return 1; }
+        peer_copy_image "$image"
+    done
+    scp -q "$MP_TEST_ENV" mp-opt-ha-peer:/tmp/mp-opt-test-deployment.env
+    tar -C "$MP_TEST_SOURCE" -czf - web/out runtime/frontend-csp.caddy \
+        | ssh -T -o BatchMode=yes mp-opt-ha-peer \
+            "rm -rf '$MP_TEST_HOME/peer-assets' && mkdir -p '$MP_TEST_HOME/peer-assets' && tar -C '$MP_TEST_HOME/peer-assets' -xzf -"
+    ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+        env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+        /opt/masterplan/deploy/test-deployment.sh internal-prepare-peer "$target"
+}
+
+internal_prepare_peer() {
+    local target="$1" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
+    require_test_policy
+    jq -e --arg target "$target" \
+        '.state == "in_progress" and .mode == "ha-join" and .deployment_lane == "unsigned"
+         and ((.completed // []) | index("joined") != null)
+         and ((.completed // []) | index("application_deployed") == null)
+         and .campaign_commit == $target' "$setup_state" >/dev/null \
+        || { ui_error "Node B is not in the exact joined pre-activation state."; return 1; }
+    mp_lock
+    trap 'mp_unlock' EXIT
+    prepare_source "$target"
+    install -m 0600 /tmp/mp-opt-test-deployment.env "$MP_TEST_ENV"
+    rm -f /tmp/mp-opt-test-deployment.env
+    sync_operations "$MP_TEST_SOURCE"
+    sync_frontend "$MP_TEST_HOME/peer-assets"
+    ensure_optional_compose_secret_sources
+    mp_prepare_backend_secret_permissions
+    mp_compose_init
+    mp_compose_validate
+    mp_unlock
+    trap - EXIT
+}
+
+internal_repin_setup() {
+    local target="$1" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" pinned temporary
+    require_test_policy
+    [[ "$target" =~ ^[0-9a-f]{40}$ ]] || return 1
+    pinned="$(jq -r '.campaign_commit // empty' "$setup_state" 2>/dev/null || true)"
+    jq -e '.state == "in_progress" and .mode == "ha-join" and .deployment_lane == "unsigned"
+           and ((.completed // []) | index("joined") != null)
+           and ((.completed // []) | index("application_deployed") == null)' \
+        "$setup_state" >/dev/null || return 1
+    git -C "$MP_ROOT" fetch --no-tags --force origin "$target" >/dev/null 2>&1 \
+        && [ "$(git -C "$MP_ROOT" rev-parse FETCH_HEAD 2>/dev/null || true)" = "$target" ] \
+        && git -C "$MP_ROOT" merge-base --is-ancestor "$pinned" "$target" >/dev/null 2>&1 \
+        || return 1
+    temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")"
+    jq --arg commit "$target" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '.campaign_commit=$commit | .updated_at=$now | .current_action="Waiting for pinned images from Node A"' \
+        "$setup_state" > "$temporary"
+    chmod 600 "$temporary"; mv "$temporary" "$setup_state"
+}
+
+internal_finalize_peer() {
+    local target="$1" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" plan temporary
+    require_test_policy
+    jq -e --arg target "$target" \
+        '.state == "in_progress" and .mode == "ha-join" and .campaign_commit == $target
+         and ((.completed // []) | index("joined") != null)' "$setup_state" >/dev/null || return 1
+    mp_compose_init
+    "${MP_COMPOSE[@]}" exec -T backend python -c \
+        'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=5).read()' >/dev/null
+    plan="$(jq -n '{base:"",target:"",full:true,migrations:false,components:["backend","frontend","caddy","database","tools","operations"]}')"
+    write_state "$target" "" "$plan" ""
+    temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")"
+    jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '.completed=((.completed+["application_deployed"])|unique) |
+         .state="complete" | .completed_at=$now | .updated_at=$now |
+         .current_action="Waiting for root administration on Node A"' \
+        "$setup_state" > "$temporary"
+    chmod 600 "$temporary"; mv "$temporary" "$setup_state"
+}
+
 internal_activate() {
     local target="$1" components="$2" fresh_commissioning="${3:-false}" plan setup_state temporary
     require_test_policy
@@ -677,6 +766,10 @@ case "$command" in
     rollback) [ "$#" -eq 0 ] || { usage; exit 2; }; rollback ;;
     restore-signed) [ "$#" -eq 0 ] || { usage; exit 2; }; restore_signed ;;
     status) [ "$#" -eq 0 ] || { usage; exit 2; }; status ;;
+    prepare-peer) [ "$#" -eq 1 ] || exit 2; prepare_initial_peer "$1" ;;
+    internal-prepare-peer) [ "$#" -eq 1 ] || exit 2; internal_prepare_peer "$1" ;;
+    internal-repin-setup) [ "$#" -eq 1 ] || exit 2; internal_repin_setup "$1" ;;
+    internal-finalize-peer) [ "$#" -eq 1 ] || exit 2; internal_finalize_peer "$1" ;;
     internal-activate) [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || exit 2; internal_activate "$1" "$2" "${3:-false}" ;;
     help|-h|--help|'') usage ;;
     *) usage; exit 2 ;;

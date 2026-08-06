@@ -55,6 +55,19 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn("The current holder will verify reciprocal SSH", SETUP)
         self.assertIn("did not present the registered host key", SETUP)
 
+    def test_converted_unsigned_pair_is_prepared_routed_replicated_then_finalised(self) -> None:
+        reconcile = shell_function(SETUP, "mp_setup_reconcile_primary_campaign_pin")
+        activate = shell_function(SETUP, "mp_setup_activate_converted_unsigned_pair")
+        resume = shell_function(SETUP, "mp_setup_primary_resume")
+        self.assertIn("merge-base --is-ancestor", reconcile)
+        self.assertIn(".campaign_commit=$commit", reconcile)
+        self.assertIn('test-deployment.sh" prepare-peer', activate)
+        self.assertLess(activate.index("prepare-peer"), activate.index("install_services.sh"))
+        self.assertLess(activate.index("install_services.sh"), activate.index("witness_control.py\" ready"))
+        self.assertLess(activate.index("witness_control.py\" ready"), activate.index('up -d db backend caddy'))
+        self.assertLess(resume.index("internal-repin-setup"), resume.index("mp_setup_state_mark paired"))
+        self.assertLess(resume.index("mp_ha_replicate_now"), resume.index("internal-finalize-peer"))
+
     @unittest.skipIf(os.name == "nt", "POSIX shell state contract")
     def test_unsigned_state_pins_first_pushed_head_and_ignores_moving_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
