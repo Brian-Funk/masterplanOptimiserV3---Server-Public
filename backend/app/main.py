@@ -394,7 +394,7 @@ async def startup_event():
         # which one may expose application data or accept writes.
 
     # Import models so SQLAlchemy sees them
-    from app.models.ha import HAClusterState  # noqa
+    from app.models.ha import HAClusterState, HAProtectionOperation  # noqa
     from app.models.event import Event  # noqa
     from app.models.published import (  # noqa
         PublishedTask,

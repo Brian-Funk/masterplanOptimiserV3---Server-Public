@@ -34,6 +34,63 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 RECOVERY_KEY_ID = re.compile(r"^rk-[0-9a-f]{16}$")
 
 
+def normalise_operation_marker(value: object) -> dict:
+    if not isinstance(value, dict) or set(value) != {
+        "operation_id", "mutation_sequence", "operation_type", "resource_type",
+        "resource_id", "marker_sha256",
+    }:
+        raise ValueError("Protection operation marker fields are invalid")
+    operation_id = str(value.get("operation_id", ""))
+    parsed = uuid.UUID(operation_id)
+    if str(parsed) != operation_id or parsed.version != 4:
+        raise ValueError("Protection operation id is invalid")
+    sequence = value.get("mutation_sequence")
+    if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
+        raise ValueError("Protection operation sequence is invalid")
+    for field in ("operation_type", "resource_type"):
+        if not isinstance(value.get(field), str) or not re.fullmatch(
+            r"[a-z][a-z0-9_.-]{1,63}", value[field]
+        ):
+            raise ValueError(f"Protection operation {field} is invalid")
+    resource_id = value.get("resource_id")
+    if resource_id is not None and (
+        not isinstance(resource_id, str) or not 1 <= len(resource_id) <= 128
+        or any(character in resource_id for character in "\r\n\t")
+    ):
+        raise ValueError("Protection operation resource id is invalid")
+    marker = {key: value[key] for key in value if key != "marker_sha256"}
+    digest = hashlib.sha256(
+        json.dumps(marker, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if value.get("marker_sha256") != digest:
+        raise ValueError("Protection operation marker digest is invalid")
+    return dict(value)
+
+
+def normalise_operations(value: object) -> list[dict]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not value or len(value) > 100:
+        raise ValueError("Protection operation list is invalid")
+    result: list[dict] = []
+    seen_ids: set[str] = set()
+    seen_sequences: set[int] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) - {"marker", "privacy_assertion"}:
+            raise ValueError("Protection operation entry is invalid")
+        marker = normalise_operation_marker(item.get("marker"))
+        if marker["operation_id"] in seen_ids or marker["mutation_sequence"] in seen_sequences:
+            raise ValueError("Protection operation marker is duplicated")
+        seen_ids.add(marker["operation_id"])
+        seen_sequences.add(marker["mutation_sequence"])
+        entry = {"marker": marker}
+        assertion = normalise_privacy_assertion(item.get("privacy_assertion"))
+        if assertion is not None:
+            entry["privacy_assertion"] = assertion
+        result.append(entry)
+    return sorted(result, key=lambda item: item["marker"]["mutation_sequence"])
+
+
 def normalise_privacy_assertion(value: object) -> dict | None:
     if value is None:
         return None
@@ -249,10 +306,12 @@ def create(args: argparse.Namespace) -> None:
     request_path = getattr(args, "request", None)
     if request_path:
         request = json.loads(Path(request_path).read_text(encoding="utf-8"))
-        assertion = normalise_privacy_assertion(request.get("privacy_assertion"))
-        if assertion is None:
-            raise ValueError("The replication request has no privacy assertion")
-        document["privacy_assertion"] = assertion
+        if request.get("format") == "mp-opt-replication-batch-v2":
+            document["protection_operations"] = normalise_operations(request.get("operations"))
+        else:
+            assertion = normalise_privacy_assertion(request.get("privacy_assertion"))
+            if assertion is not None:
+                document["privacy_assertion"] = assertion
     Path(args.output).write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(args.output, 0o600)
 
@@ -272,6 +331,7 @@ def validate(args: argparse.Namespace) -> None:
         if manifest.get(key) != value:
             raise ValueError(f"Replication manifest {key} mismatch")
     normalise_privacy_assertion(manifest.get("privacy_assertion"))
+    normalise_operations(manifest.get("protection_operations"))
     if not IDENTIFIER.fullmatch(str(manifest.get("bundle_id", ""))):
         raise ValueError("Invalid bundle identifier")
     if not isinstance(manifest.get("generation"), int) or manifest["generation"] < 1:
