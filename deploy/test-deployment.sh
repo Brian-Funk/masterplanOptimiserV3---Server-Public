@@ -285,7 +285,7 @@ ensure_optional_compose_secret_sources() {
 }
 
 compose_activate() {
-    local components="$1" fresh_commissioning="${2:-false}" domain
+    local components="$1" fresh_commissioning="${2:-false}" domain attempt
     prepare_runtime_from_installed_sources
     ensure_optional_compose_secret_sources
     mp_prepare_backend_secret_permissions
@@ -319,9 +319,21 @@ compose_activate() {
     set_apply_stage public-health
     mp_wait_for_health 45
     domain="$(mp_env_get DOMAIN)"
-    curl -fsS --max-time 10 --resolve "${domain}:443:127.0.0.1" \
-        "https://${domain}/health" >/dev/null \
-        || { ui_error "The exact deployment is not healthy on this node's local TLS endpoint."; return 1; }
+    # Caddy may accept TLS a fraction of a second before a just-recreated
+    # backend has bound its container address. Treat that bounded 502 window as
+    # startup convergence, while still refusing to record a deployment receipt
+    # unless the local TLS route becomes healthy.
+    for attempt in $(seq 1 30); do
+        if curl -fsS --max-time 10 --resolve "${domain}:443:127.0.0.1" \
+            "https://${domain}/health" >/dev/null 2>&1; then
+            break
+        fi
+        [ "$attempt" -lt 30 ] || {
+            ui_error "The exact deployment is not healthy on this node's local TLS endpoint after 30 attempts."
+            return 1
+        }
+        sleep 1
+    done
     [ "$(stat -c %a "$MP_ROOT/runtime")" = 711 ] || {
         ui_error "Runtime traversal permissions were not preserved during activation."
         return 1

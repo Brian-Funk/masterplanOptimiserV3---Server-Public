@@ -52,6 +52,12 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("restore_verified_previous_deployment", SUPERVISOR)
         self.assertIn("mp_wait_for_health 45", SUPERVISOR)
 
+    def test_local_tls_health_is_retried_before_recording_the_receipt(self) -> None:
+        self.assertIn("for attempt in $(seq 1 30)", SUPERVISOR)
+        self.assertIn('"https://${domain}/health" >/dev/null 2>&1', SUPERVISOR)
+        self.assertIn('sleep 1', SUPERVISOR)
+        self.assertIn("after 30 attempts", SUPERVISOR)
+
     def test_ha_peer_receives_same_commit_and_writes_a_matching_receipt(self) -> None:
         self.assertIn('internal-activate "$target" "$components" "$fresh_commissioning"', SUPERVISOR)
         self.assertIn("Node B did not record the exact pinned deployment receipt", SUPERVISOR)
