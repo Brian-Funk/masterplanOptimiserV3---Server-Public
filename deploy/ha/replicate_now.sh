@@ -114,8 +114,11 @@ done
 # database view, and the receiver independently verifies the pair again.
 [ -d "$MP_ROOT/state/evidence" ] && [ ! -L "$MP_ROOT/state/evidence" ] \
     || { echo "The evidence store is missing or unsafe." >&2; exit 1; }
-sudo -n cp -a "$MP_ROOT/state/evidence/." "$stage/payload/evidence/"
-sudo -n chown -R "$(id -u):$(id -g)" "$stage/payload/evidence"
+# The backend already owns the mode-0700 evidence store. Stream a read-only
+# archive through that unprivileged container so the hardened replication
+# service does not need sudo or broader host filesystem permissions.
+"${MP_COMPOSE[@]}" exec -T backend tar -C /evidence -cf - . \
+    | tar --no-same-owner -C "$stage/payload/evidence" -xf -
 find "$stage/payload/evidence" -type d -exec chmod 700 {} +
 find "$stage/payload/evidence" -type f -exec chmod 600 {} +
 [ -s "$stage/payload/evidence/ledger/chain-head.json" ] \

@@ -25,6 +25,8 @@ ACTIONS_SOURCE = (ROOT / "deploy/management/actions.sh").read_text(encoding="utf
 ROTATION_SOURCE = (ROOT / "deploy/management/recovery_rotation.sh").read_text(encoding="utf-8")
 INSTALL_SERVICES_SOURCE = (ROOT / "deploy/ha/install_services.sh").read_text(encoding="utf-8")
 AUTOMATIC_SNAPSHOTS_SOURCE = (ROOT / "deploy/ha/automatic_snapshots.sh").read_text(encoding="utf-8")
+REPLICATION_SERVICE_SOURCE = (ROOT / "deploy/ha/mp-opt-ha-replication.service").read_text(encoding="utf-8")
+REPLICATION_SOURCE = (ROOT / "deploy/ha/replicate_now.sh").read_text(encoding="utf-8")
 RECOVERY_KEY_PATH = ROOT / "deploy/ha/recovery_key_setup.py"
 PORTABLE_TOOL_PATH = ROOT / "deploy/management/portable_snapshot.py"
 SPEC = importlib.util.spec_from_file_location("recovery_key_setup", RECOVERY_KEY_PATH)
@@ -243,6 +245,27 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
         self.assertIn("-/opt/masterplan/runtime", service)
         self.assertIn("mp-opt-ha-snapshot-status-v1", SNAPSHOT_SOURCE)
         self.assertNotIn("AGE-SECRET-KEY", function_body(SNAPSHOT_SOURCE, "mp_snapshot_publish_status"))
+
+
+class ReplicationServiceSafetyTests(unittest.TestCase):
+    def test_replication_worker_keeps_hardening_and_copies_via_backend(self) -> None:
+        self.assertIn("User=deploy", REPLICATION_SERVICE_SOURCE)
+        self.assertIn("ProtectSystem=strict", REPLICATION_SERVICE_SOURCE)
+        self.assertIn("ProtectHome=read-only", REPLICATION_SERVICE_SOURCE)
+        self.assertIn("NoNewPrivileges=true", REPLICATION_SERVICE_SOURCE)
+        self.assertIn("/opt/masterplan/runtime", REPLICATION_SERVICE_SOURCE)
+        self.assertIn("/home/deploy/.local/state/mp-opt-ha-replication", REPLICATION_SERVICE_SOURCE)
+        self.assertIn('exec -T backend tar -C /evidence -cf - .', REPLICATION_SOURCE)
+        self.assertIn('tar --no-same-owner -C "$stage/payload/evidence" -xf -', REPLICATION_SOURCE)
+        self.assertNotIn('sudo -n cp -a "$MP_ROOT/state/evidence/."', REPLICATION_SOURCE)
+
+    def test_retired_bootstrap_token_is_not_rewritten_by_read_only_workers(self) -> None:
+        retirement = function_body(COMMON_SOURCE, "mp_retire_root_bootstrap_secret")
+        self.assertIn('if [ -s "$token" ]; then', retirement)
+        self.assertLess(
+            retirement.index('if [ -s "$token" ]; then'),
+            retirement.index(': > "$token"'),
+        )
 
 
 class RecoveryKeyWorkflowTests(unittest.TestCase):

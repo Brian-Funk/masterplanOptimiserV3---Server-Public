@@ -879,9 +879,16 @@ mp_root_bootstrap_is_disabled() {
 
 mp_retire_root_bootstrap_secret() {
     if mp_root_bootstrap_is_disabled; then
-        : > "$MP_ROOT/secrets/root_bootstrap_token" || return 1
-        chmod 600 "$MP_ROOT/secrets/root_bootstrap_token" || return 1
-        mp_prepare_backend_secret_permissions || return 1
+        local token="$MP_ROOT/secrets/root_bootstrap_token"
+        [ -f "$token" ] && [ ! -L "$token" ] || return 1
+        # Normal post-commissioning operations must not rewrite an already
+        # retired token. This keeps read-only workers read-only while still
+        # allowing a guarded operator action to retire stale material.
+        if [ -s "$token" ]; then
+            : > "$token" || return 1
+            chmod 600 "$token" || return 1
+            mp_prepare_backend_secret_permissions || return 1
+        fi
     fi
 }
 
