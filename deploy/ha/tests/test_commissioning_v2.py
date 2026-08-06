@@ -43,6 +43,18 @@ def shell_function(source: str, name: str) -> str:
 
 
 class PairingCodeTests(unittest.TestCase):
+    def test_join_address_is_bound_to_a_public_ssh_endpoint_when_available(self) -> None:
+        self.assertIn('observed_ipv4="$(awk \'{print $3}\' <<< "$SSH_CONNECTION")"', SETUP)
+        self.assertIn("value.is_global", SETUP)
+        self.assertIn('[ "$public_ip" = "$observed_ipv4" ]', SETUP)
+        self.assertIn("does not match the public IPv4 endpoint of this SSH session", SETUP)
+
+    def test_joiner_defers_reciprocal_ssh_until_primary_installs_its_key(self) -> None:
+        self.assertIn('verification="${5:-required}"', SETUP)
+        self.assertIn('"$(jq -r .age_recipient <<< "$peer")" deferred', SETUP)
+        self.assertIn("The current holder will verify reciprocal SSH", SETUP)
+        self.assertIn("did not present the registered host key", SETUP)
+
     @unittest.skipIf(os.name == "nt", "POSIX shell state contract")
     def test_unsigned_state_pins_first_pushed_head_and_ignores_moving_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

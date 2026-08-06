@@ -366,7 +366,7 @@ mp_setup_deploy_application() {
 }
 
 mp_setup_prepare_node_material() {
-    local node_id="$1" identity ssh_key public_ip public_ipv6 confirmed
+    local node_id="$1" identity ssh_key public_ip public_ipv6 confirmed observed_ipv4=""
     mp_require_commands age age-keygen jq openssl ssh ssh-keygen || return 1
     sudo -n install -d -o "$USER" -g "$(id -gn)" -m 0700 "$MP_HA_HOME" "$MP_HA_HOME/secrets" || return 1
     identity="$MP_HA_HOME/secrets/replication_age_identity"
@@ -380,9 +380,18 @@ mp_setup_prepare_node_material() {
         ssh-keygen -q -t ed25519 -N '' -C "mp-opt-${node_id}" -f "$ssh_key" || return 1
     fi
     chmod 600 "$ssh_key"; chmod 644 "$ssh_key.pub"
-    public_ip="$(ui_input "Public address" "Public IPv4 address for this VPS (for example 203.0.113.10)" "")" || return 1
+    if [ -n "${SSH_CONNECTION:-}" ]; then
+        observed_ipv4="$(awk '{print $3}' <<< "$SSH_CONNECTION")"
+        python3 -c 'import ipaddress,sys; value=ipaddress.IPv4Address(sys.argv[1]); raise SystemExit(0 if value.is_global else 1)' \
+            "$observed_ipv4" >/dev/null 2>&1 || observed_ipv4=""
+    fi
+    public_ip="$(ui_input "Public address" "Public IPv4 address for this VPS (for example 203.0.113.10)" "$observed_ipv4")" || return 1
     python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$public_ip" \
         || { ui_error "Enter a valid public IPv4 address."; return 1; }
+    [ -z "$observed_ipv4" ] || [ "$public_ip" = "$observed_ipv4" ] || {
+        ui_error "The entered address does not match the public IPv4 endpoint of this SSH session (${observed_ipv4}). Reconnect through the address intended for HA, then resume setup."
+        return 1
+    }
     confirmed="$(ui_input "Public address" "Type the public IPv4 address once more" "")" || return 1
     [ "$public_ip" = "$confirmed" ] || { ui_error "The public IPv4 addresses do not match."; return 1; }
     public_ipv6="$(ui_input "Public address" "Optional public IPv6 address for this VPS (for example 2001:db8::10)" "")" || return 1
@@ -398,7 +407,7 @@ mp_setup_prepare_node_material() {
 }
 
 mp_setup_install_peer_trust() {
-    local peer_ip="$1" peer_public="$2" peer_host="$3" peer_recipient="$4"
+    local peer_ip="$1" peer_public="$2" peer_host="$3" peer_recipient="$4" verification="${5:-required}"
     local config_include="$HOME/.ssh/mp-opt-ha.conf" temporary
     [[ "$peer_public" == ssh-ed25519\ * ]] && [[ "$peer_host" == ssh-ed25519\ * ]] \
         && [[ "$peer_recipient" =~ ^age1[0-9a-z]{58}$ ]] \
@@ -425,8 +434,14 @@ mp_setup_install_peer_trust() {
             chmod 600 "$temporary"; mv "$temporary" "$HOME/.ssh/config"; }
     printf '%s\n' "$peer_recipient" > "$MP_HA_HOME/peer-age-recipient"
     chmod 600 "$MP_HA_HOME/peer-age-recipient"
-    ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer true \
-        || { ui_error "The generated peer SSH trust could not be verified."; return 1; }
+    case "$verification" in
+        required)
+            ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer true \
+                || { ui_error "The peer address did not present the registered host key or accept this node's generated HA key. Verify the peer's public IPv4 address before retrying."; return 1; }
+            ;;
+        deferred) ;;
+        *) return 1 ;;
+    esac
 }
 
 mp_setup_install_ha_identity() {
@@ -854,7 +869,7 @@ mp_setup_join_node() {
     peer="$(jq -c --arg peer "$peer_id" '.nodes[] | select(.node_id == $peer)' <<< "$response")"
     mp_setup_install_peer_trust "$(jq -r .ipv4 <<< "$peer")" \
         "$(jq -r .ssh_public_key <<< "$peer")" "$(jq -r .ssh_host_key <<< "$peer")" \
-        "$(jq -r .age_recipient <<< "$peer")" || return 1
+        "$(jq -r .age_recipient <<< "$peer")" deferred || return 1
     # The first incoming copy deliberately excludes node-local database
     # credentials. Create only that local receiver scaffold; all shared
     # application configuration and secrets arrive in the verified bundle.
@@ -887,7 +902,7 @@ mp_setup_join_node() {
         ui_message "HA node joined" "The one-time code is consumed for ${node_id}. This node is pinned to $(jq -r .campaign_commit "$MP_SETUP_V2_STATE") and is waiting for Node A to transfer and activate those exact images."
     else
         mp_setup_state_complete
-        ui_message "HA node joined" "The one-time code is consumed for ${node_id}. Peer SSH and replication encryption were verified. Only a node-local database credential was created here; the current holder will now send the complete protected shared application state."
+        ui_message "HA node joined" "The one-time code is consumed for ${node_id}. Peer trust and replication-encryption material were installed. The current holder will verify reciprocal SSH before sending the complete protected shared application state."
     fi
 }
 
