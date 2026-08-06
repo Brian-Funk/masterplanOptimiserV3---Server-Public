@@ -37,6 +37,7 @@ rollback_db=""
 database_swap_started=false
 receiver_state_existed=false
 manual_export_state_existed=false
+recovery_recipient_existed=false
 snapshot_status_existed=false
 evidence_state_existed=false
 lease_service_active=false
@@ -120,6 +121,11 @@ SQL
         else
             rm -f "$MP_MANUAL_EXPORT_STATE"
         fi
+        if [ "$recovery_recipient_existed" = true ]; then
+            install -m 0600 "$stage/recovery-recipient.previous" "$MP_RECIPIENT_FILE" || true
+        else
+            rm -f "$MP_RECIPIENT_FILE"
+        fi
         if [ "$snapshot_status_existed" = true ]; then
             install -m 0644 "$stage/snapshot-status.previous" "$MP_HA_SNAPSHOT_STATUS" || true
         else
@@ -161,6 +167,10 @@ fi
 if [ -f "$MP_MANUAL_EXPORT_STATE" ]; then
     cp -a "$MP_MANUAL_EXPORT_STATE" "$stage/manual-export.previous"
     manual_export_state_existed=true
+fi
+if [ -f "$MP_RECIPIENT_FILE" ]; then
+    cp -a "$MP_RECIPIENT_FILE" "$stage/recovery-recipient.previous"
+    recovery_recipient_existed=true
 fi
 if [ -f "$MP_HA_SNAPSHOT_STATUS" ]; then
     cp -a "$MP_HA_SNAPSHOT_STATUS" "$stage/snapshot-status.previous"
@@ -280,6 +290,11 @@ chmod 700 "$(dirname "$MP_MANUAL_EXPORT_STATE")"
 install -m 0600 \
     "$stage/extracted/payload/recovery/manual-recovery-export.json" \
     "$MP_MANUAL_EXPORT_STATE"
+mkdir -p "$(dirname "$MP_RECIPIENT_FILE")"
+chmod 700 "$(dirname "$MP_RECIPIENT_FILE")"
+install -m 0600 \
+    "$stage/extracted/payload/recovery/recovery-recipient" \
+    "$MP_RECIPIENT_FILE"
 # Replace the signed ledger together with the accepted database. The backend
 # remains stopped, and the source bundle validator has hash-checked every
 # regular file and rejected links/special files.

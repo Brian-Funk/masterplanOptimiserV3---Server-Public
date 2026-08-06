@@ -39,6 +39,7 @@ class ReplicationBundleTests(unittest.TestCase):
         for relative, value in (
             ("database/masterplan.dump", b"database"),
             ("config/shared.env", b"DOMAIN=example.test\n"),
+            ("recovery/recovery-recipient", b"age1" + b"a" * 58 + b"\n"),
             ("config/secrets/secret_key", b"shared-secret"),
             ("config/secrets/ip_hmac_key", b"shared-ip-hmac-secret"),
             ("config/secrets/vapid_private_key", b"vapid-secret"),
@@ -121,6 +122,21 @@ class ReplicationBundleTests(unittest.TestCase):
                 "DATABASE_URL=local\nPOSTGRES_PASSWORD=local-password\nHA_NODE_ID=node-b\nDOMAIN=new\nSMTP_HOST=mail.example\n",
             )
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+
+    def test_recovery_recipient_is_required_and_schema_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload, manifest = self.create_manifest(root)
+            recipient = payload / "recovery" / "recovery-recipient"
+            recipient.write_text("not-an-age-recipient\n", encoding="ascii")
+            recipient.chmod(0o600)
+            replication_bundle.create(argparse.Namespace(
+                payload=str(payload), cluster="cluster-test", source="node-a",
+                target="node-b", bundle="bundle-1", generation=1,
+                release="a" * 40, output=str(manifest),
+            ))
+            with self.assertRaisesRegex(ValueError, "recovery recipient is invalid"):
+                replication_bundle.validate(self.validate_args(root))
 
     def test_shared_environment_excludes_every_node_local_ha_value(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -250,6 +266,9 @@ class ReplicationBundleTests(unittest.TestCase):
 
         self.assertIn("prepare-recovery-state", sender)
         self.assertIn('"$MP_MANUAL_EXPORT_STATE"', sender)
+        self.assertIn('"$stage/payload/recovery/recovery-recipient"', sender)
+        self.assertIn('"$stage/extracted/payload/recovery/recovery-recipient"', receiver)
+        self.assertIn('"$MP_RECIPIENT_FILE"', receiver)
         receipt_install = receiver.index(
             '"$stage/extracted/payload/recovery/manual-recovery-export.json"'
         )

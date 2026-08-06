@@ -93,6 +93,13 @@ python3 "$MP_ROOT/deploy/ha/replication_bundle.py" filter-env \
 python3 "$MP_ROOT/deploy/ha/replication_bundle.py" prepare-recovery-state \
     --source "$MP_MANUAL_EXPORT_STATE" \
     --output "$stage/payload/recovery/manual-recovery-export.json"
+[ -f "$MP_RECIPIENT_FILE" ] && [ ! -L "$MP_RECIPIENT_FILE" ] \
+    && [ "$(stat -c '%a' "$MP_RECIPIENT_FILE")" = 600 ] \
+    || { echo "The snapshot recovery recipient is missing or unsafe." >&2; exit 1; }
+recovery_recipient="$(tr -d '\r\n' < "$MP_RECIPIENT_FILE")"
+[[ "$recovery_recipient" =~ ^age1[0-9a-z]{58}$ ]] \
+    || { echo "The snapshot recovery recipient is invalid." >&2; exit 1; }
+install -m 0600 "$MP_RECIPIENT_FILE" "$stage/payload/recovery/recovery-recipient"
 for secret in secret_key ip_hmac_key vapid_private_key root_bootstrap_token smtp_token evidence_signing_key; do
     source_secret="$MP_ROOT/secrets/$secret"
     expected_mode="$(mp_expected_protected_file_mode "$source_secret")"

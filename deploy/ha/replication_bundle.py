@@ -25,6 +25,8 @@ ALLOWED_SECRET_FILES = {
 }
 RECOVERY_STATE_FORMAT = "mp-opt-manual-recovery-export-v1"
 RECOVERY_STATE_PATH = "recovery/manual-recovery-export.json"
+RECOVERY_RECIPIENT_PATH = "recovery/recovery-recipient"
+AGE_RECIPIENT = re.compile(r"^age1[0-9a-z]{58}$")
 SNAPSHOT_NAME = re.compile(
     r"^[0-9]{8}T[0-9]{6}Z_(?:database|secrets|full)_[A-Za-z0-9._-]{1,64}$"
 )
@@ -303,12 +305,18 @@ def validate(args: argparse.Namespace) -> None:
         "database/masterplan.dump",
         "config/shared.env",
         RECOVERY_STATE_PATH,
+        RECOVERY_RECIPIENT_PATH,
         "evidence/ledger/chain-head.json",
         "evidence/public/instance_signing_key.pub",
         *(f"config/secrets/{name}" for name in ALLOWED_SECRET_FILES),
     }
     if not required.issubset(actual):
         raise ValueError("Replication payload is incomplete")
+    recovery_recipient = (root / "payload" / RECOVERY_RECIPIENT_PATH).read_text(
+        encoding="ascii"
+    ).strip()
+    if not AGE_RECIPIENT.fullmatch(recovery_recipient):
+        raise ValueError("Replication recovery recipient is invalid")
     secrets = {value.removeprefix("config/secrets/") for value in actual if value.startswith("config/secrets/")}
     if not secrets.issubset(ALLOWED_SECRET_FILES):
         raise ValueError("Replication payload contains a non-shared secret")
