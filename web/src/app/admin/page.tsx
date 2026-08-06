@@ -18,6 +18,15 @@ import {
 import { withReauth } from "@/lib/reauth";
 import { responseMessage } from "@/lib/responseMessage";
 import { eventDateRangeError } from "@/lib/eventDates";
+import {
+  newIdempotencyKey,
+  pendingSecrets,
+  pollProtection,
+  protectionStageLabel,
+  randomSecret,
+  removePendingSecret,
+  retainPendingSecret,
+} from "@/lib/haProtection";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -156,6 +165,9 @@ interface Event {
   purge_due_at: string | null;
   purge_case_request_id: string | null;
   purge_started_at: string | null;
+  protection_operation_id?: string | null;
+  protection_state?: string | null;
+  protection_stage?: string | null;
 }
 
 interface AdminUser {
@@ -707,11 +719,51 @@ function EventsTab({
   const [importError, setImportError] = useState("");
   const [eventError, setEventError] = useState("");
   const [importLoading, setImportLoading] = useState(false);
+  const [protectionStages, setProtectionStages] = useState<Record<string, string>>({});
   const router = useRouter();
   const dateRangeError = eventDateRangeError(
     newEvent.start_date,
     newEvent.end_date,
   );
+
+  const monitorSecretProtection = useCallback((pending: ReturnType<typeof pendingSecrets>[number]) => {
+    setProtectionStages((current) => ({ ...current, [pending.operationId]: "queued" }));
+    void pollProtection(pending.operationId, (operation) => {
+      setProtectionStages((current) => ({
+        ...current,
+        [pending.operationId]: operation.stage,
+      }));
+    }).then((operation) => {
+      if (operation.state !== "accepted") {
+        setEventError(
+          operation.error_code
+            ? `Standby protection needs attention (${operation.error_code}). The mutation remains durable and locked.`
+            : "Standby protection needs attention. The mutation remains durable and locked.",
+        );
+        return;
+      }
+      if (pending.kind === "publisher-rotation" && pending.resourceId) {
+        setRegeneratedSecrets((current) => ({ ...current, [pending.resourceId!]: pending.secret }));
+      } else if (pending.kind === "event-import") {
+        setImportResult((current) => ({ secret: pending.secret, users: current?.users || [] }));
+      } else {
+        setCreatedSecret(pending.secret);
+      }
+      removePendingSecret(pending.operationId);
+      setProtectionStages((current) => {
+        const next = { ...current };
+        delete next[pending.operationId];
+        return next;
+      });
+      onRefresh();
+    }).catch((cause) => {
+      setEventError(cause instanceof Error ? cause.message : "Protection status is unavailable.");
+    });
+  }, [onRefresh]);
+
+  useEffect(() => {
+    pendingSecrets().forEach((pending) => monitorSecretProtection(pending));
+  }, [monitorSecretProtection]);
 
   useEffect(() => {
     apiFetch("/api/v1/governance/public")
@@ -740,6 +792,8 @@ function EventsTab({
     setEventError("");
     setCreating(true);
     try {
+      const publishSecret = randomSecret();
+      const idempotencyKey = newIdempotencyKey();
       const res = await apiFetch("/api/v1/admin/events", {
         method: "POST",
         body: JSON.stringify({
@@ -749,6 +803,8 @@ function EventsTab({
           end_date: newEvent.end_date || null,
           policy_version: eventPolicyAcknowledged ? eventPolicy?.version : null,
           policy_sha256: eventPolicyAcknowledged ? eventPolicy?.sha256 : null,
+          publish_secret: publishSecret,
+          idempotency_key: idempotencyKey,
         }),
       });
       const data = await res.json().catch(() => null);
@@ -761,7 +817,20 @@ function EventsTab({
         );
         return;
       }
-      setCreatedSecret(data.publish_secret);
+      if (data.protection_operation_id) {
+        const pending = {
+          operationId: data.protection_operation_id,
+          idempotencyKey,
+          kind: "event-create" as const,
+          resourceId: data.event?.id,
+          secret: publishSecret,
+          createdAt: new Date().toISOString(),
+        };
+        retainPendingSecret(pending);
+        monitorSecretProtection(pending);
+      } else {
+        setCreatedSecret(data.publish_secret || publishSecret);
+      }
       setNewEvent({ name: "", location: "", start_date: "", end_date: "" });
       setEventPolicyAcknowledged(false);
       onRefresh();
@@ -776,10 +845,15 @@ function EventsTab({
     setEventError("");
     setRegeneratingSecretId(eventId);
     try {
+      const publishSecret = randomSecret();
+      const idempotencyKey = newIdempotencyKey();
       const res = await withReauth(() =>
         apiFetch(`/api/v1/admin/events/${eventId}/regenerate-secret`, {
           method: "POST",
-          body: JSON.stringify({}),
+          body: JSON.stringify({
+            publish_secret: publishSecret,
+            idempotency_key: idempotencyKey,
+          }),
         }),
       );
       const data = await res.json().catch(() => null);
@@ -797,10 +871,23 @@ function EventsTab({
         );
         return;
       }
-      setRegeneratedSecrets((prev) => ({
-        ...prev,
-        [eventId]: data.publish_secret,
-      }));
+      if (data.protection_operation_id) {
+        const pending = {
+          operationId: data.protection_operation_id,
+          idempotencyKey,
+          kind: "publisher-rotation" as const,
+          resourceId: eventId,
+          secret: publishSecret,
+          createdAt: new Date().toISOString(),
+        };
+        retainPendingSecret(pending);
+        monitorSecretProtection(pending);
+      } else {
+        setRegeneratedSecrets((prev) => ({
+          ...prev,
+          [eventId]: data.publish_secret || publishSecret,
+        }));
+      }
     } catch {
       setEventError(
         "Publisher token rotation was cancelled or reauthentication failed.",
@@ -857,6 +944,10 @@ function EventsTab({
     try {
       const text = await file.text();
       const payload = JSON.parse(text);
+      const publishSecret = randomSecret();
+      const idempotencyKey = newIdempotencyKey();
+      payload.publish_secret = publishSecret;
+      payload.idempotency_key = idempotencyKey;
       const res = await withReauth(() =>
         apiFetch("/api/v1/admin/import-setup", {
           method: "POST",
@@ -865,9 +956,7 @@ function EventsTab({
       );
       if (res.ok) {
         const data = await res.json();
-        setImportResult({
-          secret: data.publish_secret,
-          users: data.users.map(
+        const importedUsers = data.users.map(
             (u: {
               user: { id: number; display_name: string };
               activation_url: string;
@@ -876,8 +965,23 @@ function EventsTab({
               display_name: u.user.display_name,
               activation_url: window.location.origin + u.activation_url,
             }),
-          ),
+          );
+        setImportResult({
+          secret: data.protection_operation_id ? "" : (data.publish_secret || publishSecret),
+          users: importedUsers,
         });
+        if (data.protection_operation_id) {
+          const pending = {
+            operationId: data.protection_operation_id,
+            idempotencyKey,
+            kind: "event-import" as const,
+            resourceId: data.event?.id,
+            secret: publishSecret,
+            createdAt: new Date().toISOString(),
+          };
+          retainPendingSecret(pending);
+          monitorSecretProtection(pending);
+        }
         setShowImport(false);
         onRefresh();
       } else {
@@ -990,9 +1094,11 @@ function EventsTab({
       {importResult && (
         <div className="bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-800 rounded-lg p-4 mb-4">
           <p className="text-sm font-medium text-green-800 dark:text-green-200 mb-1">
-            Import successful! Publish secret (shown once - save it now):
+            {importResult.secret
+              ? "Import protected. Publish secret (shown once - save it now):"
+              : "Import committed. Securing it on the standby before revealing the publisher token."}
           </p>
-          <div className="flex items-center gap-2 mb-3">
+          {importResult.secret && <div className="flex items-center gap-2 mb-3">
             <code className="flex-1 text-xs bg-green-100 dark:bg-green-900/50 px-2 py-1 rounded break-all text-green-900 dark:text-green-100">
               {importResult.secret}
             </code>
@@ -1002,7 +1108,7 @@ function EventsTab({
             >
               <Copy size={16} />
             </button>
-          </div>
+          </div>}
           {importResult.users.length > 0 && (
             <div>
               <p className="text-xs font-medium text-green-800 dark:text-green-200 mb-1">
@@ -1170,6 +1276,14 @@ function EventsTab({
                       ? `${fmtDate(ev.start_date)} → ${fmtDate(ev.end_date)}`
                       : fmtDate(ev.start_date) || "No dates"}
                   </p>
+                  {ev.status === "securing" && (
+                    <p className="mt-1 text-xs font-medium text-blue-700 dark:text-blue-300" role="status">
+                      Securing on standby · {protectionStageLabel(
+                        (ev.protection_operation_id && protectionStages[ev.protection_operation_id])
+                        || ev.protection_stage,
+                      )}
+                    </p>
+                  )}
                   {ev.purge_case_request_id ? (
                     <p className="mt-1 text-xs font-medium text-amber-700 dark:text-amber-300">
                       Event deletion workflow queued {fmtDateTime(ev.purge_started_at)}.
@@ -1190,19 +1304,22 @@ function EventsTab({
                   <Button
                     variant="ghost"
                     size="sm"
+                    disabled={ev.status === "securing"}
                     onClick={() => router.push(`/calendar?event=${ev.id}`)}
                   >
                     View
                   </Button>
                   <button
                     onClick={() => handleRegenerate(ev.id)}
-                    disabled={regeneratingSecretId !== null}
+                    disabled={regeneratingSecretId !== null || ev.status === "securing" || pendingSecrets().some(
+                      (pending) => pending.kind === "publisher-rotation" && pending.resourceId === ev.id,
+                    )}
                     className="p-1.5 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-100 disabled:cursor-wait disabled:opacity-50 dark:hover:bg-gray-700 transition-colors"
                     title={regeneratingSecretId === ev.id ? "Protecting publisher token on standby" : "Regenerate publish secret"}
                   >
                     <Key size={16} />
                   </button>
-                  {isRootAdmin && !ev.purge_case_request_id && (
+                  {isRootAdmin && !ev.purge_case_request_id && ev.status !== "securing" && (
                     <button
                       onClick={() => {
                         setEventError("");
@@ -1221,6 +1338,13 @@ function EventsTab({
                   Rotating the publisher token and waiting for the standby to verify the protected state. Keep this page open.
                 </p>
               )}
+              {pendingSecrets().filter(
+                (pending) => pending.kind === "publisher-rotation" && pending.resourceId === ev.id,
+              ).map((pending) => (
+                <p key={pending.operationId} className="mt-2 text-xs text-blue-700 dark:text-blue-300" role="status">
+                  Publisher token · {protectionStageLabel(protectionStages[pending.operationId])}
+                </p>
+              ))}
               {/* Accountable deletion-case confirmation */}
               {confirmDeleteId === ev.id && (
                 <div className="mt-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded p-3">
