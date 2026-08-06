@@ -46,6 +46,7 @@ mp_setup_install_signed_release() {
 
 mp_setup_state_begin() {
     local mode="$1" temporary lane="" policy commit="" receipt="" pinned="" checkout="" previous=""
+    local fast_forward=false
     if [ -f "$MP_SETUP_V2_STATE" ]; then
         jq -e '.format == "mp-opt-setup-state-v2" and .state == "in_progress"' \
             "$MP_SETUP_V2_STATE" >/dev/null || {
@@ -66,19 +67,24 @@ mp_setup_state_begin() {
             }
             pinned="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
             if [ "$pinned" != "$receipt" ]; then
+                git -C "$MP_ROOT" fetch --no-tags --force origin "$receipt" >/dev/null 2>&1 \
+                    && [ "$(git -C "$MP_ROOT" rev-parse FETCH_HEAD 2>/dev/null || true)" = "$receipt" ] \
+                    || { ui_error "The active exact deployment receipt is not available from origin. Push that exact commit before resuming commissioning."; return 1; }
                 checkout="$(git -C "$MP_ROOT" rev-parse HEAD 2>/dev/null || true)"
                 previous="$(jq -r '.previous_commit // empty' \
                     "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)"
-                if { [ "$pinned" != "$checkout" ] && [ "$pinned" != "$previous" ]; } \
+                if [[ "$pinned" =~ ^[0-9a-f]{40}$ ]] \
+                    && git -C "$MP_ROOT" merge-base --is-ancestor "$pinned" "$receipt" >/dev/null 2>&1; then
+                    fast_forward=true
+                fi
+                if { [ "$pinned" != "$checkout" ] && [ "$pinned" != "$previous" ] \
+                        && [ "$fast_forward" != true ]; } \
                     || jq -e '.completed | index("witness_bootstrap") != null' \
                         "$MP_SETUP_V2_STATE" >/dev/null 2>&1 \
                     || [ -s "$MP_SETUP_V2_PENDING_JOIN" ]; then
                     ui_error "The unsigned commissioning pin does not match the active exact deployment receipt. Pairing has stopped rather than changing an established campaign target."
                     return 1
                 fi
-                git -C "$MP_ROOT" fetch --no-tags --force origin "$receipt" >/dev/null 2>&1 \
-                    && [ "$(git -C "$MP_ROOT" rev-parse FETCH_HEAD 2>/dev/null || true)" = "$receipt" ] \
-                    || { ui_error "The active exact deployment receipt is not available from origin. Push that exact commit before resuming commissioning."; return 1; }
                 mp_setup_state_update '.campaign_commit=$commit' --arg commit "$receipt" || return 1
             fi
         fi

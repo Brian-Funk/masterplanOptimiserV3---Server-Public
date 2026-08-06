@@ -117,6 +117,7 @@ class PairingCodeTests(unittest.TestCase):
                 "if [[ \"$*\" == *'rev-parse HEAD'* ]]; then printf '%s\\n' \"$FAKE_CHECKOUT\"; exit 0; fi\n"
                 "if [[ \"$*\" == *'fetch --no-tags --force origin'* ]]; then printf '%s' \"${@: -1}\" > \"$FAKE_FETCHED\"; exit 0; fi\n"
                 "if [[ \"$*\" == *'rev-parse FETCH_HEAD'* ]]; then cat \"$FAKE_FETCHED\"; exit 0; fi\n"
+                "if [[ \"$*\" == *'merge-base --is-ancestor'* ]]; then exit 0; fi\n"
                 "exit 1\n",
                 encoding="utf-8",
             )
@@ -138,7 +139,7 @@ class PairingCodeTests(unittest.TestCase):
                 jq -r .campaign_commit "$MP_SETUP_V2_STATE"
                 old_pin="$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")"
                 next_commit="$(printf 'd%.0s' {1..40})"
-                jq -n --arg current "$next_commit" --arg previous "$old_pin" \
+                jq -n --arg current "$next_commit" --arg previous "$(printf 'e%.0s' {1..40})" \
                     '{current_commit:$current,previous_commit:$previous}' \
                     > "$MP_STATE/test-deployments/current.json"
                 mp_setup_state_begin convert-ha
@@ -461,6 +462,7 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn('campaign_commit:', state)
         self.assertIn('test-deployments/current.json', state)
         self.assertIn('Commissioning will not pin the management checkout', state)
+        self.assertIn('merge-base --is-ancestor "$pinned" "$receipt"', state)
         self.assertIn('fetch --no-tags --force origin "$commit"', state)
         self.assertIn('rev-parse FETCH_HEAD', state)
         self.assertNotIn("test_commit_deployed", SETUP)
