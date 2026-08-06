@@ -72,6 +72,14 @@ class PairingCodeTests(unittest.TestCase):
         self.assertLess(resume.index("internal-repin-setup"), resume.index("mp_setup_state_mark paired"))
         self.assertIn('mp_setup_state_action "Replicating complete application state to Node B"', resume)
         self.assertIn('mp_setup_state_action "Finalising Node B exact deployment"', resume)
+        self.assertIn('mp_setup_state_action "Verifying SMTP and DNS after HA conversion"', resume)
+        self.assertIn('mp_setup_state_action "Verifying automatic failover readiness"', resume)
+        self.assertIn("if ! mp_setup_state_has application_deployed; then", resume)
+        self.assertNotIn(
+            '[ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ] \\\n'
+            "        || ! mp_setup_state_has application_deployed; then",
+            resume,
+        )
         self.assertLess(resume.index("mp_ha_replicate_now"), resume.index("internal-finalize-peer"))
 
     @unittest.skipIf(os.name == "nt", "POSIX shell state contract")

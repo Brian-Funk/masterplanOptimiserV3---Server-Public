@@ -1253,8 +1253,7 @@ mp_setup_primary_resume() {
             || { ui_error "Node B could not record Node A's verified fast-forwarded campaign pin."; return 1; }
     fi
     mp_setup_state_mark paired
-    if [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ] \
-        || ! mp_setup_state_has application_deployed; then
+    if ! mp_setup_state_has application_deployed; then
         if [ "$mode" = convert-ha ] && [ -f "$MP_ROOT/infra/docker-compose.override.yml" ]; then
             mp_ha_convert_host_caddy || return 1
         fi
@@ -1296,10 +1295,12 @@ mp_setup_primary_resume() {
         mp_setup_state_mark validated
     fi
     if ! mp_setup_state_has smtp_verified; then
+        mp_setup_state_action "Verifying SMTP and DNS after HA conversion" || return 1
         mp_setup_verify_smtp_and_dns || return 1
         mp_setup_state_mark smtp_verified
     fi
     if ! mp_setup_state_has automatic_failover; then
+        mp_setup_state_action "Verifying automatic failover readiness" || return 1
         mp_ha_refresh_witness_observations || return 1
         mp_ha_active_verification_readiness || return 1
         python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic enabled >/dev/null || return 1

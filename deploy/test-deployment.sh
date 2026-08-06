@@ -431,6 +431,14 @@ internal_repin_setup() {
     local target="$1" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" pinned temporary
     require_test_policy
     [[ "$target" =~ ^[0-9a-f]{40}$ ]] || return 1
+    if jq -e --arg target "$target" \
+        '.state == "complete" and .mode == "ha-join" and .deployment_lane == "unsigned"
+         and .campaign_commit == $target
+         and ((.completed // []) | index("application_deployed") != null)' \
+        "$setup_state" >/dev/null 2>&1 \
+        && [ "$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)" = "$target" ]; then
+        return 0
+    fi
     pinned="$(jq -r '.campaign_commit // empty' "$setup_state" 2>/dev/null || true)"
     jq -e '.state == "in_progress" and .mode == "ha-join" and .deployment_lane == "unsigned"
            and ((.completed // []) | index("joined") != null)
@@ -450,6 +458,16 @@ internal_repin_setup() {
 internal_finalize_peer() {
     local target="$1" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" plan temporary
     require_test_policy
+    if jq -e --arg target "$target" \
+        '.state == "complete" and .mode == "ha-join" and .campaign_commit == $target
+         and ((.completed // []) | index("application_deployed") != null)' \
+        "$setup_state" >/dev/null 2>&1 \
+        && [ "$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)" = "$target" ]; then
+        mp_compose_init
+        "${MP_COMPOSE[@]}" exec -T backend python -c \
+            'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=5).read()' >/dev/null
+        return 0
+    fi
     jq -e --arg target "$target" \
         '.state == "in_progress" and .mode == "ha-join" and .campaign_commit == $target
          and ((.completed // []) | index("joined") != null)' "$setup_state" >/dev/null || return 1

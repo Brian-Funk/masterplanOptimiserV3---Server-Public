@@ -69,6 +69,17 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("internal-repin-setup", SUPERVISOR)
         self.assertIn("internal-finalize-peer", SUPERVISOR)
         self.assertIn("peer_copy_image", SUPERVISOR)
+        repin = SUPERVISOR.split("internal_repin_setup()", 1)[1].split(
+            "internal_finalize_peer()", 1
+        )[0]
+        finalize = SUPERVISOR.split("internal_finalize_peer()", 1)[1].split(
+            "internal_activate()", 1
+        )[0]
+        for operation in (repin, finalize):
+            self.assertIn('.state == "complete"', operation)
+            self.assertIn('index("application_deployed") != null', operation)
+            self.assertIn("MP_TEST_STATE_FILE", operation)
+            self.assertIn("return 0", operation)
         initial = SUPERVISOR.split("prepare_initial_peer()", 1)[1].split(
             "internal_prepare_peer()", 1
         )[0]
