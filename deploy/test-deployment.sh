@@ -521,15 +521,28 @@ internal_activate() {
     [ "$fresh_commissioning" != true ] || require_fresh_commissioning_database "$target"
     mp_lock
     trap 'mp_unlock' EXIT
-    prepare_source "$target"
-    install -m 0600 /tmp/mp-opt-test-deployment.env "$MP_TEST_ENV"
-    rm -f /tmp/mp-opt-test-deployment.env
-    if grep -qw operations <<< "$components" || grep -qw caddy <<< "$components"; then
-        sync_operations "$MP_TEST_SOURCE"
+    if [ "${MP_TEST_INTERNAL_ACTIVATE_REEXEC:-0}" != 1 ]; then
+        prepare_source "$target"
+        install -m 0600 /tmp/mp-opt-test-deployment.env "$MP_TEST_ENV"
+        rm -f /tmp/mp-opt-test-deployment.env
+        if grep -qw operations <<< "$components" || grep -qw caddy <<< "$components"; then
+            sync_operations "$MP_TEST_SOURCE"
+        fi
+        if grep -qw frontend <<< "$components"; then
+            sync_frontend "$MP_TEST_HOME/peer-assets"
+        fi
+        # The caller entered through the previously deployed script. After an
+        # operations update, continuing in this shell would retain its old
+        # function definitions. Re-enter exactly once through the installed
+        # target script before activating services.
+        mp_unlock
+        trap - EXIT
+        exec env MP_ROOT="$MP_ROOT" MP_TEST_PEER=1 MP_TEST_INTERNAL_ACTIVATE_REEXEC=1 \
+            "$MP_ROOT/deploy/test-deployment.sh" internal-activate \
+            "$target" "$components" "$fresh_commissioning"
     fi
-    if grep -qw frontend <<< "$components"; then
-        sync_frontend "$MP_TEST_HOME/peer-assets"
-    fi
+    [ "$(sed -n 's/^MP_TEST_COMMIT=//p' "$MP_TEST_ENV" | head -1)" = "$target" ] \
+        || { ui_error "The peer activation environment does not match the exact target after re-entry."; return 1; }
     compose_activate "$components" "$fresh_commissioning"
     previous="$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)"
     plan="$(jq -n --arg components "$components" \

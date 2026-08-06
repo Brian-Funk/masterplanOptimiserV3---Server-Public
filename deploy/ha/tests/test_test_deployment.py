@@ -68,6 +68,16 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn('.campaign_commit=$target', peer_activate)
         self.assertIn('.campaign_commit != $previous', peer_activate)
 
+    def test_peer_reexecutes_installed_exact_operations_before_activation(self) -> None:
+        peer_activate = SUPERVISOR.split("internal_activate()", 1)[1].split(
+            "deploy_witness()", 1
+        )[0]
+        self.assertIn("MP_TEST_INTERNAL_ACTIVATE_REEXEC", peer_activate)
+        self.assertIn('exec env MP_ROOT="$MP_ROOT"', peer_activate)
+        self.assertLess(peer_activate.index("sync_operations"), peer_activate.index("exec env"))
+        self.assertLess(peer_activate.index("exec env"), peer_activate.index("compose_activate"))
+        self.assertIn("does not match the exact target after re-entry", peer_activate)
+
     def test_successful_exact_update_advances_setup_pin_after_pair_readiness(self) -> None:
         self.assertIn("advance_setup_campaign_pin()", SUPERVISOR)
         apply = SUPERVISOR.split("apply_commit()", 1)[1].split("restore_signed()", 1)[0]
