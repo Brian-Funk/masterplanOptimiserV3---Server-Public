@@ -619,6 +619,8 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
         self.assertNotIn("UPDATE public_schedule_links", body)
         self.assertNotIn("publish_secret_hash", body)
         self.assertNotIn("DELETE FROM webauthn_credentials", body)
+        self.assertIn('mp_prepare_backend_secret_permissions', body)
+        self.assertNotIn('chmod 600 "$MP_ROOT/secrets/root_bootstrap_token"', body)
 
     def test_restore_refuses_snapshot_older_than_retained_privacy_action(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -713,6 +715,18 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
         self.assertIn('optional_evidence_token="$MP_ROOT/secrets/evidence_github_fine_grained_token"', body)
         self.assertIn('install -m 0600 /dev/null "$optional_evidence_token"', body)
         self.assertIn("intentionally excluded from snapshots", body)
+        for stage in (
+            "configuration-topology",
+            "configuration-environment",
+            "configuration-secrets",
+            "configuration-secret-permissions",
+            "configuration-compose-override",
+            "configuration-host-caddy",
+            "configuration-database-secret",
+            "configuration-database-role",
+            "configuration-backend-secret-permissions",
+        ):
+            self.assertIn(f'MP_SNAPSHOT_APPLY_STAGE="{stage}"', body)
 
     def test_database_snapshot_pauses_writes_and_records_evidence_anchor(self) -> None:
         body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_create")

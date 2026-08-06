@@ -782,6 +782,7 @@ mp_snapshot_restore_configuration() {
     local target_password escaped_password secrets_stage secrets_old secret_file
     local snapshot_caddy_mode current_caddy_mode optional_evidence_token
     [ -f "$payload/config/.env" ] || return 0
+    MP_SNAPSHOT_APPLY_STAGE="configuration-topology"
     if [ -f "$payload/metadata/caddy-topology" ]; then
         snapshot_caddy_mode="$(tr -d '\r\n' < "$payload/metadata/caddy-topology")"
         current_caddy_mode="$(mp_caddy_mode)"
@@ -797,9 +798,11 @@ mp_snapshot_restore_configuration() {
             || { printf 'This snapshot requires host Caddy, but host Caddy is unavailable.\n' >&2; return 1; }
         sudo caddy validate --config "$payload/config/Caddyfile" --adapter caddyfile >/dev/null || return 1
     fi
+    MP_SNAPSHOT_APPLY_STAGE="configuration-environment"
     cp -a "$payload/config/.env" "$MP_ROOT/.env" || return 1
     chmod 600 "$MP_ROOT/.env" || return 1
     cmp -s "$payload/config/.env" "$MP_ROOT/.env" || return 1
+    MP_SNAPSHOT_APPLY_STAGE="configuration-secrets"
     if [ -d "$payload/config/secrets" ]; then
         secrets_stage="$MP_ROOT/.secrets.restore.$$"
         secrets_old="$MP_ROOT/.secrets.restore-old.$$"
@@ -830,6 +833,7 @@ mp_snapshot_restore_configuration() {
     else
         mkdir -p "$MP_ROOT/secrets" || return 1
     fi
+    MP_SNAPSHOT_APPLY_STAGE="configuration-secret-permissions"
     chmod 700 "$MP_ROOT/secrets" || return 1
     find "$MP_ROOT/secrets" -maxdepth 1 -type f -exec chmod 600 {} + || return 1
     optional_evidence_token="$MP_ROOT/secrets/evidence_github_fine_grained_token"
@@ -844,6 +848,7 @@ mp_snapshot_restore_configuration() {
     if [ ! -e "$optional_evidence_token" ]; then
         install -m 0600 /dev/null "$optional_evidence_token" || return 1
     fi
+    MP_SNAPSHOT_APPLY_STAGE="configuration-compose-override"
     if [ -f "$payload/config/docker-compose.override.yml" ]; then
         cp -a "$payload/config/docker-compose.override.yml" "$MP_ROOT/infra/docker-compose.override.yml" || return 1
         chmod 600 "$MP_ROOT/infra/docker-compose.override.yml" || return 1
@@ -851,18 +856,22 @@ mp_snapshot_restore_configuration() {
     elif [ -f "$payload/metadata/compose-override-absent" ]; then
         rm -f "$MP_ROOT/infra/docker-compose.override.yml" || return 1
     fi
+    MP_SNAPSHOT_APPLY_STAGE="configuration-host-caddy"
     if [ -f "$payload/config/Caddyfile" ]; then
         sudo install -o root -g root -m 0644 "$payload/config/Caddyfile" "$MP_HOST_CADDYFILE" || return 1
         cmp -s "$payload/config/Caddyfile" "$MP_HOST_CADDYFILE" || return 1
     fi
 
+    MP_SNAPSHOT_APPLY_STAGE="configuration-database-secret"
     mp_migrate_database_secret || return 1
     target_password="$(cat "$MP_ROOT/secrets/database_password")" || return 1
     escaped_password="$(printf '%s' "$target_password" | sed "s/'/''/g")" || return 1
     mp_compose_init
+    MP_SNAPSHOT_APPLY_STAGE="configuration-database-role"
     printf "ALTER ROLE masterplan PASSWORD '%s';\n" "$escaped_password" \
         | "${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U masterplan -d postgres >/dev/null || return 1
     unset target_password escaped_password
+    MP_SNAPSHOT_APPLY_STAGE="configuration-backend-secret-permissions"
     mp_prepare_backend_secret_permissions || return 1
     return 0
 }
@@ -997,7 +1006,9 @@ SQL
         2>/dev/null || true)"
     if [ "$registered_root" = t ]; then
         : > "$MP_ROOT/secrets/root_bootstrap_token" || return 1
-        chmod 600 "$MP_ROOT/secrets/root_bootstrap_token" || return 1
+        # Truncating the retired token must not undo the backend-readable
+        # ownership and mode established during configuration restore.
+        mp_prepare_backend_secret_permissions || return 1
     fi
 }
 
