@@ -538,7 +538,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | iterator.prototype | 1.1.5 | MIT | `web/package-lock.json` |
 | jiti | 1.21.7 | MIT | `web/package-lock.json` |
 | js-tokens | 4.0.0 | MIT | `web/package-lock.json` |
-| js-yaml | 4.3.0 | MIT | `web/package-lock.json` |
+| js-yaml | 4.3.1 | MIT | `web/package-lock.json` |
 | jsdom | 30.0.1 | MIT | `web/package-lock.json` |
 | jsesc | 3.1.0 | MIT | `web/package-lock.json` |
 | json-buffer | 3.0.1 | MIT | `web/package-lock.json` |
