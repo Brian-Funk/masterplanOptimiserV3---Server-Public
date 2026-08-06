@@ -906,16 +906,21 @@ mp_snapshot_guard_privacy_actions() {
 # store. Therefore its database must describe the exact same ledger head.
 # Reject incompatibility before replacing any live database.
 mp_snapshot_guard_evidence_head() {
-    local extracted="$1" anchor current
+    local extracted="$1" anchor current anchor_head current_head
     [ -f "$extracted/payload/database/masterplan.dump" ] || return 0
     anchor="$extracted/payload/metadata/evidence-anchor.json"
     current="$MP_ROOT/state/evidence/ledger/chain-head.json"
-    if [ ! -s "$anchor" ] || [ -L "$anchor" ] || [ ! -s "$current" ] || [ -L "$current" ]; then
+    if [ ! -s "$anchor" ] || [ -L "$anchor" ] \
+        || ! sudo -n test -s "$current" || ! sudo -n test ! -L "$current"; then
         printf '%s\n' 'Restore blocked: required signed-evidence anchor is missing.' >&2
         return 1
     fi
-    if [ "$(jq -r '.head_sha256 // empty' "$anchor")" \
-        != "$(jq -r '.head_sha256 // empty' "$current")" ]; then
+    anchor_head="$(jq -er '.head_sha256 | select(type == "string" and test("^[0-9a-f]{64}$"))' "$anchor")" \
+        || { printf '%s\n' 'Restore blocked: snapshot evidence anchor is invalid.' >&2; return 1; }
+    current_head="$(sudo -n cat "$current" 2>/dev/null \
+        | jq -er '.head_sha256 | select(type == "string" and test("^[0-9a-f]{64}$"))')" \
+        || { printf '%s\n' 'Restore blocked: current protected evidence head is unreadable or invalid.' >&2; return 1; }
+    if [ "$anchor_head" != "$current_head" ]; then
         printf '%s\n' 'Restore blocked: snapshot database and current signed-evidence ledger have different heads. Choose a compatible newer snapshot; the ledger will not be rewound.' >&2
         return 1
     fi
@@ -952,6 +957,8 @@ mp_snapshot_apply() {
     local snapshot_path="$1"
     local identity_file="$2"
     local temporary payload domain restored_database=false
+    MP_SNAPSHOT_APPLY_MUTATED=false
+    MP_SNAPSHOT_APPLY_STAGE="extract-and-verify"
     temporary="$(mktemp -d "${MP_SNAPSHOTS}/.restore.XXXXXX")" || return 1
     chmod 700 "$temporary" || { rm -rf "$temporary"; return 1; }
     if ! mp_snapshot_extract "$snapshot_path" "$identity_file" "$temporary" \
@@ -961,31 +968,39 @@ mp_snapshot_apply() {
         return 1
     fi
     payload="$temporary/payload"
+    MP_SNAPSHOT_APPLY_STAGE="evidence-head-preflight"
     mp_snapshot_guard_evidence_head "$temporary" || {
         rm -rf "$temporary"
         return 1
     }
+    MP_SNAPSHOT_APPLY_STAGE="privacy-action-preflight"
     mp_snapshot_guard_privacy_actions "$temporary" || {
         rm -rf "$temporary"
         return 1
     }
     mp_compose_init
+    MP_SNAPSHOT_APPLY_STAGE="stop-backend"
+    MP_SNAPSHOT_APPLY_MUTATED=true
     "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
     if [ -f "$payload/database/masterplan.dump" ]; then
         restored_database=true
+        MP_SNAPSHOT_APPLY_STAGE="database-restore"
         mp_snapshot_restore_database "$payload/database/masterplan.dump" || {
             rm -rf "$temporary"
             return 1
         }
+        MP_SNAPSHOT_APPLY_STAGE="database-migrations"
         mp_apply_migrations || {
             rm -rf "$temporary"
             return 1
         }
     fi
+    MP_SNAPSHOT_APPLY_STAGE="configuration-restore"
     mp_snapshot_restore_configuration "$payload" || {
         rm -rf "$temporary"
         return 1
     }
+    MP_SNAPSHOT_APPLY_STAGE="compose-validation"
     mp_compose_validate || {
         rm -rf "$temporary"
         return 1
@@ -999,31 +1014,37 @@ mp_snapshot_apply() {
             return 1
         }
     elif [ "$restored_database" = true ]; then
+        MP_SNAPSHOT_APPLY_STAGE="access-revocation"
         mp_snapshot_revoke_restored_access || {
             rm -rf "$temporary"
             return 1
         }
     fi
+    MP_SNAPSHOT_APPLY_STAGE="service-start"
     "${MP_COMPOSE[@]}" up -d --force-recreate >/dev/null || {
         rm -rf "$temporary"
         return 1
     }
     if [ "$(mp_caddy_mode)" = "host" ]; then
+        MP_SNAPSHOT_APPLY_STAGE="host-caddy-reload"
         mp_caddy_reload || {
             rm -rf "$temporary"
             return 1
         }
     fi
+    MP_SNAPSHOT_APPLY_STAGE="caddy-validation"
     mp_caddy_validate || {
         rm -rf "$temporary"
         return 1
     }
     domain="$(mp_env_get DOMAIN)" || { rm -rf "$temporary"; return 1; }
+    MP_SNAPSHOT_APPLY_STAGE="public-health"
     if ! mp_wait_for_health 30; then
         rm -rf "$temporary"
         return 1
     fi
     rm -rf "$temporary"
+    MP_SNAPSHOT_APPLY_STAGE="complete"
     printf '%s\n' "$domain" >/dev/null
 }
 
@@ -1031,6 +1052,7 @@ mp_snapshot_apply() {
 mp_snapshot_restore_interactive() {
     mp_require_ha_maintenance_window || return 1
     local selected identity rollback_identity="" pre_snapshot pre_name selected_recipient current_recipient
+    local failed_stage rollback_stage
     selected="$(mp_snapshot_select "Choose a snapshot to restore")" || return 1
     selected_recipient="$(jq -r '.encryption.recipient // empty' "$selected/receipt.json" 2>/dev/null || true)"
     current_recipient="$(mp_recovery_recipient)" || {
@@ -1118,15 +1140,27 @@ mp_snapshot_restore_interactive() {
         return 0
     fi
 
-    mp_audit "snapshot.restore" "failed" "$(basename "$selected")"
+    failed_stage="${MP_SNAPSHOT_APPLY_STAGE:-unknown}"
+    mp_audit "snapshot.restore" "failed" "$(basename "$selected"):${failed_stage}"
+    if [ "${MP_SNAPSHOT_APPLY_MUTATED:-false}" != true ]; then
+        mp_remove_identity_file "$identity"
+        [ "$rollback_identity" = "$identity" ] || mp_remove_identity_file "$rollback_identity"
+        ui_error "Restore was rejected during protected preflight (${failed_stage}). No database, configuration, or service state was changed."
+        return 1
+    fi
     if mp_snapshot_apply "$pre_snapshot" "$rollback_identity"; then
         mp_remove_identity_file "$identity"
         [ "$rollback_identity" = "$identity" ] || mp_remove_identity_file "$rollback_identity"
         ui_error "Restore verification failed. The automatic rollback snapshot was restored successfully."
     else
+        rollback_stage="${MP_SNAPSHOT_APPLY_STAGE:-unknown}"
         mp_remove_identity_file "$identity"
         [ "$rollback_identity" = "$identity" ] || mp_remove_identity_file "$rollback_identity"
-        ui_error "Restore and automatic rollback both failed. Services remain stopped. Use the verified pre-restore snapshot: $(basename "$pre_snapshot")"
+        if mp_wait_for_health 1; then
+            ui_error "Restore failed during ${failed_stage}; automatic rollback also reported failure during ${rollback_stage}, but public health is currently available. Do not retry until the retained state has been verified. Use the verified pre-restore snapshot if recovery is required: $(basename "$pre_snapshot")"
+        else
+            ui_error "Restore failed during ${failed_stage} and automatic rollback failed during ${rollback_stage}. Application health is unavailable. Use the verified pre-restore snapshot: $(basename "$pre_snapshot")"
+        fi
     fi
     return 1
 }

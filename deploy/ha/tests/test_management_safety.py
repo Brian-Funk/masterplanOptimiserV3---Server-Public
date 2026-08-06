@@ -671,8 +671,9 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
                 export MP_ROOT={shlex.quote(str(installation))}
                 source {shlex.quote(str(ROOT / "deploy/management/snapshots.sh"))}
                 mp_env_get() {{ printf '%s\n' required; }}
+                sudo() {{ [ "$1" != -n ] || shift; "$@"; }}
                 jq() {{
-                    python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("head_sha256", ""))' "${{@: -1}}"
+                    python3 -c 'import json, pathlib, sys; p=pathlib.Path(sys.argv[1]); data=json.load(open(p)) if p.is_file() else json.load(sys.stdin); print(data.get("head_sha256", ""))' "${{@: -1}}"
                 }}
                 ! mp_snapshot_guard_evidence_head {shlex.quote(str(extracted))}
                 cp {shlex.quote(str(anchor))} {shlex.quote(str(current))}
@@ -687,6 +688,13 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("different heads", result.stderr)
 
+    def test_evidence_head_guard_reads_backend_owned_head_through_sudo(self) -> None:
+        body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_guard_evidence_head")
+        self.assertIn('sudo -n test -s "$current"', body)
+        self.assertIn('sudo -n test ! -L "$current"', body)
+        self.assertIn('sudo -n cat "$current"', body)
+        self.assertNotIn('jq -r \'.head_sha256 // empty\' "$current"', body)
+
     def test_database_snapshot_pauses_writes_and_records_evidence_anchor(self) -> None:
         body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_create")
         self.assertLess(body.index('stop backend'), body.index('mp_snapshot_dump_database'))
@@ -700,6 +708,19 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
         self.assertIn('rollback_identity', body)
         self.assertIn('mp_snapshot_verify_path "$pre_snapshot" "$rollback_identity"', body)
         self.assertIn('mp_snapshot_apply "$pre_snapshot" "$rollback_identity"', body)
+        self.assertIn('MP_SNAPSHOT_APPLY_MUTATED', body)
+        self.assertIn('No database, configuration, or service state was changed.', body)
+
+    def test_restore_preflight_failure_does_not_attempt_rollback(self) -> None:
+        body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_restore_interactive")
+        preflight_exit = body.index('if [ "${MP_SNAPSHOT_APPLY_MUTATED:-false}" != true ]')
+        rollback_apply = body.index('mp_snapshot_apply "$pre_snapshot" "$rollback_identity"', preflight_exit)
+        self.assertLess(preflight_exit, rollback_apply)
+        apply_body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_apply")
+        self.assertLess(
+            apply_body.index('MP_SNAPSHOT_APPLY_STAGE="evidence-head-preflight"'),
+            apply_body.index('MP_SNAPSHOT_APPLY_MUTATED=true'),
+        )
 
     def test_rotation_preserves_originals_until_verified_baseline(self) -> None:
         transform = function_body(ROTATION_SOURCE, "mp_snapshot_reencrypt_path")
