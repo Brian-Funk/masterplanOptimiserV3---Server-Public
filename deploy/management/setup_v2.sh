@@ -1143,7 +1143,12 @@ mp_setup_primary_resume() {
         if [ -n "$pairing_expires" ] \
             && [ "$(date -u -d "$pairing_expires" +%s)" -gt "$(date -u +%s)" ]; then
             join_code="$(python3 "$MP_ROOT/deploy/ha/pairing.py" encode < "$MP_SETUP_V2_PENDING_JOIN")" \
-                || { rm -f "$body"; return 1; }
+                || {
+                    rm -f "$body"
+                    ui_message "Join code renewal pending" \
+                        "The protected pending join value is incompatible and cannot be displayed. It expires at ${pairing_expires}. Resume setup after that time to replace it with a new URL-safe one-time code; no application data or routing changed."
+                    return 0
+                }
             rm -f "$body"
             ui_copyable_terminal_text "Node join code" "$join_code" \
                 "This code remains valid until ${pairing_expires}. Paste it on the joining VPS, then resume setup here." || return 1

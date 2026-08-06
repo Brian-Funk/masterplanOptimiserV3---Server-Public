@@ -95,6 +95,21 @@ class PairingCodeTests(unittest.TestCase):
             state_begin.index('format:"mp-opt-setup-state-v2"'),
         )
 
+    @unittest.skipIf(os.name == "nt", "POSIX shell secret contract")
+    def test_management_random_secret_is_urlsafe_and_pairing_compatible(self) -> None:
+        script = r'''
+            source "$1/deploy/management/common.sh"
+            for attempt in {1..32}; do
+                value="$(mp_random_secret)"
+                [[ "$value" =~ ^[A-Za-z0-9_-]{64}$ ]] || exit 2
+            done
+        '''
+        result = subprocess.run(
+            ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(ROOT)],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     @unittest.skipIf(os.name == "nt", "POSIX shell state contract")
     def test_convert_ha_pins_active_exact_receipt_not_management_head(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -495,6 +510,9 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn('mp_setup_state_action "Deploying HA witness"', primary)
         self.assertIn('mp_setup_state_action "Registering Node A with HA witness"', primary)
         self.assertIn('mp_setup_state_action "Waiting for Node B join"', primary)
+        primary_resume = shell_function(SETUP, "mp_setup_primary_resume")
+        self.assertIn("Join code renewal pending", primary_resume)
+        self.assertIn("Resume setup after that time", primary_resume)
 
     def test_standalone_dns_wait_retries_at_thirty_second_intervals(self) -> None:
         script = r'''

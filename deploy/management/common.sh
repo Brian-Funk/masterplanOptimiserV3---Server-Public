@@ -1522,7 +1522,7 @@ mp_remove_identity_file() {
 
 # Create a secure random URL-safe operator secret.
 mp_random_secret() {
-    openssl rand -base64 48 | tr -d '\n'
+    openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n'
 }
 
 # Return a redacted configuration report suitable for terminal display.
