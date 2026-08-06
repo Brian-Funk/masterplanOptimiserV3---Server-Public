@@ -90,17 +90,31 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertLess(peer_activate.index("exec env"), peer_activate.index("compose_activate"))
         self.assertIn("does not match the exact target after re-entry", peer_activate)
 
-    def test_successful_exact_update_advances_setup_pin_after_pair_readiness(self) -> None:
+    def test_exact_receipt_advances_setup_pin_before_resumable_replication(self) -> None:
         self.assertIn("advance_setup_campaign_pin()", SUPERVISOR)
         apply = SUPERVISOR.split("apply_commit()", 1)[1].split("restore_signed()", 1)[0]
         self.assertLess(
-            apply.index("mp_ha_active_verification_readiness"),
-            apply.rindex('advance_setup_campaign_pin "$target" "$previous"'),
+            apply.index('write_state "$target" "$previous"'),
+            apply.index('MP_MANAGEMENT_LOCK_HELD=1 mp_ha_replicate_now'),
+        )
+        self.assertLess(
+            apply.index('advance_setup_campaign_pin "$target" "$previous"'),
+            apply.index('MP_MANAGEMENT_LOCK_HELD=1 mp_ha_replicate_now'),
         )
         self.assertIn(
             '.campaign_commit != $previous and .campaign_commit != $target',
             SUPERVISOR,
         )
+
+    def test_late_failure_pin_reconciliation_requires_matching_pair_receipts(self) -> None:
+        reconcile = SUPERVISOR.split(
+            "reconcile_setup_campaign_pin_with_receipt()", 1
+        )[1].split("peer_copy_image()", 1)[0]
+        self.assertIn('merge-base --is-ancestor "$pinned" "$receipt"', reconcile)
+        self.assertIn("ha_pair_transport_ready", reconcile)
+        self.assertIn('/opt/masterplan/deploy/test-deployment.sh status', reconcile)
+        self.assertIn('active exact receipts differ', reconcile)
+        self.assertIn('advance_setup_campaign_pin "$receipt" "$pinned"', reconcile)
 
     def test_initial_peer_is_prepared_before_replication_and_finalised_afterward(self) -> None:
         self.assertIn("prepare_initial_peer()", SUPERVISOR)

@@ -379,6 +379,32 @@ advance_setup_campaign_pin() {
     chmod 600 "$temporary"; mv "$temporary" "$setup_state"
 }
 
+reconcile_setup_campaign_pin_with_receipt() {
+    local receipt="$1" role="$2" setup_state pinned peer_state
+    setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
+    [ -s "$setup_state" ] || return 0
+    [ "$(jq -r '.deployment_lane // empty' "$setup_state")" = unsigned ] || return 0
+    pinned="$(jq -r '.campaign_commit // empty' "$setup_state")"
+    [ "$pinned" != "$receipt" ] || return 0
+    [[ "$pinned" =~ ^[0-9a-f]{40}$ ]] && [[ "$receipt" =~ ^[0-9a-f]{40}$ ]] \
+        && [ "$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)" = "$receipt" ] \
+        && git -C "$MP_TEST_SOURCE" merge-base --is-ancestor "$pinned" "$receipt" \
+        || { ui_error "The setup pin cannot be reconciled with the active exact deployment receipt."; return 1; }
+    if [ "$role" = dynamic ] && ha_pairing_complete; then
+        ha_pair_transport_ready || {
+            ui_error "The paired setup pin cannot be reconciled while peer transport is unavailable."
+            return 1
+        }
+        peer_state="$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+            env MP_ROOT=/opt/masterplan \
+            /opt/masterplan/deploy/test-deployment.sh status 2>/dev/null)" \
+            || { ui_error "The peer receipt could not be read while reconciling the setup pin."; return 1; }
+        [ "$(jq -r '.current_commit // empty' <<< "$peer_state")" = "$receipt" ] \
+            || { ui_error "The two active exact receipts differ; the setup pin was not changed."; return 1; }
+    fi
+    advance_setup_campaign_pin "$receipt" "$pinned"
+}
+
 peer_copy_image() {
     local image="$1" local_id peer_id
     docker save "$image" | gzip -1 | ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
@@ -635,6 +661,7 @@ apply_commit() {
     }
     mp_load_ha_config
     role="$HA_ROLE"
+    reconcile_setup_campaign_pin_with_receipt "$previous" "$role"
     if [ "$role" = dynamic ] && [ "${MP_TEST_PEER:-0}" != 1 ]; then
         if ha_pairing_complete; then
             ha_pair_transport_ready || {
@@ -758,6 +785,11 @@ apply_commit() {
     write_state "$target" "$previous" "$plan" "$snapshot"
     if [ "$pre_activation_pair" = true ]; then
         advance_setup_campaign_pin "$target" "$previous" "Preparing exact images for Node B"
+    else
+        # Once the exact receipt exists, late-stage failures deliberately keep
+        # the healthy activation. Advance the setup pin in the same transaction
+        # so replication/readiness can be resumed at this exact target.
+        advance_setup_campaign_pin "$target" "$previous"
     fi
     if [ "$peer_ready" = true ]; then
         MP_MANAGEMENT_LOCK_HELD=1 mp_ha_replicate_now
@@ -767,12 +799,6 @@ apply_commit() {
             python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic enabled >/dev/null
             mp_ha_set_config_value HA_AUTOMATIC_FAILOVER enabled
         fi
-    fi
-    if [ "$pre_activation_pair" != true ]; then
-        # Advance the authoritative pin only after local activation and every
-        # paired replication/readiness gate succeeded. A failure before here
-        # restores the previous receipt and leaves the previous pin intact.
-        advance_setup_campaign_pin "$target" "$previous"
     fi
     mp_audit "deploy.test" "success" "$target"
     rm -f "$MP_TEST_FAILURE_FILE" "$MP_TEST_STAGE_FILE"
