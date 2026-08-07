@@ -9,7 +9,16 @@ MP_PORTABLE_EXPORT_INVENTORY="${MP_PORTABLE_EXPORT_INVENTORY:-$MP_STATE/portable
 MP_PORTABLE_LAST_IMPORT_STATE="${MP_PORTABLE_LAST_IMPORT_STATE:-$MP_STATE/portable-last-import.json}"
 
 mp_compliance_emit_backup_receipts() {
-    local selected="$1"
+    local selected="$1" ha_args=()
+    mp_load_ha_config || return 1
+    if [ "${HA_MODE:-standalone}" = ha ]; then
+        ha_args=(
+            --ha-mode ha
+            --ha-node-id "$HA_NODE_ID"
+            --ha-peer-node-id "$HA_PEER_NODE_ID"
+            --ha-peer-ssh "$HA_PEER_SSH"
+        )
+    fi
     python3 "$MP_ROOT/deploy/management/compliance_receipts.py" \
         --requests "$MP_ROOT/runtime/compliance-requests" \
         --receipts "$MP_ROOT/runtime/compliance-receipts" \
@@ -17,7 +26,8 @@ mp_compliance_emit_backup_receipts() {
         --portable-inventory "$MP_PORTABLE_EXPORT_INVENTORY" \
         --resolution-journals "$MP_STATE/compliance-resolutions" \
         --snapshot-receipt "$selected/receipt.json" \
-        --instance-key "$MP_ROOT/secrets/evidence_signing_key"
+        --instance-key "$MP_ROOT/secrets/evidence_signing_key" \
+        "${ha_args[@]}"
 }
 
 # Convert bounded receipt-emitter diagnostics into an actionable operator
@@ -26,7 +36,7 @@ mp_compliance_error_message() {
     local error_file="$1" diagnostic
     diagnostic="$(head -c 512 "$error_file" 2>/dev/null || true)"
     case "$diagnostic" in
-        "A pre-deletion local snapshot remains"*|"A superseded local snapshot"*|"The local snapshot resolution"*)
+        "A pre-deletion local snapshot remains"*|"A superseded local snapshot"*|"The local snapshot resolution"*|"The HA peer could not resolve"*)
             printf '%s\n' "The verified replacement remains valid, but automatic removal of pre-deletion VPS snapshots did not finish safely. Retry Deep verify to resume the protected resolution journal."
             ;;
         "Compliance receipt signing failed"*)

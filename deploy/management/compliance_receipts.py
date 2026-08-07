@@ -129,14 +129,14 @@ def snapshot_facts(receipt: dict, request: dict) -> dict:
     }
 
 
-def snapshot_inventory(root: Path, selected_receipt: Path) -> list[dict]:
+def snapshot_inventory(root: Path, selected_receipt: Path | None) -> list[dict]:
     """Return a strictly validated inventory without following substituted paths."""
 
     if root.is_symlink() or not root.is_dir():
         raise ValueError("The local snapshot inventory is unsafe")
     root_resolved = root.resolve()
-    selected_directory = selected_receipt.parent
-    if (
+    selected_directory = selected_receipt.parent if selected_receipt is not None else None
+    if selected_directory is not None and (
         selected_directory.is_symlink()
         or selected_directory.parent.resolve() != root_resolved
         or not SNAPSHOT_NAME.fullmatch(selected_directory.name)
@@ -167,7 +167,7 @@ def snapshot_inventory(root: Path, selected_receipt: Path) -> list[dict]:
             "archive_sha256": archive_sha256,
             "created_at": timestamp(receipt.get("created_at")),
         })
-    if not any(item["path"] == selected_directory for item in inventory):
+    if selected_directory is not None and not any(item["path"] == selected_directory for item in inventory):
         raise ValueError("The selected snapshot is unavailable")
     if len(inventory) > 256:
         raise ValueError("The local snapshot inventory is too large")
@@ -474,6 +474,101 @@ def sign_receipt(path: Path, instance_key: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def verify_receipt_signature(content: bytes, signature: str, public_key_path: Path) -> None:
+    if public_key_path.is_symlink() or not public_key_path.is_file():
+        raise ValueError("The instance evidence public key is unavailable")
+    public_key = " ".join(public_key_path.read_text(encoding="utf-8").split()[:2])
+    if not public_key.startswith("ssh-ed25519 "):
+        raise ValueError("The instance evidence public key is invalid")
+    with tempfile.TemporaryDirectory(prefix="mp-opt-compliance-verify-") as temporary_name:
+        temporary = Path(temporary_name)
+        allowed = temporary / "allowed_signers"
+        sig = temporary / "receipt.sig"
+        allowed.write_text(f"mp-opt-instance {public_key}\n", encoding="utf-8")
+        sig.write_text(signature, encoding="utf-8")
+        result = subprocess.run(
+            [
+                "ssh-keygen", "-Y", "verify", "-f", str(allowed),
+                "-I", "mp-opt-instance", "-n", "mp-opt-evidence-v1", "-s", str(sig),
+            ],
+            input=content,
+            check=False,
+            capture_output=True,
+        )
+    if result.returncode != 0:
+        raise ValueError("The peer snapshot-resolution signature is invalid")
+
+
+def emit_peer_resolution(args: argparse.Namespace, target: Path) -> None:
+    """Ask the current HA peer to resolve its own pre-purge local snapshots."""
+
+    peer_target = target.with_name(f"{target.stem}.peer.json")
+    if peer_target.exists():
+        peer_signature_path = Path(str(peer_target) + ".sig")
+        if not peer_signature_path.is_file():
+            raise ValueError("The peer snapshot resolution receipt is incomplete")
+        existing = load_regular(peer_target)
+        verify_receipt_signature(
+            canonical(existing), peer_signature_path.read_text(encoding="utf-8"),
+            Path(str(args.instance_key) + ".pub"),
+        )
+        return
+    receipt = load_regular(target)
+    signature_path = Path(str(target) + ".sig")
+    if not signature_path.is_file() or signature_path.stat().st_size > 16 * 1024:
+        raise ValueError("The clean-backup receipt signature is unavailable")
+    request = {
+        "format": "mp-opt-peer-snapshot-resolution-request-v1",
+        "source_node_id": args.ha_node_id,
+        "target_node_id": args.ha_peer_node_id,
+        "clean_receipt": receipt,
+        "clean_signature": signature_path.read_text(encoding="utf-8"),
+    }
+    result = subprocess.run(
+        [
+            "ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+            args.ha_peer_ssh,
+            "python3 /opt/masterplan/deploy/management/peer_snapshot_resolution.py receive",
+        ],
+        input=json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n",
+        text=True,
+        check=False,
+        capture_output=True,
+        timeout=180,
+    )
+    if result.returncode != 0:
+        diagnostic = result.stderr.strip()[:256]
+        raise ValueError(f"The HA peer could not resolve its pre-deletion snapshots: {diagnostic}")
+    try:
+        response = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError("The HA peer returned an invalid snapshot-resolution response") from exc
+    if (
+        not isinstance(response, dict)
+        or set(response) != {"format", "receipt", "signature"}
+        or response.get("format") != "mp-opt-peer-snapshot-resolution-response-v1"
+    ):
+        raise ValueError("The HA peer returned an invalid snapshot-resolution response")
+    peer_receipt = response.get("receipt")
+    if not isinstance(peer_receipt, dict) or (
+        peer_receipt.get("job_id") != receipt.get("job_id")
+        or peer_receipt.get("clean_receipt_sha256") != hashlib.sha256(canonical(receipt)).hexdigest()
+        or peer_receipt.get("replacement_package_id") != receipt.get("package_id")
+        or peer_receipt.get("replacement_package_sha256") != receipt.get("package_sha256")
+        or peer_receipt.get("source_node_id") != args.ha_node_id
+        or peer_receipt.get("target_node_id") != args.ha_peer_node_id
+    ):
+        raise ValueError("The HA peer snapshot-resolution receipt does not match the clean backup")
+    peer_signature = response.get("signature")
+    if not isinstance(peer_signature, str) or len(peer_signature) > 16 * 1024:
+        raise ValueError("The HA peer snapshot-resolution signature is invalid")
+    verify_receipt_signature(
+        canonical(peer_receipt), peer_signature, Path(str(args.instance_key) + ".pub"),
+    )
+    atomic_write(peer_target, canonical(peer_receipt))
+    atomic_write(Path(str(peer_target) + ".sig"), peer_signature.encode("utf-8"))
+
+
 def emit(args: argparse.Namespace) -> None:
     snapshot_path = Path(args.snapshot_receipt)
     snapshot = load_regular(snapshot_path)
@@ -485,6 +580,16 @@ def emit(args: argparse.Namespace) -> None:
     journals = Path(args.resolution_journals)
     receipts.mkdir(parents=True, exist_ok=True, mode=0o755)
     os.chmod(receipts, 0o755)
+    if args.reconcile_job_id:
+        if args.ha_mode != "ha":
+            raise ValueError("Peer snapshot reconciliation is available only in HA mode")
+        canonical_uuid(args.reconcile_job_id)
+        target = receipts / f"{args.reconcile_job_id}.json"
+        if not target.is_file() or not Path(str(target) + ".sig").is_file():
+            raise ValueError("The local clean-backup receipt is unavailable for reconciliation")
+        emit_peer_resolution(args, target)
+        print("PEER_RESOLVED")
+        return
     eligible: list[tuple[Path, dict, dict, Path, dict]] = []
     for request_path in sorted(requests.glob("*.json")) if requests.is_dir() else []:
         request = validate_request(load_regular(request_path, 16 * 1024))
@@ -494,6 +599,8 @@ def emit(args: argparse.Namespace) -> None:
         if target.exists():
             if not Path(str(target) + ".sig").is_file():
                 raise ValueError("Compliance receipt is incomplete")
+            if args.ha_mode == "ha":
+                emit_peer_resolution(args, target)
             request_path.unlink(missing_ok=True)
             continue
         try:
@@ -538,6 +645,8 @@ def emit(args: argparse.Namespace) -> None:
             target.unlink(missing_ok=True)
             raise
         os.chmod(str(target) + ".sig", 0o644)
+        if args.ha_mode == "ha":
+            emit_peer_resolution(args, target)
         request_path.unlink(missing_ok=True)
     if eligible:
         print(f"RESOLVED\t{len(removed_receipt_sha256s)}")
@@ -552,8 +661,16 @@ def main() -> int:
     parser.add_argument("--resolution-journals", required=True)
     parser.add_argument("--snapshot-receipt", required=True)
     parser.add_argument("--instance-key", required=True)
+    parser.add_argument("--ha-mode", choices=["standalone", "ha"], default="standalone")
+    parser.add_argument("--ha-node-id")
+    parser.add_argument("--ha-peer-node-id")
+    parser.add_argument("--ha-peer-ssh")
+    parser.add_argument("--reconcile-job-id")
     try:
-        emit(parser.parse_args())
+        args = parser.parse_args()
+        if args.ha_mode == "ha" and not all((args.ha_node_id, args.ha_peer_node_id, args.ha_peer_ssh)):
+            raise ValueError("The HA peer snapshot-resolution configuration is incomplete")
+        emit(args)
         return 0
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         print(str(exc), file=os.sys.stderr)
