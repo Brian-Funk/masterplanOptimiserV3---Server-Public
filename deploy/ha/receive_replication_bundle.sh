@@ -140,7 +140,19 @@ SQL
         else
             sudo -n rm -rf "$MP_ROOT/state/evidence"
         fi
-        if [ "$backend_service_active" = true ]; then
+        # Restoring the previous secret files replaces their inodes and the
+        # owner-only transport mode above is intentionally too narrow for the
+        # fixed unprivileged backend identity. Reapply the runtime permission
+        # contract before attempting to restart the previous backend. This is
+        # required even when the receiver is interrupted by a lost sender SSH
+        # session: cleanup must not turn a healthy standby into a restart loop.
+        backend_secret_permissions_ready=false
+        if mp_prepare_backend_secret_permissions; then
+            backend_secret_permissions_ready=true
+        else
+            printf 'Rollback restored data, but protected secret permissions could not be restored; the backend remains stopped.\n' >&2
+        fi
+        if [ "$backend_service_active" = true ] && [ "$backend_secret_permissions_ready" = true ]; then
             restore_services+=(backend)
         else
             "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
@@ -150,9 +162,26 @@ SQL
         else
             "${MP_COMPOSE[@]}" stop caddy >/dev/null 2>&1 || true
         fi
-        [ "${#restore_services[@]}" -eq 0 ] \
-            || "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate "${restore_services[@]}" >/dev/null 2>&1 \
-            || true
+        if [ "${#restore_services[@]}" -ne 0 ]; then
+            "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate "${restore_services[@]}" >/dev/null 2>&1 \
+                || true
+        fi
+        if [ "$backend_service_active" = true ] && [ "$backend_secret_permissions_ready" = true ]; then
+            backend_rollback_healthy=false
+            for _ in $(seq 1 30); do
+                if "${MP_COMPOSE[@]}" exec -T backend python -c \
+                        'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3).read()' \
+                        >/dev/null 2>&1; then
+                    backend_rollback_healthy=true
+                    break
+                fi
+                sleep 2
+            done
+            if [ "$backend_rollback_healthy" != true ]; then
+                "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
+                printf 'Rollback restored the previous state, but its backend health check failed; the backend remains stopped.\n' >&2
+            fi
+        fi
     elif [ "$result" -ne 0 ] && [ -n "$stage_db" ]; then
         mp_compose_init
         "${MP_COMPOSE[@]}" exec -T db dropdb -U masterplan --if-exists "$stage_db" >/dev/null 2>&1 || true

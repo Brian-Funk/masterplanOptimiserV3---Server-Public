@@ -294,6 +294,33 @@ class ReplicationBundleTests(unittest.TestCase):
         self.assertLess(restore_private, remove_public)
         self.assertLess(remove_public, regenerate_public)
 
+    def test_receiver_reapplies_runtime_secret_permissions_before_rollback_backend(self) -> None:
+        source = (HA_DIR / "receive_replication_bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        restore_private = source.index(
+            'install -m 0600 "$stage/secrets.previous/$secret" "$MP_ROOT/secrets/$secret"'
+        )
+        prepare_permissions = source.index(
+            "if mp_prepare_backend_secret_permissions; then", restore_private
+        )
+        restore_backend = source.index(
+            'restore_services+=(backend)', prepare_permissions
+        )
+        rollback_health = source.index(
+            "backend_rollback_healthy=false", restore_backend
+        )
+        cleanup_exit = source.index('exit "$result"', rollback_health)
+
+        self.assertLess(restore_private, prepare_permissions)
+        self.assertLess(prepare_permissions, restore_backend)
+        self.assertLess(restore_backend, rollback_health)
+        self.assertLess(rollback_health, cleanup_exit)
+        self.assertIn(
+            '"${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true',
+            source[rollback_health:cleanup_exit],
+        )
+
     def test_replication_carries_recovery_receipt_and_publishes_dashboard_state(self) -> None:
         sender = (HA_DIR / "replicate_now.sh").read_text(encoding="utf-8")
         receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(encoding="utf-8")
