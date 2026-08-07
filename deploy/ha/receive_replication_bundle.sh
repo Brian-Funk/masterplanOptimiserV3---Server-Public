@@ -59,6 +59,11 @@ cleanup() {
     local result="$?" previous_exists="" stage_exists="" rollback_source=""
     local -a restore_services=()
     set +e
+    # A sender outage closes the SSH transport and may deliver SIGHUP while
+    # rollback is running. Cleanup is the last safety boundary: do not allow a
+    # second transport signal to interrupt restoration of the previous
+    # database, evidence, configuration, and runtime secret permissions.
+    trap '' HUP INT TERM
     if [ "$result" -ne 0 ] && [ "$database_swap_started" = true ]; then
         mp_compose_init
         "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
@@ -343,6 +348,11 @@ next_domain="$(sed -n 's/^DOMAIN=//p' "$stage/.env" | tail -n 1)"
 mkdir "$stage/secrets.previous"
 cp -a "$MP_ROOT/secrets/." "$stage/secrets.previous/"
 
+# From this point onward the receiver owns an atomic local transition. Losing
+# the sender's SSH session must not abort either the swap or its rollback. The
+# sender already reconciles a lost acknowledgement against ha-receiver.json,
+# so completing a verified copy after SIGHUP is safe and deterministic.
+trap '' HUP INT TERM
 "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
 database_swap_started=true
 "${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U masterplan -d postgres \

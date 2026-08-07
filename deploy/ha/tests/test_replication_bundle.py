@@ -321,6 +321,32 @@ class ReplicationBundleTests(unittest.TestCase):
             source[rollback_health:cleanup_exit],
         )
 
+    def test_receiver_defers_sender_transport_signals_during_swap_and_rollback(self) -> None:
+        source = (HA_DIR / "receive_replication_bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        cleanup_start = source.index("cleanup() {")
+        cleanup_signal_guard = source.index("trap '' HUP INT TERM", cleanup_start)
+        cleanup_restore = source.index(
+            'if [ "$result" -ne 0 ] && [ "$database_swap_started" = true ]; then',
+            cleanup_signal_guard,
+        )
+        cleanup_registration = source.index("trap cleanup EXIT", cleanup_restore)
+        active_signal_guard = source.index(
+            "trap '' HUP INT TERM", cleanup_registration
+        )
+        swap_started = source.index(
+            "database_swap_started=true", active_signal_guard
+        )
+        receiver_receipt = source.index(
+            'install -m 0600 "$stage/receiver.json" "$MP_ROOT/runtime/ha-receiver.json"',
+            swap_started,
+        )
+
+        self.assertLess(cleanup_signal_guard, cleanup_restore)
+        self.assertLess(active_signal_guard, swap_started)
+        self.assertLess(swap_started, receiver_receipt)
+
     def test_replication_carries_recovery_receipt_and_publishes_dashboard_state(self) -> None:
         sender = (HA_DIR / "replicate_now.sh").read_text(encoding="utf-8")
         receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(encoding="utf-8")
