@@ -196,6 +196,7 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
   }, [load]);
 
   async function mutate(key: string, path: string, body: object = {}): Promise<boolean> {
+    if (busy && busy !== key) return false;
     setBusy(key);
     setError("");
     try {
@@ -282,14 +283,19 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
       .map((record) => record.package_id);
     const approved = new Set(item.approvals.map((approval) => approval.role));
     const buttons = [];
+    const actionState = (key: string) => ({
+      disabled: busy === key,
+      "aria-disabled": Boolean(busy) && busy !== key,
+    });
 
     if (item.state === "submitted" || item.state === "under_review") {
+      const key = `${item.request_id}-accept`;
       buttons.push(
         <Button
           key="accept"
           size="sm"
-          onClick={() => mutate(`${item.request_id}-accept`, `${prefix}/accept`)}
-          disabled={!!busy}
+          onClick={() => mutate(key, `${prefix}/accept`)}
+          {...actionState(key)}
         >
           {item.initiation_reason === "retention_schedule"
             ? "Accept scheduled erasure"
@@ -298,27 +304,34 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
       );
     }
     if (outstanding.length > 0) {
-      buttons.push(<Button key="external" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-external`, `${prefix}/resolve-outstanding-actions`, { actions: outstanding })} disabled={!!busy}>Confirm exact external actions</Button>);
+      const key = `${item.request_id}-external`;
+      buttons.push(<Button key="external" size="sm" variant="outline" onClick={() => mutate(key, `${prefix}/resolve-outstanding-actions`, { actions: outstanding })} {...actionState(key)}>Confirm exact external actions</Button>);
     }
     if (item.live_data_purged_at && item.topology === "two_node_ha" && !item.evidence.peer) {
-      buttons.push(<Button key="peer" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-peer`, `${prefix}/peer-replication`)} disabled={!!busy}>Verify the other server</Button>);
+      const key = `${item.request_id}-peer`;
+      buttons.push(<Button key="peer" size="sm" variant="outline" onClick={() => mutate(key, `${prefix}/peer-replication`)} {...actionState(key)}>Verify the other server</Button>);
     }
     if (item.live_data_purged_at && (item.topology === "single_node" || item.evidence.peer) && !item.evidence.clean_backup && !item.evidence.backup_not_applicable) {
       if (!item.clean_backup_bridge.job_id) {
-        buttons.push(<Button key="backup" size="sm" onClick={() => mutate(`${item.request_id}-backup`, `${prefix}/clean-backup-request`)} disabled={!!busy}>Create a recovery snapshot</Button>);
+        const key = `${item.request_id}-backup`;
+        buttons.push(<Button key="backup" size="sm" onClick={() => mutate(key, `${prefix}/clean-backup-request`)} {...actionState(key)}>Create a recovery snapshot</Button>);
       } else {
-        buttons.push(<Button key="check-backup" size="sm" onClick={() => mutate(`${item.request_id}-check-backup`, `${prefix}/advance`)} disabled={!!busy}>Check recovery receipt now</Button>);
+        const key = `${item.request_id}-check-backup`;
+        buttons.push(<Button key="check-backup" size="sm" onClick={() => mutate(key, `${prefix}/advance`)} {...actionState(key)}>Check recovery receipt now</Button>);
       }
       if (backups.length === 0 && (item.clean_backup_bridge.local_snapshot_count ?? 0) === 0) {
-        buttons.push(<Button key="no-backup" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-no-backup`, `${prefix}/no-controlled-backups`)} disabled={!!busy}>No recovery backups are used</Button>);
+        const key = `${item.request_id}-no-backup`;
+        buttons.push(<Button key="no-backup" size="sm" variant="outline" onClick={() => mutate(key, `${prefix}/no-controlled-backups`)} {...actionState(key)}>No recovery backups are used</Button>);
       }
     }
     if (item.evidence.clean_backup && unresolvedPackages.length > 0 && !item.evidence.backup_resolution) {
-      buttons.push(<Button key="old-backups" size="sm" variant="outline" onClick={() => mutate(`${item.request_id}-old-backups`, `${prefix}/resolve-backups`, { package_ids: unresolvedPackages })} disabled={!!busy}>Confirm old external backup copies deleted</Button>);
+      const key = `${item.request_id}-old-backups`;
+      buttons.push(<Button key="old-backups" size="sm" variant="outline" onClick={() => mutate(key, `${prefix}/resolve-backups`, { package_ids: unresolvedPackages })} {...actionState(key)}>Confirm old external backup copies deleted</Button>);
     }
     if (item.checklist.sha256 && item.clean_backup_bridge.local_snapshot_count === 1) {
       if (!approved.has("executor")) {
-        buttons.push(<Button key="completion" size="sm" onClick={() => confirmCompletion(item)} disabled={!!busy}>Confirm completion</Button>);
+        const key = `${item.request_id}-confirm-completion`;
+        buttons.push(<Button key="completion" size="sm" onClick={() => confirmCompletion(item)} {...actionState(key)}>{busy === key ? "Confirming completion…" : "Confirm completion"}</Button>);
       }
     }
     return buttons;
@@ -326,6 +339,7 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
 
   async function confirmCompletion(item: Workflow) {
     const key = `${item.request_id}-confirm-completion`;
+    if (busy && busy !== key) return;
     setBusy(key);
     setError("");
     try {

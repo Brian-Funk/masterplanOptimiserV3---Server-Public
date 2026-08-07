@@ -187,6 +187,39 @@ describe("ComplianceEvidenceTab", () => {
     expect(screen.queryByRole("button", { name: "Confirm completion" })).not.toBeInTheDocument();
   });
 
+  it("shows a busy state only on the deletion-case button that was clicked", async () => {
+    let finishMutation: ((response: Response) => void) | undefined;
+    const cases = [
+      { ...workflow, request_id: "del-one", retention: { reason_code: null, outstanding_actions: ["copy-one"] } },
+      { ...workflow, request_id: "del-two", retention: { reason_code: null, outstanding_actions: ["copy-two"] } },
+    ];
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/deletion-requests") return json(cases);
+      if (path.endsWith("/advance")) return json({ advanced: [] });
+      if (path === "/api/v1/admin/evidence/backups") return json([]);
+      if (path === "/api/v1/admin/evidence") return json({ initialised: true, mode: "local", instance_id: "instance-1", head_sha256: "a".repeat(64) });
+      if (path === "/api/v1/admin/evidence/archive") return json({ enabled: false, authentication: "Disabled", repository: null, default_branch: null, latest_local_chain_head: null, latest_bundled_chain_head: null, latest_archived_chain_head: null, pending_submission_count: 0, submission_id: null, state: null, pull_request_number: null, pull_request_head_sha: null, merge_commit_sha: null, failure_reason: null });
+      if (path === "/api/v1/admin/deletion-requests/del-one/resolve-outstanding-actions") {
+        return await new Promise<Response>((resolve) => { finishMutation = resolve; });
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+    const { ComplianceEvidenceTab } = await import("@/components/ComplianceEvidenceTab");
+    render(<ComplianceEvidenceTab events={[]} />);
+
+    const buttons = await screen.findAllByRole("button", { name: "Confirm exact external actions" });
+    fireEvent.click(buttons[0]);
+
+    await waitFor(() => expect(buttons[0]).toBeDisabled());
+    expect(buttons[1]).not.toBeDisabled();
+    expect(buttons[1]).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(buttons[1]);
+    expect(mockApiFetch.mock.calls.filter(([path]) => path.includes("resolve-outstanding-actions"))).toHaveLength(1);
+
+    finishMutation?.(json({ status: "ok" }));
+    await waitFor(() => expect(buttons[0]).not.toBeDisabled());
+  });
+
   it("surfaces automatic advancement failures and offers an explicit receipt retry", async () => {
     const advancePath = "/api/v1/admin/deletion-requests/del-example-1/advance";
     mockApiFetch.mockImplementation(async (path: string) => {
