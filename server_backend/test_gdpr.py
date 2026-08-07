@@ -128,6 +128,82 @@ def test_guided_deletion_advances_machine_steps_and_stops_for_backup_policy(db):
     assert prepared.json()["state"] == "awaiting_approvals"
 
 
+def test_ha_deletion_automatically_queues_peer_and_recovery_work(
+    db, monkeypatch,
+):
+    """One poll chains deterministic HA work without extra root buttons."""
+
+    from datetime import datetime, timezone
+    import uuid
+
+    from app.api.v1 import gdpr
+    from app.models.ha import HAProtectionOperation
+
+    root = create_test_user(
+        db, username="guided.ha.root", display_name="Guided HA Root",
+        is_root_admin=True, is_admin=True, event_id=None,
+    )
+    client = _make_client(db, root, reauth=True)
+    target = create_test_user(
+        db, username="guided.ha.target", display_name="Guided HA Target", event_id=None,
+    )
+    started = client.delete(f"/api/v1/admin/users/{target.id}/gdpr-delete")
+    assert started.status_code == 200
+    request_id = started.json()["request_id"]
+    queued = []
+
+    monkeypatch.setattr(gdpr.settings, "HA_MODE", "ha")
+
+    def create_operation(session, **values):
+        operation = HAProtectionOperation(
+            id=str(uuid.uuid4()), mutation_sequence=901, state="pending", stage="queued",
+            **values,
+        )
+        session.add(operation)
+        session.flush()
+        return operation
+
+    def accept_operation(_session, operation):
+        operation.state = "accepted"
+        operation.stage = "accepted"
+        operation.accepted_bundle_id = str(uuid.uuid4())
+        operation.accepted_bundle_sha256 = "a" * 64
+        operation.accepted_generation = 4
+        operation.accepted_at = datetime.now(timezone.utc)
+
+    def confirm_peer(_session, case, protection):
+        case.peer_confirmation_sha256 = "b" * 64
+        case.peer_confirmed_at = protection.accepted_at
+        case.peer_bundle_id = protection.bundle_id
+        case.peer_bundle_sha256 = protection.bundle_sha256
+        case.peer_generation = protection.generation
+        case.peer_accepted_at = protection.accepted_at
+        case.state = "awaiting_clean_backup"
+
+    monkeypatch.setattr(gdpr, "create_protection_operation", create_operation)
+    monkeypatch.setattr(gdpr, "queue_protection_operation", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gdpr, "sync_protection_operation", accept_operation)
+    monkeypatch.setattr(gdpr, "confirm_case_peer", confirm_peer)
+    monkeypatch.setattr(
+        gdpr, "queue_clean_backup_request",
+        lambda **values: queued.append(values),
+    )
+
+    advanced = client.post(f"/api/v1/admin/deletion-requests/{request_id}/advance", json={})
+
+    assert advanced.status_code == 200
+    assert advanced.json()["advanced"] == [
+        "live_data_purged",
+        "peer_replication_requested",
+        "peer_replication_confirmed",
+        "recovery_snapshot_requested",
+    ]
+    assert advanced.json()["state"] == "awaiting_clean_backup"
+    assert advanced.json()["evidence"]["peer"] == "b" * 64
+    assert advanced.json()["clean_backup_bridge"]["job_id"]
+    assert queued[0]["workflow_id"] == request_id
+
+
 def test_event_erasure_detail_includes_temporary_operator_label(db):
     """The root UI can identify an open event case without signing its name."""
     event, _ = create_test_event(db, name="Readable Deletion Event")

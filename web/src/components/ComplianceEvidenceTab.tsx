@@ -308,10 +308,6 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
       const key = `${item.request_id}-external`;
       buttons.push(<Button key="external" size="sm" variant="outline" onClick={() => mutate(key, `${prefix}/resolve-outstanding-actions`, { actions: outstanding })} {...actionState(key)}>Confirm exact external actions</Button>);
     }
-    if (item.live_data_purged_at && item.topology === "two_node_ha" && !item.evidence.peer) {
-      const key = `${item.request_id}-peer`;
-      buttons.push(<Button key="peer" size="sm" variant="outline" onClick={() => mutate(key, `${prefix}/peer-replication`)} {...actionState(key)}>Verify the other server</Button>);
-    }
     if (item.live_data_purged_at && (item.topology === "single_node" || item.evidence.peer) && !item.evidence.clean_backup && !item.evidence.backup_not_applicable) {
       if (!item.clean_backup_bridge.job_id) {
         const key = `${item.request_id}-backup`;
@@ -374,7 +370,7 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
     if (!desktopComplete) return "Open each listed event processor in Desktop. Desktop records controlled data removal and resolves its local copies; root cannot substitute for a processor.";
     if (item.state === "ready_for_live_purge") return "Deleting the controlled Server copy now.";
     if (item.retention.outstanding_actions.length > 0) return "Record the outcome of each named external action. Confirm only actions the controller has actually verified.";
-    if (item.live_data_purged_at && item.topology === "two_node_ha" && !item.evidence.peer) return "Verify that the deletion reached the other server.";
+    if (item.live_data_purged_at && item.topology === "two_node_ha" && !item.evidence.peer) return "Securing the deletion on the other server. This page checks the verified result automatically.";
     if (item.clean_backup_bridge.job_id && !item.evidence.clean_backup) return item.clean_backup_bridge.local_snapshot_count
       ? "Finish the recovery snapshot in mp-opt. This page will detect it automatically."
       : "Finish the recovery snapshot in mp-opt, or confirm that this deployment uses no recovery backups.";

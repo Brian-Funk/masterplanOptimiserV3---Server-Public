@@ -74,6 +74,32 @@ describe("ComplianceEvidenceTab", () => {
     await waitFor(() => expect(mockApiFetch).toHaveBeenCalledTimes(5));
   });
 
+  it("polls HA peer protection without exposing another confirmation button", async () => {
+    const haWorkflow = {
+      ...workflow,
+      state: "peer_replication_pending",
+      topology: "two_node_ha",
+      live_data_purged_at: "2026-08-07T17:26:09Z",
+    };
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/deletion-requests") return json([haWorkflow]);
+      if (path.endsWith("/advance")) return json({ ...haWorkflow, advanced: [] });
+      if (path === "/api/v1/admin/evidence/backups") return json([]);
+      if (path === "/api/v1/admin/evidence") return json({ initialised: true, mode: "local", instance_id: "instance-1", head_sha256: "a".repeat(64) });
+      if (path === "/api/v1/admin/evidence/archive") return json({ enabled: false, authentication: "Disabled", repository: null, default_branch: null, latest_local_chain_head: null, latest_bundled_chain_head: null, latest_archived_chain_head: null, pending_submission_count: 0, submission_id: null, state: null, pull_request_number: null, pull_request_head_sha: null, merge_commit_sha: null, failure_reason: null });
+      throw new Error(`Unexpected path: ${path}`);
+    });
+    const { ComplianceEvidenceTab } = await import("@/components/ComplianceEvidenceTab");
+    render(<ComplianceEvidenceTab events={[]} />);
+
+    expect(await screen.findByText(/Securing the deletion on the other server/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Verify the other server" })).not.toBeInTheDocument();
+    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledWith(
+      "/api/v1/admin/deletion-requests/del-example-1/advance",
+      { method: "POST", body: "{}" },
+    ));
+  });
+
   it("exposes but never automatically invokes root acceptance for a scheduled case", async () => {
     const scheduled = {
       ...workflow,

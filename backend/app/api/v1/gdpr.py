@@ -798,6 +798,129 @@ def confirm_deletion_has_no_controlled_backups(
     return _job_detail(job, db)
 
 
+def _advance_peer_protection(
+    db: Session, job: DeletionCase, admin: User, request: Request,
+) -> str | None:
+    """Queue or observe the exact HA privacy barrier without another click."""
+
+    if settings.HA_MODE != "ha" or job.peer_confirmation_sha256:
+        return None
+    if not job.live_purge_receipt_sha256 or not job.privacy_action_id or not job.privacy_action_sequence:
+        return None
+    assertion = {
+        "workflow_type": "deletion_case",
+        "workflow_id": job.request_id,
+        "privacy_action_id": job.privacy_action_id,
+        "privacy_action_sequence": job.privacy_action_sequence,
+        "live_purge_receipt_sha256": job.live_purge_receipt_sha256,
+    }
+    operation = (
+        db.query(HAProtectionOperation)
+        .filter(HAProtectionOperation.id == job.peer_replication_job_id)
+        .first()
+        if job.peer_replication_job_id else None
+    )
+    result: str | None = None
+    if operation is None and job.peer_replication_job_id is None:
+        try:
+            operation = create_protection_operation(
+                db,
+                idempotency_key=f"deletion-peer:{job.request_id}:{job.privacy_action_sequence}",
+                operation_type="privacy-case-purge",
+                resource_type="deletion_case",
+                resource_id=job.request_id,
+            )
+            if operation is not None:
+                job.peer_replication_job_id = operation.id
+            audit(db, user=admin, action="gdpr.peer_replication_requested",
+                  resource_type="deletion_request",
+                  detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
+            db.commit()
+            result = "peer_replication_requested"
+        except HAWritePermitError as exc:
+            db.rollback()
+            cancel_uncommitted_protection(operation)
+            raise EvidenceUnavailable("The standby protection guard is unavailable") from exc
+        except Exception:
+            db.rollback()
+            cancel_uncommitted_protection(operation)
+            raise
+        if operation is not None and not queue_protection_operation(
+            operation, privacy_assertion=assertion,
+        ):
+            operation.state = "indeterminate"
+            operation.stage = "attention_required"
+            operation.error_code = "replication_agent_unavailable"
+            db.commit()
+            raise EvidenceUnavailable(
+                "Standby protection could not be queued. The deletion remains durable and will be retried automatically."
+            )
+    elif (
+        operation is not None
+        and operation.state == "indeterminate"
+        and operation.error_code == "replication_agent_unavailable"
+    ):
+        if not queue_protection_operation(operation, privacy_assertion=assertion):
+            raise EvidenceUnavailable(
+                "Standby protection is still unavailable. The deletion remains durable and locked."
+            )
+        operation.state = "pending"
+        operation.stage = "queued"
+        operation.error_code = None
+        db.commit()
+        result = "peer_replication_requested"
+    if operation is not None:
+        sync_protection_operation(db, operation)
+        if operation.state == "accepted":
+            protection = HAProtectionResult(
+                protected=True,
+                job_id=operation.id,
+                bundle_id=operation.accepted_bundle_id,
+                bundle_sha256=operation.accepted_bundle_sha256,
+                generation=operation.accepted_generation,
+                accepted_at=operation.accepted_at,
+            )
+            confirm_case_peer(db, job, protection)
+            audit(db, user=admin, action="gdpr.peer_replication_confirmed",
+                  resource_type="deletion_request",
+                  detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
+            db.commit()
+            return "peer_replication_confirmed"
+    db.commit()
+    return result
+
+
+def _queue_clean_backup(
+    db: Session, job: DeletionCase, admin: User, request: Request,
+) -> bool:
+    """Idempotently expose one guided host recovery job for this case."""
+
+    if not job.live_data_purged_at or not job.live_purge_receipt_sha256 or not job.privacy_action_id or not job.privacy_action_sequence:
+        raise ValueError("Live data must be purged before creating a clean baseline")
+    if settings.HA_MODE == "ha" and not job.peer_confirmation_sha256:
+        raise ValueError("The peer must accept the privacy action first")
+    created = not bool(job.clean_backup_job_id)
+    job.clean_backup_job_id = job.clean_backup_job_id or str(uuid.uuid4())
+    queue_clean_backup_request(
+        job_id=job.clean_backup_job_id,
+        instance_id=job.instance_id,
+        workflow_type="deletion_case",
+        workflow_id=job.request_id,
+        event_ref=job.event_evidence_id,
+        subject_ref=(None if job.case_type == "event_erasure" else job.subject_evidence_id),
+        privacy_action_id=job.privacy_action_id,
+        privacy_action_sequence=job.privacy_action_sequence,
+        live_purge_receipt_sha256=job.live_purge_receipt_sha256,
+        live_data_purged_at=job.live_data_purged_at,
+    )
+    if created:
+        audit(db, user=admin, action="gdpr.clean_backup_requested",
+              resource_type="deletion_request",
+              detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
+    db.commit()
+    return created
+
+
 def _advance_deletion_case(db: Session, job: DeletionCase, admin: User) -> list[str]:
     """Apply deterministic machine-side transitions and return those performed."""
 
@@ -906,6 +1029,30 @@ def advance_deletion_request(
               detail=json.dumps({"deletion_request_id": job.request_id, "steps": steps}),
               request=request)
     db.commit()
+    job = _admin_deletion_job(db, request_id)
+    try:
+        peer_step = _advance_peer_protection(db, job, admin, request)
+        if peer_step:
+            steps.append(peer_step)
+        if job.peer_confirmation_sha256:
+            follow_up = _advance_deletion_case(db, job, admin)
+            if follow_up:
+                steps.extend(follow_up)
+                audit(db, user=admin, action="gdpr.advance_deletion",
+                      resource_type="deletion_request",
+                      detail=json.dumps({"deletion_request_id": job.request_id, "steps": follow_up}),
+                      request=request)
+                db.commit()
+            if (
+                settings.HA_MODE == "ha"
+                and not job.clean_backup_job_id
+                and not job.clean_backup_receipt_id
+            ):
+                if _queue_clean_backup(db, job, admin, request):
+                    steps.append("recovery_snapshot_requested")
+    except (EvidenceUnavailable, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"advanced": steps, **_job_detail(job, db)}
 
 
@@ -920,74 +1067,11 @@ def confirm_deletion_peer(
     job = _admin_deletion_job(db, request_id)
     if settings.HA_MODE != "ha":
         raise HTTPException(status_code=409, detail="Peer replication is not applicable")
-    if not job.live_purge_receipt_sha256 or not job.privacy_action_id or not job.privacy_action_sequence:
-        raise HTTPException(status_code=409, detail="Live data must be purged before peer replication")
-    assertion = {
-        "workflow_type": "deletion_case",
-        "workflow_id": job.request_id,
-        "privacy_action_id": job.privacy_action_id,
-        "privacy_action_sequence": job.privacy_action_sequence,
-        "live_purge_receipt_sha256": job.live_purge_receipt_sha256,
-    }
-    operation = (
-        db.query(HAProtectionOperation)
-        .filter(HAProtectionOperation.id == job.peer_replication_job_id)
-        .first()
-        if job.peer_replication_job_id else None
-    )
-    if operation is None and job.peer_replication_job_id is None:
-        try:
-            operation = create_protection_operation(
-                db,
-                idempotency_key=f"deletion-peer:{job.request_id}:{job.privacy_action_sequence}",
-                operation_type="privacy-case-purge",
-                resource_type="deletion_case",
-                resource_id=job.request_id,
-            )
-            if operation is not None:
-                job.peer_replication_job_id = operation.id
-            audit(db, user=admin, action="gdpr.peer_replication_requested",
-                  resource_type="deletion_request",
-                  detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
-            db.commit()
-        except HAWritePermitError as exc:
-            db.rollback()
-            cancel_uncommitted_protection(operation)
-            raise HTTPException(status_code=503, detail="The standby protection guard is unavailable") from exc
-        except Exception:
-            db.rollback()
-            cancel_uncommitted_protection(operation)
-            raise
-        if operation is not None and not queue_protection_operation(
-            operation, privacy_assertion=assertion,
-        ):
-            operation.state = "indeterminate"
-            operation.stage = "attention_required"
-            operation.error_code = "replication_agent_unavailable"
-            db.commit()
-    protection: HAProtectionResult | None = None
-    if operation is not None:
-        sync_protection_operation(db, operation)
-        if operation.state == "accepted":
-            protection = HAProtectionResult(
-                protected=True,
-                job_id=operation.id,
-                bundle_id=operation.accepted_bundle_id,
-                bundle_sha256=operation.accepted_bundle_sha256,
-                generation=operation.accepted_generation,
-                accepted_at=operation.accepted_at,
-            )
     try:
-        if protection is not None and protection.protected:
-            confirm_case_peer(db, job, protection)
+        _advance_peer_protection(db, job, admin, request)
     except (EvidenceUnavailable, ValueError) as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if job.peer_confirmation_sha256:
-        audit(db, user=admin, action="gdpr.peer_replication_confirmed",
-              resource_type="deletion_request",
-              detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
-    db.commit()
     if not job.peer_confirmation_sha256:
         response.status_code = 202
     return _job_detail(job, db)
@@ -1001,32 +1085,11 @@ def request_deletion_clean_backup(
     db: Session = Depends(get_db),
 ):
     job = _admin_deletion_job(db, request_id)
-    if not job.live_data_purged_at or not job.live_purge_receipt_sha256 or not job.privacy_action_id or not job.privacy_action_sequence:
-        raise HTTPException(status_code=409, detail="Live data must be purged before creating a clean baseline")
-    if settings.HA_MODE == "ha" and not job.peer_confirmation_sha256:
-        raise HTTPException(status_code=409, detail="The peer must accept the privacy action first")
-    job.clean_backup_job_id = job.clean_backup_job_id or str(uuid.uuid4())
     try:
-        queue_clean_backup_request(
-            job_id=job.clean_backup_job_id,
-            instance_id=job.instance_id,
-            workflow_type="deletion_case",
-            workflow_id=job.request_id,
-            event_ref=job.event_evidence_id,
-            subject_ref=(
-                None if job.case_type == "event_erasure" else job.subject_evidence_id
-            ),
-            privacy_action_id=job.privacy_action_id,
-            privacy_action_sequence=job.privacy_action_sequence,
-            live_purge_receipt_sha256=job.live_purge_receipt_sha256,
-            live_data_purged_at=job.live_data_purged_at,
-        )
+        _queue_clean_backup(db, job, admin, request)
     except (EvidenceUnavailable, ValueError) as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    audit(db, user=admin, action="gdpr.clean_backup_requested", resource_type="deletion_request",
-          detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
-    db.commit()
     return _job_detail(job, db)
 
 
