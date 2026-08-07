@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import uuid
@@ -16,6 +18,9 @@ import uuid
 
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 KEY_ID = re.compile(r"^rk-[0-9a-f]{16}$")
+SNAPSHOT_NAME = re.compile(
+    r"^[0-9]{8}T[0-9]{6}Z_(?:database|secrets|full)_[A-Za-z0-9._-]{1,64}$"
+)
 REQUEST_FIELDS = {
     "format", "job_id", "instance_id", "workflow_type", "workflow_id",
     "event_ref", "subject_ref", "privacy_action_id", "privacy_action_sequence",
@@ -25,6 +30,14 @@ PORTABLE_INVENTORY_FIELDS = {
     "format", "state", "snapshot", "snapshot_created_at", "confirmed_at",
     "package_id", "package_sha256", "package_size", "archive_sha256",
     "recovery_key_id",
+}
+JOURNAL_FIELDS = {
+    "format", "state", "resolution_id", "job_id", "selected_snapshot",
+    "selected_package_id", "live_data_purged_at", "prepared_at", "resolved_at",
+    "candidates",
+}
+JOURNAL_CANDIDATE_FIELDS = {
+    "snapshot", "receipt_sha256", "archive_sha256", "created_at", "tombstone",
 }
 
 
@@ -116,27 +129,238 @@ def snapshot_facts(receipt: dict, request: dict) -> dict:
     }
 
 
-def local_snapshot_count(root: Path, selected_receipt: Path) -> int:
-    """Count completed local snapshots without following substituted paths."""
+def snapshot_inventory(root: Path, selected_receipt: Path) -> list[dict]:
+    """Return a strictly validated inventory without following substituted paths."""
 
     if root.is_symlink() or not root.is_dir():
         raise ValueError("The local snapshot inventory is unsafe")
+    root_resolved = root.resolve()
     selected_directory = selected_receipt.parent
-    if selected_directory.is_symlink() or selected_directory.parent.resolve() != root.resolve():
+    if (
+        selected_directory.is_symlink()
+        or selected_directory.parent.resolve() != root_resolved
+        or not SNAPSHOT_NAME.fullmatch(selected_directory.name)
+    ):
         raise ValueError("The selected snapshot is outside the local inventory")
-    count = 0
-    for directory in root.iterdir():
+    inventory: list[dict] = []
+    for directory in sorted(root.iterdir(), key=lambda path: path.name):
         if directory.name.startswith("."):
             continue
-        if directory.is_symlink() or not directory.is_dir():
+        if (
+            not SNAPSHOT_NAME.fullmatch(directory.name)
+            or directory.is_symlink()
+            or not directory.is_dir()
+            or directory.parent.resolve() != root_resolved
+        ):
             raise ValueError("The local snapshot inventory contains an unsafe entry")
-        receipt = load_regular(directory / "receipt.json")
+        receipt_path = directory / "receipt.json"
+        receipt = load_regular(receipt_path)
         if receipt.get("format") != "mp-opt-snapshot-receipt-v2":
             raise ValueError("The local snapshot inventory contains an unsupported receipt")
-        count += 1
-    if not selected_directory.exists():
+        archive_sha256 = receipt.get("archive_sha256")
+        if not SHA256.fullmatch(str(archive_sha256 or "")):
+            raise ValueError("The local snapshot inventory contains an invalid archive digest")
+        inventory.append({
+            "name": directory.name,
+            "path": directory,
+            "receipt_sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+            "archive_sha256": archive_sha256,
+            "created_at": timestamp(receipt.get("created_at")),
+        })
+    if not any(item["path"] == selected_directory for item in inventory):
         raise ValueError("The selected snapshot is unavailable")
-    return count
+    if len(inventory) > 256:
+        raise ValueError("The local snapshot inventory is too large")
+    return inventory
+
+
+def fsync_directory(path: Path) -> None:
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def validate_snapshot_tree(path: Path) -> None:
+    if path.is_symlink() or not path.is_dir():
+        raise ValueError("A superseded local snapshot path is unsafe")
+    for current, directories, files in os.walk(path, followlinks=False):
+        current_path = Path(current)
+        for name in (*directories, *files):
+            if (current_path / name).is_symlink():
+                raise ValueError("A superseded local snapshot contains an unsafe link")
+
+
+def private_atomic_write(path: Path, value: dict) -> None:
+    raw = canonical(value)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        os.write(descriptor, raw)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        if not hasattr(os, "fchmod"):
+            os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        fsync_directory(path.parent)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def prepare_resolution_journal(
+    journals: Path,
+    request: dict,
+    facts: dict,
+    inventory: list[dict],
+) -> tuple[Path, dict]:
+    path = journals / f"{request['job_id']}.json"
+    candidates = [
+        {
+            "snapshot": item["name"],
+            "receipt_sha256": item["receipt_sha256"],
+            "archive_sha256": item["archive_sha256"],
+            "created_at": item["created_at"].isoformat(),
+            "tombstone": f".compliance-delete-{item['receipt_sha256']}",
+        }
+        for item in inventory
+        if item["created_at"] < timestamp(request["live_data_purged_at"])
+    ]
+    if len(candidates) > 128:
+        raise ValueError("Too many pre-deletion local snapshots require resolution")
+    resolution_id = str(uuid.uuid5(
+        uuid.UUID(request["job_id"]),
+        f"mp-opt-local-snapshot-resolution-v1:{facts['package_id']}",
+    ))
+    if path.exists():
+        journal = load_regular(path, 256 * 1024)
+        if (
+            set(journal) != JOURNAL_FIELDS
+            or journal.get("format") != "mp-opt-local-snapshot-resolution-v1"
+            or journal.get("job_id") != request["job_id"]
+            or journal.get("resolution_id") != resolution_id
+            or journal.get("selected_package_id") != facts["package_id"]
+            or journal.get("selected_snapshot") != Path(facts["selected_snapshot"]).name
+            or journal.get("live_data_purged_at") != request["live_data_purged_at"]
+            or journal.get("state") not in {"prepared", "resolved"}
+            or not isinstance(journal.get("candidates"), list)
+            or len(journal["candidates"]) > 128
+        ):
+            raise ValueError("The local snapshot resolution journal does not match this request")
+        timestamp(journal.get("prepared_at"))
+        if journal["state"] == "resolved":
+            timestamp(journal.get("resolved_at"))
+        elif journal.get("resolved_at") is not None:
+            raise ValueError("The local snapshot resolution journal state is invalid")
+        return path, journal
+    journal = {
+        "format": "mp-opt-local-snapshot-resolution-v1",
+        "state": "prepared",
+        "resolution_id": resolution_id,
+        "job_id": request["job_id"],
+        "selected_snapshot": Path(facts["selected_snapshot"]).name,
+        "selected_package_id": facts["package_id"],
+        "live_data_purged_at": request["live_data_purged_at"],
+        "prepared_at": datetime.now(timezone.utc).isoformat(),
+        "resolved_at": None,
+        "candidates": candidates,
+    }
+    private_atomic_write(path, journal)
+    return path, journal
+
+
+def resolve_local_snapshots(root: Path, journal_path: Path, journal: dict) -> dict:
+    root_resolved = root.resolve()
+    selected = root / journal["selected_snapshot"]
+    if selected.is_symlink() or not selected.is_dir() or selected.parent.resolve() != root_resolved:
+        raise ValueError("The clean replacement snapshot is unavailable")
+    for candidate in journal.get("candidates", []):
+        if not isinstance(candidate, dict) or set(candidate) != JOURNAL_CANDIDATE_FIELDS:
+            raise ValueError("The local snapshot resolution journal is invalid")
+        name = candidate.get("snapshot")
+        tombstone_name = candidate.get("tombstone")
+        if (
+            not isinstance(name, str)
+            or not SNAPSHOT_NAME.fullmatch(name)
+            or not isinstance(tombstone_name, str)
+            or tombstone_name != f".compliance-delete-{candidate.get('receipt_sha256')}"
+            or not SHA256.fullmatch(str(candidate.get("receipt_sha256", "")))
+            or not SHA256.fullmatch(str(candidate.get("archive_sha256", "")))
+        ):
+            raise ValueError("The local snapshot resolution journal is invalid")
+        created_at = timestamp(candidate.get("created_at"))
+        if created_at >= timestamp(journal["live_data_purged_at"]):
+            raise ValueError("The local snapshot resolution journal contains a clean snapshot")
+        source = root / name
+        tombstone = root / tombstone_name
+        if source == selected:
+            raise ValueError("The clean replacement snapshot cannot be superseded")
+        if source.exists():
+            validate_snapshot_tree(source)
+            receipt_path = source / "receipt.json"
+            if hashlib.sha256(receipt_path.read_bytes()).hexdigest() != candidate["receipt_sha256"]:
+                raise ValueError("A superseded local snapshot changed after resolution was prepared")
+            if tombstone.exists():
+                raise ValueError("The local snapshot deletion tombstone is unsafe")
+            os.replace(source, tombstone)
+            fsync_directory(root)
+        if tombstone.exists():
+            validate_snapshot_tree(tombstone)
+            shutil.rmtree(tombstone)
+            fsync_directory(root)
+    remaining = snapshot_inventory(root, selected / "receipt.json")
+    cutoff = timestamp(journal["live_data_purged_at"])
+    if any(item["created_at"] < cutoff for item in remaining):
+        raise ValueError("A pre-deletion local snapshot remains after automatic resolution")
+    if journal.get("state") != "resolved":
+        journal = {
+            **journal,
+            "state": "resolved",
+            "resolved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        private_atomic_write(journal_path, journal)
+    return {"journal": journal, "retained_count": len(remaining)}
+
+
+def resolution_public_facts(journal: dict, retained_count: int) -> dict:
+    if journal.get("state") != "resolved" or not journal.get("resolved_at"):
+        raise ValueError("The local snapshot resolution is incomplete")
+    timestamp(journal["resolved_at"])
+    timestamp(journal["live_data_purged_at"])
+    projection = {
+        "format": "mp-opt-local-snapshot-resolution-v1",
+        "resolution_id": journal["resolution_id"],
+        "job_id": journal["job_id"],
+        "selected_package_id": journal["selected_package_id"],
+        "live_data_purged_at": journal["live_data_purged_at"],
+        "resolved_at": journal["resolved_at"],
+        "superseded_local_snapshots": [
+            {
+                "receipt_sha256": item["receipt_sha256"],
+                "archive_sha256": item["archive_sha256"],
+                "created_at": item["created_at"],
+            }
+            for item in journal["candidates"]
+        ],
+        "retained_local_snapshot_count": retained_count,
+    }
+    return {
+        "local_resolution_id": journal["resolution_id"],
+        "local_resolution_sha256": hashlib.sha256(canonical(projection)).hexdigest(),
+        "superseded_local_snapshot_receipt_sha256s": [
+            item["receipt_sha256"] for item in journal["candidates"]
+        ],
+        "retained_local_snapshot_count": retained_count,
+    }
 
 
 def superseded_portable_packages(root: Path, selected_package_id: str, request: dict) -> list[dict]:
@@ -201,6 +425,7 @@ def atomic_write(path: Path, raw: bytes) -> None:
         if not hasattr(os, "fchmod"):
             os.chmod(temporary, 0o644)
         os.replace(temporary, path)
+        fsync_directory(path.parent)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -252,11 +477,15 @@ def sign_receipt(path: Path, instance_key: Path) -> None:
 def emit(args: argparse.Namespace) -> None:
     snapshot_path = Path(args.snapshot_receipt)
     snapshot = load_regular(snapshot_path)
-    snapshot_count = local_snapshot_count(Path(args.snapshots), snapshot_path)
+    snapshot["selected_snapshot"] = snapshot_path.parent.name
+    snapshots = Path(args.snapshots)
+    inventory = snapshot_inventory(snapshots, snapshot_path)
     requests = Path(args.requests)
     receipts = Path(args.receipts)
+    journals = Path(args.resolution_journals)
     receipts.mkdir(parents=True, exist_ok=True, mode=0o755)
     os.chmod(receipts, 0o755)
+    eligible: list[tuple[Path, dict, dict, Path, dict]] = []
     for request_path in sorted(requests.glob("*.json")) if requests.is_dir() else []:
         request = validate_request(load_regular(request_path, 16 * 1024))
         if request_path.name != f"{request['job_id']}.json":
@@ -271,13 +500,22 @@ def emit(args: argparse.Namespace) -> None:
             facts = snapshot_facts(snapshot, request)
         except ValueError:
             continue
-        if snapshot_count != 1:
-            raise ValueError(
-                "Superseded local snapshots remain. Delete every older local snapshot "
-                "before recording the clean recovery receipt"
-            )
+        facts["selected_snapshot"] = snapshot_path.parent.name
+        journal_path, journal = prepare_resolution_journal(journals, request, facts, inventory)
+        eligible.append((request_path, request, facts, journal_path, journal))
+    resolved: dict[str, dict] = {}
+    removed_receipt_sha256s: set[str] = set()
+    for _, request, _, journal_path, journal in eligible:
+        resolved[request["job_id"]] = resolve_local_snapshots(snapshots, journal_path, journal)
+        removed_receipt_sha256s.update(
+            item["receipt_sha256"]
+            for item in resolved[request["job_id"]]["journal"]["candidates"]
+        )
+    for request_path, request, facts, _, _ in eligible:
+        resolution = resolved[request["job_id"]]
+        target = receipts / f"{request['job_id']}.json"
         receipt = {
-            "format": "mp-opt-clean-backup-receipt-v3",
+            "format": "mp-opt-clean-backup-receipt-v4",
             "receipt_id": str(uuid.uuid5(uuid.UUID(request["job_id"]), facts["package_id"])),
             **{key: request[key] for key in (
                 "job_id", "instance_id", "workflow_type", "workflow_id", "event_ref",
@@ -285,11 +523,14 @@ def emit(args: argparse.Namespace) -> None:
                 "live_purge_receipt_sha256", "live_data_purged_at",
             )},
             **facts,
-            "local_snapshot_count": snapshot_count,
+            **resolution_public_facts(
+                resolution["journal"], resolution["retained_count"],
+            ),
             "superseded_portable_packages": superseded_portable_packages(
                 Path(args.portable_inventory), facts["package_id"], request,
             ),
         }
+        receipt.pop("selected_snapshot", None)
         atomic_write(target, canonical(receipt))
         try:
             sign_receipt(target, Path(args.instance_key))
@@ -298,7 +539,8 @@ def emit(args: argparse.Namespace) -> None:
             raise
         os.chmod(str(target) + ".sig", 0o644)
         request_path.unlink(missing_ok=True)
-        print(request["job_id"])
+    if eligible:
+        print(f"RESOLVED\t{len(removed_receipt_sha256s)}")
 
 
 def main() -> int:
@@ -307,6 +549,7 @@ def main() -> int:
     parser.add_argument("--receipts", required=True)
     parser.add_argument("--snapshots", required=True)
     parser.add_argument("--portable-inventory", required=True)
+    parser.add_argument("--resolution-journals", required=True)
     parser.add_argument("--snapshot-receipt", required=True)
     parser.add_argument("--instance-key", required=True)
     try:

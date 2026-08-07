@@ -20,14 +20,20 @@ from app.models.evidence import EvidenceKey
 
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 RECOVERY_KEY_ID = re.compile(r"^rk-[0-9a-f]{16}$")
-RECEIPT_FIELDS = {
+RECEIPT_COMMON_FIELDS = {
     "format", "receipt_id", "job_id", "instance_id", "workflow_type",
     "workflow_id", "event_ref", "subject_ref", "privacy_action_id",
     "privacy_action_sequence", "live_purge_receipt_sha256", "package_id",
     "live_data_purged_at",
     "package_sha256", "package_size", "archive_sha256", "recovery_key_id",
     "snapshot_created_at", "snapshot_evidence_head_sha256", "deep_verified_at",
-    "portable_confirmed_at", "local_snapshot_count", "superseded_portable_packages",
+    "portable_confirmed_at", "superseded_portable_packages",
+}
+RECEIPT_V3_FIELDS = RECEIPT_COMMON_FIELDS | {"local_snapshot_count"}
+RECEIPT_V4_FIELDS = RECEIPT_COMMON_FIELDS | {
+    "local_resolution_id", "local_resolution_sha256",
+    "superseded_local_snapshot_receipt_sha256s",
+    "retained_local_snapshot_count",
 }
 SUPERSEDED_PORTABLE_FIELDS = {
     "package_id", "package_sha256", "package_size", "archive_sha256",
@@ -191,10 +197,20 @@ def verified_clean_backup_receipt(
     except json.JSONDecodeError as exc:
         raise EvidenceUnavailable("The compliance receipt is invalid JSON") from exc
     canonical = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-    if raw != canonical or not isinstance(document, dict) or set(document) != RECEIPT_FIELDS:
+    if raw != canonical or not isinstance(document, dict):
         raise EvidenceUnavailable("The compliance receipt schema is invalid")
-    if document.get("format") != "mp-opt-clean-backup-receipt-v3":
+    receipt_format = document.get("format")
+    expected_fields = (
+        RECEIPT_V3_FIELDS
+        if receipt_format == "mp-opt-clean-backup-receipt-v3"
+        else RECEIPT_V4_FIELDS
+        if receipt_format == "mp-opt-clean-backup-receipt-v4"
+        else None
+    )
+    if expected_fields is None:
         raise EvidenceUnavailable("The compliance receipt format is invalid")
+    if set(document) != expected_fields:
+        raise EvidenceUnavailable("The compliance receipt schema is invalid")
     for field in ("receipt_id", "job_id", "instance_id", "workflow_id", "event_ref", "privacy_action_id", "package_id"):
         _uuid(document.get(field), field)
     if document.get("subject_ref") is not None:
@@ -220,8 +236,32 @@ def verified_clean_backup_receipt(
     size = document.get("package_size")
     if not isinstance(size, int) or isinstance(size, bool) or size < 1:
         raise EvidenceUnavailable("The compliance receipt package size is invalid")
-    if document.get("local_snapshot_count") != 1:
-        raise EvidenceUnavailable("Superseded local recovery snapshots remain")
+    if receipt_format == "mp-opt-clean-backup-receipt-v3":
+        if document.get("local_snapshot_count") != 1:
+            raise EvidenceUnavailable("Superseded local recovery snapshots remain")
+        document["retained_local_snapshot_count"] = document["local_snapshot_count"]
+        document["local_resolution_id"] = None
+        document["local_resolution_sha256"] = None
+        document["superseded_local_snapshot_receipt_sha256s"] = []
+    else:
+        _uuid(document.get("local_resolution_id"), "local_resolution_id")
+        if not SHA256.fullmatch(str(document.get("local_resolution_sha256", ""))):
+            raise EvidenceUnavailable("The local snapshot resolution digest is invalid")
+        retained_count = document.get("retained_local_snapshot_count")
+        if (
+            not isinstance(retained_count, int)
+            or isinstance(retained_count, bool)
+            or retained_count < 1
+        ):
+            raise EvidenceUnavailable("The retained local snapshot count is invalid")
+        local_receipts = document.get("superseded_local_snapshot_receipt_sha256s")
+        if not isinstance(local_receipts, list) or len(local_receipts) > 128:
+            raise EvidenceUnavailable("The superseded local snapshot inventory is invalid")
+        if len(set(local_receipts)) != len(local_receipts) or any(
+            not isinstance(digest, str) or not SHA256.fullmatch(digest)
+            for digest in local_receipts
+        ):
+            raise EvidenceUnavailable("The superseded local snapshot inventory is invalid")
     purged_at = _timestamp(expected["live_data_purged_at"])
     created_at = _timestamp(document.get("snapshot_created_at"))
     verified_at = _timestamp(document.get("deep_verified_at"))

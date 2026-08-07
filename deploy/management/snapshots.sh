@@ -736,7 +736,7 @@ mp_snapshot_create_interactive() {
 # Deep-verify a selected snapshot using a transient private age identity.
 mp_snapshot_verify_interactive() {
     local selected identity expected_recipient compliance_receipts="" compliance_note=""
-    local compliance_error_file compliance_error
+    local compliance_error_file compliance_error compliance_removed_count="0"
     selected="$(mp_snapshot_select "Choose a snapshot to verify")" || return 1
     expected_recipient="$(jq -r '.encryption.recipient // empty' "$selected/receipt.json" 2>/dev/null || true)"
     if [ -n "$expected_recipient" ]; then
@@ -756,7 +756,9 @@ mp_snapshot_verify_interactive() {
             }
             rm -f "$compliance_error_file"
             if [ -n "$compliance_receipts" ]; then
-                compliance_note="\n\nPending deletion recovery receipts were recorded. The web page will detect them automatically."
+                compliance_removed_count="$(awk -F '\t' '$1 == "RESOLVED" { print $2 }' <<< "$compliance_receipts" | tail -n 1)"
+                [[ "$compliance_removed_count" =~ ^[0-9]+$ ]] || compliance_removed_count="0"
+                compliance_note="\n\nPending deletion recovery receipts were recorded. ${compliance_removed_count} pre-deletion local snapshot(s) were removed automatically. External workstation copies remain separately accountable. The web page will detect the receipts automatically."
             elif find "$MP_ROOT/runtime/compliance-requests" -maxdepth 1 -type f -name '*.json' -print -quit 2>/dev/null | grep -q .; then
                 compliance_note="\n\nA deletion workflow is still waiting. Export this verified snapshot to the workstation and confirm its SHA-256; MP-OPT will then record the recovery receipt."
             fi

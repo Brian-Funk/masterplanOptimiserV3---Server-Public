@@ -15,6 +15,7 @@ mp_compliance_emit_backup_receipts() {
         --receipts "$MP_ROOT/runtime/compliance-receipts" \
         --snapshots "$MP_SNAPSHOTS" \
         --portable-inventory "$MP_PORTABLE_EXPORT_INVENTORY" \
+        --resolution-journals "$MP_STATE/compliance-resolutions" \
         --snapshot-receipt "$selected/receipt.json" \
         --instance-key "$MP_ROOT/secrets/evidence_signing_key"
 }
@@ -25,8 +26,8 @@ mp_compliance_error_message() {
     local error_file="$1" diagnostic
     diagnostic="$(head -c 512 "$error_file" 2>/dev/null || true)"
     case "$diagnostic" in
-        "Superseded local snapshots remain."*)
-            printf '%s\n' "Older local snapshots remain. Keep the newly verified replacement snapshot, delete every older local snapshot, then retry Deep verify."
+        "A pre-deletion local snapshot remains"*|"A superseded local snapshot"*|"The local snapshot resolution"*)
+            printf '%s\n' "The verified replacement remains valid, but automatic removal of pre-deletion VPS snapshots did not finish safely. Retry Deep verify to resume the protected resolution journal."
             ;;
         "Compliance receipt signing failed"*)
             printf '%s\n' "The instance evidence key could not sign the recovery receipt. Check the protected evidence-key configuration, then retry Deep verify."
@@ -319,7 +320,7 @@ mp_portable_mark_export_required() {
 
 mp_snapshot_export_portable_interactive() {
     local selected style transfer host local_path ticket directory output result report package_id package_hash package_size
-    local compliance_receipts="" compliance_note="" compliance_error_file compliance_error
+    local compliance_receipts="" compliance_note="" compliance_error_file compliance_error compliance_removed_count="0"
     mp_require_commands python3 jq sha256sum || return 1
     mp_portable_initialise || return 1
     selected="$(mp_snapshot_select "Choose a v2 snapshot to export")" || return 1
@@ -378,7 +379,9 @@ mp_snapshot_export_portable_interactive() {
             }
             rm -f "$compliance_error_file"
             if [ -n "$compliance_receipts" ]; then
-                compliance_note="\n\nPending deletion recovery receipts were recorded. The web page will detect them automatically."
+                compliance_removed_count="$(awk -F '\t' '$1 == "RESOLVED" { print $2 }' <<< "$compliance_receipts" | tail -n 1)"
+                [[ "$compliance_removed_count" =~ ^[0-9]+$ ]] || compliance_removed_count="0"
+                compliance_note="\n\nPending deletion recovery receipts were recorded. ${compliance_removed_count} pre-deletion local snapshot(s) were removed automatically. External workstation copies remain separately accountable. The web page will detect the receipts automatically."
             elif find "$MP_ROOT/runtime/compliance-requests" -maxdepth 1 -type f -name '*.json' -print -quit 2>/dev/null | grep -q .; then
                 compliance_note="\n\nA deletion workflow is still waiting. Deep-verify this snapshot now; MP-OPT will then record the recovery receipt."
             fi

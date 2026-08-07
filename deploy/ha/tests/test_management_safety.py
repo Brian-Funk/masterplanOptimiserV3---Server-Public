@@ -95,16 +95,19 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
         self.assertIn('mp_compliance_emit_backup_receipts "$selected"', verify)
         self.assertIn("mp_compliance_error_message", verify)
         self.assertIn("Pending deletion recovery receipts were recorded", verify)
+        self.assertIn("pre-deletion local snapshot(s) were removed automatically", verify)
         self.assertIn("Export this verified snapshot", verify)
         self.assertIn('mp_compliance_emit_backup_receipts "$selected"', export)
         self.assertIn("mp_compliance_error_message", export)
         self.assertNotIn('mp_compliance_emit_backup_receipts "$selected" || true', export)
+        self.assertIn("pre-deletion local snapshot(s) were removed automatically", export)
         self.assertIn("Deep-verify this snapshot now", export)
 
     def test_compliance_inventory_failure_is_actionable(self) -> None:
         mapper = function_body(PORTABLE_SOURCE, "mp_compliance_error_message")
-        self.assertIn("Superseded local snapshots remain", mapper)
-        self.assertIn("delete every older local snapshot", mapper)
+        self.assertIn("pre-deletion local snapshot", mapper)
+        self.assertIn("automatic removal", mapper)
+        self.assertIn("Retry Deep verify", mapper)
         self.assertNotIn("private", mapper.lower())
 
     def test_portable_exports_are_durably_inventoried_for_deletion_cases(self) -> None:
@@ -114,6 +117,7 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
         self.assertIn('"$MP_PORTABLE_EXPORT_INVENTORY/${package_id}.json"', record)
         self.assertIn('mp-opt-portable-export-inventory-v1', record)
         self.assertIn('--portable-inventory "$MP_PORTABLE_EXPORT_INVENTORY"', bridge)
+        self.assertIn('--resolution-journals "$MP_STATE/compliance-resolutions"', bridge)
 
     def test_backend_secret_contract_is_group_readable_without_broadening_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -13,6 +14,13 @@ import pytest
 from app.core import compliance_receipts
 from app.core.evidence import EvidenceUnavailable, public_key_id
 from app.models.evidence import EvidenceKey
+
+
+HOST_TOOL_PATH = Path("deploy/management/compliance_receipts.py")
+HOST_TOOL_SPEC = importlib.util.spec_from_file_location("host_compliance_receipts", HOST_TOOL_PATH)
+assert HOST_TOOL_SPEC and HOST_TOOL_SPEC.loader
+host_compliance_receipts = importlib.util.module_from_spec(HOST_TOOL_SPEC)
+HOST_TOOL_SPEC.loader.exec_module(host_compliance_receipts)
 
 
 def test_missing_host_receipt_is_reported_as_pending(db, monkeypatch, tmp_path):
@@ -65,12 +73,36 @@ def test_pending_clean_backup_request_can_be_cancelled_before_a_receipt(monkeypa
         compliance_receipts.cancel_pending_clean_backup_request(job_id=job_id)
 
 
+def test_host_inventory_rejects_substituted_snapshot_paths(tmp_path):
+    snapshots = tmp_path / "snapshots"
+    selected = snapshots / "20260807T084531Z_full_selected"
+    outside = tmp_path / "outside"
+    selected.mkdir(parents=True)
+    outside.mkdir()
+    receipt = {
+        "format": "mp-opt-snapshot-receipt-v2",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "archive_sha256": "a" * 64,
+    }
+    selected_receipt = selected / "receipt.json"
+    selected_receipt.write_text(json.dumps(receipt), encoding="utf-8")
+    substituted = snapshots / "20260807T081311Z_full_substituted"
+    try:
+        substituted.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("Directory symlinks are unavailable on this test host")
+
+    with pytest.raises(ValueError, match="unsafe entry"):
+        host_compliance_receipts.snapshot_inventory(snapshots, selected_receipt)
+
+
 def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_path):
     requests = tmp_path / "requests"
     receipts = tmp_path / "receipts"
     snapshots = tmp_path / "snapshots"
-    selected = snapshots / "selected"
+    selected = snapshots / "20260807T084531Z_full_selected"
     portable_inventory = tmp_path / "portable-inventory"
+    resolution_journals = tmp_path / "resolution-journals"
     requests.mkdir()
     receipts.mkdir()
     selected.mkdir(parents=True)
@@ -79,8 +111,10 @@ def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_p
     monkeypatch.setattr(compliance_receipts.settings, "COMPLIANCE_RECEIPT_DIR", str(receipts))
 
     ids = {name: str(uuid.uuid4()) for name in (
-        "job_id", "instance_id", "workflow_id", "event_ref", "subject_ref",
-        "privacy_action_id", "package_id", "old_package_id",
+        "job_id", "job_id_2", "job_id_3", "instance_id", "workflow_id",
+        "workflow_id_2", "workflow_id_3", "event_ref", "subject_ref",
+        "privacy_action_id", "privacy_action_id_2", "privacy_action_id_3",
+        "package_id", "old_package_id",
     )}
     key = tmp_path / "instance-key"
     subprocess.run(
@@ -115,9 +149,22 @@ def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_p
         live_purge_receipt_sha256=purge_digest,
         live_data_purged_at=purged_at,
     )
+    compliance_receipts.queue_clean_backup_request(
+        job_id=ids["job_id_2"],
+        instance_id=ids["instance_id"],
+        workflow_type="deletion_case",
+        workflow_id=ids["workflow_id_2"],
+        event_ref=ids["event_ref"],
+        subject_ref=None,
+        privacy_action_id=ids["privacy_action_id_2"],
+        privacy_action_sequence=8,
+        live_purge_receipt_sha256="f" * 64,
+        live_data_purged_at=purged_at + timedelta(seconds=30),
+    )
     snapshot_receipt = {
         "format": "mp-opt-snapshot-receipt-v2",
         "type": "full",
+        "archive_sha256": "d" * 64,
         "created_at": created_at.isoformat(),
         "verification": "deep-verified",
         "verified_at": verified_at.isoformat(),
@@ -134,6 +181,18 @@ def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_p
     }
     snapshot_path = selected / "receipt.json"
     snapshot_path.write_text(json.dumps(snapshot_receipt), encoding="utf-8")
+    compliance_receipts.queue_clean_backup_request(
+        job_id=ids["job_id_3"],
+        instance_id=ids["instance_id"],
+        workflow_type="deletion_case",
+        workflow_id=ids["workflow_id_3"],
+        event_ref=ids["event_ref"],
+        subject_ref=None,
+        privacy_action_id=ids["privacy_action_id_3"],
+        privacy_action_sequence=9,
+        live_purge_receipt_sha256="9" * 64,
+        live_data_purged_at=created_at + timedelta(seconds=30),
+    )
     old_created_at = purged_at - timedelta(days=1)
     old_confirmed_at = old_created_at + timedelta(minutes=1)
     (portable_inventory / f"{ids['old_package_id']}.json").write_text(json.dumps({
@@ -148,28 +207,60 @@ def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_p
         "archive_sha256": "2" * 64,
         "recovery_key_id": "rk-" + "3" * 16,
     }), encoding="utf-8")
-    stale = snapshots / "stale"
+    stale = snapshots / "20260807T081311Z_full_stale"
     stale.mkdir()
-    (stale / "receipt.json").write_text(json.dumps(snapshot_receipt), encoding="utf-8")
-    blocked = subprocess.run(
+    stale_receipt = {
+        **snapshot_receipt,
+        "created_at": old_created_at.isoformat(),
+        "verified_at": old_confirmed_at.isoformat(),
+        "archive_sha256": "4" * 64,
+    }
+    stale_receipt_path = stale / "receipt.json"
+    stale_receipt_path.write_text(json.dumps(stale_receipt), encoding="utf-8")
+    stale_receipt_sha256 = hashlib.sha256(stale_receipt_path.read_bytes()).hexdigest()
+    later = snapshots / "20260807T084700Z_database_scheduled"
+    later.mkdir()
+    later_receipt = {
+        **snapshot_receipt,
+        "type": "database",
+        "created_at": (created_at + timedelta(minutes=2)).isoformat(),
+        "verified_at": (verified_at + timedelta(minutes=2)).isoformat(),
+        "archive_sha256": "5" * 64,
+    }
+    (later / "receipt.json").write_text(json.dumps(later_receipt), encoding="utf-8")
+    invalid_key = tmp_path / "invalid-key"
+    invalid_key.write_text("not a signing key", encoding="utf-8")
+    invalid_key.chmod(0o640)
+    interrupted = subprocess.run(
         [
             sys.executable, "deploy/management/compliance_receipts.py",
             "--requests", str(requests),
             "--receipts", str(receipts),
             "--snapshots", str(snapshots),
             "--portable-inventory", str(portable_inventory),
+            "--resolution-journals", str(resolution_journals),
             "--snapshot-receipt", str(snapshot_path),
-            "--instance-key", str(key),
+            "--instance-key", str(invalid_key),
         ],
         check=False,
         capture_output=True,
         text=True,
     )
-    assert blocked.returncode == 1
-    assert "Superseded local snapshots remain" in blocked.stderr
+    assert interrupted.returncode == 1
+    assert "Compliance receipt signing failed" in interrupted.stderr
     assert (requests / f"{ids['job_id']}.json").exists()
-    (stale / "receipt.json").unlink()
-    stale.rmdir()
+    assert (requests / f"{ids['job_id_2']}.json").exists()
+    assert not stale.exists()
+    assert selected.exists()
+    assert later.exists()
+    journal = json.loads((resolution_journals / f"{ids['job_id']}.json").read_text())
+    assert journal["state"] == "resolved"
+    assert journal["candidates"][0]["receipt_sha256"] == stale_receipt_sha256
+    second_journal = json.loads(
+        (resolution_journals / f"{ids['job_id_2']}.json").read_text()
+    )
+    assert second_journal["state"] == "resolved"
+    assert second_journal["candidates"][0]["receipt_sha256"] == stale_receipt_sha256
     subprocess.run(
         [
             sys.executable, "deploy/management/compliance_receipts.py",
@@ -177,14 +268,31 @@ def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_p
             "--receipts", str(receipts),
             "--snapshots", str(snapshots),
             "--portable-inventory", str(portable_inventory),
+            "--resolution-journals", str(resolution_journals),
             "--snapshot-receipt", str(snapshot_path),
             "--instance-key", str(key),
         ],
         check=True,
     )
     assert not (requests / f"{ids['job_id']}.json").exists()
+    assert not (requests / f"{ids['job_id_2']}.json").exists()
+    assert (requests / f"{ids['job_id_3']}.json").exists()
+    assert not (resolution_journals / f"{ids['job_id_3']}.json").exists()
+    assert not (receipts / f"{ids['job_id_3']}.json").exists()
     host_receipt = json.loads((receipts / f"{ids['job_id']}.json").read_text())
-    assert host_receipt["local_snapshot_count"] == 1
+    assert host_receipt["format"] == "mp-opt-clean-backup-receipt-v4"
+    assert host_receipt["retained_local_snapshot_count"] == 2
+    assert host_receipt["superseded_local_snapshot_receipt_sha256s"] == [
+        stale_receipt_sha256
+    ]
+    assert len(host_receipt["local_resolution_sha256"]) == 64
+    second_host_receipt = json.loads(
+        (receipts / f"{ids['job_id_2']}.json").read_text()
+    )
+    assert second_host_receipt["retained_local_snapshot_count"] == 2
+    assert second_host_receipt["superseded_local_snapshot_receipt_sha256s"] == [
+        stale_receipt_sha256
+    ]
     assert [item["package_id"] for item in host_receipt["superseded_portable_packages"]] == [
         ids["old_package_id"]
     ]
@@ -206,6 +314,32 @@ def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_p
     )
     assert verified["package_id"] == ids["package_id"]
     assert len(verified["receipt_sha256"]) == 64
+
+    legacy_job_id = str(uuid.uuid4())
+    legacy_receipt = {
+        field: value
+        for field, value in host_receipt.items()
+        if field not in {
+            "local_resolution_id", "local_resolution_sha256",
+            "superseded_local_snapshot_receipt_sha256s",
+            "retained_local_snapshot_count",
+        }
+    }
+    legacy_receipt.update({
+        "format": "mp-opt-clean-backup-receipt-v3",
+        "job_id": legacy_job_id,
+        "receipt_id": str(uuid.uuid5(uuid.UUID(legacy_job_id), ids["package_id"])),
+        "local_snapshot_count": 1,
+    })
+    legacy_path = receipts / f"{legacy_job_id}.json"
+    legacy_path.write_bytes(host_compliance_receipts.canonical(legacy_receipt))
+    host_compliance_receipts.sign_receipt(legacy_path, key)
+    legacy_expected = {**expected, "job_id": legacy_job_id}
+    legacy_verified = compliance_receipts.verified_clean_backup_receipt(
+        db, job_id=legacy_job_id, expected=legacy_expected,
+    )
+    assert legacy_verified["retained_local_snapshot_count"] == 1
+    assert legacy_verified["local_resolution_sha256"] is None
 
     receipt_path = receipts / f"{ids['job_id']}.json"
     receipt_path.write_bytes(receipt_path.read_bytes().replace(b'"package_size":1234', b'"package_size":1235'))
