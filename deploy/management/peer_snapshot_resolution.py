@@ -40,6 +40,10 @@ NODE_ID = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 REQUEST_FORMAT = "mp-opt-peer-snapshot-resolution-request-v1"
 RECEIPT_FORMAT = "mp-opt-peer-snapshot-resolution-v1"
 MAX_HA_CONTROL_BYTES = 256 * 1024
+HA_COMPOSE_ENV_KEYS = {
+    "HA_NODE_ID", "HA_PEER_NODE_ID", "HA_CLUSTER_ID", "HA_GENERATION",
+    "HA_WITNESS_URL", "HA_RECOVERY_STORAGE_MODE",
+}
 REQUEST_FIELDS = {
     "format", "source_node_id", "target_node_id", "clean_receipt", "clean_signature",
 }
@@ -141,7 +145,7 @@ def _validate_clean_receipt(value: object) -> dict:
     return dict(value)
 
 
-def _assert_peer_database(root: Path, receipt: dict) -> None:
+def _assert_peer_database(root: Path, receipt: dict, cfg: dict[str, str]) -> None:
     compose = ["docker", "compose", "--env-file", ".env"]
     if (root / ".release.env").is_file():
         compose.extend(["--env-file", ".release.env"])
@@ -163,9 +167,18 @@ def _assert_peer_database(root: Path, receipt: dict) -> None:
         ":'action_sequence'::integer AND c.live_purge_receipt_sha256=:'purge_digest' "
         "AND c.live_data_purged_at IS NOT NULL AND p.local_applied_at IS NOT NULL);\n"
     )
+    compose_environment = os.environ.copy()
+    for key in HA_COMPOSE_ENV_KEYS:
+        value = cfg.get(key)
+        if value:
+            compose_environment[key] = value
+    if any(not compose_environment.get(key) for key in (
+        "HA_NODE_ID", "HA_PEER_NODE_ID", "HA_CLUSTER_ID", "HA_WITNESS_URL",
+    )):
+        raise ValueError("The peer HA configuration is incomplete")
     result = subprocess.run(
         compose, cwd=root, input=sql, text=True, check=False,
-        capture_output=True, timeout=30,
+        capture_output=True, timeout=30, env=compose_environment,
     )
     if result.returncode != 0 or result.stdout.strip() != "t":
         raise ValueError("The peer database does not prove the privacy action")
@@ -293,7 +306,7 @@ def receive(args: argparse.Namespace) -> None:
     receipt = _validate_clean_receipt(request.get("clean_receipt"))
     clean_raw = canonical(receipt)
     _verify_signature(clean_raw, str(request.get("clean_signature", "")), Path(args.instance_public_key))
-    _assert_peer_database(Path(args.root), receipt)
+    _assert_peer_database(Path(args.root), receipt, cfg)
     snapshots = Path(args.snapshots)
     inventory = snapshot_inventory(snapshots, None)
     clean_receipt_sha256 = hashlib.sha256(clean_raw).hexdigest()

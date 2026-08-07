@@ -473,3 +473,34 @@ def test_peer_resolution_accepts_bounded_long_running_ha_control(tmp_path):
 
     assert control["holder_node_id"] == "node-a"
     assert control_path.stat().st_size > 16 * 1024
+
+
+def test_peer_database_proof_uses_protected_ha_compose_environment(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["environment"] = kwargs["env"]
+        return subprocess.CompletedProcess(command, 0, stdout="t\n", stderr="")
+
+    monkeypatch.setattr(host_peer_snapshot_resolution.subprocess, "run", fake_run)
+    receipt = {
+        "workflow_id": str(uuid.uuid4()),
+        "privacy_action_id": str(uuid.uuid4()),
+        "privacy_action_sequence": 4,
+        "live_purge_receipt_sha256": "a" * 64,
+    }
+    config = {
+        "HA_NODE_ID": "node-a",
+        "HA_PEER_NODE_ID": "node-b",
+        "HA_CLUSTER_ID": str(uuid.uuid4()),
+        "HA_GENERATION": "8",
+        "HA_WITNESS_URL": "https://witness.example.test",
+        "HA_RECOVERY_STORAGE_MODE": "manual_portable",
+    }
+
+    host_peer_snapshot_resolution._assert_peer_database(tmp_path, receipt, config)
+
+    assert captured["environment"]["HA_NODE_ID"] == "node-a"
+    assert captured["environment"]["HA_WITNESS_URL"] == "https://witness.example.test"
+    assert "infra/docker-compose.ha.yml" in captured["command"]
