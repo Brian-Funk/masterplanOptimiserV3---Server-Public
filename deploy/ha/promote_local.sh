@@ -67,8 +67,12 @@ registered_root="$("${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 \
     2>/dev/null || true)"
 if [ "$registered_root" = "t" ]; then
     : > "$MP_ROOT/secrets/root_bootstrap_token"
-    chmod 600 "$MP_ROOT/secrets/root_bootstrap_token"
 fi
+
+# Truncating the retired bootstrap token preserves the inode but can follow a
+# replicated restore that staged secrets as owner-only files. Re-apply the
+# complete backend secret contract before recreating the unprivileged service.
+mp_prepare_backend_secret_permissions
 
 "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend >/dev/null
 for _ in $(seq 1 30); do

@@ -119,6 +119,15 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
         ):
             self.assertIn(field, ADMIN_UI)
 
+    def test_promotion_reapplies_backend_secret_permissions_after_bootstrap_retirement(self) -> None:
+        retire = ': > "$MP_ROOT/secrets/root_bootstrap_token"'
+        prepare = "mp_prepare_backend_secret_permissions"
+        restart = '"${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend'
+        self.assertIn(retire, PROMOTE)
+        self.assertNotIn('chmod 600 "$MP_ROOT/secrets/root_bootstrap_token"', PROMOTE)
+        self.assertLess(PROMOTE.index(retire), PROMOTE.index(prepare))
+        self.assertLess(PROMOTE.index(prepare), PROMOTE.index(restart))
+
     def test_logout_is_single_flight_visible_and_does_not_change_admin_tabs(self) -> None:
         self.assertIn("logoutPromise = useRef<Promise<boolean> | null>(null)", AUTH_CONTEXT)
         self.assertIn("if (logoutPromise.current) return logoutPromise.current", AUTH_CONTEXT)
