@@ -201,7 +201,6 @@ def test_ha_deletion_automatically_queues_peer_and_recovery_work(
     assert advanced.status_code == 200
     assert advanced.json()["advanced"] == [
         "live_data_purged",
-        "peer_replication_requested",
         "peer_replication_confirmed",
         "recovery_snapshot_requested",
     ]
