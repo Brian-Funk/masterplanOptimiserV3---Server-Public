@@ -78,6 +78,11 @@ class TestDeploymentPlannerTests(unittest.TestCase):
             SUPERVISOR,
         )
         self.assertIn('components="${component_token//,/ }"', SUPERVISOR)
+        self.assertIn('component_token="${component_token// /,}"', peer_activate)
+        self.assertIn(
+            "historical single, space-delimited argument",
+            peer_activate,
+        )
         self.assertIn(
             '"$target" "$component_token" "$fresh_commissioning"',
             peer_activate,

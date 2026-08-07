@@ -558,9 +558,19 @@ internal_finalize_peer() {
 
 internal_activate() {
     local target="$1" component_token="$2" fresh_commissioning="${3:-false}" plan setup_state temporary previous components
-    [[ "$component_token" =~ ^(backend|frontend|caddy|database|tools|operations|witness)(,(backend|frontend|caddy|database|tools|operations|witness))*$ ]] \
-        || { ui_error "The peer component set is invalid."; return 1; }
-    components="${component_token//,/ }"
+    if [[ "$component_token" =~ ^(backend|frontend|caddy|database|tools|operations|witness)(,(backend|frontend|caddy|database|tools|operations|witness))*$ ]]; then
+        components="${component_token//,/ }"
+    elif [[ "$component_token" =~ ^(backend|frontend|caddy|database|tools|operations|witness)(\ (backend|frontend|caddy|database|tools|operations|witness))*$ ]]; then
+        # The previously installed supervisor can re-enter this exact target
+        # with its historical single, space-delimited argument. Accept only
+        # the bounded component vocabulary, then normalize it immediately so
+        # every subsequent hop uses the unambiguous comma-delimited contract.
+        components="$component_token"
+        component_token="${component_token// /,}"
+    else
+        ui_error "The peer component set is invalid."
+        return 1
+    fi
     require_test_policy
     [ "$fresh_commissioning" != true ] || require_fresh_commissioning_database "$target"
     mp_lock
