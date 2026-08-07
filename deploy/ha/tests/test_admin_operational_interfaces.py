@@ -121,7 +121,7 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
 
     def test_promotion_reapplies_backend_secret_permissions_after_bootstrap_retirement(self) -> None:
         retire = ': > "$MP_ROOT/secrets/root_bootstrap_token"'
-        prepare = "mp_prepare_backend_secret_permissions"
+        prepare = 'chmod 0640 "$MP_ROOT/secrets/root_bootstrap_token"'
         restart = '"${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend'
         self.assertIn(retire, PROMOTE)
         self.assertNotIn('chmod 600 "$MP_ROOT/secrets/root_bootstrap_token"', PROMOTE)
