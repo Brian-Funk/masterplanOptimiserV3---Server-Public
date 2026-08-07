@@ -93,11 +93,19 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
         verify = function_body(SNAPSHOT_SOURCE, "mp_snapshot_verify_interactive")
         export = function_body(PORTABLE_SOURCE, "mp_snapshot_export_portable_interactive")
         self.assertIn('mp_compliance_emit_backup_receipts "$selected"', verify)
+        self.assertIn("mp_compliance_error_message", verify)
         self.assertIn("Pending deletion recovery receipts were recorded", verify)
         self.assertIn("Export this verified snapshot", verify)
         self.assertIn('mp_compliance_emit_backup_receipts "$selected"', export)
+        self.assertIn("mp_compliance_error_message", export)
         self.assertNotIn('mp_compliance_emit_backup_receipts "$selected" || true', export)
         self.assertIn("Deep-verify this snapshot now", export)
+
+    def test_compliance_inventory_failure_is_actionable(self) -> None:
+        mapper = function_body(PORTABLE_SOURCE, "mp_compliance_error_message")
+        self.assertIn("Superseded local snapshots remain", mapper)
+        self.assertIn("delete every older local snapshot", mapper)
+        self.assertNotIn("private", mapper.lower())
 
     def test_portable_exports_are_durably_inventoried_for_deletion_cases(self) -> None:
         record = function_body(PORTABLE_SOURCE, "mp_portable_record_confirmed_export")

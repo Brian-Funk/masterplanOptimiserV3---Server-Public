@@ -736,6 +736,7 @@ mp_snapshot_create_interactive() {
 # Deep-verify a selected snapshot using a transient private age identity.
 mp_snapshot_verify_interactive() {
     local selected identity expected_recipient compliance_receipts="" compliance_note=""
+    local compliance_error_file compliance_error
     selected="$(mp_snapshot_select "Choose a snapshot to verify")" || return 1
     expected_recipient="$(jq -r '.encryption.recipient // empty' "$selected/receipt.json" 2>/dev/null || true)"
     if [ -n "$expected_recipient" ]; then
@@ -746,10 +747,14 @@ mp_snapshot_verify_interactive() {
     if mp_snapshot_verify_path "$selected" "$identity"; then
         mp_remove_identity_file "$identity"
         if declare -F mp_compliance_emit_backup_receipts >/dev/null; then
-            compliance_receipts="$(mp_compliance_emit_backup_receipts "$selected")" || {
-                ui_error "The snapshot was verified, but pending deletion recovery receipts could not be recorded. The verified snapshot was retained; retry Deep verify after checking the evidence-signing configuration."
+            compliance_error_file="$(mktemp "$MP_STATE/compliance-error.XXXXXX")" || return 1
+            compliance_receipts="$(mp_compliance_emit_backup_receipts "$selected" 2>"$compliance_error_file")" || {
+                compliance_error="$(mp_compliance_error_message "$compliance_error_file")"
+                rm -f "$compliance_error_file"
+                ui_error "The snapshot was verified, but pending deletion recovery receipts could not be recorded. The verified snapshot was retained.\n\n${compliance_error}"
                 return 1
             }
+            rm -f "$compliance_error_file"
             if [ -n "$compliance_receipts" ]; then
                 compliance_note="\n\nPending deletion recovery receipts were recorded. The web page will detect them automatically."
             elif find "$MP_ROOT/runtime/compliance-requests" -maxdepth 1 -type f -name '*.json' -print -quit 2>/dev/null | grep -q .; then

@@ -19,6 +19,24 @@ mp_compliance_emit_backup_receipts() {
         --instance-key "$MP_ROOT/secrets/evidence_signing_key"
 }
 
+# Convert bounded receipt-emitter diagnostics into an actionable operator
+# message without displaying raw paths or cryptographic material.
+mp_compliance_error_message() {
+    local error_file="$1" diagnostic
+    diagnostic="$(head -c 512 "$error_file" 2>/dev/null || true)"
+    case "$diagnostic" in
+        "Superseded local snapshots remain."*)
+            printf '%s\n' "Older local snapshots remain. Keep the newly verified replacement snapshot, delete every older local snapshot, then retry Deep verify."
+            ;;
+        "Compliance receipt signing failed"*)
+            printf '%s\n' "The instance evidence key could not sign the recovery receipt. Check the protected evidence-key configuration, then retry Deep verify."
+            ;;
+        *)
+            printf '%s\n' "The pending deletion recovery receipt could not be validated. Review the snapshot inventory and evidence configuration, then retry Deep verify."
+            ;;
+    esac
+}
+
 mp_portable_initialise() {
     mkdir -p "$MP_PORTABLE_EXPORTS" "$MP_PORTABLE_IMPORTS" "$MP_PORTABLE_EXPORT_INVENTORY" || return 1
     chmod 700 "$MP_PORTABLE_EXPORTS" "$MP_PORTABLE_IMPORTS" "$MP_PORTABLE_EXPORT_INVENTORY" || return 1
@@ -301,7 +319,7 @@ mp_portable_mark_export_required() {
 
 mp_snapshot_export_portable_interactive() {
     local selected style transfer host local_path ticket directory output result report package_id package_hash package_size
-    local compliance_receipts="" compliance_note=""
+    local compliance_receipts="" compliance_note="" compliance_error_file compliance_error
     mp_require_commands python3 jq sha256sum || return 1
     mp_portable_initialise || return 1
     selected="$(mp_snapshot_select "Choose a v2 snapshot to export")" || return 1
@@ -351,10 +369,14 @@ mp_snapshot_export_portable_interactive() {
             return 1
         fi
         if declare -F mp_compliance_emit_backup_receipts >/dev/null; then
-            compliance_receipts="$(mp_compliance_emit_backup_receipts "$selected")" || {
-                ui_error "The workstation export was verified, but pending deletion recovery receipts could not be recorded. The export remains valid; retry Deep verify after checking the evidence-signing configuration."
+            compliance_error_file="$(mktemp "$MP_STATE/compliance-error.XXXXXX")" || return 1
+            compliance_receipts="$(mp_compliance_emit_backup_receipts "$selected" 2>"$compliance_error_file")" || {
+                compliance_error="$(mp_compliance_error_message "$compliance_error_file")"
+                rm -f "$compliance_error_file"
+                ui_error "The workstation export was verified, but pending deletion recovery receipts could not be recorded. The export remains valid.\n\n${compliance_error}"
                 return 1
             }
+            rm -f "$compliance_error_file"
             if [ -n "$compliance_receipts" ]; then
                 compliance_note="\n\nPending deletion recovery receipts were recorded. The web page will detect them automatically."
             elif find "$MP_ROOT/runtime/compliance-requests" -maxdepth 1 -type f -name '*.json' -print -quit 2>/dev/null | grep -q .; then
