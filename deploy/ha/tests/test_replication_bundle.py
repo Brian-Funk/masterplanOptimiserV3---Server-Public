@@ -345,6 +345,16 @@ class ReplicationBundleTests(unittest.TestCase):
         self.assertLess(database_ready, first_drop)
         self.assertIn("The replication peer database did not become ready.", receiver)
 
+    def test_receiver_expands_bound_marker_values_from_psql_stdin(self) -> None:
+        receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertGreaterEqual(receiver.count("printf '%s\\n'"), 4)
+        self.assertIn("id=:'operation_id'", receiver)
+        self.assertIn("request_id=:'workflow_id'", receiver)
+        self.assertNotIn('-c "SELECT EXISTS (SELECT 1 FROM ha_protection_operations', receiver)
+        self.assertNotIn('-c "UPDATE ha_protection_operations', receiver)
+
     def test_fresh_receiver_prepares_evidence_parent_and_preserves_service_state(self) -> None:
         receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(
             encoding="utf-8"

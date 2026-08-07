@@ -252,11 +252,12 @@ while [ "$operation_index" -lt "$operation_count" ]; do
     operation_type="$(jq -r '.marker.operation_type' <<< "$operation")"
     resource_type="$(jq -r '.marker.resource_type' <<< "$operation")"
     resource_id="$(jq -r '.marker.resource_id // ""' <<< "$operation")"
-    operation_verified="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d "$stage_db" -At \
-        --set=operation_id="$operation_id" --set=mutation_sequence="$operation_sequence" \
-        --set=operation_type="$operation_type" --set=resource_type="$resource_type" \
-        --set=resource_id="$resource_id" -c \
-        "SELECT EXISTS (SELECT 1 FROM ha_protection_operations WHERE id=:'operation_id' AND mutation_sequence=:'mutation_sequence'::bigint AND operation_type=:'operation_type' AND resource_type=:'resource_type' AND COALESCE(resource_id,'')=:'resource_id' AND state IN ('pending','indeterminate'))")"
+    operation_verified="$(printf '%s\n' \
+        "SELECT EXISTS (SELECT 1 FROM ha_protection_operations WHERE id=:'operation_id' AND mutation_sequence=:'mutation_sequence'::bigint AND operation_type=:'operation_type' AND resource_type=:'resource_type' AND COALESCE(resource_id,'')=:'resource_id' AND state IN ('pending','indeterminate'));" \
+        | "${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d "$stage_db" -At \
+            --set=operation_id="$operation_id" --set=mutation_sequence="$operation_sequence" \
+            --set=operation_type="$operation_type" --set=resource_type="$resource_type" \
+            --set=resource_id="$resource_id")"
     [ "$operation_verified" = "t" ] \
         || { echo "The staged database does not contain a requested protection marker." >&2; exit 1; }
 
@@ -266,18 +267,20 @@ while [ "$operation_index" -lt "$operation_count" ]; do
         privacy_action_id="$(jq -r '.privacy_assertion.privacy_action_id' <<< "$operation")"
         privacy_sequence="$(jq -r '.privacy_assertion.privacy_action_sequence' <<< "$operation")"
         privacy_purge_digest="$(jq -r '.privacy_assertion.live_purge_receipt_sha256' <<< "$operation")"
-        privacy_verified="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d "$stage_db" -At \
-            --set=workflow_id="$privacy_workflow_id" --set=action_id="$privacy_action_id" \
-            --set=action_sequence="$privacy_sequence" --set=purge_digest="$privacy_purge_digest" \
-            -c "SELECT EXISTS (SELECT 1 FROM deletion_cases c JOIN privacy_action_receipts p ON p.privacy_action_id=c.privacy_action_id WHERE c.request_id=:'workflow_id' AND c.privacy_action_id=:'action_id' AND c.privacy_action_sequence=:'action_sequence'::integer AND c.live_purge_receipt_sha256=:'purge_digest' AND c.live_data_purged_at IS NOT NULL AND p.sequence=:'action_sequence'::integer AND p.local_applied_at IS NOT NULL)")"
+        privacy_verified="$(printf '%s\n' \
+            "SELECT EXISTS (SELECT 1 FROM deletion_cases c JOIN privacy_action_receipts p ON p.privacy_action_id=c.privacy_action_id WHERE c.request_id=:'workflow_id' AND c.privacy_action_id=:'action_id' AND c.privacy_action_sequence=:'action_sequence'::integer AND c.live_purge_receipt_sha256=:'purge_digest' AND c.live_data_purged_at IS NOT NULL AND p.sequence=:'action_sequence'::integer AND p.local_applied_at IS NOT NULL);" \
+            | "${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d "$stage_db" -At \
+                --set=workflow_id="$privacy_workflow_id" --set=action_id="$privacy_action_id" \
+                --set=action_sequence="$privacy_sequence" --set=purge_digest="$privacy_purge_digest")"
         [ "$privacy_verified" = "t" ] \
             || { echo "The staged database does not prove the requested privacy action." >&2; exit 1; }
     fi
-    "${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U masterplan -d "$stage_db" \
-        --set=operation_id="$operation_id" --set=bundle_id="$bundle_id" \
-        --set=bundle_sha256="$expected_hash" --set=generation="$manifest_generation" \
-        -c "UPDATE ha_protection_operations SET state='accepted', stage='accepted', accepted_bundle_id=:'bundle_id', accepted_bundle_sha256=:'bundle_sha256', accepted_generation=:'generation'::bigint, accepted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP, error_code=NULL WHERE id=:'operation_id'" \
-        >/dev/null
+    printf '%s\n' \
+        "UPDATE ha_protection_operations SET state='accepted', stage='accepted', accepted_bundle_id=:'bundle_id', accepted_bundle_sha256=:'bundle_sha256', accepted_generation=:'generation'::bigint, accepted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP, error_code=NULL WHERE id=:'operation_id';" \
+        | "${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U masterplan -d "$stage_db" \
+            --set=operation_id="$operation_id" --set=bundle_id="$bundle_id" \
+            --set=bundle_sha256="$expected_hash" --set=generation="$manifest_generation" \
+            >/dev/null
     operation_index="$((operation_index + 1))"
 done
 
@@ -292,10 +295,11 @@ if [ -n "$privacy_workflow" ]; then
     privacy_purge_digest="$(jq -r '.privacy_assertion.live_purge_receipt_sha256' <<< "$manifest")"
     [ "$privacy_workflow" = "deletion_case" ] \
         || { echo "The privacy assertion workflow is not current." >&2; exit 1; }
-    privacy_verified="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d "$stage_db" -At \
-        --set=workflow_id="$privacy_workflow_id" --set=action_id="$privacy_action_id" \
-        --set=action_sequence="$privacy_sequence" --set=purge_digest="$privacy_purge_digest" \
-        -c "SELECT EXISTS (SELECT 1 FROM deletion_cases c JOIN privacy_action_receipts p ON p.privacy_action_id=c.privacy_action_id WHERE c.request_id=:'workflow_id' AND c.privacy_action_id=:'action_id' AND c.privacy_action_sequence=:'action_sequence'::integer AND c.live_purge_receipt_sha256=:'purge_digest' AND c.live_data_purged_at IS NOT NULL AND p.sequence=:'action_sequence'::integer AND p.local_applied_at IS NOT NULL)")"
+    privacy_verified="$(printf '%s\n' \
+        "SELECT EXISTS (SELECT 1 FROM deletion_cases c JOIN privacy_action_receipts p ON p.privacy_action_id=c.privacy_action_id WHERE c.request_id=:'workflow_id' AND c.privacy_action_id=:'action_id' AND c.privacy_action_sequence=:'action_sequence'::integer AND c.live_purge_receipt_sha256=:'purge_digest' AND c.live_data_purged_at IS NOT NULL AND p.sequence=:'action_sequence'::integer AND p.local_applied_at IS NOT NULL);" \
+        | "${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d "$stage_db" -At \
+            --set=workflow_id="$privacy_workflow_id" --set=action_id="$privacy_action_id" \
+            --set=action_sequence="$privacy_sequence" --set=purge_digest="$privacy_purge_digest")"
     [ "$privacy_verified" = "t" ] \
         || { echo "The staged database does not prove the requested privacy action." >&2; exit 1; }
 fi

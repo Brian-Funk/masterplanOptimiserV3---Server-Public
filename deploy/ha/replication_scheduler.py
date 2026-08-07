@@ -125,9 +125,9 @@ def accept_source_operation(
             f"--set=operation_id={marker['operation_id']}",
             f"--set=mutation_sequence={int(marker['mutation_sequence'])}",
             f"--set=bundle_id={bundle_id}", f"--set=bundle_sha256={bundle_sha256}",
-            f"--set=generation={int(generation)}", "-c", sql,
+            f"--set=generation={int(generation)}",
         ], cwd=ROOT, check=False, capture_output=True, text=True, timeout=30,
-        env={**os.environ, **cfg},
+        env={**os.environ, **cfg}, input=sql + "\n",
     )
     return result.returncode == 0
 

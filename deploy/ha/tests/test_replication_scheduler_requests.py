@@ -165,6 +165,29 @@ class ReplicationSchedulerRequestTests(unittest.TestCase):
             },
         )
 
+    def test_source_acceptance_sends_psql_variables_through_stdin(self) -> None:
+        marker = {
+            "operation_id": "72a24e65-6f20-45bd-bf87-338f5fcf8f93",
+            "mutation_sequence": 7,
+        }
+        completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with (
+            patch.object(scheduler, "compose_command", return_value=["docker", "compose"]),
+            patch.object(scheduler.subprocess, "run", return_value=completed) as run,
+        ):
+            self.assertTrue(scheduler.accept_source_operation(
+                marker,
+                bundle_id="bundle-1",
+                bundle_sha256="b" * 64,
+                generation=4,
+                cfg={},
+            ))
+        command = run.call_args.args[0]
+        self.assertNotIn("-c", command)
+        self.assertIn("--set=operation_id=72a24e65-6f20-45bd-bf87-338f5fcf8f93", command)
+        self.assertIn("id=:'operation_id'", run.call_args.kwargs["input"])
+        self.assertEqual(run.call_args.kwargs["text"], True)
+
     def test_multiple_critical_requests_are_batched_and_accepted_together(self) -> None:
         scheduler.REQUESTS.mkdir()
         operation_ids = [
