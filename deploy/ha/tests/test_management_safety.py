@@ -88,6 +88,54 @@ class TerminalExitSafetyTests(unittest.TestCase):
         self.assertIn("clear 2>/dev/null || true", clear_terminal)
 
 
+class HASelftestSourceSafetyTests(unittest.TestCase):
+    def test_unsigned_selftests_require_the_clean_active_exact_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            installation = root / "installation"
+            state = root / "state"
+            source = home / ".local/share/mp-opt-test-deploy/source"
+            tests = source / "deploy/ha/tests"
+            tests.mkdir(parents=True)
+            installation.mkdir()
+            (state / "test-deployments").mkdir(parents=True)
+            (tests / "sentinel.txt").write_text("exact\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(source), "init", "-q"], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(source), "commit", "-qm", "exact"], check=True)
+            commit = subprocess.check_output(
+                ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+            ).strip()
+            (installation / ".test-deployment.env").write_text(
+                f"MP_TEST_COMMIT={commit}\n", encoding="utf-8"
+            )
+            (state / "test-deployments/current.json").write_text(
+                json.dumps({"current_commit": commit}), encoding="utf-8"
+            )
+            policy = root / "deployment-policy"
+            policy.write_text("test\n", encoding="utf-8")
+            helper = function_body(HA_SOURCE, "mp_ha_selftest_root")
+            script = f"""
+                set -e
+                export HOME={shlex.quote(str(home))}
+                MP_ROOT={shlex.quote(str(installation))}
+                MP_STATE={shlex.quote(str(state))}
+                MP_DEPLOYMENT_POLICY_FILE={shlex.quote(str(policy))}
+                ui_error() {{ printf '%s\\n' "$*" >&2; }}
+                {helper}
+                [ "$(mp_ha_selftest_root)" = {shlex.quote(str(source))} ]
+                printf 'dirty\\n' >> {shlex.quote(str(tests / 'sentinel.txt'))}
+                ! mp_ha_selftest_root >/dev/null 2>&1
+            """
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class SnapshotServiceSafetyTests(unittest.TestCase):
     def test_deep_verify_retries_pending_deletion_recovery_receipts(self) -> None:
         verify = function_body(SNAPSHOT_SOURCE, "mp_snapshot_verify_interactive")

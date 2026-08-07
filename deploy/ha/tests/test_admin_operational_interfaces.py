@@ -313,6 +313,17 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
         self.assertIn("cachedMode", CALENDAR_UI)
         self.assertIn("<ServiceStatusBanner", CALENDAR_UI)
 
+    def test_tui_selftests_use_the_authoritative_exact_unsigned_source(self) -> None:
+        self.assertIn("mp_ha_selftest_root()", HA_MANAGEMENT)
+        self.assertIn("$HOME/.local/share/mp-opt-test-deploy/source", HA_MANAGEMENT)
+        self.assertIn("$MP_STATE/test-deployments/current.json", HA_MANAGEMENT)
+        self.assertIn("MP_TEST_COMMIT", HA_MANAGEMENT)
+        self.assertIn('git -C "$test_root" rev-parse HEAD', HA_MANAGEMENT)
+        self.assertIn('[ "$receipt_commit" = "$expected_commit" ]', HA_MANAGEMENT)
+        self.assertIn('[ "$source_commit" = "$expected_commit" ]', HA_MANAGEMENT)
+        self.assertIn('[ -z "$source_dirty" ]', HA_MANAGEMENT)
+        self.assertIn('cd "$MP_HA_SELFTEST_ROOT"', HA_MANAGEMENT)
+
 
 if __name__ == "__main__":
     unittest.main()
