@@ -39,6 +39,7 @@ validate_snapshot_tree = _COMPLIANCE.validate_snapshot_tree
 NODE_ID = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 REQUEST_FORMAT = "mp-opt-peer-snapshot-resolution-request-v1"
 RECEIPT_FORMAT = "mp-opt-peer-snapshot-resolution-v1"
+MAX_HA_CONTROL_BYTES = 256 * 1024
 REQUEST_FIELDS = {
     "format", "source_node_id", "target_node_id", "clean_receipt", "clean_signature",
 }
@@ -283,7 +284,10 @@ def receive(args: argparse.Namespace) -> None:
         or cfg.get("HA_PEER_NODE_ID") != source_node_id
     ):
         raise ValueError("The peer resolution request does not match this HA node")
-    control = load_regular(Path(args.control), 16 * 1024)
+    # Witness control includes bounded operational history and can legitimately
+    # exceed 16 KiB during an extended HA campaign. Keep a strict limit aligned
+    # with long-running witness state instead of rejecting a healthy pair.
+    control = load_regular(Path(args.control), MAX_HA_CONTROL_BYTES)
     if control.get("holder_node_id") != source_node_id:
         raise ValueError("The peer resolution sender is not the current writer")
     receipt = _validate_clean_receipt(request.get("clean_receipt"))

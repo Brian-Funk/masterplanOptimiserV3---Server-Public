@@ -458,3 +458,18 @@ def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_p
         compliance_receipts.verified_clean_backup_receipt(
             db, job_id=ids["job_id"], expected=expected,
         )
+
+
+def test_peer_resolution_accepts_bounded_long_running_ha_control(tmp_path):
+    control_path = tmp_path / "ha-control.json"
+    control_path.write_text(
+        json.dumps({"holder_node_id": "node-a", "history": ["x" * 1024] * 20}),
+        encoding="utf-8",
+    )
+
+    control = host_peer_snapshot_resolution.load_regular(
+        control_path, host_peer_snapshot_resolution.MAX_HA_CONTROL_BYTES,
+    )
+
+    assert control["holder_node_id"] == "node-a"
+    assert control_path.stat().st_size > 16 * 1024
