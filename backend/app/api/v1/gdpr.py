@@ -24,6 +24,7 @@ from app.core.compliance_receipts import (
     cancel_pending_clean_backup_request,
     queue_clean_backup_request,
     verified_clean_backup_receipt,
+    verified_peer_snapshot_resolution_receipt,
 )
 from app.core.deletion_workflow import (
     accept_event_request,
@@ -247,6 +248,11 @@ def _job_detail(job: DeletionCase, db: Session | None = None) -> dict:
                 else "pending" if job.clean_backup_job_id
                 else None
             ),
+            "peer_resolution_status": (
+                "verified" if job.peer_backup_resolution_sha256
+                else "pending" if settings.HA_MODE == "ha" and job.clean_backup_job_id
+                else None
+            ),
         },
         "evidence": {
             "request": job.request_manifest_sha256,
@@ -257,6 +263,7 @@ def _job_detail(job: DeletionCase, db: Session | None = None) -> dict:
             "live_purge": job.live_purge_receipt_sha256,
             "peer": job.peer_confirmation_sha256,
             "clean_backup": job.replacement_package_sha256,
+            "peer_backup_resolution": job.peer_backup_resolution_sha256,
             "backup_not_applicable": job.backup_not_applicable_sha256,
             "backup_resolution": job.backup_resolution_sha256,
             "executor_approval": job.executor_approval_sha256,
@@ -770,6 +777,11 @@ def confirm_deletion_has_no_controlled_backups(
 
     if not admin.is_root_admin:
         raise HTTPException(status_code=403, detail="Root admin access required")
+    if settings.HA_MODE == "ha":
+        raise HTTPException(
+            status_code=409,
+            detail="Two-node HA requires a clean replacement snapshot so both nodes can prove local snapshot resolution.",
+        )
     job = _admin_deletion_job(db, request_id)
     try:
         if job.clean_backup_job_id:
@@ -838,7 +850,19 @@ def _advance_deletion_case(db: Session, job: DeletionCase, admin: User) -> list[
             if "not available yet" not in str(exc):
                 raise
         else:
-            confirm_case_clean_backup(db, job, receipt=receipt)
+            peer_receipt = None
+            if settings.HA_MODE == "ha":
+                peer_receipt = verified_peer_snapshot_resolution_receipt(
+                    db,
+                    job_id=job.clean_backup_job_id,
+                    expected={
+                        **expected,
+                        "clean_receipt_sha256": receipt["receipt_sha256"],
+                        "replacement_package_id": receipt["package_id"],
+                        "replacement_package_sha256": receipt["package_sha256"],
+                    },
+                )
+            confirm_case_clean_backup(db, job, receipt=receipt, peer_receipt=peer_receipt)
             steps.append("recovery_snapshot_verified")
 
     if (
@@ -1036,7 +1060,19 @@ def apply_deletion_clean_backup_receipt(
         receipt = verified_clean_backup_receipt(
             db, job_id=job.clean_backup_job_id, expected=expected,
         )
-        confirm_case_clean_backup(db, job, receipt=receipt)
+        peer_receipt = None
+        if settings.HA_MODE == "ha":
+            peer_receipt = verified_peer_snapshot_resolution_receipt(
+                db,
+                job_id=job.clean_backup_job_id,
+                expected={
+                    **expected,
+                    "clean_receipt_sha256": receipt["receipt_sha256"],
+                    "replacement_package_id": receipt["package_id"],
+                    "replacement_package_sha256": receipt["package_sha256"],
+                },
+            )
+        confirm_case_clean_backup(db, job, receipt=receipt, peer_receipt=peer_receipt)
     except (EvidenceUnavailable, ValueError) as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc

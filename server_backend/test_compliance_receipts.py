@@ -21,6 +21,11 @@ HOST_TOOL_SPEC = importlib.util.spec_from_file_location("host_compliance_receipt
 assert HOST_TOOL_SPEC and HOST_TOOL_SPEC.loader
 host_compliance_receipts = importlib.util.module_from_spec(HOST_TOOL_SPEC)
 HOST_TOOL_SPEC.loader.exec_module(host_compliance_receipts)
+PEER_TOOL_PATH = Path("deploy/management/peer_snapshot_resolution.py")
+PEER_TOOL_SPEC = importlib.util.spec_from_file_location("host_peer_snapshot_resolution", PEER_TOOL_PATH)
+assert PEER_TOOL_SPEC and PEER_TOOL_SPEC.loader
+host_peer_snapshot_resolution = importlib.util.module_from_spec(PEER_TOOL_SPEC)
+PEER_TOOL_SPEC.loader.exec_module(host_peer_snapshot_resolution)
 
 
 def test_missing_host_receipt_is_reported_as_pending(db, monkeypatch, tmp_path):
@@ -94,6 +99,112 @@ def test_host_inventory_rejects_substituted_snapshot_paths(tmp_path):
 
     with pytest.raises(ValueError, match="unsafe entry"):
         host_compliance_receipts.snapshot_inventory(snapshots, selected_receipt)
+
+
+def test_peer_resolution_removes_only_pre_purge_snapshots(tmp_path):
+    snapshots = tmp_path / "snapshots"
+    journals = tmp_path / "journals"
+    snapshots.mkdir()
+    purged_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    receipt = {
+        "job_id": str(uuid.uuid4()),
+        "package_id": str(uuid.uuid4()),
+        "live_data_purged_at": purged_at.isoformat(),
+    }
+    hashes = {}
+    for name, created_at, archive in (
+        ("20260807T081311Z_full_old", purged_at - timedelta(minutes=1), "1" * 64),
+        ("20260807T084700Z_full_new", purged_at + timedelta(minutes=1), "2" * 64),
+    ):
+        directory = snapshots / name
+        directory.mkdir()
+        receipt_path = directory / "receipt.json"
+        receipt_path.write_text(json.dumps({
+            "format": "mp-opt-snapshot-receipt-v2",
+            "created_at": created_at.isoformat(),
+            "archive_sha256": archive,
+        }), encoding="utf-8")
+        hashes[name] = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+    inventory = host_compliance_receipts.snapshot_inventory(snapshots, None)
+    clean_sha = "3" * 64
+    journal_path = journals / f"{receipt['job_id']}.json"
+    journal = host_peer_snapshot_resolution._prepare_journal(
+        journal_path, receipt, "node-b", "node-a", inventory, clean_sha,
+    )
+    resolved, retained = host_peer_snapshot_resolution._resolve(
+        snapshots, journal_path, journal,
+    )
+    assert resolved["state"] == "resolved"
+    assert retained == 1
+    assert not (snapshots / "20260807T081311Z_full_old").exists()
+    assert (snapshots / "20260807T084700Z_full_new").is_dir()
+    assert resolved["candidates"][0]["receipt_sha256"] == hashes["20260807T081311Z_full_old"]
+
+
+def test_backend_verifies_peer_snapshot_resolution_receipt(db, monkeypatch, tmp_path):
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    monkeypatch.setattr(compliance_receipts.settings, "COMPLIANCE_RECEIPT_DIR", str(receipts))
+    monkeypatch.setattr(compliance_receipts.settings, "HA_NODE_ID", "node-b")
+    monkeypatch.setattr(compliance_receipts.settings, "HA_PEER_NODE_ID", "node-a")
+    ids = {name: str(uuid.uuid4()) for name in (
+        "resolution_id", "job_id", "instance_id", "workflow_id", "event_ref",
+        "privacy_action_id", "package_id",
+    )}
+    key = tmp_path / "instance-key"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+    public = " ".join((tmp_path / "instance-key.pub").read_text().split()[:2])
+    db.add(EvidenceKey(
+        key_id=public_key_id(public), public_key=public,
+        public_key_sha256=hashlib.sha256(public.encode("ascii")).hexdigest(),
+        instance_id=ids["instance_id"], role="instance",
+    ))
+    db.commit()
+    now = datetime.now(timezone.utc)
+    document = {
+        "format": "mp-opt-peer-snapshot-resolution-v1",
+        "resolution_id": ids["resolution_id"],
+        "job_id": ids["job_id"],
+        "instance_id": ids["instance_id"],
+        "workflow_type": "deletion_case",
+        "workflow_id": ids["workflow_id"],
+        "event_ref": ids["event_ref"],
+        "subject_ref": None,
+        "privacy_action_id": ids["privacy_action_id"],
+        "privacy_action_sequence": 3,
+        "live_purge_receipt_sha256": "4" * 64,
+        "live_data_purged_at": (now - timedelta(minutes=2)).isoformat(),
+        "clean_receipt_sha256": "5" * 64,
+        "replacement_package_id": ids["package_id"],
+        "replacement_package_sha256": "6" * 64,
+        "source_node_id": "node-b",
+        "target_node_id": "node-a",
+        "resolved_at": now.isoformat(),
+        "superseded_local_snapshot_receipt_sha256s": ["7" * 64],
+        "retained_local_snapshot_count": 0,
+        "resolution_sha256": "8" * 64,
+    }
+    target = receipts / f"{ids['job_id']}.peer.json"
+    target.write_bytes(host_compliance_receipts.canonical(document))
+    host_compliance_receipts.sign_receipt(target, key)
+    expected = {
+        key: document[key] for key in (
+            "job_id", "instance_id", "workflow_type", "workflow_id", "event_ref",
+            "subject_ref", "privacy_action_id", "privacy_action_sequence",
+            "live_purge_receipt_sha256", "live_data_purged_at", "clean_receipt_sha256",
+            "replacement_package_id", "replacement_package_sha256",
+        )
+    }
+    verified = compliance_receipts.verified_peer_snapshot_resolution_receipt(
+        db, job_id=ids["job_id"], expected=expected,
+    )
+    assert verified["receipt_sha256"] == hashlib.sha256(target.read_bytes()).hexdigest()
+    document["target_node_id"] = "node-c"
+    target.write_bytes(host_compliance_receipts.canonical(document))
+    with pytest.raises(EvidenceUnavailable, match="signature is invalid"):
+        compliance_receipts.verified_peer_snapshot_resolution_receipt(
+            db, job_id=ids["job_id"], expected=expected,
+        )
 
 
 def test_host_receipt_is_signed_scoped_and_tamper_evident(db, monkeypatch, tmp_path):

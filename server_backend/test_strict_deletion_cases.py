@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 from pathlib import Path
+import uuid
 
 import pytest
 from pydantic import ValidationError
@@ -316,6 +317,64 @@ def test_later_clean_snapshots_do_not_reblock_a_verified_case(db, monkeypatch, t
 
     assert "local_snapshot_resolution" not in deletion_cases.checklist_prerequisites(case, db)
     assert deletion_cases.build_checklist(case, db)["version"] == 3
+
+
+def test_ha_checklist_requires_peer_snapshot_resolution(db, monkeypatch, tmp_path):
+    event, _ = create_test_event(db)
+    case = _case(db, event, case_type="event_erasure")
+    deletion_cases.ensure_case_scope(db, case, event=event, subject_ref=None)
+    case.desktop_deletion_required = False
+    case.live_purge_receipt_sha256 = "b" * 64
+    case.peer_confirmation_sha256 = "c" * 64
+    case.replacement_package_sha256 = "d" * 64
+    case.outstanding_actions_json = "[]"
+    monkeypatch.setattr(deletion_cases.settings, "HA_MODE", "ha")
+    _set_snapshot_count(monkeypatch, tmp_path, 2)
+
+    assert "peer_snapshot_resolution_receipt" in deletion_cases.checklist_prerequisites(case, db)
+    case.peer_backup_resolution_sha256 = "e" * 64
+    assert "peer_snapshot_resolution_receipt" not in deletion_cases.checklist_prerequisites(case, db)
+    checklist = deletion_cases.build_checklist(case, db)
+    assert checklist["receipts"]["peer_snapshot_resolution_sha256"] == "e" * 64
+
+
+def test_completed_ha_case_can_append_peer_resolution_remediation(db, monkeypatch, tmp_path):
+    event, _ = create_test_event(db)
+    case = _case(db, event, case_type="event_erasure")
+    deletion_cases.ensure_case_scope(db, case, event=event, subject_ref=None)
+    case.desktop_deletion_required = False
+    case.live_purge_receipt_sha256 = "b" * 64
+    case.peer_confirmation_sha256 = "c" * 64
+    case.replacement_package_id = str(uuid.uuid4())
+    case.replacement_package_sha256 = "d" * 64
+    case.clean_backup_receipt_id = str(uuid.uuid4())
+    case.clean_backup_job_id = str(uuid.uuid4())
+    case.outstanding_actions_json = "[]"
+    _set_snapshot_count(monkeypatch, tmp_path, 1)
+    deletion_cases.build_checklist(case, db)
+    deletion_cases.record_checklist_approval(
+        db, case, role="executor", user_id=None, credential_sha256="e" * 64,
+    )
+    deletion_cases.complete_case(case, db)
+    original_final = case.final_receipt_sha256
+    monkeypatch.setattr(deletion_workflow.settings, "HA_MODE", "ha")
+    peer = {
+        "resolution_id": str(uuid.uuid4()),
+        "receipt_sha256": "f" * 64,
+        "resolved_at": datetime.now(timezone.utc).isoformat(),
+        "resolution_sha256": "1" * 64,
+        "target_node_id": "node-a",
+        "retained_local_snapshot_count": 0,
+        "superseded_local_snapshot_receipt_sha256s": ["2" * 64],
+    }
+    assert deletion_workflow.reconcile_completed_case_peer_snapshot(
+        db, case, peer_receipt=peer,
+    ) == "f" * 64
+    assert case.final_receipt_sha256 == original_final
+    assert case.peer_backup_resolution_sha256 == "f" * 64
+    assert deletion_workflow.reconcile_completed_case_peer_snapshot(
+        db, case, peer_receipt=peer,
+    ) == "f" * 64
 
 
 def test_checklist_is_content_bound_and_requires_all_approvals(db, monkeypatch, tmp_path):

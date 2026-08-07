@@ -609,6 +609,11 @@ def checklist_prerequisites(case: DeletionCase, db: Session) -> list[str]:
         missing.append("live_purge_receipt")
     if settings.HA_MODE == "ha" and not case.peer_confirmation_sha256:
         missing.append("peer_replication_receipt")
+    if (
+        settings.HA_MODE == "ha" and case.replacement_package_sha256
+        and not case.peer_backup_resolution_sha256
+    ):
+        missing.append("peer_snapshot_resolution_receipt")
     if not (case.replacement_package_sha256 or case.backup_not_applicable_sha256):
         missing.append("clean_backup_receipt")
     if not _backup_inventory_resolved(db):
@@ -648,6 +653,7 @@ def build_checklist(case: DeletionCase, db: Session) -> dict[str, Any]:
             "live_purge_receipt_sha256": case.live_purge_receipt_sha256,
             "peer_confirmation_sha256": case.peer_confirmation_sha256,
             "clean_backup_sha256": case.replacement_package_sha256,
+            "peer_snapshot_resolution_sha256": case.peer_backup_resolution_sha256,
             "backup_not_applicable_sha256": case.backup_not_applicable_sha256,
         },
         "desktop_deletion_required": bool(case.desktop_deletion_required),
@@ -796,6 +802,7 @@ def complete_case(case: DeletionCase, db: Session) -> str:
             "live_purge_receipt_sha256": case.live_purge_receipt_sha256,
             "peer_confirmation_sha256": case.peer_confirmation_sha256,
             "clean_backup_sha256": case.replacement_package_sha256,
+            "peer_snapshot_resolution_sha256": case.peer_backup_resolution_sha256,
             "backup_not_applicable_sha256": case.backup_not_applicable_sha256,
         },
         "desktop_deletion_required": bool(case.desktop_deletion_required),

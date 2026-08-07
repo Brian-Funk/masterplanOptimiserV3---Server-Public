@@ -521,11 +521,14 @@ def confirm_case_clean_backup(
     job: DeletionCase,
     *,
     receipt: dict,
+    peer_receipt: dict | None = None,
 ) -> None:
     if job.live_data_purged_at is None:
         raise ValueError("Live data must be purged before creating a clean replacement backup")
     if settings.HA_MODE == "ha" and job.peer_confirmed_at is None:
         raise ValueError("The peer must confirm the privacy action before the clean backup")
+    if settings.HA_MODE == "ha" and peer_receipt is None:
+        raise ValueError("The standby snapshot resolution receipt is required")
     package_id = receipt["package_id"]
     package_sha256 = receipt["package_sha256"]
     record_superseded_portable_backups(
@@ -544,6 +547,10 @@ def confirm_case_clean_backup(
     job.replacement_package_id = package_id
     job.replacement_package_sha256 = package_sha256
     job.clean_backup_receipt_id = receipt["receipt_id"]
+    if settings.HA_MODE == "ha":
+        job.peer_backup_resolution_id = peer_receipt["resolution_id"]
+        job.peer_backup_resolution_sha256 = peer_receipt["receipt_sha256"]
+        job.peer_backup_resolved_at = datetime.fromisoformat(peer_receipt["resolved_at"])
     evidence_payload = {
         "case_id": job.request_id,
         "event_ref": job.event_evidence_id,
@@ -568,6 +575,17 @@ def confirm_case_clean_backup(
         })
     else:
         evidence_payload["local_snapshot_count"] = receipt["local_snapshot_count"]
+    if peer_receipt is not None:
+        evidence_payload.update({
+            "peer_snapshot_resolution_id": peer_receipt["resolution_id"],
+            "peer_snapshot_resolution_sha256": peer_receipt["receipt_sha256"],
+            "peer_resolution_digest": peer_receipt["resolution_sha256"],
+            "peer_node_id": peer_receipt["target_node_id"],
+            "peer_retained_local_snapshot_count": peer_receipt["retained_local_snapshot_count"],
+            "peer_superseded_local_snapshot_receipt_sha256s": peer_receipt[
+                "superseded_local_snapshot_receipt_sha256s"
+            ],
+        })
     if job.case_type != "event_erasure":
         evidence_payload["subject_ref"] = job.subject_evidence_id
     append_record(
@@ -579,6 +597,51 @@ def confirm_case_clean_backup(
         payload=evidence_payload,
     )
     job.state = "awaiting_backup_resolution"
+
+
+def reconcile_completed_case_peer_snapshot(
+    db: Session,
+    job: DeletionCase,
+    *,
+    peer_receipt: dict,
+) -> str:
+    """Append a transparent remediation for a case closed before peer resolution existed."""
+
+    if settings.HA_MODE != "ha":
+        raise ValueError("Peer snapshot reconciliation is not applicable")
+    if job.state != "complete" or not job.final_receipt_sha256:
+        raise ValueError("Only a completed HA deletion case can be reconciled")
+    if not job.replacement_package_sha256 or not job.clean_backup_receipt_id:
+        raise ValueError("The completed case has no verified clean replacement snapshot")
+    if job.peer_backup_resolution_sha256:
+        return job.peer_backup_resolution_sha256
+    job.peer_backup_resolution_id = peer_receipt["resolution_id"]
+    job.peer_backup_resolution_sha256 = peer_receipt["receipt_sha256"]
+    job.peer_backup_resolved_at = datetime.fromisoformat(peer_receipt["resolved_at"])
+    append_record(
+        db,
+        workflow_type="deletion_case",
+        workflow_id=job.request_id,
+        operation_type="peer_snapshot_resolution_remediated",
+        record_type="deletion.peer_snapshot_resolution_remediated",
+        payload={
+            "case_id": job.request_id,
+            "event_ref": job.event_evidence_id,
+            "original_final_receipt_sha256": job.final_receipt_sha256,
+            "peer_snapshot_resolution_id": peer_receipt["resolution_id"],
+            "peer_snapshot_resolution_sha256": peer_receipt["receipt_sha256"],
+            "peer_resolution_digest": peer_receipt["resolution_sha256"],
+            "peer_node_id": peer_receipt["target_node_id"],
+            "peer_retained_local_snapshot_count": peer_receipt["retained_local_snapshot_count"],
+            "peer_superseded_local_snapshot_receipt_sha256s": peer_receipt[
+                "superseded_local_snapshot_receipt_sha256s"
+            ],
+            "reconciled_at": timestamp(utc_now()),
+            "outcome": "verified",
+            "status": "peer_snapshot_resolution_remediated",
+        },
+    )
+    return job.peer_backup_resolution_sha256
 
 
 def purge_event_live_data(db: Session, job: DeletionCase, event: Event) -> None:
