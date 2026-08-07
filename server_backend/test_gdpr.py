@@ -134,8 +134,10 @@ def test_ha_deletion_automatically_queues_peer_and_recovery_work(
     """One poll chains deterministic HA work without extra root buttons."""
 
     from datetime import datetime, timezone
+    from types import SimpleNamespace
     import uuid
 
+    import app.main as main_module
     from app.api.v1 import gdpr
     from app.models.ha import HAProtectionOperation
 
@@ -153,6 +155,11 @@ def test_ha_deletion_automatically_queues_peer_and_recovery_work(
     queued = []
 
     monkeypatch.setattr(gdpr.settings, "HA_MODE", "ha")
+    monkeypatch.setattr(main_module, "control_witness_ready", lambda: True)
+    monkeypatch.setattr(
+        main_module, "assess_readiness", lambda _db: SimpleNamespace(ready=True),
+    )
+    monkeypatch.setattr(main_module, "require_write_permit", lambda **_kwargs: None)
 
     def create_operation(session, **values):
         operation = HAProtectionOperation(
