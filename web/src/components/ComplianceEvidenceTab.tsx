@@ -434,7 +434,10 @@ export function ComplianceEvidenceTab({ events }: { events: EventOption[] }) {
             <details className="rounded-lg bg-gray-50 p-3 text-xs text-gray-600 dark:bg-gray-900/50 dark:text-gray-300"><summary className="cursor-pointer font-medium">Technical details</summary><div className="mt-3 grid gap-2 sm:grid-cols-2"><p>Event reference: <span className="font-mono break-all">{item.event_ref}</span></p>{item.case_type === "personal_data_erasure" && <p>Account reference: <span className="font-mono break-all">{item.subject_ref}</span></p>}<p>Processor assignments: {item.required_processors.length}</p><p>Recorded stages: {Object.values(item.evidence).filter(Boolean).length}</p></div></details>
             <div><p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Case progress</p><ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
               <CaseStep complete={!['submitted', 'under_review'].includes(item.state)} label="Request accepted" />
-              <CaseStep complete={desktopRecorded} label="Desktop report recorded" />
+              <CaseStep
+                complete={desktopRecorded}
+                label={item.desktop_deletion_required ? "Desktop report recorded" : "No Desktop was linked"}
+              />
               <CaseStep complete={Boolean(item.live_data_purged_at)} label="Server purge recorded" />
               <CaseStep complete={peerRecorded} label={item.topology === "two_node_ha" ? "HA peer verified" : "Single-node scope"} />
               <CaseStep complete={Boolean(item.evidence.clean_backup || item.evidence.backup_not_applicable)} label="Recovery policy resolved" />

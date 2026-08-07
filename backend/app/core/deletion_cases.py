@@ -179,17 +179,30 @@ def ensure_desktop_work_order(
     event: Event,
     subject_ref: str | None,
 ) -> list[DesktopDeletionWorkOrder]:
-    """Snapshot active event processors and create one work order per entity."""
+    """Snapshot active event processors and create one work order per entity.
+
+    A Desktop receipt is inapplicable only when this event has never had a
+    processor identity.  Historical or pending identities prove that Desktop
+    linking occurred, so an unavailable active key must block instead of being
+    mistaken for proof that no Desktop copy exists.
+    """
 
     ensure_case_scope(db, case, event=event, subject_ref=subject_ref)
-    identities = db.query(ProcessorIdentity).filter(
+    known_identities = db.query(ProcessorIdentity).filter(
         ProcessorIdentity.event_evidence_id == event.evidence_id,
-        ProcessorIdentity.status == "active",
-        ProcessorIdentity.active_key_id.isnot(None),
     ).order_by(ProcessorIdentity.entity_id).all()
-    if not identities:
+    identities = [identity for identity in known_identities if (
+        identity.status == "active" and identity.active_key_id is not None
+    )]
+    if not known_identities:
         case.desktop_deletion_required = False
         return []
+    if not identities:
+        case.desktop_deletion_required = True
+        raise ValueError(
+            "This event was linked to Desktop, but no active processor key is "
+            "available to complete its deletion receipt"
+        )
     case.desktop_deletion_required = True
     result: list[DesktopDeletionWorkOrder] = []
     for identity in identities:

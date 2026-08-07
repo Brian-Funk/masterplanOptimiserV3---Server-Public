@@ -609,8 +609,8 @@ def create_event_erasure_request(
         )
         event.purge_case_request_id = job.request_id
         event.purge_started_at = job.submitted_at or datetime.now(timezone.utc)
-        accept_event_request(db, job, event)
         ensure_desktop_work_order(db, job, event=event, subject_ref=None)
+        accept_event_request(db, job, event)
     except (EvidenceUnavailable, ValueError) as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -659,8 +659,8 @@ def accept_deletion_request(
                 detail="The event erasure target no longer exists",
             )
         try:
-            accept_event_request(db, job, event)
             ensure_desktop_work_order(db, job, event=event, subject_ref=None)
+            accept_event_request(db, job, event)
         except (EvidenceUnavailable, ValueError) as exc:
             db.rollback()
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -785,6 +785,12 @@ def _advance_deletion_case(db: Session, job: DeletionCase, admin: User) -> list[
     """Apply deterministic machine-side transitions and return those performed."""
 
     steps: list[str] = []
+    # Repair the former ordering defect for an already-open, never-linked event
+    # without inventing a Desktop receipt. New cases enter ready_for_live_purge
+    # directly because processor applicability is now established pre-acceptance.
+    if job.state == "awaiting_desktop_report" and not job.desktop_deletion_required:
+        job.state = "ready_for_live_purge"
+        steps.append("desktop_not_applicable")
     if job.state == "ready_for_live_purge":
         if job.case_type == "event_erasure":
             event = db.query(Event).filter(Event.evidence_id == job.event_evidence_id).first()

@@ -572,7 +572,7 @@ def confirm_case_clean_backup(
 
 
 def purge_event_live_data(db: Session, job: DeletionCase, event: Event) -> None:
-    """Delete one complete event scope after its desktop report is verified."""
+    """Delete one event after every applicable Desktop receipt is verified."""
 
     if job.live_data_purged_at is not None:
         return
@@ -580,7 +580,9 @@ def purge_event_live_data(db: Session, job: DeletionCase, event: Event) -> None:
         raise ValueError("The event erasure target no longer matches")
     if job.state not in {"ready_for_live_purge", "live_purge_in_progress"}:
         raise ValueError("The event erasure is not ready for live-data deletion")
-    if not (job.desktop_report_sha256 or job.desktop_absence_receipt_sha256):
+    if job.desktop_deletion_required and not (
+        job.desktop_report_sha256 or job.desktop_absence_receipt_sha256
+    ):
         raise ValueError("A verified desktop deletion report is required before live-data purge")
     job.state = "live_purge_in_progress"
     event_users = db.query(User).filter(

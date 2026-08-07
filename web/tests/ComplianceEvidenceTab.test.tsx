@@ -97,6 +97,7 @@ describe("ComplianceEvidenceTab", () => {
     render(<ComplianceEvidenceTab events={[]} />);
 
     expect(await screen.findByText(/Review the stored retention deadline/)).toBeInTheDocument();
+    expect(screen.getByText("No Desktop was linked")).toBeInTheDocument();
     const accept = screen.getByRole("button", { name: "Accept scheduled erasure" });
     expect(mockApiFetch.mock.calls.some(([path]) => path === acceptPath)).toBe(false);
 

@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.core import deletion_cases, deletion_workflow
 from app.models.deletion import DeletionCase
 from app.models.event import Event
@@ -204,6 +206,44 @@ def test_event_purge_deletes_complete_non_root_event_scope(db, monkeypatch):
     assert db.query(User).filter_by(id=ordinary_id).first() is None
     assert case.live_data_purged_at is not None
     assert case.live_purge_receipt_sha256 == HASH
+
+
+def test_never_linked_event_purge_does_not_invent_a_desktop_requirement(db, monkeypatch):
+    """An event created only on Server has no applicable Desktop receipt."""
+
+    _fake_evidence(monkeypatch)
+    event, _ = create_test_event(db, name="Never linked event")
+    event_id = event.id
+    case = _case(db, event, case_type="event_erasure")
+
+    assert deletion_cases.ensure_desktop_work_order(
+        db, case, event=event, subject_ref=None,
+    ) == []
+    assert case.desktop_deletion_required is False
+    deletion_workflow.accept_event_request(db, case, event)
+    assert case.state == "ready_for_live_purge"
+
+    deletion_workflow.purge_event_live_data(db, case, event)
+    db.commit()
+
+    assert db.query(Event).filter_by(id=event_id).first() is None
+    assert case.live_purge_receipt_sha256 == HASH
+
+
+def test_previously_linked_event_without_active_processor_fails_closed(db):
+    """Revocation is not evidence that every former Desktop copy is absent."""
+
+    event, _ = create_test_event(db, name="Former Desktop event")
+    identity, _ = _activate_processor(db, event)
+    identity.status = "revoked"
+    identity.active_key_id = None
+    case = _case(db, event, case_type="event_erasure")
+
+    with pytest.raises(ValueError, match="was linked to Desktop"):
+        deletion_cases.ensure_desktop_work_order(
+            db, case, event=event, subject_ref=None,
+        )
+    assert case.desktop_deletion_required is True
 
 
 def test_event_purge_accepts_processor_signed_already_absent_receipt(db, monkeypatch):
