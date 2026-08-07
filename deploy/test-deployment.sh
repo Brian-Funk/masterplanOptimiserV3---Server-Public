@@ -583,7 +583,7 @@ internal_activate() {
         trap - EXIT
         exec env MP_ROOT="$MP_ROOT" MP_TEST_PEER=1 MP_TEST_INTERNAL_ACTIVATE_REEXEC=1 \
             "$MP_ROOT/deploy/test-deployment.sh" internal-activate \
-            "$target" "$components" "$fresh_commissioning"
+            "$target" "$component_token" "$fresh_commissioning"
     fi
     [ "$(sed -n 's/^MP_TEST_COMMIT=//p' "$MP_TEST_ENV" | head -1)" = "$target" ] \
         || { ui_error "The peer activation environment does not match the exact target after re-entry."; return 1; }

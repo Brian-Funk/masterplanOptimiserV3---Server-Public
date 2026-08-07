@@ -69,18 +69,26 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("after 30 attempts", SUPERVISOR)
 
     def test_ha_peer_receives_same_commit_and_writes_a_matching_receipt(self) -> None:
+        peer_activate = SUPERVISOR.split("internal_activate()", 1)[1].split(
+            "deploy_witness()", 1
+        )[0]
         self.assertIn('peer_components="${components// /,}"', SUPERVISOR)
         self.assertIn(
             'internal-activate "$target" "$peer_components" "$fresh_commissioning"',
             SUPERVISOR,
         )
         self.assertIn('components="${component_token//,/ }"', SUPERVISOR)
+        self.assertIn(
+            '"$target" "$component_token" "$fresh_commissioning"',
+            peer_activate,
+        )
+        self.assertNotIn(
+            '"$target" "$components" "$fresh_commissioning"',
+            peer_activate,
+        )
         self.assertIn("The peer component set is invalid.", SUPERVISOR)
         self.assertIn("Node B did not record the exact pinned deployment receipt", SUPERVISOR)
         self.assertIn('write_state "$target" "" "$plan" ""', SUPERVISOR)
-        peer_activate = SUPERVISOR.split("internal_activate()", 1)[1].split(
-            "deploy_witness()", 1
-        )[0]
         self.assertIn('.campaign_commit=$target', peer_activate)
         self.assertIn('.campaign_commit != $previous', peer_activate)
         self.assertIn('/opt/masterplan/deploy/test-deployment.sh status', SUPERVISOR)
