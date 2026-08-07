@@ -93,7 +93,15 @@ require_test_policy() {
 
 ha_pairing_complete() {
     local setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
-    jq -e '(.completed // []) | index("paired") != null' "$setup_state" >/dev/null 2>&1
+    jq -e '
+        ((.completed // []) | index("paired") != null)
+        or (
+            .state == "complete"
+            and .mode == "ha-join"
+            and ((.completed // []) | index("joined") != null)
+            and ((.completed // []) | index("application_deployed") != null)
+        )
+    ' "$setup_state" >/dev/null 2>&1
 }
 
 ha_pair_transport_ready() {

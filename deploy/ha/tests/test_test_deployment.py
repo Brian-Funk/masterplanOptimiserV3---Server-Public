@@ -178,6 +178,12 @@ class TestDeploymentPlannerTests(unittest.TestCase):
 
     def test_pre_pairing_ha_update_stays_local(self) -> None:
         self.assertIn("ha_pairing_complete()", SUPERVISOR)
+        pairing = SUPERVISOR.split("ha_pairing_complete()", 1)[1].split(
+            "ha_pair_transport_ready()", 1
+        )[0]
+        self.assertIn('.mode == "ha-join"', pairing)
+        self.assertIn('index("joined") != null', pairing)
+        self.assertIn('index("application_deployed") != null', pairing)
         self.assertIn("ha_pair_transport_ready()", SUPERVISOR)
         self.assertIn('if ha_pairing_complete; then', SUPERVISOR)
         self.assertIn('[ "$peer_ready" != true ] || peer_copy_image "$image"', SUPERVISOR)
