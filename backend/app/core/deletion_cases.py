@@ -611,8 +611,6 @@ def checklist_prerequisites(case: DeletionCase, db: Session) -> list[str]:
         missing.append("peer_replication_receipt")
     if not (case.replacement_package_sha256 or case.backup_not_applicable_sha256):
         missing.append("clean_backup_receipt")
-    if case.replacement_package_sha256 and controlled_snapshot_count() != 1:
-        missing.append("local_snapshot_resolution")
     if not _backup_inventory_resolved(db):
         missing.append("backup_inventory_resolution")
     if case.outstanding_actions_json and json.loads(case.outstanding_actions_json):

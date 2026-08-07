@@ -550,7 +550,7 @@ def confirm_case_clean_backup(
         "replacement_package_id": package_id,
         "replacement_package_sha256": package_sha256,
         "receipt_sha256": receipt["receipt_sha256"],
-        "local_snapshot_count": receipt["local_snapshot_count"],
+        "retained_local_snapshot_count": receipt["retained_local_snapshot_count"],
         "superseded_portable_package_ids": [
             package["package_id"] for package in receipt["superseded_portable_packages"]
         ],
@@ -558,6 +558,16 @@ def confirm_case_clean_backup(
         "outcome": "verified",
         "status": "clean_backup_verified",
     }
+    if receipt.get("local_resolution_sha256"):
+        evidence_payload.update({
+            "local_resolution_id": receipt["local_resolution_id"],
+            "local_resolution_sha256": receipt["local_resolution_sha256"],
+            "superseded_local_snapshot_receipt_sha256s": receipt[
+                "superseded_local_snapshot_receipt_sha256s"
+            ],
+        })
+    else:
+        evidence_payload["local_snapshot_count"] = receipt["local_snapshot_count"]
     if job.case_type != "event_erasure":
         evidence_payload["subject_ref"] = job.subject_evidence_id
     append_record(

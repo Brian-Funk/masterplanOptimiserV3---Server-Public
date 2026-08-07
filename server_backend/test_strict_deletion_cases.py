@@ -304,7 +304,7 @@ def test_no_backup_confirmation_rejects_recorded_host_snapshots(db, monkeypatch,
         deletion_cases.confirm_no_controlled_backups(db, case)
 
 
-def test_checklist_rejects_superseded_local_snapshots(db, monkeypatch, tmp_path):
+def test_later_clean_snapshots_do_not_reblock_a_verified_case(db, monkeypatch, tmp_path):
     event, _ = create_test_event(db)
     case = _case(db, event, case_type="event_erasure")
     deletion_cases.ensure_case_scope(db, case, event=event, subject_ref=None)
@@ -314,9 +314,8 @@ def test_checklist_rejects_superseded_local_snapshots(db, monkeypatch, tmp_path)
     case.outstanding_actions_json = "[]"
     _set_snapshot_count(monkeypatch, tmp_path, 2)
 
-    assert "local_snapshot_resolution" in deletion_cases.checklist_prerequisites(case, db)
-    with pytest.raises(ValueError, match="required actions remain"):
-        deletion_cases.build_checklist(case, db)
+    assert "local_snapshot_resolution" not in deletion_cases.checklist_prerequisites(case, db)
+    assert deletion_cases.build_checklist(case, db)["version"] == 3
 
 
 def test_checklist_is_content_bound_and_requires_all_approvals(db, monkeypatch, tmp_path):

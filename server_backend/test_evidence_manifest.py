@@ -164,7 +164,7 @@ def test_current_deletion_records_are_signed_and_attestation_cli_is_absent(tmp_p
     assert "invalid choice" in result.stderr
 
 
-def test_clean_backup_evidence_accepts_bounded_snapshot_and_portable_inventory(tmp_path):
+def test_clean_backup_evidence_accepts_v3_and_deletion_scoped_v4_inventory(tmp_path):
     private, public = _keypair(tmp_path)
     ledger = tmp_path / "ledger"
     instance_id = str(uuid.uuid4())
@@ -199,6 +199,26 @@ def test_clean_backup_evidence_accepts_bounded_snapshot_and_portable_inventory(t
     assert record.is_file()
     assert verify_chain(ledger, public)["records"] == 1
 
+    resolution_id = str(uuid.uuid4())
+    v4_payload = {
+        key: value for key, value in payload.items() if key != "local_snapshot_count"
+    } | {
+        "retained_local_snapshot_count": 2,
+        "local_resolution_id": resolution_id,
+        "local_resolution_sha256": "c" * 64,
+        "superseded_local_snapshot_receipt_sha256s": ["d" * 64],
+    }
+    append_record(
+        ledger,
+        instance_id=instance_id,
+        chain_id=chain_id,
+        record_type="deletion.clean_backup_verified",
+        payload=v4_payload,
+        private_key=private,
+        public_key=public,
+    )
+    assert verify_chain(ledger, public)["records"] == 2
+
     with pytest.raises(EvidenceError, match="exactly one"):
         append_record(
             ledger,
@@ -217,6 +237,17 @@ def test_clean_backup_evidence_accepts_bounded_snapshot_and_portable_inventory(t
             chain_id=chain_id,
             record_type="deletion.clean_backup_verified",
             payload={**payload, "superseded_portable_package_ids": ["not-a-package-id"]},
+            private_key=private,
+            public_key=public,
+        )
+
+    with pytest.raises(EvidenceError, match="positive snapshot count"):
+        append_record(
+            ledger,
+            instance_id=instance_id,
+            chain_id=chain_id,
+            record_type="deletion.clean_backup_verified",
+            payload={**v4_payload, "retained_local_snapshot_count": 0},
             private_key=private,
             public_key=public,
         )

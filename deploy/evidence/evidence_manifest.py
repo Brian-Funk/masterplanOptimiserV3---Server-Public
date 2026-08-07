@@ -196,6 +196,7 @@ PAYLOAD_FIELDS = frozenset(
         "processor_entity_id",
         "processor_key_id",
         "processor_assignment_id",
+        "local_resolution_id",
         "snapshotted_key_id",
         "completed_key_id",
         "snapshotted_public_key_sha256",
@@ -224,7 +225,10 @@ PAYLOAD_FIELDS = frozenset(
         "server_receipts",
         "clean_backup_sha256",
         "backup_not_applicable_sha256",
+        "local_resolution_sha256",
         "local_snapshot_count",
+        "retained_local_snapshot_count",
+        "superseded_local_snapshot_receipt_sha256s",
         "superseded_portable_package_ids",
         "policy_version",
         "disposition",
@@ -258,6 +262,7 @@ UUID_FIELDS = frozenset(
         "repository_id",
         "instance_id",
         "processor_assignment_id",
+        "local_resolution_id",
     }
 )
 HASH_FIELDS = frozenset(
@@ -302,6 +307,7 @@ HASH_FIELDS = frozenset(
         "completed_public_key_sha256",
         "clean_backup_sha256",
         "backup_not_applicable_sha256",
+        "local_resolution_sha256",
     }
 )
 TIMESTAMP_FIELDS = frozenset(
@@ -485,6 +491,9 @@ def _validate_payload(value: Any, *, path: str = "payload") -> None:
             elif field == "local_snapshot_count":
                 if not isinstance(item, int) or isinstance(item, bool) or item != 1:
                     raise EvidenceError(f"{child_path} must be exactly one")
+            elif field == "retained_local_snapshot_count":
+                if not isinstance(item, int) or isinstance(item, bool) or item < 1:
+                    raise EvidenceError(f"{child_path} must be a positive snapshot count")
             elif isinstance(item, dict):
                 _validate_payload(item, path=child_path)
             elif isinstance(item, list):
@@ -499,6 +508,11 @@ def _validate_payload(value: Any, *, path: str = "payload") -> None:
                         "superseded_portable_package_ids",
                     }:
                         _canonical_uuid(entry, f"{child_path}[{index}]")
+                    elif field == "superseded_local_snapshot_receipt_sha256s":
+                        if not isinstance(entry, str) or not SHA256_RE.fullmatch(entry):
+                            raise EvidenceError(
+                                f"{child_path}[{index}] must be a lower-case SHA-256 digest"
+                            )
                     elif not isinstance(entry, str) or not SAFE_ENUM_RE.fullmatch(entry):
                         raise EvidenceError(f"{child_path} entries must be bounded enums")
             elif isinstance(item, str):
