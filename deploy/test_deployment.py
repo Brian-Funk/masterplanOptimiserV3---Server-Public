@@ -98,6 +98,8 @@ def classify_path(path: str) -> set[str]:
         result.add("operations")
     if path.startswith(".github/workflows/"):
         result.add("operations")
+    if path.endswith(".md"):
+        result.add("operations")
     if path == ".dockerignore":
         result.update(COMPONENTS)
     if not result:

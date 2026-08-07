@@ -260,6 +260,24 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertFalse(plan.full)
         self.assertFalse(plan.migrations)
 
+    def test_root_documentation_does_not_publish_runtime_components(self) -> None:
+        plan = MODULE.plan_from_files("a" * 40, "b" * 40, ["changes.md"])
+        self.assertEqual(plan.components, ("operations",))
+        self.assertTrue(plan.full)
+
+    def test_ha_test_and_documentation_changes_do_not_publish_witness(self) -> None:
+        plan = MODULE.plan_from_files(
+            "a" * 40,
+            "b" * 40,
+            ["changes.md", "deploy/ha/tests/test_management_safety.py"],
+        )
+        self.assertEqual(plan.components, ("operations",))
+        self.assertNotIn("witness", plan.components)
+
+    def test_unknown_non_document_path_remains_conservative(self) -> None:
+        plan = MODULE.plan_from_files("a" * 40, "b" * 40, ["unknown.runtime"])
+        self.assertEqual(plan.components, MODULE.COMPONENTS)
+
     def test_frontend_and_database_plans_require_full_review(self) -> None:
         plan = MODULE.plan_from_files(
             "a" * 40,
