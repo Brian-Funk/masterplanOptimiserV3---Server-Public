@@ -242,6 +242,11 @@ def _job_detail(job: DeletionCase, db: Session | None = None) -> dict:
             "job_id": job.clean_backup_job_id,
             "receipt_id": job.clean_backup_receipt_id,
             "local_snapshot_count": controlled_snapshot_count(),
+            "local_resolution_status": (
+                "verified" if job.clean_backup_receipt_id
+                else "pending" if job.clean_backup_job_id
+                else None
+            ),
         },
         "evidence": {
             "request": job.request_manifest_sha256,

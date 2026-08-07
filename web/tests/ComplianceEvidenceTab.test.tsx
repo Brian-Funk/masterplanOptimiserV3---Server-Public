@@ -31,7 +31,7 @@ const workflow = {
   desktop_work_orders: [{ work_order_id: "work-1", operation: "delete_event", state: "report_received", report_sha256: "report-sha", processor_entity_id: "prc-example0001", processor_key_id: "ek-1234567890abcdef", copy_resolution_sha256: "copy-sha" }],
   required_processors: [{ processor_entity_id: "prc-example0001", event_ref: "event-example", event_name: "Synthetic Event", processor_key_id: "ek-1234567890abcdef", display_label: "Test workstation", state: "complete", deletion_receipt_sha256: "report-sha", copy_resolution_sha256: "copy-sha" }],
   approvals: [],
-  clean_backup_bridge: { job_id: null, receipt_id: null, local_snapshot_count: 0 },
+  clean_backup_bridge: { job_id: null, receipt_id: null, local_snapshot_count: 0, local_resolution_status: null },
 };
 
 describe("ComplianceEvidenceTab", () => {
@@ -138,7 +138,7 @@ describe("ComplianceEvidenceTab", () => {
     );
   });
 
-  it("blocks completion while superseded local snapshots remain", async () => {
+  it("allows completion when later clean snapshots increase the operational count", async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === "/api/v1/admin/deletion-requests") return json([{
         ...workflow,
@@ -146,7 +146,7 @@ describe("ComplianceEvidenceTab", () => {
         live_data_purged_at: "2026-08-05T11:51:37Z",
         evidence: { clean_backup: "b".repeat(64) },
         checklist: { sha256: "c".repeat(64) },
-        clean_backup_bridge: { job_id: "job-1", receipt_id: "receipt-1", local_snapshot_count: 2 },
+        clean_backup_bridge: { job_id: "job-1", receipt_id: "receipt-1", local_snapshot_count: 2, local_resolution_status: "verified" },
       }]);
       if (path === "/api/v1/admin/evidence/backups") return json([]);
       if (path === "/api/v1/admin/evidence") return json({ initialised: true, mode: "local", instance_id: "instance-1", head_sha256: "a".repeat(64) });
@@ -156,8 +156,9 @@ describe("ComplianceEvidenceTab", () => {
     const { ComplianceEvidenceTab } = await import("@/components/ComplianceEvidenceTab");
     render(<ComplianceEvidenceTab events={[]} />);
 
-    expect(await screen.findByText(/Delete every superseded local snapshot in mp-opt/i)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Confirm completion" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Confirm completion" })).toBeInTheDocument();
+    expect(screen.getByText("Local VPS snapshots resolved")).toBeInTheDocument();
+    expect(screen.queryByText(/Delete every superseded local snapshot in mp-opt/i)).not.toBeInTheDocument();
   });
 
   it("requires explicit resolution of known external backup copies", async () => {
@@ -167,7 +168,7 @@ describe("ComplianceEvidenceTab", () => {
         state: "awaiting_backup_resolution",
         live_data_purged_at: "2026-08-05T11:51:37Z",
         evidence: { clean_backup: "b".repeat(64) },
-        clean_backup_bridge: { job_id: "job-1", receipt_id: "receipt-1", local_snapshot_count: 1 },
+        clean_backup_bridge: { job_id: "job-1", receipt_id: "receipt-1", local_snapshot_count: 1, local_resolution_status: "verified" },
       }]);
       if (path === "/api/v1/admin/evidence/backups") return json([{
         package_id: "old-package-1",
@@ -227,7 +228,7 @@ describe("ComplianceEvidenceTab", () => {
         ...workflow,
         state: "awaiting_clean_backup",
         live_data_purged_at: "2026-08-05T11:51:37Z",
-        clean_backup_bridge: { job_id: "job-1", receipt_id: null, local_snapshot_count: 1 },
+        clean_backup_bridge: { job_id: "job-1", receipt_id: null, local_snapshot_count: 1, local_resolution_status: "pending" },
       }]);
       if (path === advancePath) {
         return new Response(JSON.stringify({ detail: "The compliance receipt could not be applied" }), {

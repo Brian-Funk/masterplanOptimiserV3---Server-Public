@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Replaced the global single-snapshot deletion gate with resumable,
+  deletion-scoped removal of only pre-purge local recovery snapshots while
+  retaining clean later HA recovery points and external-copy accountability.
 - Added accessible per-case technical disclosures to the compact completed
   deletion-case list.
 - Verified Desktop deletion artifacts in evidence ZIPs with their established
