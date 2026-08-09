@@ -1,5 +1,6 @@
 """Secure activation email delivery and expiry policy tests."""
 
+import json
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from zipfile import ZipFile
@@ -27,7 +28,9 @@ from app.core.activation_email import (
     recover_stale_deliveries,
     render_activation_qr_png,
 )
+from app.core.activation_mail_governance import resolve_activation_mail_governance
 from app.models.audit import AuditLog
+from app.models.governance import EventGovernanceOverride, GovernancePublication
 from app.models.server_setting import ServerSetting
 from app.models.user import ActivationEmailDelivery, ActivationLink
 from server_backend.conftest import create_test_event, create_test_user, _make_client
@@ -66,8 +69,44 @@ def _request() -> Request:
     })
 
 
+MAIL_NOTICE = {
+    "instance_name": "Synthetic Access Portal",
+    "controller_legal_name": "Synthetic Event Controller",
+    "privacy_contact_email": "privacy@synthetic-controller.ch",
+    "optional_features": {
+        "smtp_enabled": True,
+        "smtp_provider_code": "synthetic_mail",
+    },
+    "processors": [
+        {
+            "provider_code": "synthetic_mail",
+            "display_name": "Synthetic Mail Relay",
+            "purpose_codes": ["activation_email"],
+            "hosting_countries": ["CH"],
+            "support_access_countries": ["DE"],
+        }
+    ],
+}
+
+
+def _publish_mail_notice(db, *, content: dict | None = None) -> GovernancePublication:
+    """Publish synthetic controller facts without using deployment examples."""
+
+    row = GovernancePublication(
+        version=4,
+        content_json=json.dumps(content or MAIL_NOTICE),
+        content_sha256="4" * 64,
+        source_json="{}",
+        source_sha256="5" * 64,
+        material_change=True,
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
 @pytest.fixture
-def configured_mail(monkeypatch):
+def configured_mail(monkeypatch, db):
     """Configure a safe fake SMTP sender and capture generated messages."""
 
     from app.core.config import settings
@@ -78,7 +117,8 @@ def configured_mail(monkeypatch):
     monkeypatch.setattr(settings, "SMTP_TOKEN", "provider-token")
     monkeypatch.setattr(settings, "SMTP_SECURITY", "starttls")
     monkeypatch.setattr(settings, "SMTP_FROM_EMAIL", "access@example.com")
-    monkeypatch.setattr(settings, "SMTP_FROM_NAME", "Masterplan Access")
+    monkeypatch.setattr(settings, "SMTP_FROM_NAME", "Synthetic SMTP Sender")
+    _publish_mail_notice(db)
     messages: list = []
     monkeypatch.setattr(
         admin_module,
@@ -88,7 +128,7 @@ def configured_mail(monkeypatch):
     return messages
 
 
-def test_single_user_email_contains_link_and_two_qr_parts(
+def test_single_user_email_contains_link_and_one_inline_qr(
     db,
     admin_client,
     configured_mail,
@@ -120,12 +160,12 @@ def test_single_user_email_contains_link_and_two_qr_parts(
     image_parts = [part for part in message.walk() if part.get_content_type() == "image/png"]
     qr_parts = [part for part in image_parts if part.get_filename() == "activation-qr.png"]
     logo_parts = [part for part in image_parts if part.get_filename() is None]
-    assert len(image_parts) == 3
-    assert len(qr_parts) == 2
+    assert len(image_parts) == 2
+    assert len(qr_parts) == 1
     assert len(logo_parts) == 1
     assert logo_parts[0].get_content_disposition() == "inline"
-    assert {part.get_content_disposition() for part in qr_parts} == {"inline", "attachment"}
-    assert qr_parts[0].get_payload(decode=True) == qr_parts[1].get_payload(decode=True)
+    assert qr_parts[0].get_content_disposition() == "inline"
+    assert not [part for part in message.walk() if part.get_content_disposition() == "attachment"]
 
     delivery = db.query(ActivationEmailDelivery).filter_by(user_id=user.id).one()
     link = db.query(ActivationLink).filter_by(user_id=user.id).one()
@@ -172,7 +212,7 @@ def test_delivery_helper_commits_only_non_secret_metadata(
         for part in configured_mail[0].walk()
         if part.get_filename() == "activation-qr.png"
     ]
-    assert len(qr_parts) == 2
+    assert len(qr_parts) == 1
     with Image.open(BytesIO(qr_parts[0].get_payload(decode=True))) as qr_badge:
         assert qr_badge.format == "PNG"
         assert qr_badge.width == 920
@@ -217,9 +257,10 @@ def test_additional_passkey_email_states_non_destructive_outcome(
     assert result.status == "accepted"
     assert result.purpose == ADDITIONAL_PASSKEY
     message = configured_mail[0]
-    assert message["Subject"] == "Add another Masterplan Access passkey"
+    assert message["Subject"] == "Add another Synthetic Access Portal passkey"
     plain = message.get_body(preferencelist=("plain",)).get_content()
     assert "existing passkeys and signed-in sessions will remain valid" in plain
+    assert "An authorised organiser requested an additional passkey link." in plain
     delivery = db.query(ActivationEmailDelivery).filter_by(user_id=user.id).one()
     link = db.query(ActivationLink).filter_by(user_id=user.id).one()
     assert delivery.purpose == ADDITIONAL_PASSKEY
@@ -285,6 +326,148 @@ def test_participant_can_email_only_their_recorded_additional_passkey_link(
     assert delivery.recipient_email == user.email
     assert delivery.purpose == ADDITIONAL_PASSKEY
     assert len(configured_mail) == 1
+    plain = configured_mail[0].get_body(preferencelist=("plain",)).get_content()
+    assert "You requested this from your signed-in account." in plain
+
+
+def test_participant_capability_fails_closed_without_published_mail_governance(
+    db,
+    configured_mail,
+):
+    """A participant never receives a token from generic or draft-only facts."""
+
+    db.query(GovernancePublication).delete()
+    event, _ = create_test_event(db, name="Governance gated event")
+    user = create_test_user(db, username="governance.gated", event_id=event.id)
+    db.add(ServerSetting(key="self_service_additional_passkeys_enabled", value="1"))
+    db.commit()
+    client = _make_client(db, user)
+
+    capability = client.get("/api/v1/account/additional-passkey")
+    send = client.post("/api/v1/account/additional-passkey/email", json={})
+
+    assert capability.status_code == 200
+    assert capability.json()["governance_ready"] is False
+    assert capability.json()["can_request"] is False
+    assert "published controller and email-provider notice" in capability.json()["message"]
+    assert send.status_code == 200
+    assert send.json()["status"] == "not_attempted"
+    assert send.json()["error_code"] == "published_mail_governance_unavailable"
+    assert db.query(ActivationLink).filter_by(user_id=user.id).count() == 0
+    assert configured_mail == []
+
+
+@pytest.mark.parametrize(
+    "mutate_notice",
+    [
+        lambda notice: notice["optional_features"].update({"smtp_enabled": False}),
+        lambda notice: notice["optional_features"].update({"smtp_provider_code": "unknown"}),
+        lambda notice: notice["processors"][0].update({"hosting_countries": [], "support_access_countries": []}),
+        lambda notice: notice["processors"][0].update({"purpose_codes": ["event_scheduling"]}),
+        lambda notice: notice.update({"instance_name": ""}),
+    ],
+)
+def test_participant_mail_rejects_incomplete_published_variables(
+    db,
+    configured_mail,
+    mutate_notice,
+):
+    """Every visible deployment fact must be supplied by one complete publication."""
+
+    publication = db.query(GovernancePublication).one()
+    notice = json.loads(publication.content_json)
+    mutate_notice(notice)
+    publication.content_json = json.dumps(notice)
+    event, _ = create_test_event(db, name="Incomplete governance")
+    user = create_test_user(db, username="incomplete.variables", event_id=event.id)
+    db.commit()
+
+    result = admin_module._send_user_activation_email(
+        user=user,
+        admin=user,
+        mailer=FakeMailer(configured_mail),
+        request=_request(),
+        purpose=ADDITIONAL_PASSKEY,
+        db=db,
+    )
+
+    assert result.status == "not_attempted"
+    assert result.error_code == "published_mail_governance_unavailable"
+    assert db.query(ActivationLink).filter_by(user_id=user.id).count() == 0
+    assert configured_mail == []
+
+
+def test_event_governance_can_disable_activation_email(
+    db,
+    configured_mail,
+):
+    """An event-level feature decision is enforced before token creation."""
+
+    event, _ = create_test_event(db, name="Email-disabled event")
+    user = create_test_user(db, username="event.disabled", event_id=event.id)
+    db.add(EventGovernanceOverride(
+        event_id=event.id,
+        enabled_optional_features_json="[]",
+        policy_version=4,
+    ))
+    db.commit()
+
+    result = admin_module._send_user_activation_email(
+        user=user,
+        admin=user,
+        mailer=FakeMailer(configured_mail),
+        request=_request(),
+        purpose=ADDITIONAL_PASSKEY,
+        db=db,
+    )
+
+    assert result.status == "not_attempted"
+    assert result.error_code == "event_activation_email_disabled"
+    assert db.query(ActivationLink).filter_by(user_id=user.id).count() == 0
+
+
+def test_event_controller_override_drives_mail_and_public_details(
+    db,
+    configured_mail,
+    admin_client,
+):
+    """Reviewed event facts replace instance identity without exposing drafts."""
+
+    event, _ = create_test_event(db, name="Overridden event")
+    user = create_test_user(db, username="override.recipient", event_id=event.id)
+    db.add(EventGovernanceOverride(
+        event_id=event.id,
+        controller_override_enabled=True,
+        controller_identity_override="Synthetic Event-Specific Controller",
+        privacy_contact_override="event-privacy@synthetic-controller.ch",
+        enabled_optional_features_json='["activation_email"]',
+        policy_version=4,
+    ))
+    db.commit()
+
+    result = admin_module._send_user_activation_email(
+        user=user,
+        admin=user,
+        mailer=FakeMailer(configured_mail),
+        request=_request(),
+        purpose=ADDITIONAL_PASSKEY,
+        db=db,
+    )
+
+    assert result.status == "accepted"
+    html_body = configured_mail[0].get_body(preferencelist=("html",)).get_content()
+    assert "Synthetic Event-Specific Controller" in html_body
+    assert "event-privacy@synthetic-controller.ch" in html_body
+    assert f"/api/v1/governance/public/events/{event.id}/privacy.html" in html_body
+    details = admin_client.get(
+        f"/api/v1/governance/public/events/{event.id}/privacy.html"
+    )
+    assert details.status_code == 200
+    assert "Synthetic Event-Specific Controller" in details.text
+    assert "event-privacy@synthetic-controller.ch" in details.text
+    assert "Overridden event" not in details.text
+    assert 'name="robots"' not in details.text
+    assert details.headers["x-robots-tag"] == "noindex, nofollow"
 
 
 def test_participant_self_service_enforces_per_user_minute_limit(
@@ -362,52 +545,70 @@ def test_management_accounts_keep_direct_passkey_enrollment(db, configured_mail)
 
 
 @pytest.mark.parametrize(
-    ("purpose", "subject", "headline", "notice"),
+    ("purpose", "subject", "headline", "notice", "reason"),
     [
         (
             INITIAL_SETUP,
-            "Activate your Masterplan Access account",
+            "Activate your Synthetic Access Portal account",
             "Set up your secure access",
             "Keep this private",
+            "An authorised organiser prepared account access for you.",
         ),
         (
             ADDITIONAL_PASSKEY,
-            "Add another Masterplan Access passkey",
+            "Add another Synthetic Access Portal passkey",
             "Add a passkey to your account",
             "Existing access remains",
+            "An authorised organiser requested an additional passkey link.",
         ),
         (
             CREDENTIAL_RESET,
-            "Reset your Masterplan Access passkeys",
+            "Reset your Synthetic Access Portal passkeys",
             "Reset your passkeys",
             "Important",
+            "An authorised administrator requested a credential reset.",
         ),
     ],
 )
 def test_email_purposes_share_branded_dark_accessible_shell(
+    db,
     configured_mail,
     purpose,
     subject,
     headline,
     notice,
+    reason,
 ):
     """Every purpose uses the same accessible dark shell and tailored copy."""
 
+    event, _ = create_test_event(db, name='Event <b>unsafe</b> & "quoted"')
+    recipient = create_test_user(
+        db,
+        username=f"purpose.{purpose}",
+        event_id=event.id,
+    )
+    governance = resolve_activation_mail_governance(user=recipient, db=db)
     message, _message_id = build_activation_message(
         recipient="recipient@example.com",
         display_name="Alex <script>alert(1)</script>",
-        event_name='Event <b>unsafe</b> & "quoted"',
         url="https://localhost/activate#token=safe-token",
         expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
         purpose=purpose,
+        governance=governance,
     )
 
     assert message["Subject"] == subject
-    assert "Masterplan Access <access@example.com>" == str(message["From"])
+    assert "Synthetic Access Portal <access@example.com>" == str(message["From"])
     html_body = message.get_body(preferencelist=("html",)).get_content()
     plain_body = message.get_body(preferencelist=("plain",)).get_content()
     assert headline in html_body
     assert notice in html_body
+    assert reason in html_body
+    assert "Synthetic Event Controller" in html_body
+    assert "privacy@synthetic-controller.ch" in html_body
+    assert "Synthetic Mail Relay" in html_body
+    assert "CH, DE" in html_body
+    assert 'data-policy-sha256="4444444444444444444444444444444444444444444444444444444444444444"' in html_body
     assert 'bgcolor="#22252a"' in html_body
     assert 'bgcolor="#282c34"' in html_body
     assert 'role="presentation"' in html_body
@@ -418,7 +619,64 @@ def test_email_purposes_share_branded_dark_accessible_shell(
     assert "&lt;script&gt;" in html_body
     assert "Event &lt;b&gt;unsafe&lt;/b&gt; &amp; &quot;quoted&quot;" in html_body
     assert "https://localhost/activate#token=safe-token" in plain_body
+    assert "Published policy: v4; SHA-256 " + "4" * 64 in plain_body
+    action_position = html_body.index('href="https://localhost/activate#token=safe-token"')
+    security_position = html_body.index("If you did not request or expect this message")
+    qr_position = html_body.index("Scan instead")
+    privacy_position = html_body.index("Privacy and contact")
+    assert action_position < security_position < qr_position < privacy_position
+    assert plain_body.index("https://localhost/activate#token=safe-token") < plain_body.index(
+        "If you did not request or expect this message"
+    ) < plain_body.index("The inline QR code") < plain_body.index("Privacy and contact")
+    assert '<img src="http' not in html_body
     assert len(html_body.encode()) < 80_000
+
+
+def test_operational_mail_uses_only_escaped_deployment_variables(
+    db,
+    configured_mail,
+    monkeypatch,
+):
+    """No maintainer, campaign host, or example deployment leaks into mail."""
+
+    from app.core.config import settings
+
+    publication = db.query(GovernancePublication).one()
+    notice = json.loads(publication.content_json)
+    notice["instance_name"] = "Tenant & <Portal>"
+    notice["controller_legal_name"] = "Controller <One> & Partners"
+    notice["processors"][0]["display_name"] = "Mail <Relay> & Co"
+    publication.content_json = json.dumps(notice)
+    monkeypatch.setattr(settings, "WEBAUTHN_ORIGIN", "https://tenant.synthetic-controller.ch")
+    event, _ = create_test_event(db, name="Variable event")
+    user = create_test_user(db, username="variable.recipient", event_id=event.id)
+    db.commit()
+    governance = resolve_activation_mail_governance(user=user, db=db)
+
+    message, _ = build_activation_message(
+        recipient=user.email,
+        display_name=user.display_name,
+        url="https://tenant.synthetic-controller.ch/activate#token=variable-token",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=2),
+        purpose=ADDITIONAL_PASSKEY,
+        governance=governance,
+        self_service_requested=True,
+    )
+
+    html_body = message.get_body(preferencelist=("html",)).get_content()
+    plain_body = message.get_body(preferencelist=("plain",)).get_content()
+    assert str(message["Subject"]) == "Add another Tenant & <Portal> passkey"
+    assert "Tenant &amp; &lt;Portal&gt;" in html_body
+    assert "Controller &lt;One&gt; &amp; Partners" in html_body
+    assert "Mail &lt;Relay&gt; &amp; Co" in html_body
+    assert "https://tenant.synthetic-controller.ch/api/v1/governance/public/versions/4/privacy.html" in plain_body
+    for forbidden in (
+        "mp-opt.net",
+        "access@mp-opt.net",
+        "Brian-Funk",
+        "Northstar Assembly Cooperative",
+    ):
+        assert forbidden not in str(message)
 
 
 def test_token_free_test_email_previews_brand_without_activation_content(
@@ -428,12 +686,12 @@ def test_token_free_test_email_previews_brand_without_activation_content(
 
     message = build_test_message("administrator@example.com")
 
-    assert message["Subject"] == "Masterplan Access email test"
+    assert message["Subject"] == "Synthetic SMTP Sender email test"
     plain_body = message.get_body(preferencelist=("plain",)).get_content()
     html_body = message.get_body(preferencelist=("html",)).get_content()
     assert "Email delivery is ready" in html_body
     assert "Configuration test" in html_body
-    assert "Masterplan Access can connect" in plain_body
+    assert "Synthetic SMTP Sender can connect" in plain_body
     assert "/activate" not in str(message)
     assert "token=" not in str(message)
     assert "href=" not in html_body
@@ -454,7 +712,7 @@ def test_qr_zip_uses_identical_canonical_bytes_and_token_free_audit(
     admin_client,
     configured_mail,
 ):
-    """A direct ZIP and an email attachment share exactly one PNG renderer."""
+    """A direct ZIP and the inline email QR share exactly one PNG renderer."""
 
     event, _ = create_test_event(db, name="Canonical Event")
     user = create_test_user(
@@ -488,17 +746,18 @@ def test_qr_zip_uses_identical_canonical_bytes_and_token_free_audit(
     message, _ = build_activation_message(
         recipient=user.email,
         display_name=user.display_name,
-        event_name=event.name,
         url=url,
         expires_at=link.expires_at,
         purpose=link.purpose,
+        governance=resolve_activation_mail_governance(user=user, db=db),
     )
-    attachment = next(
+    inline_qr = next(
         part
         for part in message.walk()
-        if part.get_content_disposition() == "attachment"
+        if part.get_filename() == "activation-qr.png"
     )
-    assert zip_png == expected_png == attachment.get_payload(decode=True)
+    assert inline_qr.get_content_disposition() == "inline"
+    assert zip_png == expected_png == inline_qr.get_payload(decode=True)
 
     audit_entry = db.query(AuditLog).filter_by(action="activation.qr_download").one()
     assert str(user.id) in (audit_entry.detail or "")
