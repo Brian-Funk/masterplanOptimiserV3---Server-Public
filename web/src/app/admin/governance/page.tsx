@@ -250,10 +250,12 @@ export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupM
   const statusClasses = statusKind === "error" ? "border-red-300 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200" : statusKind === "success" ? "border-green-300 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950 dark:text-green-200" : "border-blue-300 bg-blue-50 text-blue-800 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-200";
 
   return <div className={setupMode ? "space-y-6 text-gray-900 dark:text-gray-100" : "min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100"}>
-    {!setupMode && <header className="border-b border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800"><div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3"><Logo height={32} href="https://info.mp-opt.net" /><ThemeToggle /></div></header>}
-    <div className={setupMode ? "space-y-6" : "mx-auto max-w-6xl space-y-6 px-4 py-8"}>
+    {!setupMode && <header className="sticky top-0 z-20 border-b border-gray-200 bg-white/95 backdrop-blur dark:border-gray-700 dark:bg-gray-800/95"><div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6"><div className="flex items-center gap-3"><Logo height={32} href="https://info.mp-opt.net" /><span className="hidden text-sm font-semibold text-gray-500 dark:text-gray-400 sm:inline">Root administration</span></div><ThemeToggle /></div></header>}
+    <div className={setupMode ? "space-y-6" : "mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:py-8"}>
+      <div className={setupMode ? "space-y-6" : "grid items-start gap-6 lg:grid-cols-[15rem_minmax(0,1fr)] xl:gap-8"}>
       {!setupMode && <AdminNavigation active="policies" isRootAdmin isIssuerOnly={false} canManagePublicLinks />}
-      <div><div className="flex items-start gap-3"><ShieldCheck size={30} className="mt-1 text-blue-600" aria-hidden="true" /><div><h1 className="text-3xl font-bold">Policies &amp; notices</h1><p className="mt-1 max-w-3xl text-sm text-gray-600 dark:text-gray-300">Build this deployment&apos;s controller-reviewed legal centre. Drafts stay local, and nothing is sent to the software maintainer.</p></div></div></div>
+      <div className="min-w-0 space-y-6">
+      <div><div className="flex items-start gap-3"><ShieldCheck size={26} className="mt-0.5 text-blue-600" aria-hidden="true" /><div><h1 className="text-2xl font-semibold tracking-tight">Policies &amp; notices</h1><p className="mt-1 max-w-3xl text-sm text-gray-600 dark:text-gray-300">Build this deployment&apos;s controller-reviewed legal centre. Drafts stay local, and nothing is sent to the software maintainer.</p></div></div></div>
       <div role={statusKind === "error" ? "alert" : "status"} className={`rounded-lg border px-4 py-3 text-sm ${statusClasses}`}><strong>{status}</strong><span className="mt-1 block">{publishedVersion ? `Current public version: ${publishedVersion}.` : "No policy is published."} {checks.length > 0 ? `${blockingCount} blocking preflight item(s).` : "Save a draft to run preflight."}</span></div>
 
       <Guidance title="How to use this page">Work from top to bottom. <strong>Required to publish</strong> means Masterplan needs the entry to produce a coherent notice; it is not a universal legal conclusion. Conditional duties depend on the controller and deployment. Optional fields may be left empty. Deployment settings are linked where they affect the notice.</Guidance>
@@ -319,6 +321,8 @@ export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupM
         {Object.entries(confirmationLabels).map(([key, label]) => <label key={key} className="flex items-start gap-3 rounded-lg border border-gray-200 p-3 text-sm dark:border-gray-700"><input className="mt-1" type="checkbox" checked={confirmations[key as ConfirmationKey]} onChange={(event) => setConfirmations((current) => ({ ...current, [key]: event.target.checked }))} /><span>{label}</span></label>)}
         <div className="flex flex-wrap gap-3"><Button disabled={!ready || !confirmed} type="button" onClick={publish}>Publish immutable version</Button>{publishedVersion && <a className="inline-flex min-h-11 items-center rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium dark:border-gray-600 dark:bg-gray-900" href={`/api/v1/admin/governance/export/${publishedVersion}`}>Export current evidence JSON</a>}</div>
       </Card>
+      </div>
+      </div>
     </div>
   </div>;
 }

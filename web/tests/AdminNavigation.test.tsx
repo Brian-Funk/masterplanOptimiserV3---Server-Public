@@ -31,6 +31,8 @@ describe("AdminNavigation", () => {
     expect(screen.getAllByText("Trust & keys").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Deletion evidence").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Audit log").length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("combobox")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Governance" })).toHaveAttribute("aria-current", "page");
   });
 
   it("preserves in-page tab selection and routes policies to its editor", () => {
@@ -67,5 +69,23 @@ describe("AdminNavigation", () => {
     expect(screen.queryByText("System")).not.toBeInTheDocument();
     expect(screen.queryByText("Events")).not.toBeInTheDocument();
     expect(screen.getAllByText("Users").length).toBeGreaterThan(0);
+  });
+
+  it("uses one grouped mobile selector for root pages", () => {
+    const onSelect = vi.fn();
+    render(
+      <AdminNavigation
+        active="events"
+        isRootAdmin
+        isIssuerOnly={false}
+        canManagePublicLinks
+        onSelect={onSelect}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Administration page" }), {
+      target: { value: "privacy" },
+    });
+    expect(onSelect).toHaveBeenCalledWith("privacy");
   });
 });

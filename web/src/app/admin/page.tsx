@@ -464,13 +464,13 @@ export default function AdminPage() {
   return (
     <div className={`min-h-screen bg-gray-50 dark:bg-gray-900 ${user?.is_root_admin ? "" : "mobile-page-with-nav"}`}>
       {/* Header */}
-      <header className="sticky top-0 z-10 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 shadow-sm">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 py-2.5 sm:py-3 flex items-center justify-between">
+      <header className="sticky top-0 z-20 border-b border-gray-200 bg-white/95 backdrop-blur dark:border-gray-700 dark:bg-gray-800/95">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-2.5 sm:px-6 sm:py-3">
           <div className="flex min-w-0 items-center gap-3">
             <span className="hidden sm:inline-flex"><Logo height={32} href="https://info.mp-opt.net" /></span>
             <div className="min-w-0">
               <h1 className="truncate text-lg font-semibold text-gray-900 dark:text-gray-100 leading-tight">
-                {isIssuerOnly ? "Issuer Dashboard" : "Admin Dashboard"}
+                {isIssuerOnly ? "Issuer dashboard" : user?.is_root_admin ? "Root administration" : "Administration"}
               </h1>
               {user && (
                 <p className="text-xs text-gray-500 dark:text-gray-400">
@@ -499,16 +499,6 @@ export default function AdminPage() {
             >
               <Shield size={18} />
             </button>
-            {user?.is_root_admin && (
-              <button
-                onClick={() => router.push("/admin/governance")}
-                className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700 transition-colors"
-                aria-label="Instance governance and legal notice"
-                title="Instance governance and legal notice"
-              >
-                <FileText size={18} />
-              </button>
-            )}
             <button
               onClick={handleLogout}
               disabled={isLoggingOut}
@@ -523,7 +513,8 @@ export default function AdminPage() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-4 md:py-6 space-y-5 md:space-y-6">
+      <main className="mx-auto max-w-7xl px-4 py-4 sm:px-6 md:py-6">
+        <div className={user?.is_root_admin ? "grid items-start gap-6 lg:grid-cols-[15rem_minmax(0,1fr)] xl:gap-8" : "space-y-5 md:space-y-6"}>
         <AdminNavigation
           active={tab}
           isRootAdmin={!!user?.is_root_admin}
@@ -531,6 +522,8 @@ export default function AdminPage() {
           canManagePublicLinks={canManagePublicScheduleLinks(user)}
           onSelect={setTab}
         />
+
+        <div className="min-w-0 space-y-5 md:space-y-6">
 
         {/* Event context is separate so it never compresses the root tab bar. */}
         {!isIssuerOnly && EVENT_SCOPED_TABS.includes(tab) &&
@@ -603,6 +596,8 @@ export default function AdminPage() {
         {tab === "privacy" && user?.is_root_admin && <ComplianceEvidenceTab events={events} />}
         {tab === "ha" && user?.is_root_admin && <HighAvailabilityTab />}
         {tab === "audit" && <AuditTab />}
+        </div>
+        </div>
       </main>
 
       {!user?.is_root_admin && (
