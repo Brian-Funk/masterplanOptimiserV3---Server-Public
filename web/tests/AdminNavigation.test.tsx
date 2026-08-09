@@ -69,6 +69,8 @@ describe("AdminNavigation", () => {
     expect(screen.queryByText("System")).not.toBeInTheDocument();
     expect(screen.queryByText("Events")).not.toBeInTheDocument();
     expect(screen.getAllByText("Users").length).toBeGreaterThan(0);
+    expect(screen.getByText("Issuer administration")).toBeInTheDocument();
+    expect(screen.getAllByRole("combobox")).toHaveLength(1);
   });
 
   it("uses one grouped mobile selector for root pages", () => {

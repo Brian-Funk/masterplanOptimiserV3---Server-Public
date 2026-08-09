@@ -35,7 +35,6 @@ import { Logo } from "@/components/Logo";
 import { ActivationCampaignCard } from "@/components/ActivationCampaignCard";
 import { SnapshotComparisonModal } from "@/components/SnapshotComparisonModal";
 import { MobileActionSheet } from "@/components/MobileActionSheet";
-import { MobileBottomNavigation } from "@/components/MobileBottomNavigation";
 import { ComplianceEvidenceTab } from "@/components/ComplianceEvidenceTab";
 import { AdminNavigation, type AdminTab } from "@/components/AdminNavigation";
 import { PermittedDataInputNotice } from "@/components/PermittedDataInputNotice";
@@ -82,8 +81,6 @@ import {
   Unlock,
   Pencil,
   Check,
-  Share2,
-  CalendarDays,
   MoreHorizontal,
   Server,
 } from "lucide-react";
@@ -324,7 +321,6 @@ export default function AdminPage() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [tab, setTabState] = useState<AdminTab>("events");
-  const [showMobileMore, setShowMobileMore] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<number | "">("");
 
   const setTab = useCallback((nextTab: AdminTab) => {
@@ -462,7 +458,7 @@ export default function AdminPage() {
   }
 
   return (
-    <div className={`min-h-screen bg-gray-50 dark:bg-gray-900 ${user?.is_root_admin ? "" : "mobile-page-with-nav"}`}>
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
       {/* Header */}
       <header className="sticky top-0 z-20 border-b border-gray-200 bg-white/95 backdrop-blur dark:border-gray-700 dark:bg-gray-800/95">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-2.5 sm:px-6 sm:py-3">
@@ -479,10 +475,10 @@ export default function AdminPage() {
               )}
             </div>
           </div>
-          <div className={`items-center gap-1 ${user?.is_root_admin ? "flex" : "hidden md:flex"}`}>
-            {isIssuerOnly && user?.event_id && (
+          <div className="flex items-center gap-1">
+            {!user?.is_root_admin && (user?.event_id || selectedEvent) && (
               <button
-                onClick={() => router.push(`/calendar?event=${user.event_id}`)}
+                onClick={() => router.push(`/calendar?event=${user?.event_id || selectedEvent}`)}
                 className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700 transition-colors"
                 aria-label="Back to calendar"
                 title="Back to calendar"
@@ -514,7 +510,7 @@ export default function AdminPage() {
       </header>
 
       <main className="mx-auto max-w-7xl px-4 py-4 sm:px-6 md:py-6">
-        <div className={user?.is_root_admin ? "grid items-start gap-6 lg:grid-cols-[15rem_minmax(0,1fr)] xl:gap-8" : "space-y-5 md:space-y-6"}>
+        <div className="grid items-start gap-6 lg:grid-cols-[15rem_minmax(0,1fr)] xl:gap-8">
         <AdminNavigation
           active={tab}
           isRootAdmin={!!user?.is_root_admin}
@@ -600,66 +596,6 @@ export default function AdminPage() {
         </div>
       </main>
 
-      {!user?.is_root_admin && (
-        <MobileBottomNavigation
-          items={[
-            {
-              id: "schedule",
-              label: "Schedule",
-              icon: <CalendarDays size={19} />,
-              onSelect: () => {
-                const targetEvent = user?.event_id || selectedEvent;
-                router.push(targetEvent ? `/calendar?event=${targetEvent}` : "/calendar");
-              },
-            },
-            {
-              id: "people",
-              label: "People",
-              icon: <Users size={19} />,
-              active: tab === "users",
-              onSelect: () => setTab("users"),
-            },
-            {
-              id: "updates",
-              label: "Updates",
-              icon: <Megaphone size={19} />,
-              active: tab === "announcements",
-              onSelect: () => setTab("announcements"),
-            },
-            {
-              id: "more",
-              label: "More",
-              icon: <MoreHorizontal size={20} />,
-              active: showMobileMore || !["users", "announcements"].includes(tab),
-              onSelect: () => setShowMobileMore(true),
-            },
-          ]}
-        />
-      )}
-
-      <MobileActionSheet
-        open={showMobileMore}
-        onClose={() => setShowMobileMore(false)}
-        title="More"
-        description="Management sections and account settings."
-      >
-        <div className="space-y-1">
-          {!isIssuerOnly && (
-            <button type="button" onClick={() => { setTab("events"); setShowMobileMore(false); }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><Plus size={18} /> Events</button>
-          )}
-          <button type="button" onClick={() => { setTab("history"); setShowMobileMore(false); }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><History size={18} /> History</button>
-          {canManagePublicScheduleLinks(user) && (
-            <button type="button" onClick={() => { setTab("public-links"); setShowMobileMore(false); }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><Share2 size={18} /> Public links</button>
-          )}
-          {!isIssuerOnly && (
-            <button type="button" onClick={() => { setTab("audit"); setShowMobileMore(false); }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><FileText size={18} /> Audit log</button>
-          )}
-          <div className="my-2 border-t border-gray-200 dark:border-gray-700" />
-          <div className="flex min-h-11 items-center justify-between rounded-lg px-3"><span className="text-sm">Appearance</span><ThemeToggle /></div>
-          <button type="button" onClick={() => router.push("/account/security")} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><Shield size={18} /> Account security</button>
-          <button type="button" onClick={handleLogout} disabled={isLoggingOut} aria-busy={isLoggingOut} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-red-600 hover:bg-red-50 disabled:cursor-wait disabled:opacity-60 dark:text-red-400 dark:hover:bg-red-900/20">{isLoggingOut ? <RefreshCw size={18} className="animate-spin" /> : <LogOut size={18} />} {isLoggingOut ? "Logging out…" : "Log out"}</button>
-        </div>
-      </MobileActionSheet>
     </div>
   );
 }
@@ -6022,6 +5958,12 @@ const SETTING_DESCRIPTIONS: Record<string, string> = {
     "How long a re-authentication passkey challenge remains valid for sensitive admin operations.",
   passkey_requests_per_minute:
     "Maximum passkey requests accepted per minute. Public sign-in is limited per client address, while registration and re-authentication are limited per activation or account session.",
+  self_service_additional_passkeys_enabled:
+    "Allow non-management users to request a one-time additional-passkey link at their own administrator-recorded email address. Root, admin, and issuer accounts are not affected by this switch.",
+  self_service_passkey_emails_per_minute:
+    "Maximum self-service additional-passkey emails one non-management account may request in one minute. Administrator-triggered emails are not counted.",
+  self_service_passkey_emails_per_day:
+    "Maximum self-service additional-passkey emails one non-management account may request in one rolling day. Administrator-triggered emails are not counted.",
   announcements_per_event_limit:
     "Maximum number of announcements returned per event. Older announcements beyond this limit are not shown.",
   masterplan_pushes_per_minute:
@@ -6040,7 +5982,7 @@ const SECTION_DESCRIPTIONS: Record<string, string> = {
   Authentication:
     "Configure account verification windows and activation link behaviour.",
   Passkeys:
-    "Configure passkey ceremony lifetimes and throughput for sign-in, registration, and re-authentication.",
+    "Configure passkey ceremonies and the optional email-based enrollment available to non-management users.",
   "Data Retention":
     "Set how long expired or revoked records are kept before automatic cleanup removes them.",
   "Desktop Publishing":
@@ -6237,6 +6179,9 @@ function SecurityTab() {
         "exchange_code_ttl_seconds",
         "reauth_challenge_ttl_minutes",
         "passkey_requests_per_minute",
+        "self_service_additional_passkeys_enabled",
+        "self_service_passkey_emails_per_minute",
+        "self_service_passkey_emails_per_day",
       ],
     },
     {
@@ -6384,12 +6329,24 @@ function SecurityTab() {
                         )}
                       </div>
                       <span className="text-xs text-gray-400 dark:text-gray-500 mt-0.5 block">
-                        Default: {meta.default} {meta.unit} &middot; Range:{" "}
-                        {meta.min} - {meta.max}
+                        {key === "self_service_additional_passkeys_enabled"
+                          ? `Default: ${meta.default ? "Allowed" : "Not allowed"}`
+                          : <>Default: {meta.default} {meta.unit} &middot; Range: {meta.min} - {meta.max}</>}
                       </span>
                     </div>
                     <div className="flex items-center gap-2.5 shrink-0">
-                      <input
+                      {key === "self_service_additional_passkeys_enabled" ? (
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={(draft[key] ?? meta.value) === 1}
+                          onClick={() => setDraft((prev) => ({ ...prev, [key]: (prev[key] ?? meta.value) === 1 ? 0 : 1 }))}
+                          className={`relative h-7 w-12 rounded-full transition-colors ${(draft[key] ?? meta.value) === 1 ? "bg-blue-600" : "bg-gray-300 dark:bg-gray-600"}`}
+                        >
+                          <span className={`absolute left-1 top-1 h-5 w-5 rounded-full bg-white shadow transition-transform ${(draft[key] ?? meta.value) === 1 ? "translate-x-5" : "translate-x-0"}`} />
+                          <span className="sr-only">{(draft[key] ?? meta.value) === 1 ? "Allowed" : "Not allowed"}</span>
+                        </button>
+                      ) : <input
                         type="number"
                         min={meta.min}
                         max={meta.max}
@@ -6405,9 +6362,9 @@ function SecurityTab() {
                             ? "border-blue-400 dark:border-blue-500 ring-1 ring-blue-200 dark:ring-blue-800"
                             : "border-gray-300 dark:border-gray-600"
                         }`}
-                      />
+                      />}
                       <span className="text-xs text-gray-500 dark:text-gray-400 w-16">
-                        {meta.unit}
+                        {key === "self_service_additional_passkeys_enabled" ? ((draft[key] ?? meta.value) === 1 ? "Allowed" : "Off") : meta.unit}
                       </span>
                       <button
                         onClick={() => handleReset(key)}

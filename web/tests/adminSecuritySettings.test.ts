@@ -51,5 +51,9 @@ describe("admin security settings", () => {
     expect(source).toContain('title: "Passkeys"');
     expect(source).toContain('"passkey_requests_per_minute"');
     expect(source).toContain("limited per activation or account session");
+    expect(source).toContain('"self_service_additional_passkeys_enabled"');
+    expect(source).toContain('"self_service_passkey_emails_per_minute"');
+    expect(source).toContain('"self_service_passkey_emails_per_day"');
+    expect(source).toContain('role="switch"');
   });
 });

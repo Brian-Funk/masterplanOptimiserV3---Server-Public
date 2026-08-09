@@ -22,6 +22,15 @@ export interface PasskeyManagerProps {
   onClose: () => void;
 }
 
+interface AdditionalPasskeyCapability {
+  mode: "direct" | "email";
+  self_service_enabled: boolean;
+  email_available: boolean;
+  mail_configured: boolean;
+  can_request: boolean;
+  message: string;
+}
+
 /** Modal for registering, renaming, and deleting passkeys on an account. */
 export function PasskeyManager({ open, onClose }: PasskeyManagerProps) {
   const [credentials, setCredentials] = useState<Credential[]>([]);
@@ -30,10 +39,12 @@ export function PasskeyManager({ open, onClose }: PasskeyManagerProps) {
   const [registering, setRegistering] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editName, setEditName] = useState("");
+  const [capability, setCapability] = useState<AdditionalPasskeyCapability | null>(null);
+  const [notice, setNotice] = useState("");
 
   useEffect(() => {
     if (open) {
-      fetchCredentials();
+      void fetchCredentials();
     }
   }, [open]);
 
@@ -41,10 +52,15 @@ export function PasskeyManager({ open, onClose }: PasskeyManagerProps) {
     setLoading(true);
     setError("");
     try {
-      const res = await apiFetch("/api/v1/passkey/credentials");
+      const [res, capabilityResponse] = await Promise.all([
+        apiFetch("/api/v1/passkey/credentials"),
+        apiFetch("/api/v1/account/additional-passkey"),
+      ]);
       if (!res.ok) throw new Error("Failed to load passkeys");
       const data = await res.json();
       setCredentials(data);
+      if (!capabilityResponse.ok) throw new Error("Passkey enrollment settings could not be loaded.");
+      setCapability(await capabilityResponse.json());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load");
     } finally {
@@ -55,7 +71,20 @@ export function PasskeyManager({ open, onClose }: PasskeyManagerProps) {
   const handleAddPasskey = async () => {
     setRegistering(true);
     setError("");
+    setNotice("");
     try {
+      if (capability?.mode === "email") {
+        const response = await apiFetch("/api/v1/account/additional-passkey/email", {
+          method: "POST",
+          body: JSON.stringify({}),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(passkeyErrorMessage(body, "The enrollment email could not be sent."));
+        }
+        setNotice("The mail server accepted your one-time enrollment email. Open it on the device that should hold the new passkey.");
+        return;
+      }
       const beginRes = await withReauth(() =>
         apiFetch("/api/v1/passkey/register/begin", {
           method: "POST",
@@ -162,6 +191,11 @@ export function PasskeyManager({ open, onClose }: PasskeyManagerProps) {
               {error}
             </div>
           )}
+          {notice && (
+            <div role="status" className="rounded border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800 dark:border-green-800 dark:bg-green-900/30 dark:text-green-200">
+              {notice}
+            </div>
+          )}
 
           {loading ? (
             <p className="text-sm text-gray-500 text-center py-4">Loading...</p>
@@ -241,18 +275,25 @@ export function PasskeyManager({ open, onClose }: PasskeyManagerProps) {
           )}
         </div>
 
-        <div className="px-4 py-3 border-t border-gray-200 dark:border-gray-700">
-          <Button
-            variant="primary"
-            size="sm"
-            fullWidth
-            disabled={registering}
-            onClick={handleAddPasskey}
-          >
-            <Plus size={16} className="mr-1" />
-            {registering ? "Waiting for passkey manager..." : "Add Passkey"}
-          </Button>
-        </div>
+        {capability?.mode === "direct" && (
+          <div className="px-4 py-3 border-t border-gray-200 dark:border-gray-700">
+            <Button variant="primary" size="sm" fullWidth disabled={registering} onClick={handleAddPasskey}>
+              <Plus size={16} className="mr-1" />
+              {registering ? "Waiting for passkey manager..." : "Add passkey"}
+            </Button>
+          </div>
+        )}
+        {capability?.mode === "email" && capability.self_service_enabled && (
+          <div className="space-y-3 border-t border-gray-200 px-4 py-3 dark:border-gray-700">
+            <p className="text-sm leading-5 text-gray-600 dark:text-gray-300">{capability.message}</p>
+            {capability.can_request && (
+              <Button variant="primary" size="sm" fullWidth disabled={registering} onClick={handleAddPasskey}>
+                <Plus size={16} className="mr-1" />
+                {registering ? "Sending enrollment email..." : "Email me an additional-passkey link"}
+              </Button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
