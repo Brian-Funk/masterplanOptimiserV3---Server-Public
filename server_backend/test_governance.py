@@ -410,7 +410,9 @@ def test_immutable_privacy_and_rights_pages_are_styled_human_readable_notices(db
         assert response.status_code == 200
         assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
         assert '<article class="notice-shell">' in response.text
-        assert "ui-sans-serif" in response.text
+        assert 'font-family:"Source Sans 3"' in response.text
+        assert 'src="/logo_normal.png"' in response.text
+        assert 'alt="Masterplan Optimiser"' in response.text
         assert f"SHA-256 {published['content_sha256']}" in response.text
         assert 'href="/api/v1/governance/public/versions/1/privacy.html"' in response.text
         assert 'href="/api/v1/governance/public/versions/1/rights.html"' in response.text
@@ -425,7 +427,34 @@ def test_immutable_privacy_and_rights_pages_are_styled_human_readable_notices(db
     assert "What happens next" in rights.text
     assert "Email the privacy contact" in rights.text
     assert "Access" in rights.text
+    assert "Correction" in rights.text
+    assert "Erasure" in rights.text
+    assert "Restriction" in rights.text
+    assert "Objection" in rights.text
     assert "Portability" in rights.text
+    assert "Automated decisions" in rights.text
+    assert "You can ask in ordinary language" in rights.text
+    assert "GDPR Art. 15" in rights.text
+    assert "FADP Art. 25" in rights.text
+    assert "GDPR Articles 77 and 79" in rights.text
+    assert "FADP Articles 32 and 49 onward" in rights.text
+
+
+def test_every_public_governance_section_uses_the_shared_masterplan_shell(db):
+    client, _root = _root_with_reauth(db)
+    assert client.put("/api/v1/admin/governance", json=PROFILE).status_code == 200
+    assert client.post(
+        "/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION
+    ).status_code == 200
+
+    for section in ("privacy", "legal", "terms", "data-policy", "retention", "rights", "processors"):
+        response = client.get(f"/api/v1/governance/public/versions/1/{section}.html")
+        assert response.status_code == 200
+        assert '<article class="notice-shell">' in response.text
+        assert '<nav class="notice-nav"' in response.text
+        assert '<footer class="notice-footer">' in response.text
+        assert 'src="/logo_normal.png"' in response.text
+        assert "Masterplan Optimiser self-hosted instance" in response.text
 
 
 def test_root_can_review_saved_draft_as_private_html_before_publication(db):

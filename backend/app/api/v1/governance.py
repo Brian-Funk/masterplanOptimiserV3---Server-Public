@@ -46,21 +46,23 @@ user_router = APIRouter()
 PUBLIC_SECTIONS = ("privacy", "legal", "terms", "data-policy", "retention", "rights", "processors")
 
 NOTICE_STYLES = """
-:root{color-scheme:light dark;--bg:#f4f6f8;--surface:#fff;--surface-soft:#f8fafc;--text:#172033;--muted:#5f6b7a;--line:#dfe5ec;--accent:#365f88;--accent-soft:#eaf1f8;--good:#2f6b50;--good-soft:#eaf6ef;--warn:#8b4e34;--warn-soft:#fff1eb;--shadow:0 18px 50px rgba(31,45,61,.08)}
-*{box-sizing:border-box}html{background:var(--bg)}body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.65}
-a{color:var(--accent);text-underline-offset:3px}a:hover{text-decoration-thickness:2px}main{width:min(920px,calc(100% - 32px));margin:0 auto;padding:48px 0 72px}
-.notice-shell{background:var(--surface);border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow);overflow:hidden}.notice-header{padding:40px 44px 32px;background:linear-gradient(145deg,var(--surface) 0%,var(--accent-soft) 100%);border-bottom:1px solid var(--line)}
-.notice-kicker{margin:0 0 8px;color:var(--accent);font-size:.76rem;font-weight:750;letter-spacing:.12em;text-transform:uppercase}.notice-header h1{margin:0;font-size:clamp(2rem,5vw,3.35rem);line-height:1.08;letter-spacing:-.035em}.notice-lead{max-width:700px;margin:16px 0 0;color:var(--muted);font-size:1.06rem}
-.notice-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:24px}.notice-meta span,.notice-meta code{display:inline-flex;align-items:center;min-height:30px;padding:4px 10px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.72);color:var(--muted);font-size:.78rem}.notice-meta code{max-width:100%;overflow-wrap:anywhere;border-radius:10px;font-family:ui-monospace,"SFMono-Regular",Consolas,monospace}
-.notice-content{padding:10px 44px 38px}.notice-content h2{margin:32px 0 10px;padding-top:28px;border-top:1px solid var(--line);font-size:1.28rem;line-height:1.3;letter-spacing:-.012em}.notice-content h2:first-child{border-top:0}.notice-content p{margin:8px 0;color:var(--muted)}.notice-content strong{color:var(--text)}
-.notice-content ul,.notice-content ol{margin:12px 0;padding-left:22px}.notice-content li{margin:7px 0;color:var(--muted)}.notice-content li::marker{color:var(--accent)}
-.notice-callout{margin:18px 0;padding:16px 18px;border:1px solid var(--line);border-radius:14px;background:var(--surface-soft)}.notice-callout--good{border-color:#badbc8;background:var(--good-soft)}.notice-callout--warn{border-color:#efcbbc;background:var(--warn-soft)}
-.rights-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;padding:0!important;list-style:none}.rights-grid li{margin:0;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--surface-soft)}.rights-grid strong{display:block;margin-bottom:3px}
-.notice-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}.notice-button{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:8px 14px;border-radius:10px;background:var(--accent);color:#fff;text-decoration:none;font-weight:700}.notice-button:hover{color:#fff;filter:brightness(.95)}
-table{width:100%;margin:16px 0;border-collapse:separate;border-spacing:0;border:1px solid var(--line);border-radius:14px;overflow:hidden;font-size:.9rem}caption{padding:0 0 10px;text-align:left;font-weight:700;color:var(--text)}th,td{padding:10px 12px;border-top:1px solid var(--line);text-align:left;vertical-align:top}tr:first-child th,tr:first-child td{border-top:0}th{width:46%;background:var(--surface-soft);font-weight:650}td{color:var(--muted)}
-.notice-nav{display:flex;flex-wrap:wrap;gap:8px;padding:22px 44px 30px;border-top:1px solid var(--line);background:var(--surface-soft)}.notice-nav a{padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:var(--surface);text-decoration:none;font-size:.86rem}.notice-nav a[aria-current="page"]{border-color:var(--accent);background:var(--accent-soft);font-weight:700}
-@media(max-width:640px){main{width:min(100% - 20px,920px);padding:18px 0 36px}.notice-shell{border-radius:18px}.notice-header{padding:28px 22px 24px}.notice-content{padding:6px 22px 28px}.notice-nav{padding:18px 22px 24px}.rights-grid{grid-template-columns:1fr}th{width:42%}}
-@media(prefers-color-scheme:dark){:root{--bg:#111722;--surface:#19212d;--surface-soft:#202a37;--text:#edf2f7;--muted:#b3bfcc;--line:#354254;--accent:#9bc3e8;--accent-soft:#263a4d;--good-soft:#1c382c;--warn-soft:#402820;--shadow:none}.notice-meta span,.notice-meta code{background:rgba(25,33,45,.8)}.notice-button{background:#8ab7df;color:#102235}.notice-button:hover{color:#102235}}
+:root{color-scheme:light dark;--bg:#f7f8fa;--surface:#fff;--surface-soft:#f8fafc;--surface-muted:#f1f3f5;--text:#111827;--muted:#667085;--line:#e4e7ec;--blue:#2563eb;--blue-soft:#eff6ff;--violet:#7c3aed;--good:#047857;--good-soft:#ecfdf5;--warn:#b45309;--warn-soft:#fffbeb;--danger:#b42318;--danger-soft:#fff5f5;--shadow:0 1px 3px rgba(16,24,40,.08)}
+*{box-sizing:border-box}html{background:var(--bg)}body{min-width:320px;margin:0;background:var(--bg);color:var(--text);font-family:"Source Sans 3",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:var(--blue);text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible{outline:2px solid var(--blue);outline-offset:3px;border-radius:4px}main{width:min(1024px,calc(100% - 32px));margin:0 auto;padding:32px 0 64px}
+.notice-shell{background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden}.notice-header{position:relative;padding:28px 36px 30px;border-top:4px solid transparent;border-bottom:1px solid var(--line);border-image:linear-gradient(90deg,var(--blue),var(--violet)) 1;background:var(--surface)}
+.notice-brand{display:flex;align-items:center;gap:12px;margin-bottom:26px}.notice-logo{width:46px;height:46px;object-fit:contain}.notice-brand-copy{min-width:0}.notice-product{display:block;font-size:.98rem;font-weight:700;color:var(--text)}.notice-instance{display:block;overflow:hidden;color:var(--muted);font-size:.82rem;text-overflow:ellipsis;white-space:nowrap}
+.notice-kicker{margin:0 0 6px;color:var(--blue);font-size:.74rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase}.notice-header h1{max-width:760px;margin:0;font-size:clamp(2rem,4vw,2.75rem);line-height:1.12;letter-spacing:-.03em}.notice-lead{max-width:720px;margin:12px 0 0;color:var(--muted);font-size:1.04rem}
+.notice-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}.notice-meta span,.notice-meta code{display:inline-flex;align-items:center;min-height:29px;padding:4px 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface-soft);color:var(--muted);font-size:.77rem}.notice-meta code{max-width:100%;overflow-wrap:anywhere;font-family:ui-monospace,"SFMono-Regular",Consolas,monospace}
+.notice-nav{display:flex;flex-wrap:wrap;gap:5px;padding:12px 28px;border-bottom:1px solid var(--line);background:var(--surface-soft)}.notice-nav a{padding:7px 10px;border-radius:8px;color:var(--muted);text-decoration:none;font-size:.87rem;font-weight:600}.notice-nav a:hover{background:var(--surface);color:var(--text)}.notice-nav a[aria-current="page"]{background:var(--blue-soft);color:#1d4ed8}
+.notice-content{padding:8px 36px 40px}.notice-content h2{margin:32px 0 10px;padding-top:28px;border-top:1px solid var(--line);font-size:1.25rem;line-height:1.3;letter-spacing:-.01em}.notice-content h2:first-child{border-top:0}.notice-content p{max-width:78ch;margin:8px 0;color:var(--muted)}.notice-content strong{color:var(--text)}
+.notice-content ul,.notice-content ol{margin:12px 0;padding-left:22px}.notice-content li{margin:7px 0;color:var(--muted)}.notice-content li::marker{color:var(--blue)}
+.notice-callout{margin:18px 0;padding:16px 18px;border:1px solid var(--line);border-radius:12px;background:var(--surface-soft)}.notice-callout p:first-child{margin-top:0}.notice-callout p:last-child{margin-bottom:0}.notice-callout--good{border-color:#a7f3d0;background:var(--good-soft)}.notice-callout--warn{border-color:#fde68a;background:var(--warn-soft)}
+.rights-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;padding:0!important;list-style:none}.rights-grid li{display:flex;min-height:154px;margin:0;padding:17px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}.rights-card{display:flex;min-width:0;flex-direction:column}.rights-card>strong{display:block;margin-bottom:5px;font-size:1.02rem}.rights-card>span{color:var(--muted)}.rights-card__refs{display:flex;flex-wrap:wrap;gap:6px;margin-top:auto;padding-top:14px}.rights-card__refs a{padding:3px 7px;border-radius:6px;background:var(--blue-soft);font-size:.75rem;font-weight:700;text-decoration:none}.rights-note{font-size:.9rem}
+.notice-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}.notice-button{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:8px 14px;border-radius:9px;background:var(--blue);color:#fff;text-decoration:none;font-weight:700}.notice-button:hover{color:#fff;filter:brightness(.96)}.notice-button--secondary{border:1px solid var(--line);background:var(--surface);color:var(--text)}.notice-button--secondary:hover{color:var(--text);background:var(--surface-soft)}
+table{width:100%;margin:16px 0;border-collapse:separate;border-spacing:0;border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:.9rem}caption{padding:0 0 10px;text-align:left;font-weight:700;color:var(--text)}th,td{padding:11px 13px;border-top:1px solid var(--line);text-align:left;vertical-align:top}tr:first-child th,tr:first-child td{border-top:0}th{width:46%;background:var(--surface-soft);font-weight:650}td{color:var(--muted)}
+.notice-footer{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;padding:18px 36px;border-top:1px solid var(--line);background:var(--surface-soft);color:var(--muted);font-size:.78rem}.notice-footer a{color:var(--muted)}
+@media(max-width:640px){main{width:min(100% - 20px,1024px);padding:12px 0 34px}.notice-shell{border-radius:14px}.notice-header{padding:24px 20px}.notice-brand{margin-bottom:22px}.notice-content{padding:6px 20px 30px}.notice-nav{padding:10px 14px}.notice-footer{padding:16px 20px}.rights-grid{grid-template-columns:1fr}.rights-grid li{min-height:0}th{width:42%}}
+@media(prefers-color-scheme:dark){:root{--bg:#22252a;--surface:#282c34;--surface-soft:#2d333d;--surface-muted:#343a45;--text:#e5e7eb;--muted:#abb2bf;--line:#3d434f;--blue:#93c5fd;--blue-soft:#243652;--violet:#c4b5fd;--good-soft:#183c31;--warn-soft:#44341e;--danger-soft:#452526;--shadow:none}.notice-nav a[aria-current="page"]{color:#bfdbfe}.rights-card__refs a{color:#bfdbfe}.notice-button{background:#3b82f6;color:#fff}}
 """
 
 
@@ -266,7 +268,7 @@ def _render_governance_html(
         "rights": "How to exercise data-protection rights with the controller of this deployment.",
         "processors": "The controller-declared providers and processing locations used by this deployment.",
     }
-    instance_name = _text((notice or {}).get("instance_name") or "Masterplan Optimiser")
+    instance_name = _text((notice or {}).get("instance_name") or "Self-hosted instance")
     meta: list[str] = []
     if preview:
         meta.append("<span>Private draft</span>")
@@ -278,7 +280,13 @@ def _render_governance_html(
         meta.append(f"<code>SHA-256 {_text(content_sha256)}</code>")
     header = (
         '<header class="notice-header">'
-        f'<p class="notice-kicker">{instance_name}</p>'
+        '<div class="notice-brand">'
+        '<picture><source media="(prefers-color-scheme: dark)" srcset="/logo_dark.svg">'
+        '<img class="notice-logo" src="/logo_normal.png" width="46" height="46" '
+        'alt="Masterplan Optimiser"></picture>'
+        '<div class="notice-brand-copy"><span class="notice-product">Masterplan Optimiser</span>'
+        f'<span class="notice-instance">{instance_name}</span></div></div>'
+        '<p class="notice-kicker">Published governance</p>'
         f'<h1>{headings[section]}</h1>'
         f'<p class="notice-lead">{leads[section]}</p>'
         + (f'<div class="notice-meta">{"".join(meta)}</div>' if meta else "")
@@ -361,33 +369,66 @@ def _render_governance_html(
         if section in {"privacy", "rights"}:
             body.extend([
                 "<h2>Your rights</h2>",
-                "<p>Depending on the law that applies, you may have rights to access, correct, erase, "
-                "restrict or object to processing, and to receive portable data. Contact the controller at "
+                "<p>Whether you are a participant, organiser, administrator or another account holder, "
+                "data-protection rights concern your own personal data. Depending on the law that applies, "
+                "you may ask to access, correct, erase, restrict or object to processing, and to receive eligible data "
+                "in a portable form. Contact the controller at "
                 f"<a href=\"mailto:{_text(notice.get('privacy_contact_email'))}\">{_text(notice.get('privacy_contact_email'))}</a>; "
                 "the controller will assess the applicable right, scope and proportionate identity verification.</p>",
             ])
             if section == "rights":
+                gdpr_url = "https://eur-lex.europa.eu/eli/reg/2016/679/2016-05-04"
+                fadp_url = "https://www.fedlex.admin.ch/eli/cc/2022/491/en"
                 body.extend([
+                    '<div class="notice-callout"><strong>You can ask in ordinary language.</strong>'
+                    '<p>You do not need to identify the applicable law or quote an article. Describe what you want '
+                    'to know or change, and the controller will assess the request. These rights do not give an organiser '
+                    "access to another person's information or to all operational records.</p></div>",
+                ])
+                if notice.get("jurisdiction_scope"):
+                    body.extend([
+                        "<h2>Applicable scope</h2>",
+                        f"<p>The controller recorded the following jurisdiction scope for this deployment: {_text(notice.get('jurisdiction_scope'))}</p>",
+                        "<p>The Swiss FADP, the EU GDPR, or both may apply. The controller must assess the law for the particular request; "
+                        "the software does not infer jurisdiction from hosting, network location or a person's account role.</p>",
+                    ])
+                body.extend([
+                    "<h2>Rights you may exercise</h2>",
                     '<ul class="rights-grid">',
-                    "<li><strong>Access</strong>Ask whether and how information about you is processed.</li>",
-                    "<li><strong>Correction</strong>Ask for inaccurate or incomplete information to be corrected.</li>",
-                    "<li><strong>Erasure</strong>Ask for deletion where the applicable conditions are met.</li>",
-                    "<li><strong>Restriction or objection</strong>Ask the controller to limit or reconsider processing where the law provides.</li>",
-                    "<li><strong>Portability</strong>Request eligible information in a portable form where applicable.</li>",
+                    '<li><div class="rights-card"><strong>Access</strong><span>Ask whether personal data about you is processed and request the data and relevant processing information.</span>'
+                    f'<div class="rights-card__refs"><a href="{gdpr_url}" rel="noopener noreferrer">GDPR Art. 15</a><a href="{fadp_url}" rel="noopener noreferrer">FADP Art. 25</a></div></div></li>',
+                    '<li><div class="rights-card"><strong>Correction</strong><span>Ask for inaccurate personal data to be corrected and incomplete data to be completed where appropriate.</span>'
+                    f'<div class="rights-card__refs"><a href="{gdpr_url}" rel="noopener noreferrer">GDPR Art. 16</a><a href="{fadp_url}" rel="noopener noreferrer">FADP Art. 32(1)</a></div></div></li>',
+                    '<li><div class="rights-card"><strong>Erasure</strong><span>Ask for deletion or destruction where the applicable legal conditions are met. This right is not unconditional.</span>'
+                    f'<div class="rights-card__refs"><a href="{gdpr_url}" rel="noopener noreferrer">GDPR Art. 17</a><a href="{fadp_url}" rel="noopener noreferrer">FADP Art. 32(2)(c)</a></div></div></li>',
+                    '<li><div class="rights-card"><strong>Restriction</strong><span>Ask for disputed or potentially unlawful processing to be limited while the matter is assessed.</span>'
+                    f'<div class="rights-card__refs"><a href="{gdpr_url}" rel="noopener noreferrer">GDPR Art. 18</a><a href="{fadp_url}" rel="noopener noreferrer">FADP Art. 32(2)(b)</a></div></div></li>',
+                    '<li><div class="rights-card"><strong>Objection</strong><span>Object to processing of your personal data. The controller must assess whether it may lawfully continue.</span>'
+                    f'<div class="rights-card__refs"><a href="{gdpr_url}" rel="noopener noreferrer">GDPR Art. 21</a><a href="{fadp_url}" rel="noopener noreferrer">FADP Arts. 30(2)(b), 32</a></div></div></li>',
+                    '<li><div class="rights-card"><strong>Portability</strong><span>Ask for qualifying data in a commonly used, machine-readable format where the statutory conditions apply.</span>'
+                    f'<div class="rights-card__refs"><a href="{gdpr_url}" rel="noopener noreferrer">GDPR Art. 20</a><a href="{fadp_url}" rel="noopener noreferrer">FADP Art. 28</a></div></div></li>',
+                    '<li><div class="rights-card"><strong>Automated decisions</strong><span>Ask for the applicable safeguards or human review of a solely automated decision that significantly affects you.</span>'
+                    f'<div class="rights-card__refs"><a href="{gdpr_url}" rel="noopener noreferrer">GDPR Art. 22</a><a href="{fadp_url}" rel="noopener noreferrer">FADP Art. 21</a></div></div></li>',
                     "</ul>",
+                    '<p class="rights-note">The precise scope, exceptions and response depend on the applicable law, the processing purpose, '
+                    "other people's rights, and any legally required retention.</p>",
                 ])
             if notice.get("rights_summary"):
                 body.append(_paragraphs(notice.get("rights_summary")))
             if section == "rights":
                 body.extend([
                     "<h2>How to make a request</h2>",
-                    '<div class="notice-callout"><p>Contact the controller using the privacy address below. '
-                    "Describe the request clearly; do not email unnecessary identity documents or sensitive information.</p>"
+                    '<div class="notice-callout"><p>Contact the controller using the privacy address below. You may write in ordinary language; '
+                    "describe what you want to know or change. Do not email unnecessary identity documents or sensitive information.</p>"
                     f'<div class="notice-actions"><a class="notice-button" href="mailto:{_text(notice.get("privacy_contact_email"))}">Email the privacy contact</a></div></div>',
                     "<h2>What happens next</h2>",
                     "<ol><li>The controller confirms the scope of the request.</li>"
                     "<li>Only proportionate identity verification is requested where needed.</li>"
                     "<li>The controller assesses the applicable law, any limits, and the response or action required.</li></ol>",
+                    f'<p>Under <a href="{gdpr_url}" rel="noopener noreferrer">GDPR Article 12</a>, a controller normally '
+                    'responds without undue delay and within one month. Under the '
+                    '<a href="https://www.fedlex.admin.ch/eli/cc/2022/568/en" rel="noopener noreferrer">Swiss Data Protection Ordinance</a>, '
+                    "access information is normally provided within 30 days.</p>",
                 ])
                 if notice.get("rights_request_url"):
                     body.append(
@@ -419,7 +460,13 @@ def _render_governance_html(
             if notice.get("terms_summary"):
                 body.append(_paragraphs(notice.get("terms_summary")))
         if section == "rights":
-            body.append("<h2>Supervisory authority</h2>")
+            body.extend([
+                "<h2>Complaint and legal remedy</h2>",
+                '<p>If the controller does not handle a request properly, the applicable route may include a complaint to a supervisory authority '
+                "or a legal remedy. See <a href=\"https://eur-lex.europa.eu/eli/reg/2016/679/2016-05-04\" rel=\"noopener noreferrer\">GDPR Articles 77 and 79</a> "
+                'and <a href="https://www.fedlex.admin.ch/eli/cc/2022/491/en" rel="noopener noreferrer">FADP Articles 32 and 49 onward</a>.</p>',
+                "<h2>Supervisory authority</h2>",
+            ])
             if notice.get("supervisory_authority_name") and notice.get("supervisory_authority_url"):
                 body.append(f"<p><a href=\"{_text(notice.get('supervisory_authority_url'))}\" rel=\"noopener noreferrer\">{_text(notice.get('supervisory_authority_name'))}</a></p>")
             elif notice.get("supervisory_authority_name"):
@@ -453,12 +500,16 @@ def _render_governance_html(
         nav_links = [nav_link(f"/{item}", item, label) for item, label in nav_labels.items()]
         nav_links.append('<a href="/licence">Licence</a>')
     navigation = f'<nav class="notice-nav" aria-label="{nav_label}">{"".join(nav_links)}</nav>'
+    footer = (
+        '<footer class="notice-footer"><span>Masterplan Optimiser self-hosted instance</span>'
+        '<span>Controller-specific published governance</span></footer>'
+    )
     document = (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         f"<title>{headings[section]} | {instance_name}</title><style>{NOTICE_STYLES}</style></head>"
-        f'<body><main><article class="notice-shell">{header}'
-        f'<div class="notice-content">{"".join(body)}</div>{navigation}</article></main></body></html>'
+        f'<body><main><article class="notice-shell">{header}{navigation}'
+        f'<div class="notice-content">{"".join(body)}</div>{footer}</article></main></body></html>'
     )
     headers = {"Cache-Control": "private, no-store", "X-Robots-Tag": "noindex, nofollow"} if preview else {"Cache-Control": "no-cache"}
     return HTMLResponse(document, headers=headers)

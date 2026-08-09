@@ -3,10 +3,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { GovernanceNotice } from "@/components/GovernanceNotice";
 
+vi.mock("@/components/Logo", () => ({ Logo: () => <div aria-label="Masterplan Optimiser logo">Logo</div> }));
+
 const notice = {
   configured: true,
   version: 3,
   published_at: "2026-07-31T12:00:00Z",
+  content_sha256: "a".repeat(64),
+  instance_name: "Synthetic governance test instance",
+  jurisdiction_scope: "Swiss and European data-protection scope may apply.",
   controller_legal_name: "Synthetic Controller",
   controller_postal_address: "Controller Street 1",
   controller_country: "CH",
@@ -64,5 +69,33 @@ describe("GovernanceNotice", () => {
 
     expect(await screen.findByText("Authorised operational use only.")).toBeInTheDocument();
     expect(screen.queryByText(/All rights reserved/)).not.toBeInTheDocument();
+  });
+
+  it("uses the shared Masterplan legal-centre shell for current public notices", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => notice }));
+    render(<GovernanceNotice section="retention" />);
+
+    expect(await screen.findByRole("heading", { name: "Retention and deletion", level: 1 })).toBeInTheDocument();
+    expect(screen.getByLabelText("Masterplan Optimiser logo")).toBeInTheDocument();
+    expect(screen.getByText("Synthetic governance test instance")).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Legal centre" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open permanent exact page" })).toHaveAttribute(
+      "href",
+      "/api/v1/governance/public/versions/3/retention.html",
+    );
+  });
+
+  it("explains organiser rights in ordinary language with direct GDPR and FADP citations", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => notice }));
+    render(<GovernanceNotice section="rights" />);
+
+    expect(await screen.findByText("You can ask in ordinary language.")).toBeInTheDocument();
+    expect(screen.getByText(/participant, organiser, administrator/)).toBeInTheDocument();
+    for (const title of ["Access", "Correction", "Erasure", "Restriction", "Objection", "Portability", "Automated decisions"]) {
+      expect(screen.getByText(title)).toBeInTheDocument();
+    }
+    expect(screen.getByRole("link", { name: "GDPR Art. 15" })).toHaveAttribute("href", expect.stringContaining("eur-lex.europa.eu"));
+    expect(screen.getByRole("link", { name: "FADP Art. 25" })).toHaveAttribute("href", expect.stringContaining("fedlex.admin.ch"));
+    expect(screen.getByText(/software does not infer jurisdiction/)).toBeInTheDocument();
   });
 });
