@@ -43,7 +43,7 @@ export default function LicencePage() {
             GNU Affero General Public License
           </h2>
           <div className='w-full overflow-hidden rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-900/50'>
-            <pre className='m-0 w-full whitespace-pre-wrap break-words p-5 font-sans text-sm leading-7 text-gray-700 dark:text-gray-300 sm:p-7'>
+            <pre className='m-0 w-full whitespace-pre-wrap break-words p-5 text-center font-sans text-sm leading-7 text-gray-700 dark:text-gray-300 sm:p-7'>
               {licence}
             </pre>
           </div>
