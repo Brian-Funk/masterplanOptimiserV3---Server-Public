@@ -561,7 +561,10 @@ def test_frontend_legal_artifacts_are_self_contained_and_exact():
     }
     for name, page in pages.items():
         source = page.read_text(encoding="utf-8")
-        assert 'path.join(process.cwd(), "legal-artifacts"' in source
+        assert (
+            'path.join(process.cwd(), "legal-artifacts"' in source
+            or "path.join(process.cwd(), 'legal-artifacts'" in source
+        )
         assert name in source
         assert "SECURITY_REPORT.md" not in source
 
