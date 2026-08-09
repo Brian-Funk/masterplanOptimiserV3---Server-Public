@@ -158,10 +158,13 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
         self.assertIn('role="table" aria-label="User accounts"', ADMIN_UI)
         self.assertIn('recentlyUpdated', ADMIN_UI)
 
-    def test_root_tabs_wrap_and_event_filter_uses_a_separate_context_row(self) -> None:
+    def test_management_navigation_is_calm_and_event_filter_is_separate(self) -> None:
         self.assertIn("const EVENT_SCOPED_TABS: AdminTab[]", ADMIN_UI)
-        self.assertIn('flex-wrap gap-1', ADMIN_NAV)
-        self.assertIn('aria-label="Administration sections"', ADMIN_NAV)
+        self.assertIn('lg:grid-cols-[15rem_minmax(0,1fr)]', ADMIN_UI)
+        self.assertIn('aria-label={workspaceLabel}', ADMIN_NAV)
+        self.assertIn('sticky top-24 hidden overflow-hidden rounded-2xl', ADMIN_NAV)
+        self.assertIn('Administration page', ADMIN_NAV)
+        self.assertIn('Issuer administration', ADMIN_NAV)
         self.assertIn('htmlFor="admin-event-context"', ADMIN_UI)
         self.assertIn('Event context', ADMIN_UI)
         navigation_start = ADMIN_UI.index("<AdminNavigation")
