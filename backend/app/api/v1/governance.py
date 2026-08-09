@@ -793,6 +793,44 @@ def public_event_governance(event_id: int, db: Session = Depends(get_db)):
     return _event_governance_payload(event, override, publication)
 
 
+@public_router.get("/public/events/{event_id}/privacy.html", response_class=HTMLResponse)
+def public_event_privacy_details(event_id: int, db: Session = Depends(get_db)):
+    """Render the effective event controller layer without exposing private facts."""
+
+    event = db.get(Event, event_id)
+    publication = db.query(GovernancePublication).order_by(
+        GovernancePublication.version.desc()
+    ).first()
+    if event is None or publication is None:
+        raise HTTPException(status_code=404, detail="Published event governance not found")
+    payload = _event_governance_payload(
+        event,
+        db.get(EventGovernanceOverride, event_id),
+        publication,
+    )
+    version_base = f"/api/v1/governance/public/versions/{publication.version}"
+    document = (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>Event privacy details</title></head><body><main>'
+        '<h1>Event privacy details</h1>'
+        '<p>This event uses the following reviewed controller and contact layer.</p>'
+        f'<p><strong>Controller:</strong> {_text(payload.get("controller_identity"))}</p>'
+        f'<p><strong>Privacy contact:</strong> <a href="mailto:{_text(payload.get("privacy_contact"))}">'
+        f'{_text(payload.get("privacy_contact"))}</a></p>'
+        f'<p>Underlying published policy: version {publication.version}; '
+        f'SHA-256 {_text(publication.content_sha256)}.</p>'
+        f'<nav aria-label="Published privacy information"><a href="{version_base}/privacy.html">Privacy notice</a> | '
+        f'<a href="{version_base}/rights.html">Your rights</a> | '
+        f'<a href="{version_base}/processors.html">Processors</a></nav>'
+        '</main></body></html>'
+    )
+    return HTMLResponse(
+        document,
+        headers={"Cache-Control": "no-cache", "X-Robots-Tag": "noindex, nofollow"},
+    )
+
+
 @admin_router.get("/events/{event_id}")
 def event_governance_override(
     event_id: int,
