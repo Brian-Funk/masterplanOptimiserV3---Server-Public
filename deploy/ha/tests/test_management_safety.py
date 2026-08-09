@@ -319,6 +319,26 @@ class ReplicationServiceSafetyTests(unittest.TestCase):
         self.assertIn('tar --no-same-owner -C "$stage/payload/evidence" -xf -', REPLICATION_SOURCE)
         self.assertNotIn('sudo -n cp -a "$MP_ROOT/state/evidence/."', REPLICATION_SOURCE)
 
+    def test_replication_snapshot_is_bounded_and_revalidates_the_writer_lease(self) -> None:
+        self.assertIn("SET lock_timeout TO '30s';", REPLICATION_SOURCE)
+        self.assertIn('read -r -t "$snapshot_wait_seconds"', REPLICATION_SOURCE)
+        self.assertGreaterEqual(REPLICATION_SOURCE.count("assert_current_holder"), 4)
+        snapshot_commit = REPLICATION_SOURCE.index('wait "$snapshot_pid"')
+        captured_guard = REPLICATION_SOURCE.index(
+            "assert_current_holder", snapshot_commit,
+        )
+        archive_hash = REPLICATION_SOURCE.index('archive_hash="$(sha256sum', captured_guard)
+        transfer_guard = REPLICATION_SOURCE.index(
+            "assert_current_holder", archive_hash,
+        )
+        peer_transfer = REPLICATION_SOURCE.index(
+            'response="$(ssh -o BatchMode=yes', transfer_guard,
+        )
+        self.assertLess(snapshot_commit, captured_guard)
+        self.assertLess(captured_guard, archive_hash)
+        self.assertLess(archive_hash, transfer_guard)
+        self.assertLess(transfer_guard, peer_transfer)
+
     def test_retired_bootstrap_token_is_not_rewritten_by_read_only_workers(self) -> None:
         retirement = function_body(COMMON_SOURCE, "mp_retire_root_bootstrap_secret")
         self.assertIn('if [ -s "$token" ]; then', retirement)

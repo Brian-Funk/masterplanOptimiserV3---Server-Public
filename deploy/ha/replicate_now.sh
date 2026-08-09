@@ -45,6 +45,20 @@ peer_confirms_bundle() {
     return 0
 }
 
+assert_current_holder() {
+    local control holder current_generation routing_ready
+    control="$(cat "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
+    holder="$(jq -r '.holder_node_id // empty' <<< "$control" 2>/dev/null || true)"
+    current_generation="$(jq -r '.generation // 0' <<< "$control" 2>/dev/null || true)"
+    routing_ready="$(jq -r '.routing_ready // false' <<< "$control" 2>/dev/null || true)"
+    if [ "$holder" != "$HA_NODE_ID" ] \
+        || [ "$current_generation" != "$generation" ] \
+        || [ "$routing_ready" != true ]; then
+        echo "Replication stopped because this node no longer holds the original writer lease." >&2
+        exit 24
+    fi
+}
+
 # shellcheck source=../management/common.sh
 source "$MP_ROOT/deploy/management/common.sh"
 mp_load_ha_config
@@ -53,6 +67,7 @@ mp_load_ha_config
 generation="$(jq -r '.generation // 0' "$MP_ROOT/runtime/ha-control.json")"
 [[ "$generation" =~ ^[1-9][0-9]*$ ]] || exit 1
 [ -n "${HA_PEER_SSH:-}" ] && [ -n "${HA_PEER_NODE_ID:-}" ] || exit 1
+assert_current_holder
 
 # Capture database and shared files while no CLI recovery/configuration action
 # can change their relationship.
@@ -101,14 +116,21 @@ snapshot_input="${SNAPSHOT_SESSION[1]}"
 snapshot_output="${SNAPSHOT_SESSION[0]}"
 snapshot_pid="$SNAPSHOT_SESSION_PID"
 printf '%s\n' \
+    "SET lock_timeout TO '30s';" \
     'SELECT pg_advisory_lock(5571046919607735876);' \
     'BEGIN ISOLATION LEVEL REPEATABLE READ;' \
     "SELECT 'SNAPSHOT:' || pg_export_snapshot();" >&"$snapshot_input"
 snapshot_id=""
-while IFS= read -r line <&"$snapshot_output"; do
-    case "$line" in
-        SNAPSHOT:*) snapshot_id="${line#SNAPSHOT:}"; break ;;
-    esac
+snapshot_deadline=$((SECONDS + 30))
+while [ "$SECONDS" -lt "$snapshot_deadline" ]; do
+    snapshot_wait_seconds=$((snapshot_deadline - SECONDS))
+    if IFS= read -r -t "$snapshot_wait_seconds" line <&"$snapshot_output"; then
+        case "$line" in
+            SNAPSHOT:*) snapshot_id="${line#SNAPSHOT:}"; break ;;
+        esac
+    else
+        break
+    fi
 done
 [[ "$snapshot_id" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{8}-[0-9]+$ ]] \
     || { echo "A consistent database snapshot could not be exported." >&2; exit 1; }
@@ -170,6 +192,11 @@ snapshot_input=""
 wait "$snapshot_pid"
 snapshot_pid=""
 
+# Capture can overlap a witness decision. Never construct or send a bundle
+# after the source has lost the exact generation it started with. The receiver
+# independently enforces the same holder relationship at acceptance time.
+assert_current_holder
+
 release="$(mp_release_hash)"
 manifest_args=(create \
     --payload "$stage/payload" --cluster "$HA_CLUSTER_ID" \
@@ -186,6 +213,7 @@ tar -C "$stage" -cf - manifest.json payload \
     | age -r "$recipient" -o "$stage/bundle.age"
 archive_hash="$(sha256sum "$stage/bundle.age" | awk '{print $1}')"
 capture_completed_ms="$(date +%s%3N)"
+assert_current_holder
 set +e
 response="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$HA_PEER_SSH" \
     "/opt/masterplan/deploy/ha/receive_replication_bundle.sh '$job_id' '$archive_hash'" \
