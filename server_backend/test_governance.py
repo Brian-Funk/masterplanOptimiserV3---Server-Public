@@ -396,6 +396,38 @@ def test_public_legal_notice_is_readable_without_javascript_and_escapes_controll
     assert "sessionStorage" in response.text
 
 
+def test_immutable_privacy_and_rights_pages_are_styled_human_readable_notices(db):
+    client, _root = _root_with_reauth(db)
+    assert client.put("/api/v1/admin/governance", json=PROFILE).status_code == 200
+    published = client.post(
+        "/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION
+    ).json()
+
+    privacy = client.get("/api/v1/governance/public/versions/1/privacy.html")
+    rights = client.get("/api/v1/governance/public/versions/1/rights.html")
+
+    for response in (privacy, rights):
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
+        assert '<article class="notice-shell">' in response.text
+        assert "ui-sans-serif" in response.text
+        assert f"SHA-256 {published['content_sha256']}" in response.text
+        assert 'href="/api/v1/governance/public/versions/1/privacy.html"' in response.text
+        assert 'href="/api/v1/governance/public/versions/1/rights.html"' in response.text
+        assert '"controller_legal_name"' not in response.text
+        assert "<pre>" not in response.text
+        assert "<script>" not in response.text
+
+    assert "Purpose and permitted information" in privacy.text
+    assert "Cookies and browser storage" in privacy.text
+    assert "Processors and service providers" in privacy.text
+    assert "How to make a request" in rights.text
+    assert "What happens next" in rights.text
+    assert "Email the privacy contact" in rights.text
+    assert "Access" in rights.text
+    assert "Portability" in rights.text
+
+
 def test_root_can_review_saved_draft_as_private_html_before_publication(db):
     client, _root = _root_with_reauth(db)
     profile = {**PROFILE, "controller_legal_name": "Draft <script>alert(1)</script> Controller"}

@@ -45,6 +45,24 @@ user_router = APIRouter()
 
 PUBLIC_SECTIONS = ("privacy", "legal", "terms", "data-policy", "retention", "rights", "processors")
 
+NOTICE_STYLES = """
+:root{color-scheme:light dark;--bg:#f4f6f8;--surface:#fff;--surface-soft:#f8fafc;--text:#172033;--muted:#5f6b7a;--line:#dfe5ec;--accent:#365f88;--accent-soft:#eaf1f8;--good:#2f6b50;--good-soft:#eaf6ef;--warn:#8b4e34;--warn-soft:#fff1eb;--shadow:0 18px 50px rgba(31,45,61,.08)}
+*{box-sizing:border-box}html{background:var(--bg)}body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.65}
+a{color:var(--accent);text-underline-offset:3px}a:hover{text-decoration-thickness:2px}main{width:min(920px,calc(100% - 32px));margin:0 auto;padding:48px 0 72px}
+.notice-shell{background:var(--surface);border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow);overflow:hidden}.notice-header{padding:40px 44px 32px;background:linear-gradient(145deg,var(--surface) 0%,var(--accent-soft) 100%);border-bottom:1px solid var(--line)}
+.notice-kicker{margin:0 0 8px;color:var(--accent);font-size:.76rem;font-weight:750;letter-spacing:.12em;text-transform:uppercase}.notice-header h1{margin:0;font-size:clamp(2rem,5vw,3.35rem);line-height:1.08;letter-spacing:-.035em}.notice-lead{max-width:700px;margin:16px 0 0;color:var(--muted);font-size:1.06rem}
+.notice-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:24px}.notice-meta span,.notice-meta code{display:inline-flex;align-items:center;min-height:30px;padding:4px 10px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.72);color:var(--muted);font-size:.78rem}.notice-meta code{max-width:100%;overflow-wrap:anywhere;border-radius:10px;font-family:ui-monospace,"SFMono-Regular",Consolas,monospace}
+.notice-content{padding:10px 44px 38px}.notice-content h2{margin:32px 0 10px;padding-top:28px;border-top:1px solid var(--line);font-size:1.28rem;line-height:1.3;letter-spacing:-.012em}.notice-content h2:first-child{border-top:0}.notice-content p{margin:8px 0;color:var(--muted)}.notice-content strong{color:var(--text)}
+.notice-content ul,.notice-content ol{margin:12px 0;padding-left:22px}.notice-content li{margin:7px 0;color:var(--muted)}.notice-content li::marker{color:var(--accent)}
+.notice-callout{margin:18px 0;padding:16px 18px;border:1px solid var(--line);border-radius:14px;background:var(--surface-soft)}.notice-callout--good{border-color:#badbc8;background:var(--good-soft)}.notice-callout--warn{border-color:#efcbbc;background:var(--warn-soft)}
+.rights-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;padding:0!important;list-style:none}.rights-grid li{margin:0;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--surface-soft)}.rights-grid strong{display:block;margin-bottom:3px}
+.notice-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}.notice-button{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:8px 14px;border-radius:10px;background:var(--accent);color:#fff;text-decoration:none;font-weight:700}.notice-button:hover{color:#fff;filter:brightness(.95)}
+table{width:100%;margin:16px 0;border-collapse:separate;border-spacing:0;border:1px solid var(--line);border-radius:14px;overflow:hidden;font-size:.9rem}caption{padding:0 0 10px;text-align:left;font-weight:700;color:var(--text)}th,td{padding:10px 12px;border-top:1px solid var(--line);text-align:left;vertical-align:top}tr:first-child th,tr:first-child td{border-top:0}th{width:46%;background:var(--surface-soft);font-weight:650}td{color:var(--muted)}
+.notice-nav{display:flex;flex-wrap:wrap;gap:8px;padding:22px 44px 30px;border-top:1px solid var(--line);background:var(--surface-soft)}.notice-nav a{padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:var(--surface);text-decoration:none;font-size:.86rem}.notice-nav a[aria-current="page"]{border-color:var(--accent);background:var(--accent-soft);font-weight:700}
+@media(max-width:640px){main{width:min(100% - 20px,920px);padding:18px 0 36px}.notice-shell{border-radius:18px}.notice-header{padding:28px 22px 24px}.notice-content{padding:6px 22px 28px}.notice-nav{padding:18px 22px 24px}.rights-grid{grid-template-columns:1fr}th{width:42%}}
+@media(prefers-color-scheme:dark){:root{--bg:#111722;--surface:#19212d;--surface-soft:#202a37;--text:#edf2f7;--muted:#b3bfcc;--line:#354254;--accent:#9bc3e8;--accent-soft:#263a4d;--good-soft:#1c382c;--warn-soft:#402820;--shadow:none}.notice-meta span,.notice-meta code{background:rgba(25,33,45,.8)}.notice-button{background:#8ab7df;color:#102235}.notice-button:hover{color:#102235}}
+"""
+
 
 PurposeCode = Literal[
     "event_scheduling", "account_authentication", "activation_email", "security_audit",
@@ -222,7 +240,9 @@ def _render_governance_html(
     notice: dict[str, object] | None,
     version: int | None = None,
     published_at: datetime | None = None,
+    content_sha256: str | None = None,
     preview: bool = False,
+    navigation_base: str | None = None,
 ) -> HTMLResponse:
     """Render one public or root-only preview legal-centre section."""
 
@@ -237,11 +257,38 @@ def _render_governance_html(
         "rights": "Your data-protection rights",
         "processors": "Processors and service providers",
     }
-    body: list[str] = [f"<h1>{headings[section]}</h1>"]
+    leads = {
+        "privacy": "How this deployment uses, protects, retains and shares operational information.",
+        "legal": "The controller and contact details for this self-hosted deployment.",
+        "terms": "The operating terms that apply to this deployment.",
+        "data-policy": "The exact boundary between supported operational information and unsupported sensitive data.",
+        "retention": "The controller-selected periods and deletion approach for this deployment.",
+        "rights": "How to exercise data-protection rights with the controller of this deployment.",
+        "processors": "The controller-declared providers and processing locations used by this deployment.",
+    }
+    instance_name = _text((notice or {}).get("instance_name") or "Masterplan Optimiser")
+    meta: list[str] = []
+    if preview:
+        meta.append("<span>Private draft</span>")
+    elif version is not None:
+        meta.append(f"<span>Policy version {version}</span>")
+    if published_at is not None:
+        meta.append(f"<span>Published {_text(published_at.date())}</span>")
+    if content_sha256:
+        meta.append(f"<code>SHA-256 {_text(content_sha256)}</code>")
+    header = (
+        '<header class="notice-header">'
+        f'<p class="notice-kicker">{instance_name}</p>'
+        f'<h1>{headings[section]}</h1>'
+        f'<p class="notice-lead">{leads[section]}</p>'
+        + (f'<div class="notice-meta">{"".join(meta)}</div>' if meta else "")
+        + "</header>"
+    )
+    body: list[str] = []
     if preview:
         body.append(
-            "<p><strong>Private draft preview — not published.</strong> "
-            "Preview markers and publication metadata are not part of the final public notice.</p>"
+            '<div class="notice-callout notice-callout--warn"><strong>Private draft preview &mdash; not published.</strong> '
+            "Preview markers and publication metadata are not part of the final public notice.</div>"
         )
     if notice is None:
         body.extend([
@@ -269,8 +316,8 @@ def _render_governance_html(
             body.extend([
                 "<h2>Purpose and permitted information</h2>",
                 f"<p>{_text(policy.get('purpose'))}. Optional data must be necessary for that purpose.</p>",
-                f"<p><strong>Normally permitted:</strong> {_text(', '.join(policy.get('allowed') or []))}.</p>",
-                f"<p><strong>Not supported:</strong> {_text(', '.join(policy.get('unsupported') or []))}.</p>",
+                f'<div class="notice-callout notice-callout--good"><strong>Normally permitted</strong><p>{_text(", ".join(policy.get("allowed") or []))}.</p></div>',
+                f'<div class="notice-callout notice-callout--warn"><strong>Not supported</strong><p>{_text(", ".join(policy.get("unsupported") or []))}.</p></div>',
             ])
         if section == "privacy":
             storage = notice.get("storage") or {}
@@ -319,8 +366,34 @@ def _render_governance_html(
                 f"<a href=\"mailto:{_text(notice.get('privacy_contact_email'))}\">{_text(notice.get('privacy_contact_email'))}</a>; "
                 "the controller will assess the applicable right, scope and proportionate identity verification.</p>",
             ])
+            if section == "rights":
+                body.extend([
+                    '<ul class="rights-grid">',
+                    "<li><strong>Access</strong>Ask whether and how information about you is processed.</li>",
+                    "<li><strong>Correction</strong>Ask for inaccurate or incomplete information to be corrected.</li>",
+                    "<li><strong>Erasure</strong>Ask for deletion where the applicable conditions are met.</li>",
+                    "<li><strong>Restriction or objection</strong>Ask the controller to limit or reconsider processing where the law provides.</li>",
+                    "<li><strong>Portability</strong>Request eligible information in a portable form where applicable.</li>",
+                    "</ul>",
+                ])
             if notice.get("rights_summary"):
                 body.append(_paragraphs(notice.get("rights_summary")))
+            if section == "rights":
+                body.extend([
+                    "<h2>How to make a request</h2>",
+                    '<div class="notice-callout"><p>Contact the controller using the privacy address below. '
+                    "Describe the request clearly; do not email unnecessary identity documents or sensitive information.</p>"
+                    f'<div class="notice-actions"><a class="notice-button" href="mailto:{_text(notice.get("privacy_contact_email"))}">Email the privacy contact</a></div></div>',
+                    "<h2>What happens next</h2>",
+                    "<ol><li>The controller confirms the scope of the request.</li>"
+                    "<li>Only proportionate identity verification is requested where needed.</li>"
+                    "<li>The controller assesses the applicable law, any limits, and the response or action required.</li></ol>",
+                ])
+                if notice.get("rights_request_url"):
+                    body.append(
+                        f'<p><a class="notice-button" href="{_text(notice.get("rights_request_url"))}" '
+                        'rel="noopener noreferrer">Open the rights-request form</a></p>'
+                    )
         if section in {"privacy", "processors"}:
             body.append("<h2>Processors and service providers</h2>")
             if notice.get("processor_summary"):
@@ -355,31 +428,37 @@ def _render_governance_html(
                 body.append("<p>Where applicable, you may lodge a complaint with the competent data-protection supervisory authority.</p>")
         if preview:
             body.append("<p>Private draft preview. No policy version or publication time has been assigned.</p>")
-        else:
-            body.append(
-                f"<p>Published policy version {version} on {_text(published_at.date() if published_at else '')}.</p>"
-            )
+    nav_labels = {
+        "privacy": "Privacy",
+        "legal": "Legal",
+        "terms": "Terms",
+        "data-policy": "Permitted data",
+        "retention": "Retention",
+        "rights": "Rights",
+        "processors": "Processors",
+    }
+    def nav_link(href: str, item: str, label: str) -> str:
+        current = ' aria-current="page"' if item == section else ""
+        return f'<a href="{href}"{current}>{label}</a>'
+
     if preview:
-        preview_base = "/api/v1/admin/governance/preview"
-        body.append(
-            f'<nav aria-label="Draft legal centre"><a href="{preview_base}/privacy.html">Privacy</a> | '
-            f'<a href="{preview_base}/legal.html">Legal</a> | <a href="{preview_base}/terms.html">Terms</a> | '
-            f'<a href="{preview_base}/data-policy.html">Permitted data</a> | '
-            f'<a href="{preview_base}/retention.html">Retention</a> | <a href="{preview_base}/rights.html">Rights</a> | '
-            f'<a href="{preview_base}/processors.html">Processors</a></nav>'
-        )
+        nav_base = "/api/v1/admin/governance/preview"
+        nav_label = "Draft legal centre"
+        nav_links = [nav_link(f"{nav_base}/{item}.html", item, label) for item, label in nav_labels.items()]
+    elif navigation_base:
+        nav_label = "Published policy sections"
+        nav_links = [nav_link(f"{navigation_base}/{item}.html", item, label) for item, label in nav_labels.items()]
     else:
-        body.append(
-            '<nav aria-label="Legal centre"><a href="/privacy">Privacy</a> | '
-            '<a href="/legal">Legal</a> | <a href="/terms">Terms</a> | <a href="/data-policy">Permitted data</a> | '
-            '<a href="/retention">Retention</a> | <a href="/rights">Rights</a> | '
-            '<a href="/processors">Processors</a> | <a href="/licence">Licence</a></nav>'
-        )
+        nav_label = "Legal centre"
+        nav_links = [nav_link(f"/{item}", item, label) for item, label in nav_labels.items()]
+        nav_links.append('<a href="/licence">Licence</a>')
+    navigation = f'<nav class="notice-nav" aria-label="{nav_label}">{"".join(nav_links)}</nav>'
     document = (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        f"<title>{headings[section]} | Masterplan Optimiser</title></head>"
-        f"<body><main>{''.join(body)}</main></body></html>"
+        f"<title>{headings[section]} | {instance_name}</title><style>{NOTICE_STYLES}</style></head>"
+        f'<body><main><article class="notice-shell">{header}'
+        f'<div class="notice-content">{"".join(body)}</div>{navigation}</article></main></body></html>'
     )
     headers = {"Cache-Control": "private, no-store", "X-Robots-Tag": "noindex, nofollow"} if preview else {"Cache-Control": "no-cache"}
     return HTMLResponse(document, headers=headers)
@@ -397,6 +476,7 @@ def public_governance_html(section: str, db: Session = Depends(get_db)):
         notice=json.loads(publication.content_json) if publication else None,
         version=publication.version if publication else None,
         published_at=publication.published_at if publication else None,
+        content_sha256=publication.content_sha256 if publication else None,
     )
 
 
@@ -415,26 +495,16 @@ def versioned_public_governance_html(
     ).first()
     if publication is None:
         raise HTTPException(status_code=404, detail="Policy version not found")
-    notice = json.loads(publication.content_json)
-    body = [
-        f"<h1>{_text(section.replace('-', ' ').title())}</h1>",
-        f"<p>Version {version}; SHA-256 {_text(publication.content_sha256)}</p>",
-    ]
-    if section == "data-policy":
-        permitted = notice.get("permitted_data", {})
-        body.extend([
-            f"<h2>Purpose</h2><p>{_text(permitted.get('purpose'))}</p>",
-            "<h2>Allowed data</h2><ul>"
-            + "".join(f"<li>{_text(item)}</li>" for item in permitted.get("allowed", []))
-            + "</ul>",
-            "<h2>Unsupported data</h2><ul>"
-            + "".join(f"<li>{_text(item)}</li>" for item in permitted.get("unsupported", []))
-            + "</ul>",
-        ])
-    else:
-        body.append(f"<pre>{_text(json.dumps(notice, indent=2, sort_keys=True))}</pre>")
-    document = "<!doctype html><html lang=\"en\"><body><main>" + "".join(body) + "</main></body></html>"
-    return HTMLResponse(document, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+    response = _render_governance_html(
+        section,
+        notice=json.loads(publication.content_json),
+        version=publication.version,
+        published_at=publication.published_at,
+        content_sha256=publication.content_sha256,
+        navigation_base=f"/api/v1/governance/public/versions/{publication.version}",
+    )
+    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
 
 
 @admin_router.get("")
