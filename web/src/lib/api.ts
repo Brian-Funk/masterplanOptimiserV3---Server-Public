@@ -49,3 +49,42 @@ export async function apiFetch(
     cache: "no-store",
   });
 }
+
+const DEFAULT_TRANSITION_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 8_000];
+
+/**
+ * Retry an idempotent request while Caddy is temporarily unable to reach the
+ * active backend during a guarded service transition.
+ *
+ * Callers must supply an idempotent request: a naturally idempotent method
+ * such as PUT, or a POST carrying a stable server-enforced idempotency key.
+ */
+export async function retryServiceTransition(
+  request: () => Promise<Response>,
+  options: {
+    delaysMs?: number[];
+    wait?: (delayMs: number) => Promise<void>;
+  } = {},
+): Promise<Response> {
+  const delaysMs = options.delaysMs ?? DEFAULT_TRANSITION_RETRY_DELAYS_MS;
+  const wait = options.wait ?? ((delayMs: number) =>
+    new Promise<void>((resolve) => window.setTimeout(resolve, delayMs)));
+  let lastResponse: Response | null = null;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= delaysMs.length; attempt += 1) {
+    try {
+      const response = await request();
+      if (![502, 503, 504].includes(response.status)) return response;
+      lastResponse = response;
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt < delaysMs.length) await wait(delaysMs[attempt]);
+  }
+
+  if (lastResponse) return lastResponse;
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("The service remained unavailable during the protected update.");
+}

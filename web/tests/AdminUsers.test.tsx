@@ -13,6 +13,7 @@ const mockUseAuth = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/api", () => ({
   apiFetch: mockApiFetch,
+  retryServiceTransition: (request: () => Promise<Response>) => request(),
 }));
 
 vi.mock("@/contexts/AuthContext", () => ({
@@ -205,6 +206,8 @@ describe("Admin users", () => {
 
     finishCreate?.(jsonResponse({ publish_secret: "synthetic-secret" }));
     await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+    expect(screen.queryByLabelText("Participant-visible event name")).not.toBeInTheDocument();
+    expect(screen.getByText("Publish secret (shown once - save it now):")).toBeInTheDocument();
   });
 
   it("shows the server reason when an event deletion case is rejected", async () => {
@@ -261,6 +264,41 @@ describe("Admin users", () => {
     expect(screen.queryByTitle("Show people tagged phase3")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Export user data" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Remove or delete account" })).toBeInTheDocument();
+  });
+
+  it("keeps issuer access unchanged and explains a failed update", async () => {
+    const managedUser = {
+      ...issuerUser,
+      id: 5,
+      username: "new.issuer",
+      display_name: "New Issuer",
+      is_issuer: false,
+      event_id: 7,
+      tags: [],
+    };
+    mockApiFetch.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      if (path === "/api/v1/admin/users" && !options?.method) return jsonResponse([managedUser]);
+      if (path === "/api/v1/admin/users/5" && options?.method === "PUT") {
+        return {
+          ok: false,
+          status: 502,
+          json: async () => ({}),
+        } as Response;
+      }
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+    await user.click(await screen.findByRole("button", { name: "Users" }));
+    await user.click(await screen.findByTitle("Account details"));
+    await user.click(screen.getByRole("checkbox", { name: "Issuer access" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Issuer access could not be updated. Nothing was changed; try again.",
+    );
+    expect(screen.getByRole("checkbox", { name: "Issuer access" })).not.toBeChecked();
   });
 
   it("automatically starts signed deletion when a used account cannot be removed directly", async () => {

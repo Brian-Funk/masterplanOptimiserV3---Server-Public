@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
 import { useServiceAvailability } from "@/contexts/ServiceAvailabilityContext";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, retryServiceTransition } from "@/lib/api";
 import { getApiUrl } from "@/lib/environment";
 import {
   deriveUsernameFromDisplayName,
@@ -789,19 +789,22 @@ function EventsTab({
     try {
       const publishSecret = randomSecret();
       const idempotencyKey = newIdempotencyKey();
-      const res = await apiFetch("/api/v1/admin/events", {
-        method: "POST",
-        body: JSON.stringify({
-          name: newEvent.name,
-          location: newEvent.location || null,
-          start_date: newEvent.start_date || null,
-          end_date: newEvent.end_date || null,
-          policy_version: eventPolicyAcknowledged ? eventPolicy?.version : null,
-          policy_sha256: eventPolicyAcknowledged ? eventPolicy?.sha256 : null,
-          publish_secret: publishSecret,
-          idempotency_key: idempotencyKey,
-        }),
+      const eventBody = JSON.stringify({
+        name: newEvent.name,
+        location: newEvent.location || null,
+        start_date: newEvent.start_date || null,
+        end_date: newEvent.end_date || null,
+        policy_version: eventPolicyAcknowledged ? eventPolicy?.version : null,
+        policy_sha256: eventPolicyAcknowledged ? eventPolicy?.sha256 : null,
+        publish_secret: publishSecret,
+        idempotency_key: idempotencyKey,
       });
+      const res = await retryServiceTransition(() =>
+        apiFetch("/api/v1/admin/events", {
+          method: "POST",
+          body: eventBody,
+        }),
+      );
       const data = await res.json().catch(() => null);
       if (!res.ok) {
         setEventError(
@@ -828,6 +831,7 @@ function EventsTab({
       }
       setNewEvent({ name: "", location: "", start_date: "", end_date: "" });
       setEventPolicyAcknowledged(false);
+      setShowCreate(false);
       onRefresh();
     } catch {
       setEventError("The event could not be created. Please try again.");
@@ -1478,6 +1482,8 @@ function UsersTab({
   const [emailActionErrors, setEmailActionErrors] = useState<
     Record<number, string>
   >({});
+  const [issuerBusy, setIssuerBusy] = useState<Set<number>>(new Set());
+  const [issuerActionErrors, setIssuerActionErrors] = useState<Record<number, string>>({});
   const [deliverySettings, setDeliverySettings] =
     useState<ActivationDeliverySettings | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
@@ -1953,16 +1959,43 @@ function UsersTab({
   };
 
   const handleToggleIssuer = async (userId: number, isIssuer: boolean) => {
+    setIssuerBusy((current) => new Set(current).add(userId));
+    setIssuerActionErrors((current) => {
+      const next = { ...current };
+      delete next[userId];
+      return next;
+    });
     try {
       const res = await withReauth(() =>
-        apiFetch(`/api/v1/admin/users/${userId}`, {
-          method: "PUT",
-          body: JSON.stringify({ is_issuer: isIssuer }),
-        }),
+        retryServiceTransition(() =>
+          apiFetch(`/api/v1/admin/users/${userId}`, {
+            method: "PUT",
+            body: JSON.stringify({ is_issuer: isIssuer }),
+          }),
+        ),
       );
-      if (res.ok) onRefresh();
-    } catch {
-      // The passkey prompt was cancelled or re-authentication failed.
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        onRefresh();
+      } else {
+        setIssuerActionErrors((current) => ({
+          ...current,
+          [userId]: responseMessage(data, "Issuer access could not be updated. Nothing was changed; try again."),
+        }));
+      }
+    } catch (error) {
+      setIssuerActionErrors((current) => ({
+        ...current,
+        [userId]: error instanceof Error
+          ? error.message
+          : "Issuer access could not be updated. Nothing was changed; try again.",
+      }));
+    } finally {
+      setIssuerBusy((current) => {
+        const next = new Set(current);
+        next.delete(userId);
+        return next;
+      });
     }
   };
 
@@ -3951,17 +3984,23 @@ function UsersTab({
                     Can edit schedules
                   </label>
                   {isRootAdmin && !u.is_root_admin && (
-                    <label className="flex items-center gap-2 pb-1.5 text-sm text-gray-600 dark:text-gray-400 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={u.is_issuer}
-                        onChange={(e) =>
-                          handleToggleIssuer(u.id, e.target.checked)
-                        }
-                        className="rounded"
-                      />
-                      Issuer access
-                    </label>
+                    <div className="pb-1.5">
+                      <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={u.is_issuer}
+                          disabled={issuerBusy.has(u.id)}
+                          onChange={(e) => void handleToggleIssuer(u.id, e.target.checked)}
+                          className="rounded disabled:cursor-wait disabled:opacity-60"
+                        />
+                        {issuerBusy.has(u.id) ? "Saving issuer access..." : "Issuer access"}
+                      </label>
+                      {issuerActionErrors[u.id] && (
+                        <p className="mt-1 text-xs text-red-700 dark:text-red-300" role="alert">
+                          {issuerActionErrors[u.id]}
+                        </p>
+                      )}
+                    </div>
                   )}
                 </div>
               )}
