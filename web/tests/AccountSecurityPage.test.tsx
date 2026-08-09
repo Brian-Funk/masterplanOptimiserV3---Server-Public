@@ -8,6 +8,8 @@ const mockApiFetch = vi.hoisted(() => vi.fn());
 const mockPush = vi.hoisted(() => vi.fn());
 const mockReplace = vi.hoisted(() => vi.fn());
 const mockUseAuth = vi.hoisted(() => vi.fn());
+const mockLogout = vi.hoisted(() => vi.fn());
+const mockHardNavigate = vi.hoisted(() => vi.fn());
 const mockRouter = vi.hoisted(() => ({
   push: mockPush,
   replace: mockReplace,
@@ -15,6 +17,7 @@ const mockRouter = vi.hoisted(() => ({
 
 vi.mock("@/lib/api", () => ({ apiFetch: mockApiFetch }));
 vi.mock("@/contexts/AuthContext", () => ({ useAuth: mockUseAuth }));
+vi.mock("@/lib/hardNavigation", () => ({ hardNavigate: mockHardNavigate }));
 vi.mock("next/navigation", () => ({
   useRouter: () => mockRouter,
 }));
@@ -73,7 +76,10 @@ describe("Account security page", () => {
     mockApiFetch.mockReset();
     mockPush.mockReset();
     mockReplace.mockReset();
-    mockUseAuth.mockReturnValue({ user: account, isLoading: false });
+    mockLogout.mockReset();
+    mockLogout.mockResolvedValue(true);
+    mockHardNavigate.mockReset();
+    mockUseAuth.mockReturnValue({ user: account, isLoading: false, logout: mockLogout });
     mockApiFetch.mockResolvedValue(jsonResponse(sessions));
   });
 
@@ -126,6 +132,7 @@ describe("Account security page", () => {
     await screen.findByText("Chrome on Windows");
     await user.click(screen.getByRole("button", { name: "Revoke and log out" }));
 
-    await waitFor(() => expect(mockReplace).toHaveBeenCalledWith("/login"));
+    await waitFor(() => expect(mockHardNavigate).toHaveBeenCalledWith("/login"));
+    expect(mockLogout).toHaveBeenCalledOnce();
   });
 });

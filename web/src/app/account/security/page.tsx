@@ -11,6 +11,7 @@ import { Card } from "@/components/ui/Card";
 import { Logo } from "@/components/Logo";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { PasskeyManager } from "@/components/PasskeyManager";
+import { hardNavigate } from "@/lib/hardNavigation";
 
 interface ActiveSession {
   id: number;
@@ -29,7 +30,7 @@ function displayTime(value: string | null): string {
 
 export default function AccountSecurityPage() {
   const router = useRouter();
-  const { user, isLoading: authLoading } = useAuth();
+  const { user, isLoading: authLoading, logout } = useAuth();
   const [sessions, setSessions] = useState<ActiveSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -83,7 +84,8 @@ export default function AccountSecurityPage() {
         throw new Error(detail.detail || "The session could not be revoked.");
       }
       if (session.current) {
-        router.replace("/login");
+        await logout();
+        hardNavigate("/login");
         return;
       }
       setSessions((current) => current.filter((item) => item.id !== session.id));
@@ -146,7 +148,7 @@ export default function AccountSecurityPage() {
                 <h2 className="text-base font-semibold">Passkeys</h2>
               </div>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-600 dark:text-gray-300">
-                Add, rename, or remove your passkeys. Sensitive changes require reauthentication, and the final passkey cannot be removed.
+                Review, rename, or remove your passkeys. If this deployment permits additional passkeys, enrollment is offered inside. Sensitive changes require reauthentication, and the final passkey cannot be removed.
               </p>
             </div>
             <Button className="shrink-0" variant="outline" onClick={() => setShowPasskeys(true)}>
