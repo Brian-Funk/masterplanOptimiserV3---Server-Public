@@ -1,9 +1,1 @@
-vulnerabilities:
-  - id: CVE-2026-69247
-    purls:
-      - pkg:pypi/cryptography@49.0.0
-    expired_at: 2026-08-18
-    statement: >-
-      The affected PKCS#7 EnvelopedData decrypt APIs are not used by MP-OPT.
-      cryptography 50.0.0 is not published yet; remove this exception as soon as
-      the fixed release can be locked.
+vulnerabilities: []

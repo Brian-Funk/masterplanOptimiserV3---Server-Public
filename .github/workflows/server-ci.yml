@@ -116,11 +116,7 @@ jobs:
         working-directory: backend
         run: |
           python -m pip install --constraint requirements.lock.txt -r requirements.txt pip-audit
-          # CVE-2026-69247 affects only cryptography's PKCS#7 EnvelopedData
-          # decrypt APIs. MP-OPT does not call those APIs, and the advisory's
-          # patched 50.0.0 release is not yet published. Keep this one explicit
-          # exception until the lock can move to the released fixed version.
-          python -m pip_audit -r requirements.lock.txt --ignore-vuln CVE-2026-69247
+          python -m pip_audit -r requirements.lock.txt
           python -m compileall app
       - name: Build and scan affected images
         if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.database == 'true' || needs.changes.outputs.caddy == 'true' || needs.changes.outputs.tools == 'true'

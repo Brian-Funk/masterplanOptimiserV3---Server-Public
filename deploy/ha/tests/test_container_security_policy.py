@@ -137,15 +137,13 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
         self.assertIn("mp_build_frontend_container", deploy)
         self.assertIn("node:22-alpine", common)
 
-    def test_ci_audits_dependencies_with_one_bounded_non_applicable_exception(self) -> None:
+    def test_ci_audits_dependencies_without_vulnerability_exceptions(self) -> None:
         workflow = (ROOT / ".github/workflows/server-ci.yml").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("python -m pip_audit -r requirements.lock.txt", workflow)
-        self.assertIn("--ignore-vuln CVE-2026-69247", workflow)
-        self.assertIn("does not call those APIs", workflow)
-        self.assertEqual(workflow.count("--ignore-vuln"), 1)
+        self.assertNotIn("--ignore-vuln", workflow)
         self.assertIn(
             "pip install --constraint requirements.lock.txt -r requirements.txt",
             workflow,
@@ -155,11 +153,7 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
         trivy_ignore = (ROOT / "deploy/security/trivyignore.yaml").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(trivy_ignore.count("CVE-"), 1)
-        self.assertIn("CVE-2026-69247", trivy_ignore)
-        self.assertIn("pkg:pypi/cryptography@49.0.0", trivy_ignore)
-        self.assertIn("expired_at: 2026-08-18", trivy_ignore)
-        self.assertIn("PKCS#7 EnvelopedData decrypt APIs are not used", trivy_ignore)
+        self.assertEqual(trivy_ignore.strip(), "vulnerabilities: []")
         self.assertIn("pull_with_retry()", workflow)
         self.assertIn('for attempt in 1 2 3; do', workflow)
         for image in (
