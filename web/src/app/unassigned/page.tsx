@@ -5,10 +5,10 @@ import { useRouter } from "next/navigation";
 import { CalendarClock, RefreshCw, Shield } from "lucide-react";
 
 import { useAuth } from "@/contexts/AuthContext";
+import { AuthenticatedHeaderActions } from "@/components/AuthenticatedHeaderActions";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Logo } from "@/components/Logo";
-import { ThemeToggle } from "@/components/ThemeToggle";
 
 export default function UnassignedPage() {
   const router = useRouter();
@@ -34,7 +34,7 @@ export default function UnassignedPage() {
       <header className="border-b border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
         <div className="mx-auto flex max-w-2xl items-center justify-between px-4 py-3">
           <Logo height={32} href="https://info.mp-opt.net" />
-          <ThemeToggle />
+          <AuthenticatedHeaderActions />
         </div>
       </header>
       <main className="mx-auto max-w-2xl px-4 py-12">

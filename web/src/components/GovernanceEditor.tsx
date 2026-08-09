@@ -20,7 +20,7 @@ type Requirement = "required" | "conditional" | "optional";
 type SectionState = "unreviewed" | "ready" | "error";
 const sectionBorder: Record<SectionState, string> = {
   unreviewed: "border-gray-200 dark:border-gray-700",
-  ready: "border-green-400 dark:border-green-700",
+  ready: "border-green-400 ring-1 ring-green-200/70 dark:border-green-400 dark:ring-green-400/35",
   error: "border-red-400 dark:border-red-700",
 };
 

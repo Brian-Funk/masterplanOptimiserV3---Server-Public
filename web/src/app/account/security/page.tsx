@@ -6,10 +6,10 @@ import { ArrowLeft, Clock3, Key, Laptop, RefreshCw, Shield, Trash2 } from "lucid
 
 import { useAuth } from "@/contexts/AuthContext";
 import { apiFetch } from "@/lib/api";
+import { AuthenticatedHeaderActions } from "@/components/AuthenticatedHeaderActions";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Logo } from "@/components/Logo";
-import { ThemeToggle } from "@/components/ThemeToggle";
 import { PasskeyManager } from "@/components/PasskeyManager";
 import { hardNavigate } from "@/lib/hardNavigation";
 
@@ -121,7 +121,7 @@ export default function AccountSecurityPage() {
             >
               <ArrowLeft size={17} /> Back
             </button>
-            <ThemeToggle />
+            <AuthenticatedHeaderActions accountSecurityActive />
           </div>
         </div>
       </header>

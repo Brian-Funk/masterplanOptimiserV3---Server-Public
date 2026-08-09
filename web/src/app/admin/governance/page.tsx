@@ -6,8 +6,8 @@ import { AlertTriangle, CheckCircle2, Download, FileText, Info, ShieldCheck, Upl
 
 import { GovernanceEditor } from "@/components/GovernanceEditor";
 import { AdminNavigation } from "@/components/AdminNavigation";
+import { AuthenticatedHeaderActions } from "@/components/AuthenticatedHeaderActions";
 import { Logo } from "@/components/Logo";
-import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { useAuth } from "@/contexts/AuthContext";
@@ -82,7 +82,7 @@ function Field({ label, value, onChange, multiline = false, type = "text", place
 
 const sectionBorder: Record<GovernanceSectionState, string> = {
   unreviewed: "border-gray-200 dark:border-gray-700",
-  ready: "border-green-400 dark:border-green-700",
+  ready: "border-green-400 ring-1 ring-green-200/70 dark:border-green-400 dark:ring-green-400/35",
   error: "border-red-400 dark:border-red-700",
 };
 
@@ -250,7 +250,7 @@ export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupM
   const statusClasses = statusKind === "error" ? "border-red-300 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200" : statusKind === "success" ? "border-green-300 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950 dark:text-green-200" : "border-blue-300 bg-blue-50 text-blue-800 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-200";
 
   return <div className={setupMode ? "space-y-6 text-gray-900 dark:text-gray-100" : "min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100"}>
-    {!setupMode && <header className="sticky top-0 z-20 border-b border-gray-200 bg-white/95 backdrop-blur dark:border-gray-700 dark:bg-gray-800/95"><div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6"><div className="flex items-center gap-3"><Logo height={32} href="https://info.mp-opt.net" /><span className="hidden text-sm font-semibold text-gray-500 dark:text-gray-400 sm:inline">Root administration</span></div><ThemeToggle /></div></header>}
+    {!setupMode && <header className="sticky top-0 z-20 border-b border-gray-200 bg-white/95 backdrop-blur dark:border-gray-700 dark:bg-gray-800/95"><div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6"><div className="flex items-center gap-3"><Logo height={32} href="https://info.mp-opt.net" /><span className="hidden text-sm font-semibold text-gray-500 dark:text-gray-400 sm:inline">Root administration</span></div><AuthenticatedHeaderActions /></div></header>}
     <div className={setupMode ? "space-y-6" : "mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:py-8"}>
       <div className={setupMode ? "space-y-6" : "grid items-start gap-6 lg:grid-cols-[15rem_minmax(0,1fr)] xl:gap-8"}>
       {!setupMode && <AdminNavigation active="policies" isRootAdmin isIssuerOnly={false} canManagePublicLinks />}
