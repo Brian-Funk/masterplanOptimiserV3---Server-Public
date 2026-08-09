@@ -20,6 +20,7 @@ from email_validator import EmailNotValidError, validate_email
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from sqlalchemy.orm import Session
 
+from app.core.activation_mail_governance import ActivationMailGovernance
 from app.core.config import settings
 
 logger = logging.getLogger("activation.email")
@@ -468,7 +469,12 @@ def render_activation_qr_png(
     return output.getvalue()
 
 
-def _base_message(recipient: str, subject: str) -> tuple[EmailMessage, str]:
+def _base_message(
+    recipient: str,
+    subject: str,
+    *,
+    sender_name: str,
+) -> tuple[EmailMessage, str]:
     """Create a message with validated sender and privacy-safe standard headers."""
 
     sender = validate_email(
@@ -480,7 +486,7 @@ def _base_message(recipient: str, subject: str) -> tuple[EmailMessage, str]:
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = Address(
-        display_name=_mail_brand_name(),
+        display_name=sender_name,
         addr_spec=sender,
     )
     message["To"] = recipient
@@ -510,7 +516,9 @@ def _email_html(
     notice_colour: str,
     qr_cid: str | None = None,
     qr_alt: str | None = None,
-    policy_url: str | None = None,
+    request_explanation: str | None = None,
+    security_notice: str | None = None,
+    governance: ActivationMailGovernance | None = None,
 ) -> str:
     """Render the reusable fixed-dark transactional email shell."""
 
@@ -576,13 +584,36 @@ def _email_html(
           </td></tr>
         </table>"""
 
-    policy_link = ""
-    if policy_url:
-        safe_policy_url = html.escape(policy_url, quote=True)
-        policy_link = (
-            f'<br /><a href="{safe_policy_url}" style="color:#93c5fd;text-decoration:underline;">'
-            "Privacy notice and permitted-data policy</a>"
+    security_section = ""
+    if security_notice:
+        security_section = (
+            '<p style="margin:14px 0 0;color:#d1d5db;font-size:13px;line-height:19px;">'
+            f'{html.escape(security_notice)}</p>'
         )
+
+    privacy_section = ""
+    if governance and request_explanation:
+        safe_privacy = html.escape(governance.privacy_url, quote=True)
+        safe_rights = html.escape(governance.rights_url, quote=True)
+        event_link = ""
+        if governance.event_privacy_url:
+            safe_event_privacy = html.escape(governance.event_privacy_url, quote=True)
+            event_link = (
+                f' · <a href="{safe_event_privacy}" style="color:#93c5fd;text-decoration:underline;">'
+                'Event privacy details</a>'
+            )
+        country_label = ", ".join(governance.smtp_processing_countries)
+        privacy_section = f"""
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#22252a" style="margin-top:26px;background:#22252a;border:1px solid #3d434f;border-radius:8px;" data-policy-sha256="{html.escape(governance.policy_sha256, quote=True)}">
+          <tr><td style="padding:14px 16px;">
+            <p style="margin:0 0 7px;color:#f3f4f6;font-size:14px;line-height:19px;font-weight:700;">Privacy and contact</p>
+            <p style="margin:0 0 5px;color:#d1d5db;font-size:13px;line-height:19px;">{html.escape(request_explanation)}</p>
+            <p style="margin:0 0 5px;color:#d1d5db;font-size:13px;line-height:19px;"><strong>Controller:</strong> {html.escape(governance.controller_name)}</p>
+            <p style="margin:0 0 5px;color:#d1d5db;font-size:13px;line-height:19px;"><strong>Privacy contact:</strong> <a href="mailto:{html.escape(governance.privacy_contact, quote=True)}" style="color:#93c5fd;text-decoration:underline;">{html.escape(governance.privacy_contact)}</a></p>
+            <p style="margin:0 0 5px;color:#d1d5db;font-size:13px;line-height:19px;"><strong>Email delivery:</strong> {html.escape(governance.smtp_provider_name)} · {html.escape(country_label)}</p>
+            <p style="margin:0;color:#9ca3af;font-size:12px;line-height:18px;"><a href="{safe_privacy}" style="color:#93c5fd;text-decoration:underline;">Privacy notice</a> · <a href="{safe_rights}" style="color:#93c5fd;text-decoration:underline;">Your rights</a>{event_link} · Published policy v{governance.policy_version}</p>
+          </td></tr>
+        </table>"""
 
     return f"""<!doctype html>
 <html lang="en">
@@ -632,15 +663,17 @@ def _email_html(
                 <tr><td style="padding:14px 16px;">
                   <p style="margin:0 0 4px;color:#f3f4f6;font-size:13px;line-height:18px;font-weight:700;">{safe_notice_label}</p>
                   <p style="margin:0;color:#d1d5db;font-size:13px;line-height:19px;">{safe_outcome}</p>
+                  {security_section}
                 </td></tr>
               </table>
               {qr_section}
+              {privacy_section}
             </td>
           </tr>
         </table>
         <table role="presentation" class="mail-shell" width="600" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:600px;">
           <tr><td align="center" style="padding:18px 24px 0;color:#9ca3af;font-size:12px;line-height:18px;">
-            Sent automatically by {safe_brand}. Do not forward secure access links or QR codes.<br />If you were not expecting this message, contact your organiser.{policy_link}
+            Sent automatically by {safe_brand}. Do not forward secure access links or QR codes.
           </td></tr>
         </table>
       </td>
@@ -666,17 +699,21 @@ def build_activation_message(
     *,
     recipient: str,
     display_name: str,
-    event_name: str | None,
     url: str,
     expires_at: datetime,
     purpose: str,
-    policy_url: str | None = None,
+    governance: ActivationMailGovernance,
+    self_service_requested: bool = False,
 ) -> tuple[EmailMessage, str]:
     """Build a branded multipart access email and return its message ID."""
 
-    brand = _mail_brand_name()
+    brand = governance.brand
     presentation = _purpose_presentation(purpose, brand)
-    message, message_id = _base_message(recipient, presentation.subject)
+    message, message_id = _base_message(
+        recipient,
+        presentation.subject,
+        sender_name=brand,
+    )
     message_domain = message_id.rsplit("@", 1)[-1].rstrip(">")
     logo_cid = make_msgid(domain=message_domain)
     qr_cid = make_msgid(domain=message_domain)
@@ -686,7 +723,20 @@ def build_activation_message(
         expiry = expiry.replace(tzinfo=timezone.utc)
     expiry_label = expiry.astimezone(timezone.utc).strftime("%d %B %Y at %H:%M UTC")
 
+    event_name = governance.event_name
     event_line = f" for {event_name}" if event_name else ""
+    if self_service_requested and purpose == "additional_passkey":
+        request_explanation = "You requested this from your signed-in account."
+    elif purpose == "initial_setup":
+        request_explanation = "An authorised organiser prepared account access for you."
+    elif purpose == "additional_passkey":
+        request_explanation = "An authorised organiser requested an additional passkey link."
+    else:
+        request_explanation = "An authorised administrator requested a credential reset."
+    security_notice = (
+        "If you did not request or expect this message, do not use the link. "
+        "No new passkey has been added yet. Contact the controller below."
+    )
     message.set_content(
         f"Hello {display_name},\n\n"
         f"{presentation.headline}\n\n"
@@ -696,10 +746,21 @@ def build_activation_message(
         f"Event: {event_name or 'Not specified'}\n"
         f"Valid until: {expiry_label}\n\n"
         f"{presentation.notice_label}: {presentation.outcome_note}\n\n"
-        "The attached QR code opens the same secure action on another device.\n"
+        f"{security_notice}\n\n"
+        "The inline QR code opens the same secure action on another device.\n"
         "Do not forward this one-time link or QR code.\n"
-        "If you were not expecting this message, contact your organiser.\n"
-        + (f"Privacy notice and permitted-data policy: {policy_url}\n" if policy_url else "")
+        "\nPrivacy and contact\n"
+        f"{request_explanation}\n"
+        f"Controller: {governance.controller_name}\n"
+        f"Privacy contact: {governance.privacy_contact}\n"
+        f"Email delivery: {governance.smtp_provider_name} · {', '.join(governance.smtp_processing_countries)}\n"
+        f"Privacy notice: {governance.privacy_url}\n"
+        f"Your rights: {governance.rights_url}\n"
+        + (
+            f"Event privacy details: {governance.event_privacy_url}\n"
+            if governance.event_privacy_url else ""
+        )
+        + f"Published policy: v{governance.policy_version}; SHA-256 {governance.policy_sha256}\n"
     )
     message.add_alternative(
         _email_html(
@@ -722,7 +783,9 @@ def build_activation_message(
             notice_colour=presentation.notice_colour,
             qr_cid=qr_cid[1:-1],
             qr_alt=presentation.qr_alt,
-            policy_url=policy_url,
+            request_explanation=request_explanation,
+            security_notice=security_notice,
+            governance=governance,
         ),
         subtype="html",
     )
@@ -736,12 +799,6 @@ def build_activation_message(
         filename="activation-qr.png",
         disposition="inline",
     )
-    message.add_attachment(
-        qr_png,
-        maintype="image",
-        subtype="png",
-        filename="activation-qr.png",
-    )
     return message, message_id
 
 
@@ -749,7 +806,11 @@ def build_test_message(recipient: str) -> EmailMessage:
     """Build a branded token-free SMTP configuration test message."""
 
     brand = _mail_brand_name()
-    message, message_id = _base_message(recipient, f"{brand} email test")
+    message, message_id = _base_message(
+        recipient,
+        f"{brand} email test",
+        sender_name=brand,
+    )
     logo_cid = make_msgid(domain=message_id.rsplit("@", 1)[-1].rstrip(">"))
     message.set_content(
         f"{brand} email delivery is ready.\n\n"

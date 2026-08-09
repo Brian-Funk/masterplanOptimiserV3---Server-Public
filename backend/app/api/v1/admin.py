@@ -50,6 +50,10 @@ from app.core.activation_email import (
     render_activation_qr_png,
     safe_mail_settings,
 )
+from app.core.activation_mail_governance import (
+    ActivationMailGovernanceError,
+    resolve_activation_mail_governance,
+)
 from app.core.audit import audit
 from app.core.config import settings
 from app.core.event_dates import require_valid_event_date_range
@@ -1857,15 +1861,6 @@ class ActivationEmailDeliveryOut(BaseModel):
     purpose: Literal["initial_setup", "additional_passkey", "credential_reset"]
 
 
-def _event_name(user: User, db: Session) -> str | None:
-    """Return the event name used in activation email body copy."""
-
-    if user.event_id is None:
-        return None
-    event = db.query(Event.name).filter(Event.id == user.event_id).first()
-    return event[0] if event else None
-
-
 def _latest_retryable_delivery(
     user_id: int,
     db: Session,
@@ -1907,7 +1902,7 @@ def _record_not_attempted(
         status="not_attempted",
         error_code=error.code,
         error_message=error.safe_message,
-        includes_qr=True,
+        includes_qr=False,
         completed_at=datetime.now(timezone.utc),
     )
     db.add(delivery)
@@ -1978,6 +1973,19 @@ def _send_user_activation_email(
             purpose=in_progress.purpose,
         )
 
+    try:
+        governance = resolve_activation_mail_governance(user=user, db=db)
+    except ActivationMailGovernanceError as exc:
+        return _record_not_attempted(
+            user=user,
+            admin=admin,
+            error=ActivationMailError(exc.code, exc.safe_message),
+            purpose=purpose,
+            retry_of_id=retry_of_id,
+            request=request,
+            db=db,
+        )
+
     recipient = normalise_recipient(user.email)
     raw_token, link = create_activation_link(
         user_id=user.id,
@@ -1988,21 +1996,15 @@ def _send_user_activation_email(
         permit_email_delivery_start=True,
     )
     url = absolute_activation_url(raw_token)
-    policy_identity = current_policy_identity(db)
-    policy_url = (
-        f"{settings.WEBAUTHN_ORIGIN.rstrip('/')}/api/v1/governance/public/versions/"
-        f"{policy_identity[0]}/privacy.html"
-        if policy_identity else None
-    )
     try:
         message, message_id = build_activation_message(
             recipient=recipient,
             display_name=user.display_name,
-            event_name=_event_name(user, db),
             url=url,
             expires_at=link.expires_at,
             purpose=purpose,
-            policy_url=policy_url,
+            governance=governance,
+            self_service_requested=admin.id == user.id,
         )
     except Exception as exc:
         logger.error("Activation email rendering failed (%s)", type(exc).__name__)
@@ -2717,6 +2719,14 @@ def get_additional_passkey_capability(
     except ActivationMailError:
         email_available = False
     smtp_ready = mail_is_configured()
+    governance_ready = False
+    governance_message: str | None = None
+    if enabled and email_available and smtp_ready:
+        try:
+            resolve_activation_mail_governance(user=current_user, db=db)
+            governance_ready = True
+        except ActivationMailGovernanceError as error:
+            governance_message = error.safe_message
     if not enabled:
         message = "Additional passkey enrollment is not enabled for participant accounts."
     elif not email_available:
@@ -2729,6 +2739,10 @@ def get_additional_passkey_capability(
             "Email delivery is not configured for this deployment. "
             "Contact an administrator to add another passkey."
         )
+    elif not governance_ready:
+        message = governance_message or (
+            "Participant email delivery is waiting for published Governance settings."
+        )
     else:
         message = (
             "A one-time enrollment link can be sent to the email address "
@@ -2739,7 +2753,8 @@ def get_additional_passkey_capability(
         "self_service_enabled": enabled,
         "email_available": email_available,
         "mail_configured": smtp_ready,
-        "can_request": enabled and email_available and smtp_ready,
+        "governance_ready": governance_ready,
+        "can_request": enabled and email_available and smtp_ready and governance_ready,
         "per_minute": runtime_settings.get_int(
             "self_service_passkey_emails_per_minute", db
         ),
