@@ -30,7 +30,7 @@ import {
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
-import { AuthenticatedHeaderActions } from "@/components/AuthenticatedHeaderActions";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { Logo } from "@/components/Logo";
 import { ActivationCampaignCard } from "@/components/ActivationCampaignCard";
 import { SnapshotComparisonModal } from "@/components/SnapshotComparisonModal";
@@ -48,6 +48,7 @@ import {
   type SnapshotComparisonSummary,
 } from "@/lib/snapshotComparison";
 import {
+  LogOut,
   Plus,
   Copy,
   RefreshCw,
@@ -310,6 +311,8 @@ export default function AdminPage() {
   const router = useRouter();
   const {
     user,
+    logout,
+    isLoggingOut,
     isLoading: authLoading,
     authStatus,
   } = useAuth();
@@ -417,6 +420,10 @@ export default function AdminPage() {
     }
   }, [isIssuerOnly, user, selectedEvent]);
 
+  const handleLogout = async () => {
+    if (await logout()) router.replace("/login");
+  };
+
   const hasManagementAccess = !!user &&
     (user.is_admin || user.is_root_admin || user.is_issuer);
 
@@ -479,7 +486,25 @@ export default function AdminPage() {
                 <ArrowLeft size={18} />
               </button>
             )}
-            <AuthenticatedHeaderActions />
+            <ThemeToggle />
+            <button
+              onClick={() => router.push("/account/security")}
+              className="rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
+              aria-label="Open account security"
+              title="Account security"
+            >
+              <Shield size={18} />
+            </button>
+            <button
+              onClick={handleLogout}
+              disabled={isLoggingOut}
+              aria-busy={isLoggingOut}
+              className="rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-100 disabled:cursor-wait disabled:opacity-60 dark:text-gray-400 dark:hover:bg-gray-700"
+              aria-label={isLoggingOut ? "Logging out" : "Logout"}
+              title={isLoggingOut ? "Logging out…" : "Logout"}
+            >
+              {isLoggingOut ? <RefreshCw size={18} className="animate-spin" /> : <LogOut size={18} />}
+            </button>
           </div>
         </div>
       </header>
