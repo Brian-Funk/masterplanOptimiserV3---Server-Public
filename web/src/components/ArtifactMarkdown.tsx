@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 
+import { PUBLIC_TEXT_LINK_CLASS } from "@/lib/publicLinks";
+
 type Block =
   | { kind: "heading"; text: string }
   | { kind: "paragraph"; text: string }
@@ -136,17 +138,25 @@ function InlineMarkdown({ children, sourceBaseUrl }: { children: string; sourceB
       return <code className="rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-800 dark:bg-gray-700 dark:text-gray-200" key={index}>{token.slice(1, -1)}</code>;
     }
     const markdownLink = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-    const rawHref = markdownLink?.[2] || (token.startsWith("http") ? token : null);
+    const rawHref = markdownLink?.[2] || (/^https?:\/\//.test(token) ? token : null);
     if (rawHref) {
       const href = resolveArtifactHref(rawHref.replace(/[.,;:]$/, ""), sourceBaseUrl);
-      return <a className="break-all font-medium" href={href} key={index} rel="noopener noreferrer" target="_blank">{markdownLink?.[1] || token}</a>;
+      const label = markdownLink?.[1] || token;
+      return <a className={`${PUBLIC_TEXT_LINK_CLASS} break-words`} href={href} key={index} rel="noopener noreferrer" target="_blank"><LinkLabel text={label} /></a>;
     }
     return token;
   });
 }
 
 function resolveArtifactHref(href: string, sourceBaseUrl?: string) {
-  if (/^https?:\/\//.test(href) || href.startsWith("#")) return href;
+  if (/^https?:\/\//.test(href) || href.startsWith("#") || href.startsWith("/")) return href;
   if (!sourceBaseUrl) return href;
   return `${sourceBaseUrl.replace(/\/$/, "")}/${href.replace(/^\.\//, "")}`;
+}
+
+function LinkLabel({ text }: { text: string }) {
+  if (text.startsWith("**") && text.endsWith("**") && text.length > 4) {
+    return <strong>{text.slice(2, -2)}</strong>;
+  }
+  return text;
 }

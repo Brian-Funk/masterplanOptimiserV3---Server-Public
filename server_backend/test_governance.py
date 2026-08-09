@@ -398,7 +398,12 @@ def test_public_legal_notice_is_readable_without_javascript_and_escapes_controll
 
 def test_immutable_privacy_and_rights_pages_are_styled_human_readable_notices(db):
     client, _root = _root_with_reauth(db)
-    assert client.put("/api/v1/admin/governance", json=PROFILE).status_code == 200
+    profile = {
+        **PROFILE,
+        "privacy_contact_phone": "+41 44 555 01 23",
+        "dpo_contact": "dpo@synthetic-controller.ch",
+    }
+    assert client.put("/api/v1/admin/governance", json=profile).status_code == 200
     published = client.post(
         "/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION
     ).json()
@@ -423,6 +428,12 @@ def test_immutable_privacy_and_rights_pages_are_styled_human_readable_notices(db
     assert "Purpose and permitted information" in privacy.text
     assert "Cookies and browser storage" in privacy.text
     assert "Processors and service providers" in privacy.text
+    assert 'href="tel:+41445550123">+41 44 555 01 23</a>' in privacy.text
+    assert 'href="mailto:dpo@synthetic-controller.ch">dpo@synthetic-controller.ch</a>' in privacy.text
+    assert 'href="rights.html">Read how to exercise your rights</a>' in privacy.text
+    terms = client.get("/api/v1/governance/public/versions/1/terms.html")
+    assert terms.status_code == 200
+    assert 'href="data-policy.html">permitted-data boundary</a>' in terms.text
     assert "How to make a request" in rights.text
     assert "What happens next" in rights.text
     assert "Email the privacy contact" in rights.text

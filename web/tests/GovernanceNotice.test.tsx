@@ -16,6 +16,8 @@ const notice = {
   controller_postal_address: "Controller Street 1",
   controller_country: "CH",
   privacy_contact_email: "privacy@synthetic-controller.ch",
+  privacy_contact_phone: "+41 44 555 01 23",
+  dpo_contact: "dpo@synthetic-controller.ch",
   supervisory_authority_name: "Synthetic Authority",
   supervisory_authority_url: "https://authority.invalid/",
   processor_summary: "Controller-supplied processor summary.",
@@ -82,6 +84,26 @@ describe("GovernanceNotice", () => {
     expect(screen.getByRole("link", { name: "Open permanent exact page" })).toHaveAttribute(
       "href",
       "/api/v1/governance/public/versions/3/retention.html",
+    );
+    expect(screen.getByRole("link", { name: "Open permanent exact page" })).toHaveClass("underline");
+  });
+
+  it("makes actionable public contacts and cross-references recognisable as links", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => notice }));
+    render(<GovernanceNotice section="legal" />);
+
+    expect(await screen.findByRole("link", { name: "privacy@synthetic-controller.ch" })).toHaveAttribute(
+      "href",
+      "mailto:privacy@synthetic-controller.ch",
+    );
+    expect(screen.getByRole("link", { name: "+41 44 555 01 23" })).toHaveAttribute(
+      "href",
+      "tel:+41445550123",
+    );
+    expect(screen.getByRole("link", { name: "dpo@synthetic-controller.ch" })).toHaveClass("underline");
+    expect(screen.getByRole("link", { name: "permitted-data boundary" })).toHaveAttribute(
+      "href",
+      "/data-policy",
     );
   });
 

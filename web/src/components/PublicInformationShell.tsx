@@ -4,6 +4,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 
 import { Logo } from "@/components/Logo";
+import { PUBLIC_TEXT_LINK_CLASS } from "@/lib/publicLinks";
 
 export type PublicInformationSection =
   | "about"
@@ -80,7 +81,7 @@ export function PublicInformationShell({
 
         <footer className="flex flex-col gap-1 border-t border-gray-200 bg-gray-50 px-5 py-4 text-xs text-gray-500 dark:border-gray-700 dark:bg-gray-700/60 dark:text-gray-400 sm:flex-row sm:items-center sm:justify-between sm:px-9">
           <span>Masterplan Optimiser</span>
-          <Link className="hover:text-gray-700 dark:hover:text-gray-200" href="/privacy">
+          <Link className={PUBLIC_TEXT_LINK_CLASS} href="/privacy">
             Open the instance legal centre
           </Link>
         </footer>

@@ -1,7 +1,10 @@
+import Link from 'next/link';
+
 import {
   PublicInformationSection,
   PublicInformationShell,
 } from '@/components/PublicInformationShell';
+import { PUBLIC_TEXT_LINK_CLASS } from '@/lib/publicLinks';
 
 export default function DisclaimerPage() {
   return (
@@ -22,7 +25,9 @@ export default function DisclaimerPage() {
         <p>
           The software is provided <strong className='text-gray-900 dark:text-gray-100'>as is</strong>,
           without warranty of any kind, express or implied, including warranties of merchantability,
-          fitness for a particular purpose, and non-infringement.
+          fitness for a particular purpose, and non-infringement. See the{' '}
+          <Link className={PUBLIC_TEXT_LINK_CLASS} href='/licence'>software licence</Link>{' '}
+          for the exact terms shipped with this build.
         </p>
       </PublicInformationSection>
 
@@ -36,9 +41,11 @@ export default function DisclaimerPage() {
 
       <PublicInformationSection title='Third-party services'>
         <p>
-          A deployment may connect to services selected by its operator. Availability, accuracy,
-          security, and applicable terms for those services remain the responsibility of their
-          providers and the self-hosting controller.
+          A deployment may connect to services selected by its operator. The published{' '}
+          <Link className={PUBLIC_TEXT_LINK_CLASS} href='/processors'>processor register</Link>{' '}
+          identifies the providers declared for this instance. Availability, accuracy, security,
+          and the <Link className={PUBLIC_TEXT_LINK_CLASS} href='/terms'>applicable terms</Link>{' '}
+          remain the responsibility of those providers and the self-hosting controller.
         </p>
       </PublicInformationSection>
     </PublicInformationShell>

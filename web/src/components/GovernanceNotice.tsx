@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 
 import { Logo } from "@/components/Logo";
+import { PUBLIC_TEXT_LINK_CLASS } from "@/lib/publicLinks";
 
 type Governance = {
   configured: boolean;
@@ -157,7 +158,7 @@ export function GovernanceNotice({ section }: { section: GovernanceSection }) {
 
         <footer className="flex flex-col gap-1 border-t border-gray-200 bg-gray-50 px-5 py-4 text-xs text-gray-500 dark:border-gray-700 dark:bg-gray-700/60 dark:text-gray-400 sm:flex-row sm:items-center sm:justify-between sm:px-9">
           <span>Masterplan Optimiser self-hosted instance</span>
-          {notice?.version && <a className="hover:text-gray-700 dark:hover:text-gray-200" href={`/api/v1/governance/public/versions/${notice.version}/${section}.html`}>Open permanent exact page</a>}
+          {notice?.version && <a className={PUBLIC_TEXT_LINK_CLASS} href={`/api/v1/governance/public/versions/${notice.version}/${section}.html`}>Open permanent exact page</a>}
         </footer>
       </article>
     </main>
@@ -181,9 +182,9 @@ function ControllerSection({ notice }: { notice: Governance }) {
     <p className="font-semibold text-gray-900 dark:text-gray-100">{notice.controller_legal_name}</p>
     {notice.controller_postal_address && <p className="whitespace-pre-line">{notice.controller_postal_address}</p>}
     {notice.controller_country && <p>Country: {notice.controller_country}</p>}
-    <p><a href={`mailto:${notice.privacy_contact_email}`}>{notice.privacy_contact_email}</a></p>
-    {notice.privacy_contact_phone && <p>{notice.privacy_contact_phone}</p>}
-    {notice.dpo_contact && <p>Data-protection contact: {notice.dpo_contact}</p>}
+    <p><a className={PUBLIC_TEXT_LINK_CLASS} href={`mailto:${notice.privacy_contact_email}`}>{notice.privacy_contact_email}</a></p>
+    {notice.privacy_contact_phone && <p><a className={PUBLIC_TEXT_LINK_CLASS} href={`tel:${notice.privacy_contact_phone.replace(/[^\d+]/g, "")}`}>{notice.privacy_contact_phone}</a></p>}
+    {notice.dpo_contact && <p>Data-protection contact: <ContactValue value={notice.dpo_contact} /></p>}
   </Section>;
 }
 
@@ -223,13 +224,13 @@ function RightsSection({ notice, full }: { notice: Governance; full: boolean }) 
   const contact = notice.privacy_contact_email || "the controller's published privacy contact";
   return <Section title="Your rights">
     <p>Whether you are a participant, organiser, administrator or another account holder, data-protection rights concern your own personal data. They do not provide access to another person&apos;s information or to all operational records.</p>
-    {!full && <><p className="mt-2">Depending on the law that applies, you may ask to access, correct, erase, restrict or object to processing, and to receive eligible data in a portable form. The controller will assess the applicable right, scope and proportionate identity verification.</p><p className="mt-3"><Link className="font-semibold" href="/rights">Read how to exercise your rights</Link></p></>}
+    {!full && <><p className="mt-2">Depending on the law that applies, you may ask to access, correct, erase, restrict or object to processing, and to receive eligible data in a portable form. The controller will assess the applicable right, scope and proportionate identity verification.</p><p className="mt-3"><Link className={PUBLIC_TEXT_LINK_CLASS} href="/rights">Read how to exercise your rights</Link></p></>}
     {full && <>
       <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-700/50"><strong className="text-gray-900 dark:text-gray-100">You can ask in ordinary language.</strong><p className="mt-1">You do not need to identify the applicable law or quote an article. Describe what you want to know or change, and the controller will assess the request.</p></div>
       {notice.jurisdiction_scope && <><Subheading>Applicable scope</Subheading><p>The controller recorded the following jurisdiction scope for this deployment: {notice.jurisdiction_scope}</p><p className="mt-2">The Swiss FADP, the EU GDPR, or both may apply. The controller must assess the law for the particular request; the software does not infer jurisdiction from hosting, network location or account role.</p></>}
       <Subheading>Rights you may exercise</Subheading>
       <ul className="grid list-none gap-3 p-0 sm:grid-cols-2">
-        {RIGHTS.map((right) => <li key={right.title} className="flex min-h-40 flex-col rounded-xl border border-gray-200 p-4 dark:border-gray-700"><strong className="text-base text-gray-900 dark:text-gray-100">{right.title}</strong><p className="mt-1">{right.description}</p><div className="mt-auto flex flex-wrap gap-1.5 pt-4 text-xs font-semibold"><a className="rounded-md bg-blue-50 px-2 py-1 no-underline dark:bg-blue-950/60" href={GDPR_URL} rel="noopener noreferrer">GDPR {right.gdpr}</a><a className="rounded-md bg-blue-50 px-2 py-1 no-underline dark:bg-blue-950/60" href={FADP_URL} rel="noopener noreferrer">FADP {right.fadp}</a></div></li>)}
+        {RIGHTS.map((right) => <li key={right.title} className="flex min-h-40 flex-col rounded-xl border border-gray-200 p-4 dark:border-gray-700"><strong className="text-base text-gray-900 dark:text-gray-100">{right.title}</strong><p className="mt-1">{right.description}</p><div className="mt-auto flex flex-wrap gap-1.5 pt-4 text-xs font-semibold"><a className="rounded-md bg-blue-50 px-2 py-1 text-blue-700 underline decoration-blue-300 underline-offset-2 dark:bg-blue-950/60 dark:text-blue-300 dark:decoration-blue-700" href={GDPR_URL} rel="noopener noreferrer" target="_blank">GDPR {right.gdpr}</a><a className="rounded-md bg-blue-50 px-2 py-1 text-blue-700 underline decoration-blue-300 underline-offset-2 dark:bg-blue-950/60 dark:text-blue-300 dark:decoration-blue-700" href={FADP_URL} rel="noopener noreferrer" target="_blank">FADP {right.fadp}</a></div></li>)}
       </ul>
       <p className="mt-3 text-sm">The precise scope, exceptions and response depend on the applicable law, processing purpose, other people&apos;s rights, and any legally required retention.</p>
       {notice.rights_summary && <p className="mt-3 whitespace-pre-line">{notice.rights_summary}</p>}
@@ -237,12 +238,12 @@ function RightsSection({ notice, full }: { notice: Governance; full: boolean }) 
       <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-700/50"><p>You may write in ordinary language. Describe what you want to know or change and do not email unnecessary identity documents or sensitive information.</p><div className="mt-4 flex flex-wrap gap-2"><a className="inline-flex min-h-10 items-center justify-center rounded-lg bg-blue-600 px-4 py-2 font-semibold text-white no-underline hover:bg-blue-700" href={`mailto:${contact}`}>Email the privacy contact</a>{notice.rights_request_url && <a className="inline-flex min-h-10 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 py-2 font-semibold text-gray-900 no-underline hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100" href={notice.rights_request_url} rel="noopener noreferrer">Open the rights-request form</a>}</div></div>
       <Subheading>What happens next</Subheading>
       <ol className="list-decimal space-y-2 pl-5 marker:font-semibold marker:text-blue-600"><li>The controller confirms the scope of the request.</li><li>Only proportionate identity verification is requested where needed.</li><li>The controller assesses the applicable law, any limits, and the response or action required.</li></ol>
-      <p className="mt-3">Under <a href={GDPR_URL} rel="noopener noreferrer">GDPR Article 12</a>, a controller normally responds without undue delay and within one month. Under the <a href="https://www.fedlex.admin.ch/eli/cc/2022/568/en" rel="noopener noreferrer">Swiss Data Protection Ordinance</a>, access information is normally provided within 30 days.</p>
+      <p className="mt-3">Under <a className={PUBLIC_TEXT_LINK_CLASS} href={GDPR_URL} rel="noopener noreferrer" target="_blank">GDPR Article 12</a>, a controller normally responds without undue delay and within one month. Under the <a className={PUBLIC_TEXT_LINK_CLASS} href="https://www.fedlex.admin.ch/eli/cc/2022/568/en" rel="noopener noreferrer" target="_blank">Swiss Data Protection Ordinance</a>, access information is normally provided within 30 days.</p>
       <Subheading>Complaint and legal remedy</Subheading>
-      <p>If the controller does not handle a request properly, the applicable route may include a complaint to a supervisory authority or a legal remedy. See <a href={GDPR_URL} rel="noopener noreferrer">GDPR Articles 77 and 79</a> and <a href={FADP_URL} rel="noopener noreferrer">FADP Articles 32 and 49 onward</a>.</p>
+      <p>If the controller does not handle a request properly, the applicable route may include a complaint to a supervisory authority or a legal remedy. See <a className={PUBLIC_TEXT_LINK_CLASS} href={GDPR_URL} rel="noopener noreferrer" target="_blank">GDPR Articles 77 and 79</a> and <a className={PUBLIC_TEXT_LINK_CLASS} href={FADP_URL} rel="noopener noreferrer" target="_blank">FADP Articles 32 and 49 onward</a>.</p>
       <Subheading>Supervisory authority</Subheading>
-      {notice.supervisory_authority_name && notice.supervisory_authority_url ? <p><a href={notice.supervisory_authority_url} rel="noopener noreferrer">{notice.supervisory_authority_name}</a></p> : notice.supervisory_authority_name ? <p>{notice.supervisory_authority_name}</p> : <p>Where applicable, you may lodge a complaint with the competent data-protection supervisory authority.</p>}
-      {notice.incident_contact_email && <p className="mt-2">Incident contact: <a href={`mailto:${notice.incident_contact_email}`}>{notice.incident_contact_email}</a></p>}
+      {notice.supervisory_authority_name && notice.supervisory_authority_url ? <p><a className={PUBLIC_TEXT_LINK_CLASS} href={notice.supervisory_authority_url} rel="noopener noreferrer" target="_blank">{notice.supervisory_authority_name}</a></p> : notice.supervisory_authority_name ? <p>{notice.supervisory_authority_name}</p> : <p>Where applicable, you may lodge a complaint with the competent data-protection supervisory authority.</p>}
+      {notice.incident_contact_email && <p className="mt-2">Incident contact: <a className={PUBLIC_TEXT_LINK_CLASS} href={`mailto:${notice.incident_contact_email}`}>{notice.incident_contact_email}</a></p>}
     </>}
   </Section>;
 }
@@ -255,7 +256,18 @@ function ProcessorsSection({ notice }: { notice: Governance }) {
 }
 
 function TermsSection({ notice }: { notice: Governance }) {
-  return <Section title="Terms for this instance"><p>Use is limited to authorised operational event scheduling and access management. Users must follow the permitted-data boundary and protect their own account access.</p>{notice.terms_summary && <p className="mt-3 whitespace-pre-line">{notice.terms_summary}</p>}</Section>;
+  return <Section title="Terms for this instance"><p>Use is limited to authorised operational event scheduling and access management. Users must follow the <Link className={PUBLIC_TEXT_LINK_CLASS} href="/data-policy">permitted-data boundary</Link> and protect their own account access.</p>{notice.terms_summary && <p className="mt-3 whitespace-pre-line">{notice.terms_summary}</p>}</Section>;
+}
+
+function ContactValue({ value }: { value: string }) {
+  const contact = value.trim();
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact)) {
+    return <a className={PUBLIC_TEXT_LINK_CLASS} href={`mailto:${contact}`}>{contact}</a>;
+  }
+  if (/^https?:\/\//.test(contact)) {
+    return <a className={PUBLIC_TEXT_LINK_CLASS} href={contact} rel="noopener noreferrer" target="_blank">{contact}</a>;
+  }
+  return contact;
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {

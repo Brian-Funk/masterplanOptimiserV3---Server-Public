@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import Link from 'next/link';
 
 import { PublicInformationShell } from '@/components/PublicInformationShell';
+import { PUBLIC_TEXT_LINK_CLASS } from '@/lib/publicLinks';
 
 export const dynamic = 'force-static';
 
@@ -21,13 +23,17 @@ export default function LicencePage() {
       <div className='space-y-6'>
         <div className='rounded-xl border border-blue-200 bg-blue-50 p-4 text-blue-950 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-100'>
           <p>
-            Masterplan Optimiser Server is distributed under the GNU Affero General Public
-            License, version 3 only. This software licence is separate from the controller&apos;s
-            instance-specific notices and terms.
+            Masterplan Optimiser Server is distributed under the{' '}
+            <a className={PUBLIC_TEXT_LINK_CLASS} href='https://www.gnu.org/licenses/agpl-3.0.html' rel='noopener noreferrer' target='_blank'>
+              GNU Affero General Public License, version 3 only
+            </a>. This software licence is separate from the controller&apos;s{' '}
+            <Link className={PUBLIC_TEXT_LINK_CLASS} href='/privacy'>instance-specific notices</Link>{' '}
+            and <Link className={PUBLIC_TEXT_LINK_CLASS} href='/terms'>terms</Link>.
           </p>
           <p className='mt-3 break-all text-sm'>
             Corresponding source for this exact build:{' '}
             <a
+              className={PUBLIC_TEXT_LINK_CLASS}
               href={process.env.NEXT_PUBLIC_SOURCE_URL}
               rel='noreferrer'
               target='_blank'

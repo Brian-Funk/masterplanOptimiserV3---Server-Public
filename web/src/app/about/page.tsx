@@ -1,15 +1,19 @@
+import Link from 'next/link';
+
 import {
   PublicInformationSection,
   PublicInformationShell,
 } from '@/components/PublicInformationShell';
+import { PUBLIC_TEXT_LINK_CLASS } from '@/lib/publicLinks';
 
 const technologies = [
-  ['Next.js and React', 'User interface'],
-  ['FastAPI', 'Backend API'],
-  ['Google OR-Tools', 'Constraint-based schedule optimisation'],
-  ['SQLAlchemy', 'Database access'],
-  ['Tailwind CSS', 'Design system'],
-  ['WebAuthn and passkeys', 'Passwordless authentication'],
+  ['Next.js', 'User interface framework', 'https://nextjs.org/'],
+  ['React', 'Component model', 'https://react.dev/'],
+  ['FastAPI', 'Backend API', 'https://fastapi.tiangolo.com/'],
+  ['Google OR-Tools', 'Constraint-based schedule optimisation', 'https://developers.google.com/optimization'],
+  ['SQLAlchemy', 'Database access', 'https://www.sqlalchemy.org/'],
+  ['Tailwind CSS', 'Design system', 'https://tailwindcss.com/'],
+  ['WebAuthn and passkeys', 'Passwordless authentication', 'https://developer.mozilla.org/en-US/docs/Web/API/Web_Authentication_API'],
 ] as const;
 
 export default function AboutPage() {
@@ -28,11 +32,18 @@ export default function AboutPage() {
       </PublicInformationSection>
 
       <PublicInformationSection title='Technology'>
-        <p>The application is built from reviewed open-source components.</p>
+        <p>
+          The application is built from reviewed open-source components. See the{' '}
+          <Link className={PUBLIC_TEXT_LINK_CLASS} href='/third-party-notices'>
+            complete third-party notices
+          </Link>.
+        </p>
         <ul className='grid list-none gap-3 p-0 sm:grid-cols-2'>
-          {technologies.map(([name, purpose]) => (
+          {technologies.map(([name, purpose, href]) => (
             <li className='rounded-xl border border-gray-200 p-4 dark:border-gray-700' key={name}>
-              <strong className='text-gray-900 dark:text-gray-100'>{name}</strong>
+              <a className={PUBLIC_TEXT_LINK_CLASS} href={href} rel='noopener noreferrer' target='_blank'>
+                {name}
+              </a>
               <p className='mt-1 text-sm'>{purpose}</p>
             </li>
           ))}
@@ -41,7 +52,10 @@ export default function AboutPage() {
 
       <PublicInformationSection title='Credits'>
         <p>
-          Designed and developed by <strong className='text-gray-900 dark:text-gray-100'>Brian Funk</strong>.
+          Designed and developed by{' '}
+          <a className={PUBLIC_TEXT_LINK_CLASS} href='https://github.com/Brian-Funk' rel='noopener noreferrer' target='_blank'>
+            Brian Funk
+          </a>.
         </p>
       </PublicInformationSection>
 
@@ -57,6 +71,7 @@ export default function AboutPage() {
             <dt className='text-sm text-gray-500 dark:text-gray-400'>Corresponding source</dt>
             <dd className='mt-1 break-all text-sm'>
               <a
+                className={PUBLIC_TEXT_LINK_CLASS}
                 href={process.env.NEXT_PUBLIC_SOURCE_URL}
                 rel='noreferrer'
                 target='_blank'

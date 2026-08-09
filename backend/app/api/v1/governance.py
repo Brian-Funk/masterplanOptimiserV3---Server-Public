@@ -3,6 +3,7 @@
 import hashlib
 import html
 import json
+import re
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -240,6 +241,17 @@ def _paragraphs(value: object | None) -> str:
     return "".join(f"<p>{_text(line)}</p>" for line in lines)
 
 
+def _contact_html(value: object | None) -> str:
+    """Link a clearly structured public contact without interpreting free-form prose."""
+    raw = str(value or "").strip()
+    escaped = _text(raw)
+    if re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", raw):
+        return f'<a href="mailto:{escaped}">{escaped}</a>'
+    if re.fullmatch(r"https?://[^\s]+", raw):
+        return f'<a href="{escaped}" rel="noopener noreferrer">{escaped}</a>'
+    return escaped
+
+
 def _render_governance_html(
     section: str,
     *,
@@ -320,9 +332,11 @@ def _render_governance_html(
             if notice.get("controller_country"):
                 body.append(f"<p>Country: {_text(notice.get('controller_country'))}</p>")
             if notice.get("privacy_contact_phone"):
-                body.append(f"<p>Telephone: {_text(notice['privacy_contact_phone'])}</p>")
+                phone = _text(notice["privacy_contact_phone"])
+                phone_href = "".join(char for char in str(notice["privacy_contact_phone"]) if char.isdigit() or char == "+")
+                body.append(f'<p>Telephone: <a href="tel:{phone_href}">{phone}</a></p>')
             if notice.get("dpo_contact"):
-                body.append(f"<p>Data-protection contact: {_text(notice['dpo_contact'])}</p>")
+                body.append(f"<p>Data-protection contact: {_contact_html(notice['dpo_contact'])}</p>")
         if section in {"privacy", "data-policy"}:
             policy = notice.get("permitted_data") or {}
             body.extend([
@@ -378,7 +392,8 @@ def _render_governance_html(
                 "you may ask to access, correct, erase, restrict or object to processing, and to receive eligible data "
                 "in a portable form. Contact the controller at "
                 f"<a href=\"mailto:{_text(notice.get('privacy_contact_email'))}\">{_text(notice.get('privacy_contact_email'))}</a>; "
-                "the controller will assess the applicable right, scope and proportionate identity verification.</p>",
+                "the controller will assess the applicable right, scope and proportionate identity verification. "
+                '<a href="rights.html">Read how to exercise your rights</a>.</p>',
             ])
             if section == "rights":
                 gdpr_url = "https://eur-lex.europa.eu/eli/reg/2016/679/2016-05-04"
@@ -459,7 +474,7 @@ def _render_governance_html(
             body.extend([
                 "<h2>Terms for this instance</h2>",
                 "<p>Use is limited to authorised operational event scheduling and access management. "
-                "Users must follow the permitted-data boundary and protect their own account access.</p>",
+                'Users must follow the <a href="data-policy.html">permitted-data boundary</a> and protect their own account access.</p>',
             ])
             if notice.get("terms_summary"):
                 body.append(_paragraphs(notice.get("terms_summary")))

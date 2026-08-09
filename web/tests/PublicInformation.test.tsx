@@ -40,6 +40,40 @@ describe('public information pages', () => {
       'href',
       'https://example.invalid/',
     );
+    expect(screen.getByRole('link', { name: 'https://example.invalid/' })).toHaveClass('underline');
+  });
+
+  it('renders reviewed Markdown links visibly without turning package names into URLs', () => {
+    render(
+      <ArtifactMarkdown
+        markdown={'## References\n\nRead [**SUPPORTED-VERSIONS.md**](SUPPORTED-VERSIONS.md). The packages http-ece and httpx2 are plain text.'}
+        sourceBaseUrl='https://github.com/example/project/tree/exact-sha'
+      />,
+    );
+
+    const policy = screen.getByRole('link', { name: 'SUPPORTED-VERSIONS.md' });
+    expect(policy).toHaveAttribute(
+      'href',
+      'https://github.com/example/project/tree/exact-sha/SUPPORTED-VERSIONS.md',
+    );
+    expect(policy).toHaveClass('underline');
+    expect(policy.querySelector('strong')).toHaveTextContent('SUPPORTED-VERSIONS.md');
+    expect(screen.queryByRole('link', { name: 'http-ece' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'httpx2' })).not.toBeInTheDocument();
+  });
+
+  it('ships authoritative security destinations in the public artifact', () => {
+    const security = fs.readFileSync(
+      path.join(process.cwd(), 'legal-artifacts', 'SECURITY.md'),
+      'utf8',
+    );
+
+    expect(security).toContain(
+      '[GitHub\'s private vulnerability reporting](https://github.com/Brian-Funk/masterplanOptimiserV3---Server-Public/security/advisories/new)',
+    );
+    expect(security).toContain(
+      '[latest signed production release](https://github.com/Brian-Funk/masterplanOptimiserV3---Server-Public/releases/latest)',
+    );
   });
 
   it('uses the self-hosted Source Sans 3 family globally and in immutable notices', () => {

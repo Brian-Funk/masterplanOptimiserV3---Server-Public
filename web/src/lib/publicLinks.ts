@@ -1,0 +1,2 @@
+export const PUBLIC_TEXT_LINK_CLASS =
+  "font-semibold text-blue-700 underline decoration-blue-300 underline-offset-2 transition-colors hover:text-blue-900 hover:decoration-blue-500 focus-visible:rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 dark:text-blue-300 dark:decoration-blue-700 dark:hover:text-blue-100 dark:hover:decoration-blue-400";
