@@ -254,6 +254,7 @@ _NO_STORE_PREFIXES = (
     "/api/v1/auth/",
     "/api/v1/passkey/",
     "/api/v1/activation/",
+    "/api/v1/account/",
     "/api/v1/admin/",
     "/api/v1/calendar/",
     "/api/v1/notifications/",

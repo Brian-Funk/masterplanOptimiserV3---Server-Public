@@ -28,6 +28,7 @@ from app.core.activation_email import (
     render_activation_qr_png,
 )
 from app.models.audit import AuditLog
+from app.models.server_setting import ServerSetting
 from app.models.user import ActivationEmailDelivery, ActivationLink
 from server_backend.conftest import create_test_event, create_test_user, _make_client
 
@@ -223,6 +224,141 @@ def test_additional_passkey_email_states_non_destructive_outcome(
     link = db.query(ActivationLink).filter_by(user_id=user.id).one()
     assert delivery.purpose == ADDITIONAL_PASSKEY
     assert link.purpose == ADDITIONAL_PASSKEY
+
+
+def test_participant_self_service_is_hidden_by_default(db):
+    """The root-controlled participant capability defaults to disabled."""
+
+    event, _ = create_test_event(db, name="Self-service disabled")
+    user = create_test_user(db, username="disabled.user", event_id=event.id)
+    client = _make_client(db, user)
+
+    response = client.get("/api/v1/account/additional-passkey")
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "email"
+    assert response.json()["self_service_enabled"] is False
+    assert response.json()["can_request"] is False
+
+
+def test_participant_self_service_explains_missing_admin_email(db):
+    """No recipient can be selected or supplied by the participant."""
+
+    event, _ = create_test_event(db, name="Missing email")
+    user = create_test_user(db, username="missing.email", event_id=event.id)
+    user.email = None
+    db.add(ServerSetting(key="self_service_additional_passkeys_enabled", value="1"))
+    db.commit()
+    client = _make_client(db, user)
+
+    capability = client.get("/api/v1/account/additional-passkey")
+    send = client.post("/api/v1/account/additional-passkey/email", json={})
+
+    assert capability.status_code == 200
+    assert capability.json()["email_available"] is False
+    assert "not been added by an administrator" in capability.json()["message"]
+    assert send.status_code == 409
+    assert "not been added by an administrator" in send.json()["detail"]
+    assert db.query(ActivationLink).filter_by(user_id=user.id).count() == 0
+
+
+def test_participant_can_email_only_their_recorded_additional_passkey_link(
+    db,
+    configured_mail,
+):
+    """Enabled self-service sends a non-destructive link to the stored address."""
+
+    event, _ = create_test_event(db, name="Self-service enabled")
+    user = create_test_user(db, username="enabled.user", event_id=event.id)
+    db.add(ServerSetting(key="self_service_additional_passkeys_enabled", value="1"))
+    db.commit()
+    client = _make_client(db, user)
+
+    response = client.post("/api/v1/account/additional-passkey/email", json={})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "accepted"
+    assert response.json()["purpose"] == ADDITIONAL_PASSKEY
+    assert "activation_url" not in response.json()
+    delivery = db.query(ActivationEmailDelivery).filter_by(user_id=user.id).one()
+    assert delivery.requested_by_id == user.id
+    assert delivery.recipient_email == user.email
+    assert delivery.purpose == ADDITIONAL_PASSKEY
+    assert len(configured_mail) == 1
+
+
+def test_participant_self_service_enforces_per_user_minute_limit(
+    db,
+    configured_mail,
+):
+    """The root-selected minute limit counts only participant self-service attempts."""
+
+    event, _ = create_test_event(db, name="Self-service limited")
+    user = create_test_user(db, username="limited.user", event_id=event.id)
+    db.add_all([
+        ServerSetting(key="self_service_additional_passkeys_enabled", value="1"),
+        ServerSetting(key="self_service_passkey_emails_per_minute", value="1"),
+        ServerSetting(key="self_service_passkey_emails_per_day", value="10"),
+    ])
+    db.commit()
+    client = _make_client(db, user)
+
+    first = client.post("/api/v1/account/additional-passkey/email", json={})
+    second = client.post("/api/v1/account/additional-passkey/email", json={})
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert "per-minute" in second.json()["detail"]
+    assert second.headers["retry-after"] == "60"
+    assert len(configured_mail) == 1
+
+
+def test_participant_self_service_enforces_per_user_daily_limit(
+    db,
+    configured_mail,
+):
+    """The independently configurable rolling-day limit is enforced as well."""
+
+    event, _ = create_test_event(db, name="Self-service daily limit")
+    user = create_test_user(db, username="daily.user", event_id=event.id)
+    db.add_all([
+        ServerSetting(key="self_service_additional_passkeys_enabled", value="1"),
+        ServerSetting(key="self_service_passkey_emails_per_minute", value="10"),
+        ServerSetting(key="self_service_passkey_emails_per_day", value="1"),
+    ])
+    db.commit()
+    client = _make_client(db, user)
+
+    first = client.post("/api/v1/account/additional-passkey/email", json={})
+    second = client.post("/api/v1/account/additional-passkey/email", json={})
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert "daily" in second.json()["detail"]
+    assert second.headers["retry-after"] == "86400"
+    assert len(configured_mail) == 1
+
+
+def test_management_accounts_keep_direct_passkey_enrollment(db, configured_mail):
+    """Participant policy and limits never replace management re-authentication."""
+
+    event, _ = create_test_event(db, name="Management direct")
+    admin = create_test_user(
+        db,
+        username="direct.manager",
+        event_id=event.id,
+        is_admin=True,
+    )
+    client = _make_client(db, admin)
+
+    capability = client.get("/api/v1/account/additional-passkey")
+    send = client.post("/api/v1/account/additional-passkey/email", json={})
+
+    assert capability.status_code == 200
+    assert capability.json()["mode"] == "direct"
+    assert send.status_code == 409
+    assert "directly after re-authentication" in send.json()["detail"]
+    assert configured_mail == []
 
 
 @pytest.mark.parametrize(

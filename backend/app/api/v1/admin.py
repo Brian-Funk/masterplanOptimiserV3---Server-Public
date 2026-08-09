@@ -12,7 +12,7 @@ import zipfile
 import os
 from pathlib import Path
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -44,6 +44,7 @@ from app.core.activation_email import (
     activation_url as absolute_activation_url,
     build_activation_message,
     build_test_message,
+    mail_is_configured,
     normalise_recipient,
     recover_stale_deliveries,
     render_activation_qr_png,
@@ -115,6 +116,7 @@ from app.models.user import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+account_router = APIRouter()
 
 
 def _ensure_aware_utc(value: datetime | None) -> datetime | None:
@@ -2681,6 +2683,161 @@ def create_user_activation_link(
         expires_at=_ensure_aware_utc(_link.expires_at),
         purpose=purpose,
     )
+
+
+def _is_management_account(user: User) -> bool:
+    """Return whether passkey additions use the direct re-authenticated path."""
+
+    return bool(user.is_root_admin or user.is_admin or user.is_issuer)
+
+
+@account_router.get("/additional-passkey")
+def get_additional_passkey_capability(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the safe enrollment mode for the current account."""
+
+    if _is_management_account(current_user):
+        return {
+            "mode": "direct",
+            "self_service_enabled": True,
+            "email_available": bool(current_user.email),
+            "mail_configured": mail_is_configured(),
+            "can_request": False,
+            "message": "Management passkeys are added directly after passkey re-authentication.",
+        }
+
+    enabled = runtime_settings.get_int(
+        "self_service_additional_passkeys_enabled", db
+    ) == 1
+    email_available = True
+    try:
+        normalise_recipient(current_user.email)
+    except ActivationMailError:
+        email_available = False
+    smtp_ready = mail_is_configured()
+    if not enabled:
+        message = "Additional passkey enrollment is not enabled for participant accounts."
+    elif not email_available:
+        message = (
+            "Your email address has not been added by an administrator. "
+            "Contact an administrator to make additional-passkey enrollment available."
+        )
+    elif not smtp_ready:
+        message = (
+            "Email delivery is not configured for this deployment. "
+            "Contact an administrator to add another passkey."
+        )
+    else:
+        message = (
+            "A one-time enrollment link can be sent to the email address "
+            "recorded by your administrator."
+        )
+    return {
+        "mode": "email",
+        "self_service_enabled": enabled,
+        "email_available": email_available,
+        "mail_configured": smtp_ready,
+        "can_request": enabled and email_available and smtp_ready,
+        "per_minute": runtime_settings.get_int(
+            "self_service_passkey_emails_per_minute", db
+        ),
+        "per_day": runtime_settings.get_int(
+            "self_service_passkey_emails_per_day", db
+        ),
+        "message": message,
+    }
+
+
+@account_router.post(
+    "/additional-passkey/email",
+    response_model=ActivationEmailResult,
+)
+@limiter.limit("20/minute")
+def request_additional_passkey_email(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Send a purpose-bound link only to the signed-in participant's address."""
+
+    if _is_management_account(current_user):
+        raise HTTPException(
+            status_code=409,
+            detail="Management accounts add passkeys directly after re-authentication.",
+        )
+    if runtime_settings.get_int("self_service_additional_passkeys_enabled", db) != 1:
+        raise HTTPException(
+            status_code=403,
+            detail="Additional passkey enrollment is not enabled for participant accounts.",
+        )
+    try:
+        normalise_recipient(current_user.email)
+    except ActivationMailError as error:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Your email address has not been added by an administrator. "
+                "Contact an administrator to make additional-passkey enrollment available."
+            ),
+        ) from error
+    if not mail_is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Email delivery is not configured for this deployment. "
+                "Contact an administrator to add another passkey."
+            ),
+        )
+
+    now = datetime.now(timezone.utc)
+    self_service_attempts = db.query(ActivationEmailDelivery).filter(
+        ActivationEmailDelivery.user_id == current_user.id,
+        ActivationEmailDelivery.requested_by_id == current_user.id,
+        ActivationEmailDelivery.purpose == ADDITIONAL_PASSKEY,
+    )
+    minute_limit = runtime_settings.get_int(
+        "self_service_passkey_emails_per_minute", db
+    )
+    day_limit = runtime_settings.get_int("self_service_passkey_emails_per_day", db)
+    if self_service_attempts.filter(
+        ActivationEmailDelivery.started_at >= now - timedelta(minutes=1)
+    ).count() >= minute_limit:
+        raise HTTPException(
+            status_code=429,
+            detail="The per-minute additional-passkey email limit has been reached. Try again shortly.",
+            headers={"Retry-After": "60"},
+        )
+    if self_service_attempts.filter(
+        ActivationEmailDelivery.started_at >= now - timedelta(days=1)
+    ).count() >= day_limit:
+        raise HTTPException(
+            status_code=429,
+            detail="The daily additional-passkey email limit has been reached. Contact an administrator if access is urgent.",
+            headers={"Retry-After": "86400"},
+        )
+
+    try:
+        with ActivationMailer() as mailer:
+            return _send_user_activation_email(
+                user=current_user,
+                admin=current_user,
+                mailer=mailer,
+                request=request,
+                db=db,
+                purpose=ADDITIONAL_PASSKEY,
+            )
+    except ActivationMailError as error:
+        return _record_not_attempted(
+            user=current_user,
+            admin=current_user,
+            error=error,
+            purpose=ADDITIONAL_PASSKEY,
+            retry_of_id=None,
+            request=request,
+            db=db,
+        )
 
 
 @router.get("/users/{user_id}/activation-links")
