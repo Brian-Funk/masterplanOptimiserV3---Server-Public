@@ -246,13 +246,18 @@ def _final_checks(db: Session) -> tuple[dict[str, bool], dict]:
         and hashlib.sha256(publication.content_json.encode("utf-8")).hexdigest()
         == publication.content_sha256
     )
-    expected_version_marker = f"Published policy version {publication.version}" if publication else ""
+    expected_version_marker = f"Policy version {publication.version}" if publication else ""
+    expected_digest_marker = f"SHA-256 {publication.content_sha256}" if publication else ""
     public_notices_ok = bool(
         publication
         and privacy_notice.status_code == 200
         and terms_notice.status_code == 200
         and expected_version_marker.encode("utf-8") in privacy_notice.body
         and expected_version_marker.encode("utf-8") in terms_notice.body
+        and expected_digest_marker.encode("utf-8") in privacy_notice.body
+        and expected_digest_marker.encode("utf-8") in terms_notice.body
+        and b"<h1>Privacy notice</h1>" in privacy_notice.body
+        and b"<h1>Instance terms</h1>" in terms_notice.body
     )
     checks = {
         "root_passkey": root_passkey_ready(db),
