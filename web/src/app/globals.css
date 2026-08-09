@@ -47,7 +47,7 @@ html.dark {
 
 html,
 body {
-  font-family: var(--font-source-sans), -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+  font-family: 'Source Sans 3', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;

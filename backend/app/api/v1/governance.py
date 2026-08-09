@@ -46,6 +46,10 @@ user_router = APIRouter()
 PUBLIC_SECTIONS = ("privacy", "legal", "terms", "data-policy", "retention", "rights", "processors")
 
 NOTICE_STYLES = """
+@font-face{font-family:'Source Sans 3';font-style:normal;font-display:swap;font-weight:400;src:url('/fonts/source-sans-3-latin-400-normal.woff2') format('woff2')}
+@font-face{font-family:'Source Sans 3';font-style:italic;font-display:swap;font-weight:400;src:url('/fonts/source-sans-3-latin-400-italic.woff2') format('woff2')}
+@font-face{font-family:'Source Sans 3';font-style:normal;font-display:swap;font-weight:600;src:url('/fonts/source-sans-3-latin-600-normal.woff2') format('woff2')}
+@font-face{font-family:'Source Sans 3';font-style:normal;font-display:swap;font-weight:700;src:url('/fonts/source-sans-3-latin-700-normal.woff2') format('woff2')}
 :root{color-scheme:light dark;--bg:#f7f8fa;--surface:#fff;--surface-soft:#f8fafc;--surface-muted:#f1f3f5;--text:#111827;--muted:#667085;--line:#e4e7ec;--blue:#2563eb;--blue-soft:#eff6ff;--violet:#7c3aed;--good:#047857;--good-soft:#ecfdf5;--warn:#b45309;--warn-soft:#fffbeb;--danger:#b42318;--danger-soft:#fff5f5;--shadow:0 1px 3px rgba(16,24,40,.08)}
 *{box-sizing:border-box}html{background:var(--bg)}body{min-width:320px;margin:0;background:var(--bg);color:var(--text);font-family:"Source Sans 3",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;line-height:1.6;-webkit-font-smoothing:antialiased}
 a{color:var(--blue);text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible{outline:2px solid var(--blue);outline-offset:3px;border-radius:4px}main{width:min(1024px,calc(100% - 32px));margin:0 auto;padding:32px 0 64px}
