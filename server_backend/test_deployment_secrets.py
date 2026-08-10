@@ -296,6 +296,7 @@ def test_blank_database_base_schema_runs_before_dynamic_migrations():
     database_start = '"${MP_COMPOSE[@]}" up -d db'
     base_schema = "mp_ensure_base_schema"
     migrations = "mp_apply_migrations"
+    fresh_initialisation = "mp_initialise_fresh_commissioning_state"
     schema_contract = "mp_verify_database_schema_contract"
     application_start = (
         '"${MP_COMPOSE[@]}" up -d --build --force-recreate --remove-orphans'
@@ -306,7 +307,14 @@ def test_blank_database_base_schema_runs_before_dynamic_migrations():
     database_start_index = deploy_script.index(database_start, service_build_index)
     base_schema_index = deploy_script.index(base_schema, database_start_index)
     migrations_index = deploy_script.index(migrations, base_schema_index)
-    schema_contract_index = deploy_script.index(schema_contract, migrations_index)
+    fresh_initialisation_index = deploy_script.index(
+        fresh_initialisation,
+        migrations_index,
+    )
+    schema_contract_index = deploy_script.index(
+        schema_contract,
+        fresh_initialisation_index,
+    )
     application_start_index = deploy_script.index(
         application_start,
         schema_contract_index,
@@ -316,9 +324,12 @@ def test_blank_database_base_schema_runs_before_dynamic_migrations():
     assert service_build_index < database_start_index
     assert database_start_index < base_schema_index
     assert base_schema_index < migrations_index
-    assert migrations_index < schema_contract_index
+    assert migrations_index < fresh_initialisation_index
+    assert fresh_initialisation_index < schema_contract_index
     assert schema_contract_index < application_start_index
     assert "deploy/migrations/*.sql" in common
+    assert "python -m app.tools.bootstrap_schema" in common
+    assert "python -m app.tools.bootstrap_fresh_commissioning" in common
     assert "basename \"$migration\"" in common
     assert "20260714_activation_email_delivery.sql" not in deploy_script
     assert "20260715_additional_passkey.sql" not in deploy_script

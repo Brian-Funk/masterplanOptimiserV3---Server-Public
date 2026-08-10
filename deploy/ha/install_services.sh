@@ -3,12 +3,14 @@
 set -Eeuo pipefail
 
 install_only=false
-if [ "${1:-}" = "--install-only" ]; then
-    install_only=true
-elif [ "$#" -gt 0 ]; then
-    echo "Usage: $0 [--install-only]" >&2
-    exit 2
-fi
+commissioning=false
+case "${1:-}" in
+    "") ;;
+    --install-only) install_only=true ;;
+    --commissioning) commissioning=true ;;
+    *) echo "Usage: $0 [--install-only|--commissioning]" >&2; exit 2 ;;
+esac
+[ "$#" -le 1 ] || { echo "Usage: $0 [--install-only|--commissioning]" >&2; exit 2; }
 
 MP_ROOT="${MP_ROOT:-/opt/masterplan}"
 export MP_ROOT
@@ -52,6 +54,14 @@ done
 sudo -n systemctl daemon-reload
 sudo -n systemctl disable --now mp-opt-ha-control.service >/dev/null 2>&1 || true
 [ "$install_only" = false ] || exit 0
+if [ "$commissioning" = true ]; then
+    sudo -n systemctl disable --now mp-opt-ha-replication.timer \
+        mp-opt-ha-replication.path mp-opt-ha-snapshots.timer >/dev/null 2>&1 || true
+    sudo -n systemctl stop mp-opt-ha-replication.service \
+        mp-opt-ha-snapshots.service >/dev/null 2>&1 || true
+    sudo -n systemctl enable --now mp-opt-ha-lease.service
+    exit 0
+fi
 sudo -n systemctl enable --now mp-opt-ha-lease.service
 sudo -n systemctl enable --now mp-opt-ha-replication.timer
 sudo -n systemctl enable --now mp-opt-ha-replication.path

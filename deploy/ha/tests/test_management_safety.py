@@ -88,6 +88,20 @@ class TerminalExitSafetyTests(unittest.TestCase):
         self.assertIn("clear 2>/dev/null || true", clear_terminal)
 
 
+class FreshCommissioningServiceSafetyTests(unittest.TestCase):
+    def test_commissioning_activates_only_the_lease_observer(self) -> None:
+        self.assertIn("--commissioning", INSTALL_SERVICES_SOURCE)
+        commissioning = INSTALL_SERVICES_SOURCE.index('if [ "$commissioning" = true ]')
+        regular = INSTALL_SERVICES_SOURCE.index(
+            "sudo -n systemctl enable --now mp-opt-ha-replication.timer",
+            commissioning,
+        )
+        commissioning_body = INSTALL_SERVICES_SOURCE[commissioning:regular]
+        self.assertIn("disable --now mp-opt-ha-replication.timer", commissioning_body)
+        self.assertIn("systemctl enable --now mp-opt-ha-lease.service", commissioning_body)
+        self.assertNotIn("enable --now mp-opt-ha-snapshots.timer", commissioning_body)
+
+
 class HASelftestSourceSafetyTests(unittest.TestCase):
     def test_unsigned_selftests_require_the_clean_active_exact_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

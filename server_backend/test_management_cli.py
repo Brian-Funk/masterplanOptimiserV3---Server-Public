@@ -960,7 +960,8 @@ def test_database_wipe_recreates_schema_then_applies_committed_migrations():
     helper_start = common.index("mp_ensure_base_schema()")
     helper_end = common.index("# Append a sanitised", helper_start)
     helper_body = common[helper_start:helper_end]
-    assert "up -d --no-deps --force-recreate backend" in helper_body
+    assert "python -m app.tools.bootstrap_schema" in helper_body
+    assert "up -d --no-deps --force-recreate backend" not in helper_body
 
 
 def test_restore_verifies_then_creates_verified_rollback_before_apply():
