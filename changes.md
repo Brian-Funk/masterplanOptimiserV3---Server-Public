@@ -65,7 +65,9 @@ this version. The next public release prepared from a qualified successor is
   manifests, SBOMs, immutable images and fail-closed public-material checks.
 - Corrected public repository references, neutralised self-hosting examples and
   removed the hardcoded production metadata base.
-- Moved the Python lock to the published `cryptography` 50.0.0 fix and removed
-  the temporary CVE exception from dependency and container scans.
+- Rechecked the temporary `cryptography` exception. Version 50.0.0 is published,
+  but WebAuthn's current `pyOpenSSL 26.3.0` dependency requires
+  `cryptography<50`; the bounded non-applicable PKCS#7 exception therefore
+  remains until a compatible dependency release permits the fixed lock.
 - Expanded exact-SHA CI coverage for commissioning, HA, deletion evidence,
   governance, email privacy and public documentation.
