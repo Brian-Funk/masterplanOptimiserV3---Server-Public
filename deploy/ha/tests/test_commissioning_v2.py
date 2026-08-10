@@ -549,9 +549,34 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn('mp_setup_state_action "Deploying HA witness"', primary)
         self.assertIn('mp_setup_state_action "Registering Node A with HA witness"', primary)
         self.assertIn('mp_setup_state_action "Waiting for Node B join"', primary)
+        self.assertIn("mp_setup_poll_peer_join_in_tui", primary)
         primary_resume = shell_function(SETUP, "mp_setup_primary_resume")
         self.assertIn("Join code renewal pending", primary_resume)
         self.assertIn("Resume setup after that time", primary_resume)
+
+    def test_primary_waits_in_place_for_node_b_and_continues(self) -> None:
+        wait = shell_function(SETUP, "mp_setup_wait_for_peer_join")
+        wrapper = shell_function(SETUP, "mp_setup_poll_peer_join_in_tui")
+        primary = shell_function(SETUP, "mp_setup_primary_create")
+        resume = shell_function(SETUP, "mp_setup_primary_resume")
+        self.assertIn("pair-state", wait)
+        self.assertIn(".paired == true", wait)
+        self.assertIn("sleep \"$interval\"", wait)
+        self.assertIn("trap", wait)
+        self.assertNotIn("node_token", wrapper)
+        self.assertIn("continues as soon as pairing is verified", wrapper)
+        self.assertIn("mp_setup_primary_resume", primary)
+        self.assertIn("mp_setup_poll_peer_join_in_tui", resume)
+
+    def test_signed_fresh_setup_uses_explicit_bootstrap_lane(self) -> None:
+        deploy = shell_function(SETUP, "mp_setup_deploy_application")
+        primary = shell_function(SETUP, "mp_setup_primary_resume")
+        self.assertIn("--fresh-commissioning", deploy)
+        self.assertIn("standalone-new|ha-primary-new", deploy)
+        self.assertLess(
+            primary.index("mp_ha_replicate_now"),
+            primary.index('install_services.sh"'),
+        )
 
     def test_standalone_dns_wait_retries_at_thirty_second_intervals(self) -> None:
         script = r'''

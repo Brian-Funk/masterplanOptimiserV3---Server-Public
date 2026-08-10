@@ -346,8 +346,9 @@ mp_setup_reconcile_unsigned_application() {
 }
 
 mp_setup_deploy_application() {
-    local lane
+    local lane mode
     lane="$(jq -r '.deployment_lane // empty' "$MP_SETUP_V2_STATE")"
+    mode="$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE")"
     case "$lane" in
         unsigned) mp_setup_reconcile_unsigned_application ;;
         signed)
@@ -358,7 +359,13 @@ mp_setup_deploy_application() {
                 mp_compose_init && "${MP_COMPOSE[@]}" up -d db backend caddy && mp_wait_for_health 45
             else
                 mp_setup_state_action "Deploying signed release" || return 1
-                "$MP_ROOT/deploy/deploy.sh" --no-pull && mp_wait_for_health 45
+                case "$mode" in
+                    standalone-new|ha-primary-new)
+                        "$MP_ROOT/deploy/deploy.sh" --no-pull --fresh-commissioning \
+                            && mp_wait_for_health 45
+                        ;;
+                    *) "$MP_ROOT/deploy/deploy.sh" --no-pull && mp_wait_for_health 45 ;;
+                esac
             fi
             ;;
         *) ui_error "The setup deployment lane is invalid."; return 1 ;;
@@ -679,6 +686,52 @@ mp_setup_verify_standalone_dns() {
         || { ui_message "DNS wait paused" "Public DNS is not ready yet. No deployment was started; resume commissioning whenever you want to continue the automatic checks."; return 1; }
 }
 
+# Keep the primary's TUI attached to the witness pairing checkpoint.  No
+# credential is passed on the command line or written to the display.  A lost
+# SSH session simply stops this poller; setup-v2 retains the join checkpoint.
+mp_setup_wait_for_peer_join() {
+(
+    local interval attempt=1 token body response expires_at now
+    interval="${MP_SETUP_PEER_POLL_INTERVAL_SECONDS:-5}"
+    [[ "$interval" =~ ^[0-9]+$ ]] || interval=5
+    mp_load_ha_config || return 1
+    token="$(cat "$MP_HA_HOME/secrets/node_token")" || return 1
+    body="$(mktemp "$MP_STATE/pair-wait.XXXXXX")" || return 1
+    trap 'rm -f "$body"; unset token response; return 130' INT TERM PIPE
+    jq -n --arg node "$HA_NODE_ID" '{node_id:$node}' > "$body" || return 1
+    while true; do
+        response="$(mp_setup_witness_call pair-state "$HA_WITNESS_URL" \
+            "$HA_CLUSTER_ID" "$token" "$body" 2>/dev/null || true)"
+        if jq -e '.paired == true' <<< "$response" >/dev/null 2>&1; then
+            printf '[%s] Node B pairing is complete. Continuing commissioning.\n' \
+                "$(date -u +%H:%M:%SZ)"
+            rm -f "$body"; unset token response
+            return 0
+        fi
+        expires_at="$(jq -r '.expires_at // empty' <<< "$response" 2>/dev/null || true)"
+        if [ -n "$expires_at" ]; then
+            now="$(date -u +%s)"
+            if [ "$(date -u -d "$expires_at" +%s 2>/dev/null || printf 0)" -le "$now" ]; then
+                printf '[%s] The join code expired before Node B completed pairing.\n' \
+                    "$(date -u +%H:%M:%SZ)" >&2
+                rm -f "$body"; unset token response
+                return 2
+            fi
+        fi
+        printf '[%s] Waiting for Node B (check %d). Retrying in %s seconds.\n' \
+            "$(date -u +%H:%M:%SZ)" "$attempt" "$interval"
+        sleep "$interval" || return $?
+        attempt=$((attempt + 1))
+    done
+)
+}
+
+mp_setup_poll_peer_join_in_tui() {
+    ui_run_command "Waiting for Node B" \
+        "Leave this window open while Node B consumes the one-time code. MP-OPT checks automatically and continues as soon as pairing is verified. Press Ctrl+C or close SSH to pause safely." \
+        mp_setup_wait_for_peer_join
+}
+
 mp_setup_primary_create() {
     local mode="$1" domain cluster_id node_token pairing_secret body pending join_code bootstrap_tmp
     local bootstrap_ok attempt bootstrap_error repair_attempted
@@ -814,8 +867,12 @@ mp_setup_primary_create() {
     mp_setup_state_action "Waiting for Node B join" || return 1
     join_code="$(python3 "$MP_ROOT/deploy/ha/pairing.py" encode < "$MP_SETUP_V2_PENDING_JOIN")" || return 1
     ui_copyable_terminal_text "Node B join code" "$join_code" \
-        "On the second VPS, start mp-opt, choose Join an existing HA pair with a one-time code, and paste this code within 15 minutes. Then return here and choose Resume setup." || return 1
-    ui_message "Pairing paused" "No application data was placed in the join code. Setup is checkpointed and can be resumed after Node B joins."
+        "On the second VPS, start mp-opt, choose Join an existing HA pair with a one-time code, and paste this code within 15 minutes. Return to this window after copying; it will wait and continue automatically." || return 1
+    mp_setup_poll_peer_join_in_tui || {
+        ui_message "Pairing wait paused" "The protected join checkpoint remains valid. Run mp-opt to display the current code or create its replacement and resume automatic polling."
+        return 1
+    }
+    mp_setup_primary_resume
 }
 
 mp_setup_join_node() {
@@ -1214,8 +1271,13 @@ mp_setup_primary_resume() {
                 }
             rm -f "$body"
             ui_copyable_terminal_text "Node join code" "$join_code" \
-                "This code remains valid until ${pairing_expires}. Paste it on the joining VPS, then resume setup here." || return 1
-            return 0
+                "This code remains valid until ${pairing_expires}. Paste it on the joining VPS, then return to this window; it will wait and continue automatically." || return 1
+            mp_setup_poll_peer_join_in_tui || {
+                ui_message "Pairing wait paused" "The protected join checkpoint remains valid. Run mp-opt to resume automatic polling or replace an expired code."
+                return 1
+            }
+            mp_setup_primary_resume
+            return $?
         fi
         pairing_secret="$(mp_random_secret)"
         jq -n --arg node "$HA_NODE_ID" --arg target "$HA_PEER_NODE_ID" --arg pair "$pairing_secret" \
@@ -1237,8 +1299,13 @@ mp_setup_primary_resume() {
         join_code="$(python3 "$MP_ROOT/deploy/ha/pairing.py" encode < "$MP_SETUP_V2_PENDING_JOIN")" || return 1
         rm -f "$body"; unset pairing_secret
         ui_copyable_terminal_text "Replacement join code" "$join_code" \
-            "The previous code expired. Paste this new 15-minute one-time code on the joining VPS, then resume here." || return 1
-        return 0
+            "The previous code expired. Paste this new 15-minute one-time code on the joining VPS, then return to this window; it will wait and continue automatically." || return 1
+        mp_setup_poll_peer_join_in_tui || {
+            ui_message "Pairing wait paused" "The protected replacement checkpoint remains valid. Run mp-opt to resume automatic polling."
+            return 1
+        }
+        mp_setup_primary_resume
+        return $?
     fi
     peer="$(jq -c --arg peer "$HA_PEER_NODE_ID" '.nodes[] | select(.node_id == $peer)' <<< "$response")"
     [ -n "$peer" ] || { rm -f "$body"; ui_error "The witness did not return the expected peer metadata."; return 1; }
@@ -1279,6 +1346,7 @@ mp_setup_primary_resume() {
     if ! mp_setup_state_has replicated; then
         mp_setup_state_action "Replicating complete application state to Node B" || return 1
         mp_ha_replicate_now || return 1
+        "$MP_ROOT/deploy/ha/install_services.sh" || return 1
         mp_setup_state_mark replicated
     fi
     if [ "$mode" = convert-ha ] \

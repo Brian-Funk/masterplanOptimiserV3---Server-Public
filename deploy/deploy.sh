@@ -7,12 +7,15 @@ set -euo pipefail
 umask 077
 
 PULL_LATEST=1
-if [ "${1:-}" = "--no-pull" ]; then
-    PULL_LATEST=0
-elif [ "$#" -gt 0 ]; then
-    echo "Usage: $0 [--no-pull]"
-    exit 2
-fi
+FRESH_COMMISSIONING=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --no-pull) PULL_LATEST=0 ;;
+        --fresh-commissioning) FRESH_COMMISSIONING=1 ;;
+        *) echo "Usage: $0 [--no-pull] [--fresh-commissioning]"; exit 2 ;;
+    esac
+    shift
+done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -249,6 +252,13 @@ if ! mp_apply_migrations; then
     "${MP_COMPOSE[@]}" logs --tail 100 db backend >&2 || true
     exit 1
 fi
+if [ "$FRESH_COMMISSIONING" -eq 1 ]; then
+    echo "       Initialising the narrow fresh commissioning state..."
+    mp_initialise_fresh_commissioning_state || {
+        echo "  ERROR: Fresh root/evidence initialisation failed. Public services were not started."
+        exit 1
+    }
+fi
 echo "       Verifying the canonical database schema contract..."
 if ! mp_verify_database_schema_contract; then
     echo "  ERROR: The canonical database schema contract is incomplete."
@@ -261,9 +271,6 @@ if [ -f "$REPO_DIR/.release.env" ]; then
     "${MP_COMPOSE[@]}" up -d --no-build --force-recreate --remove-orphans
 else
     "${MP_COMPOSE[@]}" up -d --build --force-recreate --remove-orphans
-fi
-if sudo -n true >/dev/null 2>&1; then
-    "$REPO_DIR/deploy/ha/install_services.sh"
 fi
 sleep 5
 "${MP_COMPOSE[@]}" ps
@@ -306,6 +313,17 @@ for i in $(seq 1 15); do
     fi
     sleep 3
 done
+
+# Service activation deliberately follows backend health.  During fresh HA
+# commissioning only the lease observer runs; replication and snapshot
+# triggers remain dormant until the first guarded peer copy is accepted.
+if sudo -n true >/dev/null 2>&1; then
+    if [ "$FRESH_COMMISSIONING" -eq 1 ] && [ "$(mp_ha_role)" = "dynamic" ]; then
+        "$REPO_DIR/deploy/ha/install_services.sh" --commissioning
+    else
+        "$REPO_DIR/deploy/ha/install_services.sh"
+    fi
+fi
 
 echo ""
 echo "════════════════════════════════════════════════════════"

@@ -45,6 +45,26 @@ belongs on a VPS. The exact generation, two-copy backup, HA synchronization and
 rotation procedure is in
 [Snapshot recovery key](snapshot-recovery-key.md).
 
+Fresh standalone and Node A commissioning use two bounded commands from the
+exact signed backend image before public services start. The first imports the
+complete SQLAlchemy model registry and creates the base schema. Ordered,
+hash-checked migrations then run normally. The second command creates only the
+root bootstrap record and instance evidence genesis after independently proving
+that no application, passkey, governance, deletion or non-genesis evidence
+state exists.
+
+During fresh HA commissioning, only the lease observer is activated after the
+backend passes internal health. Periodic replication, critical-request path
+activation and snapshot timers remain stopped until Node B accepts the guarded
+first complete copy. This prevents an exported database snapshot from holding
+the evidence advisory lock while initial evidence state is being created.
+
+After Node A displays the one-time Node B code, the TUI remains at the pairing
+screen and polls automatically. Successful pairing advances the same workflow;
+Ctrl+C or closing SSH leaves the protected setup-v2 checkpoint available to
+resume. Root browser commissioning and DNS propagation use the same resumable
+polling principle.
+
 ## Menu areas
 
 - **System overview** shows health, versions, storage and recovery readiness.

@@ -1221,26 +1221,35 @@ mp_verify_database_schema_contract() {
 
 # Bootstrap a blank database through the application's canonical model metadata.
 mp_ensure_base_schema() {
-    local attempt
     mp_database_has_base_schema && return 0
     printf '       Empty database detected. Initialising the base schema...\n'
     mp_compose_init
-    "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend >/dev/null || return 1
-    for attempt in $(seq 1 30); do
-        if mp_database_has_base_schema; then
-            "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
-            printf '       Base schema initialised.\n'
-            return 0
-        fi
-        if ! "${MP_COMPOSE[@]}" ps --status running --services | grep -Fxq backend; then
-            break
-        fi
-        sleep 2
-    done
-    printf '       Base schema initialisation failed. Backend logs follow.\n' >&2
-    "${MP_COMPOSE[@]}" logs --tail 100 backend >&2 || true
-    "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
-    return 1
+    "${MP_COMPOSE[@]}" run -T --rm --no-deps backend \
+        python -m app.tools.bootstrap_schema >/dev/null || return 1
+    mp_database_has_base_schema || return 1
+    printf '       Base schema initialised without starting public services.\n'
+}
+
+# Initialise only the root bootstrap record and instance evidence genesis.  The
+# Python command independently proves that no application state exists; this
+# host-side guard additionally binds the exception to an active v2 setup.
+mp_initialise_fresh_commissioning_state() {
+    local setup_state="${MP_STATE}/setup-state-v2.json"
+    jq -e '
+        .format == "mp-opt-setup-state-v2"
+        and .state == "in_progress"
+        and (.mode == "standalone-new" or .mode == "ha-primary-new")
+        and (.completed | index("application_deployed") == null)
+    ' "$setup_state" >/dev/null 2>&1 || {
+        printf 'Fresh application initialisation requires an active setup-v2 checkpoint.\n' >&2
+        return 1
+    }
+    mp_compose_init
+    "${MP_COMPOSE[@]}" run -T --rm --no-deps \
+        -e MP_FRESH_COMMISSIONING=1 \
+        -e HA_MODE=standalone -e HA_ROLE=standalone \
+        -e HA_NODE_ID=standalone -e HA_CONTROL_WITNESS_REQUIRED=false \
+        backend python -m app.tools.bootstrap_fresh_commissioning
 }
 
 # Append a sanitised hash-chained management receipt.

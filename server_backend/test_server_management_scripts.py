@@ -162,8 +162,10 @@ def test_snapshot_only_captures_host_caddy_for_host_topology(tmp_path: Path):
         ).is_file()
 
 
-def test_base_schema_bootstrap_skips_existing_and_starts_blank_database(tmp_path: Path):
-    """Base-schema initialisation must run once only for an empty database."""
+def test_base_schema_bootstrap_skips_existing_and_uses_one_shot_for_blank_database(
+    tmp_path: Path,
+):
+    """Base-schema initialisation must not start the public backend."""
     root = _server_root()
     common = root / "deploy" / "management" / "common.sh"
     compose_log = tmp_path / "compose.log"
@@ -179,8 +181,9 @@ mp_ensure_base_schema
 schema_ready_call=2
 calls=0
 mp_ensure_base_schema
-grep -Fq 'up -d --no-deps --force-recreate backend' "{compose_log}"
-grep -Fq 'stop backend' "{compose_log}"
+grep -Fq 'run -T --rm --no-deps backend python -m app.tools.bootstrap_schema' "{compose_log}"
+! grep -Fq 'up -d' "{compose_log}"
+! grep -Fq 'stop backend' "{compose_log}"
 '''
     result = _run_bash(script, {"MP_ROOT": str(root)})
     assert result.returncode == 0, result.stderr
