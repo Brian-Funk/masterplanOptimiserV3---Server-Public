@@ -1,5 +1,37 @@
 # Changes
 
+## 3.9.1 — 10 August 2026
+
+This maintenance release corrects fresh signed commissioning discovered during
+the first clean production two-node setup after v3.9.0.
+
+### Fresh commissioning
+
+- Replaced the circular blank-database bootstrap with bounded one-shot commands
+  inside the exact signed backend image. The base schema is created without
+  starting FastAPI, and root/evidence genesis is accepted only from an active
+  fresh setup-v2 checkpoint and an independently verified empty database.
+- Preserved normal HA write fencing for every application mutation; the narrow
+  bootstrap exception cannot run against populated application, credential,
+  governance, deletion or non-genesis evidence state.
+- Made interrupted root/evidence genesis idempotently resumable while retaining
+  strict evidence-key and chain verification.
+
+### HA sequencing and TUI resume
+
+- Kept replication, request-path and snapshot triggers dormant until the
+  guarded first peer copy is accepted. Only the lease observer runs during the
+  initial deployment-health and routing transition.
+- Moved HA service activation after backend health so witness promotion cannot
+  invalidate the deployment health window or hold the evidence advisory lock
+  during initialisation.
+- Kept the Node A join window open after displaying the Node B code. It now
+  polls the witness, reports progress and proceeds automatically after pairing;
+  Ctrl+C and lost SSH sessions retain the same safe checkpoint.
+- Added regression coverage for empty-state refusal, exact genesis retries,
+  deployment ordering, dormant commissioning services and persistent peer
+  polling.
+
 ## 3.9.0 — 10 August 2026
 
 This release promotes the reviewed `3.8.2` security-qualification baseline to

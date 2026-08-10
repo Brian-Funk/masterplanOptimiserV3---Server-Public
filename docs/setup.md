@@ -62,7 +62,7 @@ sudo bash /tmp/mp-opt-setup.sh \
 Do not substitute `main`, `master`, or a moving branch name. The bootstrap
 rejects them.
 
-The explicit public repository URL also keeps the immutable `v3.9.0`
+The explicit public repository URL also keeps the immutable `v3.9.1`
 bootstrap asset usable after the source repository transition. Later bootstrap
 assets use the same public URL by default.
 
