@@ -4,7 +4,7 @@ ARG XCADDY_VERSION=v0.4.5
 ARG GRPC_VERSION=v1.82.1
 ARG X_TEXT_VERSION=v0.39.0
 
-FROM golang:${GO_VERSION}-alpine AS builder
+FROM golang:${GO_VERSION}-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
 ARG CADDY_VERSION
 ARG XCADDY_VERSION
 ARG GRPC_VERSION
@@ -24,7 +24,7 @@ RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION} \
     && /go/bin/caddy list-modules \
         | grep -Fx 'dns.providers.mpopt_witness'
 
-FROM caddy:2-alpine
+FROM caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
 
 # Upstream tags can briefly lag Alpine and Go security releases. Refresh the
 # OS packages and replace the standard Caddy binary with the same Caddy release

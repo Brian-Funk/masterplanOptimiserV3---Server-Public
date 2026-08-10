@@ -1,7 +1,7 @@
 ARG GO_VERSION=1.26.5
 ARG GOSU_VERSION=1.19
 
-FROM golang:${GO_VERSION}-alpine AS gosu-builder
+FROM golang:${GO_VERSION}-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS gosu-builder
 ARG GOSU_VERSION
 RUN CGO_ENABLED=0 go install github.com/tianon/gosu@${GOSU_VERSION}
 
@@ -9,7 +9,7 @@ RUN CGO_ENABLED=0 go install github.com/tianon/gosu@${GOSU_VERSION}
 # /var/lib/postgresql/data volume. A major-version upgrade requires an explicit
 # pg_upgrade/restore workflow; changing this base image is not a safe dependency
 # refresh.
-FROM postgres:16-alpine
+FROM postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
 
 # gosu is used by the official entrypoint before PostgreSQL starts. Rebuild it
 # with a patched Go standard library and refresh Alpine packages while keeping

@@ -7,6 +7,7 @@ import subprocess
 from deploy.security.publication_audit import (
     REQUIRED_PUBLIC_FILES,
     audit_history,
+    audit_immutable_build_inputs,
     audit_text,
     audit_tree,
     forbidden_path_reason,
@@ -112,3 +113,46 @@ def test_shared_phase_c_scanner_fixture(tmp_path):
         encoding="utf-8",
     )
     assert verify_scanner_fixture(fixture) == []
+
+
+def test_release_chain_requires_immutable_action_and_image_references(tmp_path):
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    workflow = workflows / "release.yml"
+    workflow.write_text(
+        "steps:\n"
+        "  - uses: actions/checkout@v7\n"
+        "  - uses: docker://alpine:3.23\n",
+        encoding="utf-8",
+    )
+    dockerfile = tmp_path / "infra" / "Dockerfile"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text("FROM python:3.14-alpine\n", encoding="utf-8")
+
+    failures = audit_immutable_build_inputs(tmp_path)
+
+    assert any("GitHub Action is not pinned" in failure for failure in failures)
+    assert sum("GitHub Action is not pinned" in failure for failure in failures) == 2
+    assert any("release base image is not pinned" in failure for failure in failures)
+
+
+def test_release_chain_accepts_commit_and_manifest_digest_pins(tmp_path):
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    workflow = workflows / "release.yml"
+    workflow.write_text(
+        "steps:\n"
+        f"  - uses: actions/checkout@{'a' * 40} # v7\n"
+        f"  - uses: docker://alpine:3.23@sha256:{'c' * 64}\n"
+        "  - uses: ./local-action\n",
+        encoding="utf-8",
+    )
+    dockerfile = tmp_path / "infra" / "Dockerfile"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text(
+        f"FROM python:3.14-alpine@sha256:{'b' * 64} AS runtime\n"
+        "FROM runtime\n",
+        encoding="utf-8",
+    )
+
+    assert audit_immutable_build_inputs(tmp_path) == []

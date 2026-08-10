@@ -69,6 +69,17 @@ EVIDENCE_PERSONAL_DATA_PATTERNS = (
     )),
 )
 TEXT_LIMIT = 5 * 1024 * 1024
+ACTION_REFERENCE = re.compile(
+    r"^\s*(?:-\s*)?uses:\s*([^\s#]+)",
+)
+IMMUTABLE_ACTION_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+IMMUTABLE_IMAGE_DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
+RELEASE_DOCKERFILES = (
+    "infra/Dockerfile",
+    "infra/Dockerfile.caddy",
+    "infra/Dockerfile.postgres",
+    "infra/Dockerfile.tools",
+)
 
 
 def forbidden_path_reason(relative: str) -> str | None:
@@ -178,6 +189,68 @@ def audit_license_metadata(root: Path) -> list[str]:
     return failures
 
 
+def audit_immutable_build_inputs(root: Path) -> list[str]:
+    """Require reviewed immutable identities for release-chain dependencies."""
+
+    failures: list[str] = []
+    workflows = root / ".github" / "workflows"
+    if workflows.is_dir():
+        for path in sorted((*workflows.glob("*.yml"), *workflows.glob("*.yaml"))):
+            relative = path.relative_to(root).as_posix()
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1,
+            ):
+                match = ACTION_REFERENCE.match(line)
+                if match is None:
+                    continue
+                reference = match.group(1)
+                if reference.startswith("./"):
+                    continue
+                if reference.startswith("docker://"):
+                    immutable = bool(IMMUTABLE_IMAGE_DIGEST.search(reference))
+                else:
+                    action, separator, revision = reference.rpartition("@")
+                    immutable = bool(
+                        action and separator and IMMUTABLE_ACTION_COMMIT.fullmatch(revision)
+                    )
+                if not immutable:
+                    failures.append(
+                        f"GitHub Action is not pinned to a full commit SHA: "
+                        f"{relative}:{line_number}"
+                    )
+
+    for relative in RELEASE_DOCKERFILES:
+        path = root / relative
+        if not path.is_file():
+            continue
+        stage_aliases: set[str] = set()
+        for line_number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1,
+        ):
+            parts = line.strip().split()
+            if not parts or parts[0].upper() != "FROM":
+                continue
+            index = 1
+            while index < len(parts) and parts[index].startswith("--"):
+                index += 1
+            if index >= len(parts):
+                failures.append(f"invalid FROM instruction: {relative}:{line_number}")
+                continue
+            image = parts[index]
+            if (
+                image != "scratch"
+                and image not in stage_aliases
+                and not IMMUTABLE_IMAGE_DIGEST.search(image)
+            ):
+                failures.append(
+                    f"release base image is not pinned to a SHA-256 digest: "
+                    f"{relative}:{line_number}"
+                )
+            if index + 2 < len(parts) and parts[index + 1].upper() == "AS":
+                stage_aliases.add(parts[index + 2])
+    return failures
+
+
 def tracked_files(root: Path) -> list[Path]:
     output = subprocess.run(
         [
@@ -213,6 +286,7 @@ def audit_tree(root: Path) -> list[str]:
         if not (root / required).is_file():
             failures.append(f"required public file is missing: {required}")
     failures.extend(audit_license_metadata(root))
+    failures.extend(audit_immutable_build_inputs(root))
     failures.extend(audit_public_claims(root, "server"))
     return failures
 
