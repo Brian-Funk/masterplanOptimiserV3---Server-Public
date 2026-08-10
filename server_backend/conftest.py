@@ -197,6 +197,50 @@ def create_test_user(
     return user
 
 
+def create_test_governance_publication(
+    db: Session,
+    *,
+    version: int = 1,
+    controller: str = "Synthetic Event Controller",
+) -> GovernancePublication:
+    """Publish the minimal exact facts required for activation-consent tests."""
+
+    content = {
+        "instance_id": "00000000-0000-4000-8000-000000000001",
+        "instance_name": "Synthetic Masterplan",
+        "controller_legal_name": controller,
+        "privacy_contact_email": "privacy@synthetic-controller.test",
+        "processing_purposes": [
+            {
+                "purpose_code": "event_scheduling",
+                "enabled": True,
+                "description": "Coordinate operational event schedules.",
+            }
+        ],
+        "data_categories": [
+            {
+                "category_code": "operational_identity",
+                "display_name": "Names and operational roles",
+                "enabled": True,
+            }
+        ],
+    }
+    rendered = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    row = GovernancePublication(
+        version=version,
+        content_json=rendered,
+        content_sha256=hashlib.sha256(rendered.encode("utf-8")).hexdigest(),
+        source_json="{}",
+        source_sha256="0" * 64,
+        material_change=True,
+        change_summary_json="[]",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
 def inject_session(
     db: Session,
     user: User,

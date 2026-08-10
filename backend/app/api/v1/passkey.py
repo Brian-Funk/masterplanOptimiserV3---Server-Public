@@ -29,7 +29,13 @@ from app.core import runtime_settings as rt
 from app.core.activation import (
     ADDITIONAL_PASSKEY,
     CREDENTIAL_RESET,
+    INITIAL_SETUP,
     validate_activation_token,
+)
+from app.core.activation_consent import (
+    ActivationConsentError,
+    STATEMENT_VERSION,
+    resolve_activation_consent,
 )
 from app.core.audit import audit
 from app.core.config import settings
@@ -59,6 +65,7 @@ from app.core.security import (
     get_current_user,
 )
 from app.core.commissioning import commissioning_stage
+from app.core.evidence import EvidenceUnavailable, append_record
 from app.core.sessions import revoke_all_user_sessions, validate_session
 from app.db.database import get_db
 from app.models.user import (
@@ -68,6 +75,7 @@ from app.models.user import (
     User,
     WebAuthnCredential,
 )
+from app.models.governance import AccountProcessingConsent
 from app.models.server_setting import ServerSetting
 
 logger = logging.getLogger(__name__)
@@ -102,6 +110,16 @@ class CeremonyCompletion(BaseModel):
     credential: dict
     policy_version: Optional[str] = Field(None, max_length=64)
     policy_sha256: Optional[str] = Field(None, pattern=r"^[0-9a-f]{64}$")
+
+
+class ProcessingConsentConfirmation(BaseModel):
+    """Exact unchecked confirmation submitted before first WebAuthn activation."""
+
+    confirmed: Literal[True]
+    statement_version: str = Field(..., min_length=1, max_length=64)
+    statement_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    policy_version: int = Field(..., ge=1)
+    policy_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
 
 
 class CredentialRename(BaseModel):
@@ -284,6 +302,62 @@ def _record_verification_failure(
     db.commit()
 
 
+def _consent_action(
+    user: User,
+    link: ActivationLink,
+    confirmation: ProcessingConsentConfirmation | None,
+    db: Session,
+) -> tuple[str | None, str | None]:
+    """Validate and canonicalise consent only for an account's first activation."""
+
+    if link.purpose != INITIAL_SETUP:
+        return None, None
+    if confirmation is None or confirmation.confirmed is not True:
+        raise HTTPException(
+            status_code=428,
+            detail={
+                "code": "processing_consent_required",
+                "message": "Review and confirm the processing information before registering a passkey.",
+            },
+        )
+    try:
+        disclosure = resolve_activation_consent(user, db)
+    except ActivationConsentError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": exc.safe_message},
+        ) from exc
+    expected = disclosure.document
+    if (
+        confirmation.statement_version != STATEMENT_VERSION
+        or not secrets.compare_digest(
+            confirmation.statement_sha256.lower(), disclosure.statement_sha256
+        )
+        or confirmation.policy_version != expected["policy_version"]
+        or not secrets.compare_digest(
+            confirmation.policy_sha256.lower(), str(expected["policy_sha256"])
+        )
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "processing_consent_identity_mismatch",
+                "message": "The processing information changed. Review the current exact notice before continuing.",
+            },
+        )
+    action = json.dumps(
+        {
+            "format": "mp-opt-activation-registration-action-v1",
+            "consent_document": expected,
+            "consent_statement_sha256": disclosure.statement_sha256,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return action, hashlib.sha256(action.encode("utf-8")).hexdigest()
+
+
 @router.get("/bootstrap-status", response_model=BootstrapStatusResponse)
 def bootstrap_status(db: Session = Depends(get_db)):
     """Return whether root bootstrap is required and operator-enabled."""
@@ -439,7 +513,11 @@ def bootstrap_complete(
     runtime_limit("passkey_requests_per_minute"),
     key_func=passkey_registration_rate_key,
 )
-def register_begin(request: Request, db: Session = Depends(get_db)):
+def register_begin(
+    request: Request,
+    body: ProcessingConsentConfirmation | None = None,
+    db: Session = Depends(get_db),
+):
     """Start activation-based or recently re-authenticated registration."""
     activation = _activation_context(request, db)
     if activation:
@@ -447,11 +525,14 @@ def register_begin(request: Request, db: Session = Depends(get_db)):
         purpose = ACTIVATION_REGISTRATION
         session_id = None
         activation_link_id = link.id
+        action_json, action_sha256 = _consent_action(user, link, body, db)
     else:
         user, auth_session = _session_registration_context(request, db)
         purpose = ACCOUNT_REGISTRATION
         session_id = auth_session.id
         activation_link_id = None
+        action_json = None
+        action_sha256 = None
 
     options = _registration_options(user, db)
     ceremony = create_ceremony(
@@ -461,8 +542,62 @@ def register_begin(request: Request, db: Session = Depends(get_db)):
         user_id=user.id,
         session_id=session_id,
         activation_link_id=activation_link_id,
+        action_json=action_json,
+        action_sha256=action_sha256,
     )
     return {"options": options_to_json(options), "ceremony_id": ceremony.id}
+
+
+def _verified_ceremony_consent(
+    user: User,
+    link: ActivationLink | None,
+    ceremony,
+    db: Session,
+):
+    """Return the still-current disclosure bound to an initial ceremony."""
+
+    if link is None or link.purpose != INITIAL_SETUP:
+        return None
+    if not ceremony.action_json or not ceremony.action_sha256:
+        raise HTTPException(
+            status_code=428,
+            detail={
+                "code": "processing_consent_required",
+                "message": "Review and confirm the processing information before registering a passkey.",
+            },
+        )
+    if not secrets.compare_digest(
+        hashlib.sha256(ceremony.action_json.encode("utf-8")).hexdigest(),
+        ceremony.action_sha256,
+    ):
+        raise HTTPException(status_code=409, detail="The activation ceremony is invalid")
+    try:
+        action = json.loads(ceremony.action_json)
+        disclosure = resolve_activation_consent(user, db)
+    except (TypeError, ValueError, json.JSONDecodeError, ActivationConsentError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "processing_consent_unavailable",
+                "message": "The processing information could not be verified. Review the activation page again.",
+            },
+        ) from exc
+    if (
+        action.get("format") != "mp-opt-activation-registration-action-v1"
+        or action.get("consent_document") != disclosure.document
+        or not secrets.compare_digest(
+            str(action.get("consent_statement_sha256") or ""),
+            disclosure.statement_sha256,
+        )
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "processing_consent_identity_mismatch",
+                "message": "The processing information changed. Review the current exact notice before continuing.",
+            },
+        )
+    return disclosure
 
 
 @router.post("/register/complete")
@@ -498,6 +633,7 @@ def register_complete(
         session_id=session_id,
         activation_link_id=activation_link_id,
     )
+    consent_disclosure = _verified_ceremony_consent(user, link, ceremony, db)
     try:
         verification = verify_registration_response(
             credential=body.credential,
@@ -551,6 +687,66 @@ def register_complete(
             user=user,
         )
         raise HTTPException(status_code=409, detail="Passkey is already registered") from exc
+
+    consent_row = None
+    if consent_disclosure is not None and link is not None:
+        document = consent_disclosure.document
+        consented_at = datetime.now(timezone.utc)
+        consent_row = AccountProcessingConsent(
+            user_id=user.id,
+            user_subject_id=user.evidence_subject_id,
+            event_id=user.event_id,
+            event_evidence_id=document.get("event_ref"),
+            activation_link_id=link.id,
+            policy_version=int(document["policy_version"]),
+            policy_sha256=str(document["policy_sha256"]),
+            statement_version=STATEMENT_VERSION,
+            statement_sha256=consent_disclosure.statement_sha256,
+            controller_identity=str(document["controller_identity"]),
+            document_json=consent_disclosure.document_json,
+            consented_at=consented_at,
+        )
+        try:
+            with db.begin_nested():
+                db.add(consent_row)
+                db.flush()
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "processing_consent_already_recorded",
+                    "message": "This account activation consent is already recorded.",
+                },
+            ) from exc
+        try:
+            consent_row.instance_record_sha256 = append_record(
+                db,
+                workflow_type="account_consent",
+                workflow_id=consent_row.consent_id,
+                operation_type="recorded",
+                record_type="account.processing_consent_recorded",
+                payload={
+                    "consent_id": consent_row.consent_id,
+                    "user_subject_id": user.evidence_subject_id,
+                    "event_ref": document.get("event_ref"),
+                    "policy_version": consent_row.policy_version,
+                    "policy_sha256": consent_row.policy_sha256,
+                    "statement_version": consent_row.statement_version,
+                    "statement_sha256": consent_row.statement_sha256,
+                    "controller_identity": consent_row.controller_identity,
+                    "consented_at": consented_at.replace(microsecond=0).isoformat(),
+                },
+            )
+        except EvidenceUnavailable as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "processing_consent_evidence_unavailable",
+                    "message": "The consent record could not be sealed. No passkey was registered; try again.",
+                },
+            ) from exc
     replaced_passkeys = _apply_activation_credential_policy(
         user_id=user.id,
         new_credential=credential,
@@ -568,6 +764,9 @@ def register_complete(
         detail=json.dumps({
             "purpose": link.purpose if link is not None else "account_registration",
             "credentials_replaced": replaced_passkeys,
+            "processing_consent_sha256": (
+                consent_row.statement_sha256 if consent_row is not None else None
+            ),
         }),
         request=request,
     )

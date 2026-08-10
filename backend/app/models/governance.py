@@ -1,5 +1,7 @@
 """Locally controlled, versioned governance configuration and acknowledgements."""
 
+import uuid
+
 from sqlalchemy import (
     Boolean, CheckConstraint, Column, DateTime, ForeignKey, Integer, String, Text,
     UniqueConstraint,
@@ -112,3 +114,30 @@ class DataPolicyAcknowledgement(Base):
     scope = Column(String(48), nullable=False)
     acknowledged_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     superseded_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class AccountProcessingConsent(Base):
+    """Immutable proof of the exact disclosure confirmed at first activation."""
+
+    __tablename__ = "account_processing_consents"
+    __table_args__ = (
+        UniqueConstraint("user_subject_id", name="uq_account_processing_consent_subject"),
+        UniqueConstraint("activation_link_id", name="uq_account_processing_consent_activation"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    consent_id = Column(String(36), nullable=False, unique=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    user_subject_id = Column(String(36), nullable=False, index=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True)
+    event_evidence_id = Column(String(36), nullable=True, index=True)
+    activation_link_id = Column(Integer, ForeignKey("activation_links.id", ondelete="SET NULL"), nullable=True)
+    policy_version = Column(Integer, nullable=False)
+    policy_sha256 = Column(String(64), nullable=False)
+    statement_version = Column(String(64), nullable=False)
+    statement_sha256 = Column(String(64), nullable=False)
+    controller_identity = Column(String(200), nullable=False)
+    document_json = Column(Text, nullable=False)
+    instance_record_sha256 = Column(String(64), nullable=True)
+    consented_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
