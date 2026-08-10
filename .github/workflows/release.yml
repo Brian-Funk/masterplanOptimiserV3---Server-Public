@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing signed release tag to recover, for example v3.8.0
+        description: Existing signed release tag to recover, for example v3.9.0
         required: false
         type: string
       rebuild_all:
