@@ -1,12 +1,10 @@
 # Changes
 
-## Unreleased
+## 3.9.0 — 10 August 2026
 
-The source version is `3.8.2` solely to identify the reviewed security-scan
-baseline shared with the App. It is not a release: do not create a tag,
-container image, manifest, SBOM, GitHub Release or public changelog entry for
-this version. The next public release prepared from a qualified successor is
-`3.9.0`. The Server intentionally has no interim `3.8.1` package release.
+This release promotes the reviewed `3.8.2` security-qualification baseline to
+the next supported public Server release. The Server intentionally has no
+interim `3.8.1` package release.
 
 ### Commissioning, governance and trust
 

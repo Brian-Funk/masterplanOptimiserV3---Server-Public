@@ -13,7 +13,7 @@ The current private repository remains the development source until the publicat
    artefacts or Git objects copied from the private repository. Never change
    the private development repository's visibility in place.
 6. Confirm `LICENSE`, `SECURITY.md`, support policy, third-party notices and controller-neutral documentation are present.
-7. Make the reviewed repository public, enable private vulnerability reporting and branch protection, then create the canonical signed `v3.8.0` release.
+7. Make the reviewed repository public, enable private vulnerability reporting and branch protection, then create the first canonical signed `v3.8.0` release. Subsequent releases use the same protected process.
 
 Before the first public push, run
 `python deploy/security/publication_audit.py --history` inside the new
@@ -32,4 +32,4 @@ build whose public source is elsewhere, must set all three non-secret values:
 The build fails closed for a floating revision, embedded credentials or a
 mismatched source link.
 
-The old `v3.4.0` release is retired. Do not reuse or replace its tag. The next prepared stable release is `v3.8.0`. Development deployments continue to use commit-addressed unsigned test artefacts and must show that they are not a production release.
+The old `v3.4.0` release is retired. Do not reuse or replace its tag. The current prepared stable release is `v3.9.0`. Development deployments continue to use commit-addressed unsigned test artefacts and must show that they are not a production release.

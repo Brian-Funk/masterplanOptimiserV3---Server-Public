@@ -68,15 +68,15 @@ def test_signed_lane_is_exact_tag_peer_first_and_immutable() -> None:
     assert "gh release delete" not in workflow
 
 
-def test_qualification_version_is_synchronised_without_replacing_stable_release() -> None:
+def test_release_version_is_synchronised_with_current_deployment_docs() -> None:
     backend = tomllib.loads(text("pyproject.toml"))["project"]["version"]
     frontend = json.loads(text("web/package.json"))["version"]
     lock_document = json.loads(text("web/package-lock.json"))
-    assert backend == frontend == lock_document["version"] == "3.8.2"
-    assert lock_document["packages"][""]["version"] == "3.8.2"
-    assert "It is not a release" in text("changes.md")
-    assert "signed-deployment.sh v3.8.0" in text("docs/deployment.md")
-    assert "canonical signed `v3.8.0` release" in text("docs/publication-runbook.md")
+    assert backend == frontend == lock_document["version"] == "3.9.0"
+    assert lock_document["packages"][""]["version"] == "3.9.0"
+    assert "## 3.9.0" in text("changes.md")
+    assert "signed-deployment.sh v3.9.0" in text("docs/deployment.md")
+    assert "current prepared stable release is `v3.9.0`" in text("docs/publication-runbook.md")
 
 
 def test_signed_release_preflight_binds_exact_latest_green_main() -> None:
