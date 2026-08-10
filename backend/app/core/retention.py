@@ -135,7 +135,6 @@ def _schedule_event_purges(db: Session, now: datetime) -> tuple[int, int]:
         job = existing or create_event_erasure_case(
             db,
             event,
-            processor_approval_required=False,
             initiation_reason="retention_schedule",
             now=now,
         )

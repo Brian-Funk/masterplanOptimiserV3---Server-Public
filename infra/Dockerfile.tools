@@ -1,11 +1,14 @@
 FROM node:25-alpine
 
-ARG WRANGLER_VERSION=4.115.0
+COPY infra/cloudflare-ha-witness/package.json /opt/wrangler/package.json
+COPY infra/cloudflare-ha-witness/package-lock.json /opt/wrangler/package-lock.json
 
 # This signed, immutable release image is used only while commissioning the
 # Cloudflare witness. No Node.js or npm installation is required on a VPS.
 RUN apk upgrade --no-cache \
-    && npm install --global "wrangler@${WRANGLER_VERSION}" \
+    && cd /opt/wrangler \
+    && npm ci --omit=dev --no-audit --no-fund \
+    && ln -s /opt/wrangler/node_modules/.bin/wrangler /usr/local/bin/wrangler \
     && npm cache clean --force \
     && rm -rf \
         /root/.npm \

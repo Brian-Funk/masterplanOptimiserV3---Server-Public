@@ -31,7 +31,8 @@ describe("admin security settings", () => {
   it("limits the Security tab to root admins", () => {
     const source = adminPageSource();
 
-    expect(source).toContain('t.key === "security"');
+    expect(source).toContain('["security", "privacy", "ha"].includes(tab)');
+    expect(source).toContain("isRootAdmin={!!user?.is_root_admin}");
     expect(source).toContain("user?.is_root_admin");
     expect(source).toContain('tab === "security" && user?.is_root_admin');
   });
@@ -50,5 +51,9 @@ describe("admin security settings", () => {
     expect(source).toContain('title: "Passkeys"');
     expect(source).toContain('"passkey_requests_per_minute"');
     expect(source).toContain("limited per activation or account session");
+    expect(source).toContain('"self_service_additional_passkeys_enabled"');
+    expect(source).toContain('"self_service_passkey_emails_per_minute"');
+    expect(source).toContain('"self_service_passkey_emails_per_day"');
+    expect(source).toContain('role="switch"');
   });
 });

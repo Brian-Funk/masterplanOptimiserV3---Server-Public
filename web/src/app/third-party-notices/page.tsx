@@ -1,23 +1,42 @@
-import fs from "node:fs";
-import path from "node:path";
-import Link from "next/link";
+import fs from 'node:fs';
+import path from 'node:path';
+import Link from 'next/link';
 
-export const dynamic = "force-static";
+import { ArtifactMarkdown } from '@/components/ArtifactMarkdown';
+import { PublicInformationShell } from '@/components/PublicInformationShell';
+import { PUBLIC_TEXT_LINK_CLASS } from '@/lib/publicLinks';
+
+export const dynamic = 'force-static';
 
 /** Read-only third-party notices shipped with this source tree. */
 export default function ThirdPartyNoticesPage() {
+  const repositoryUrl = process.env.NEXT_PUBLIC_SOURCE_REPOSITORY_URL;
   const notices = fs.readFileSync(
-    path.join(process.cwd(), "legal-artifacts", "THIRD-PARTY-NOTICES.md"),
-    "utf8",
+    path.join(process.cwd(), 'legal-artifacts', 'THIRD-PARTY-NOTICES.md'),
+    'utf8',
   );
+
   return (
-    <main className="min-h-screen bg-gray-50 px-6 py-12 dark:bg-gray-900">
-      <article className="mx-auto max-w-4xl space-y-5 text-gray-700 dark:text-gray-300">
-        <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">Third-party notices</h1>
-        <p>This read-only inventory is tied to the installed source version. Phase 6 release validation verifies that it is complete and current.</p>
-        <pre className="overflow-x-auto whitespace-pre-wrap rounded border bg-white p-5 text-xs dark:border-gray-700 dark:bg-gray-950">{notices}</pre>
-        <Link className="text-blue-600 underline dark:text-blue-400" href="/licence">Open the software licence</Link>
-      </article>
-    </main>
+    <PublicInformationShell
+      lead='The reviewed dependency and bundled-asset inventory tied to this exact source build.'
+      section='third-party-notices'
+      title='Third-party notices'
+    >
+      <div className='mb-8 rounded-xl border border-gray-200 bg-gray-50 p-4 text-gray-600 dark:border-gray-700 dark:bg-gray-700/40 dark:text-gray-300'>
+        This inventory is generated from committed dependency locks.{' '}
+        {repositoryUrl ? (
+          <a className={PUBLIC_TEXT_LINK_CLASS} href={`${repositoryUrl}/releases`} rel='noopener noreferrer' target='_blank'>
+            Release SBOMs
+          </a>
+        ) : 'Release SBOMs'}{' '}
+        remain authoritative for operating-system packages and exact container digests. See the{' '}
+        <Link className={PUBLIC_TEXT_LINK_CLASS} href='/licence'>project licence</Link>{' '}
+        for the software&apos;s licensing terms.
+      </div>
+      <ArtifactMarkdown
+        markdown={notices}
+        sourceBaseUrl={process.env.NEXT_PUBLIC_SOURCE_URL}
+      />
+    </PublicInformationShell>
   );
 }

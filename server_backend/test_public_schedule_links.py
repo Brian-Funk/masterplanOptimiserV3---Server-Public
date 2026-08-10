@@ -2,7 +2,10 @@
 
 import hashlib
 import json
+import secrets
+import uuid
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 from app.models.audit import AuditLog
@@ -15,6 +18,8 @@ from app.models.published import (
     PublishedGeneralScheduleCategory,
     PublishedGeneralScheduleItem,
 )
+from app.models.ha import HAProtectionOperation
+from app.core.config import settings
 from server_backend.conftest import (
     _make_client,
     create_test_event,
@@ -92,6 +97,8 @@ def _create_link(client, event_id: int, **overrides):
         "description": "Shared with the board",
         "expires_at": _future_iso(),
         "view_ids": [10, 11],
+        "token": secrets.token_urlsafe(48),
+        "idempotency_key": str(uuid.uuid4()),
         **overrides,
     }
     return client.post(
@@ -127,6 +134,51 @@ def test_root_creates_hashed_one_time_public_schedule_link(db, root_client):
     assert listed.status_code == 200
     assert "share_url" not in listed.json()[0]
     assert "token" not in json.dumps(listed.json()).lower()
+
+
+def test_ha_link_is_locked_until_exact_standby_protection_and_retry_is_idempotent(
+    db, root_client, monkeypatch, tmp_path,
+):
+    import app.main as main_module
+    from app.core import ha_replication
+
+    event = db.query(Event).filter(Event.name == "Root Event").one()
+    _seed_schedule(db, event.id)
+    request_dir = tmp_path / "ha-requests"
+    monkeypatch.setattr(settings, "HA_MODE", "ha")
+    monkeypatch.setattr(settings, "HA_CLUSTER_ID", "cluster-test")
+    monkeypatch.setattr(settings, "HA_NODE_ID", "node-a")
+    monkeypatch.setattr(settings, "HA_REPLICATION_REQUEST_DIR", str(request_dir))
+    monkeypatch.setattr(main_module, "control_witness_ready", lambda: True)
+    monkeypatch.setattr(main_module, "assess_readiness", lambda _db: SimpleNamespace(ready=True))
+    monkeypatch.setattr(main_module, "require_write_permit", lambda **_kwargs: None)
+    monkeypatch.setattr(ha_replication, "witness_post", lambda *_args, **_kwargs: {})
+    token = secrets.token_urlsafe(48)
+    payload = {
+        "description": "HA protected link",
+        "expires_at": _future_iso(),
+        "view_ids": [10],
+        "token": token,
+        "idempotency_key": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    }
+    url = f"/api/v1/admin/events/{event.id}/public-schedule-links"
+
+    first = root_client.post(url, json=payload)
+    assert first.status_code == 202
+    assert first.json()["share_url"] is None
+    operation_id = first.json()["protection_operation_id"]
+    assert db.query(PublicScheduleLink).count() == 1
+    assert db.get(HAProtectionOperation, operation_id).state == "pending"
+    assert (request_dir / f"{operation_id}.json").is_file()
+    assert root_client.get(
+        "/api/v1/public-schedule/shared",
+        headers={"Authorization": f"Bearer {token}"},
+    ).status_code == 404
+
+    repeated = root_client.post(url, json=payload)
+    assert repeated.status_code == 202
+    assert repeated.json()["protection_operation_id"] == operation_id
+    assert db.query(PublicScheduleLink).count() == 1
 
 
 def test_public_link_management_is_root_or_own_event_issuer_only(

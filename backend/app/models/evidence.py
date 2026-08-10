@@ -46,8 +46,68 @@ class EvidenceKey(Base):
     root_credential_id_sha256 = Column(String(64), nullable=True)
     root_action_sha256 = Column(String(64), nullable=True)
     activated_at = Column(DateTime(timezone=True), nullable=True)
-    trust_declaration_sha256 = Column(String(64), nullable=True)
+    trust_establishment_sha256 = Column(String(64), nullable=True)
     registered_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ProcessorIdentity(Base):
+    """One processor identity immutably assigned to one event.
+
+    Key versions remain in ``evidence_keys`` so rotation never changes the
+    event assignment or the identity snapshotted by a deletion case.
+    """
+
+    __tablename__ = "processor_identities"
+    __table_args__ = (
+        UniqueConstraint("instance_id", "entity_id", name="uq_processor_identity_entity"),
+        CheckConstraint(
+            "status IN ('pending','active','revoked')",
+            name="ck_processor_identity_status",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    assignment_id = Column(String(36), nullable=False, unique=True, default=_uuid)
+    instance_id = Column(String(36), nullable=False, index=True)
+    entity_id = Column(String(64), nullable=False, unique=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True)
+    event_evidence_id = Column(String(36), nullable=False, index=True)
+    event_display_name = Column(String(128), nullable=True)
+    display_label = Column(String(128), nullable=True)
+    status = Column(String(16), nullable=False, default="pending", index=True)
+    active_key_id = Column(String(19), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    activated_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class ProcessorPolicyAcknowledgement(Base):
+    """One processor-signed acknowledgement of an exact published policy."""
+
+    __tablename__ = "processor_policy_acknowledgements"
+    __table_args__ = (
+        UniqueConstraint(
+            "event_evidence_id", "entity_id", "policy_version", "policy_sha256",
+            name="uq_processor_policy_acknowledgement",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    acknowledgement_id = Column(String(36), nullable=False, unique=True, default=_uuid)
+    instance_id = Column(String(36), nullable=False, index=True)
+    event_evidence_id = Column(String(36), nullable=False, index=True)
+    entity_id = Column(String(64), nullable=False, index=True)
+    key_id = Column(String(19), nullable=False, index=True)
+    policy_version = Column(Integer, nullable=False)
+    policy_sha256 = Column(String(64), nullable=False)
+    document_json = Column(Text, nullable=False)
+    document_sha256 = Column(String(64), nullable=False, unique=True)
+    signature_sha256 = Column(String(64), nullable=False, unique=True)
+    evidence_package_json = Column(Text, nullable=True)
+    evidence_package_sha256 = Column(String(64), nullable=True, unique=True)
+    acknowledged_at = Column(DateTime(timezone=True), nullable=False)
+    instance_record_sha256 = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class EvidenceKeyRegistrationChallenge(Base):
@@ -71,6 +131,10 @@ class EvidenceKeyRegistrationChallenge(Base):
     purpose = Column(String(16), nullable=False)
     instance_id = Column(String(36), nullable=False, index=True)
     entity_id = Column(String(64), nullable=False, index=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True)
+    event_evidence_id = Column(String(36), nullable=True, index=True)
+    event_display_name = Column(String(128), nullable=True)
+    display_label = Column(String(128), nullable=True)
     public_key = Column(Text, nullable=False)
     public_key_sha256 = Column(String(64), nullable=False)
     key_id = Column(String(19), nullable=False, index=True)

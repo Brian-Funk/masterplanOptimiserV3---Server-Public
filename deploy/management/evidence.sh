@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Signed accountability evidence verification, export and copy guidance.
 
-MP_EVIDENCE_BUNDLE_TOOL="${MP_ROOT}/deploy/evidence/portable_bundle.py"
 MP_EVIDENCE_EXPORTS="${MP_STATE}/evidence-exports"
 MP_EVIDENCE_GITHUB_CLIENT="${MP_ROOT}/deploy/evidence/github_token_client.py"
 MP_EVIDENCE_GITHUB_TOKEN="${MP_ROOT}/secrets/evidence_github_fine_grained_token"
@@ -24,14 +23,14 @@ mp_instance_key_status() {
 }
 
 mp_trust_key_guidance() {
-    ui_message "Controller and processor key ceremonies" \
-        "Open the root accountability screen in the Server web interface.\n\nController: generate and sign only with tools/controller_custody.py on a controller-controlled workstation.\n\nProcessor: generate and sign only in Masterplan Desktop using the declared processor ID.\n\nServer accepts public material and proof packages only. Root then authorises the exact activation with WebAuthn. The instance key signs the durable verification record. Controller and processor private keys must never enter this VPS."
+    ui_message "Trust and key status" \
+        "Open Governance > Trust & keys in the root Server web interface.\n\nController: generate and sign only with tools/controller_custody.py on a controller-controlled workstation.\n\nProcessor: link the event in Masterplan Desktop, then generate locally or import an encrypted processor-key package. Desktop submits public material and proof automatically.\n\nRoot authorises each exact event assignment with the passkey. The instance key seals durable verification records. Controller and processor private keys must never enter this VPS."
 }
 
 mp_evidence_verify() {
     local result report
     report="$(mktemp "$MP_STATE/evidence-verify.XXXXXX")" || return 1
-    if ! result="$(sudo -n python3 "$MP_ROOT/deploy/evidence/evidence_manifest.py" verify-chain \
+    if ! result="$(sudo -n env PYTHONDONTWRITEBYTECODE=1 python3 "$MP_ROOT/deploy/evidence/evidence_manifest.py" verify-chain \
         "$MP_EVIDENCE_HOME/ledger" \
         "$MP_EVIDENCE_HOME/public/instance_signing_key.pub" 2>&1)"; then
         printf 'SIGNED EVIDENCE: INVALID OR UNAVAILABLE\n\n%s\n' "$result" > "$report"
@@ -53,54 +52,51 @@ mp_evidence_verify() {
 }
 
 mp_evidence_export_bundle() {
-    local timestamp partial output result hash host copy_text partial_digest output_digest
-    timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    local output result hash expected_hash file_name staged host copy_text
     mkdir -p "$MP_EVIDENCE_EXPORTS" && chmod 700 "$MP_EVIDENCE_EXPORTS" || return 1
-    output="$MP_EVIDENCE_EXPORTS/${timestamp}_accountability.evidence"
-    partial="${output}.root"
-    partial_digest="${partial}.sha256"
-    output_digest="${output}.sha256"
-    [ ! -e "$output" ] && [ ! -e "$partial" ] || return 1
-    if ! result="$(sudo -n python3 "$MP_EVIDENCE_BUNDLE_TOOL" create-local \
-        --evidence-home "$MP_EVIDENCE_HOME" \
-        --trust-repository "$MP_EVIDENCE_HOME/controller-trust" \
-        --instance-id "$(mp_env_get MP_INSTANCE_ID)" \
-        --output "$partial" 2>&1)"; then
-        sudo -n rm -f "$partial" "$partial_digest"
-        ui_error "Signed evidence verification or bundle creation failed. Nothing was exported.\n\n${result}"
+    mp_compose_init
+    if ! result="$("${MP_COMPOSE[@]}" exec -T backend \
+        python -m app.services.evidence_archive export-tui 2>&1)"; then
+        ui_error "Signed evidence verification or ZIP creation failed. Nothing was exported.\n\n${result}"
         return 1
     fi
-    sudo -n chown "$(id -u):$(id -g)" "$partial" "$partial_digest" || return 1
-    chmod 600 "$partial" "$partial_digest" || return 1
-    mv "$partial" "$output" || return 1
+    file_name="$(jq -er '.file_name' <<< "$result")" || return 1
+    expected_hash="$(jq -er '.zip_sha256' <<< "$result")" || return 1
+    [[ "$file_name" =~ ^[0-9]{8}T[0-9]{6}Z_[0-9a-f]{12}_accountability-evidence\.zip$ ]] \
+        && [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]] \
+        || { ui_error "The backend returned an invalid evidence export identity."; return 1; }
+    staged="$MP_EVIDENCE_HOME/exports/$file_name"
+    output="$MP_EVIDENCE_EXPORTS/$file_name"
+    [ ! -e "$output" ] && sudo -n test -f "$staged" && ! sudo -n test -L "$staged" || return 1
+    sudo -n chown "$(id -u):$(id -g)" "$staged" || return 1
+    chmod 600 "$staged" || return 1
+    mv "$staged" "$output" || return 1
     hash="$(sha256sum "$output" | awk '{print $1}')"
-    printf '%s  %s\n' "$hash" "$(basename "$output")" > "$output_digest" || return 1
-    chmod 600 "$output_digest" || return 1
-    rm -f "$partial_digest"
-    python3 "$MP_EVIDENCE_BUNDLE_TOOL" verify --bundle "$output" >/dev/null || return 1
+    [ "$hash" = "$expected_hash" ] || { ui_error "The mounted evidence export changed after backend verification."; return 1; }
     host="$(hostname -f 2>/dev/null || hostname)"
-    copy_text="Evidence bundle: $output
-SHA-256: $hash
+    copy_text="Complete evidence ZIP: $output
+ZIP SHA-256: $hash
 
 Run from a workstation terminal:
 
 scp deploy@${host}:$(printf '%q' "$output") .
 sha256sum $(printf '%q' "$(basename "$output")")
 
-The displayed SHA-256 must match exactly. The bundle contains signed records,
-    public verification keys and integrity anchors; it never contains a
-private signing or recovery key."
-    mp_audit "evidence.bundle-export" "success" "$(basename "$output"):sha256:${hash}"
-    ui_copyable_terminal_text "Accountability evidence exported" "$copy_text" \
+The displayed ZIP SHA-256 must match exactly. The ZIP contains
+accountability.evidence, accountability.evidence.sha256 and VERIFYING.txt.
+It contains public verification material but no private signing, passkey,
+recovery or application secret."
+    mp_audit "evidence.zip-export" "success" "$(basename "$output"):sha256:${hash}"
+    ui_copyable_terminal_text "Complete accountability evidence exported" "$copy_text" \
         "Copy and run the workstation commands. Press Enter here to return to MP-OPT_SERVER."
 }
 
 mp_evidence_git_guidance() {
-    local bundle body
+    local export_zip body
     mkdir -p "$MP_EVIDENCE_EXPORTS" && chmod 700 "$MP_EVIDENCE_EXPORTS" || return 1
-    bundle="$(find "$MP_EVIDENCE_EXPORTS" -maxdepth 1 -type f -name '*.evidence' -print | sort -r | head -n1)"
-    if [ -z "$bundle" ]; then
-        ui_error "Export and verify an accountability evidence bundle first."
+    export_zip="$(find "$MP_EVIDENCE_EXPORTS" -maxdepth 1 -type f -name '*accountability-evidence.zip' -print | sort -r | head -n1)"
+    if [ -z "$export_zip" ]; then
+        ui_error "Export and verify a complete accountability evidence ZIP first."
         return 1
     fi
     body="The Git archive repository is intentionally not created automatically.
@@ -108,8 +104,9 @@ Create an empty private repository only after the local evidence tests pass.
 
 After cloning that repository on a trusted workstation, stage the verified bundle with:
 
-python3 /absolute/path/to/trusted-server-source/deploy/evidence/portable_bundle.py stage-archive \\
-  --bundle /absolute/path/to/copied/$(printf '%q' "$(basename "$bundle")") \\
+unzip $(printf '%q' "$(basename "$export_zip")") accountability.evidence accountability.evidence.sha256 VERIFYING.txt
+python3 /absolute/path/to/trusted-server-source/deploy/evidence/evidence_bundle.py stage-git \\
+  --bundle /absolute/path/to/copied/accountability.evidence \\
   --archive /absolute/path/to/cloned-evidence-repository
 
 The command uses the protected installed verifier and stages only the bundle
@@ -168,40 +165,30 @@ mp_evidence_git_test_file() {
 
 mp_evidence_git_configure() {
     local token repeat owner repository branch controller_id instance_id schedule
-    local staged result repository_id fingerprint preflight_dir preflight bundle_controller_id
+    local staged result repository_id fingerprint bundle_controller_id
     owner="$(ui_input "Evidence Git archive" "Private Evidence repository owner")" || return 1
     repository="$(ui_input "Evidence Git archive" "Private Evidence repository name")" || return 1
     branch="$(ui_input "Evidence Git archive" "Protected default branch" "main")" || return 1
-    controller_id="$(ui_input "Evidence Git archive" "Stable controller ID in the form ctl- plus 16 lowercase letters or numbers")" || return 1
     instance_id="$(mp_env_get MP_INSTANCE_ID 2>/dev/null || true)"
     schedule="$(ui_input "Evidence Git archive" "Upload schedule in seconds, from 60 to 86400" "900")" || return 1
     [[ "$owner" =~ ^[A-Za-z0-9._-]{1,100}$ ]] \
         && [[ "$repository" =~ ^[A-Za-z0-9._-]{1,100}$ ]] \
         && [[ "$branch" =~ ^[A-Za-z0-9._/-]{1,100}$ ]] \
-        && [[ "$controller_id" =~ ^ctl-[a-z0-9]{16}$ ]] \
         && [[ "$instance_id" =~ ^[0-9a-f-]{36}$ ]] \
         && [[ "$schedule" =~ ^[0-9]+$ ]] && [ "$schedule" -ge 60 ] && [ "$schedule" -le 86400 ] \
-        || { ui_error "Repository, controller, instance, branch or schedule input is invalid."; return 1; }
+        || { ui_error "Repository, instance, branch or schedule input is invalid."; return 1; }
     [ "${repository,,}" != "masterplanoptimiserv3---evidence-public" ] \
         || { ui_error "Automatic archival must not target Evidence-Public."; return 1; }
-    preflight_dir="$(mktemp -d "$MP_STATE/evidence-archive-preflight.XXXXXX")" || return 1
-    preflight="$preflight_dir/preflight.evidence.bundle"
-    if ! result="$(sudo -n python3 "$MP_EVIDENCE_BUNDLE_TOOL" create-local \
-        --evidence-home "$MP_EVIDENCE_HOME" \
-        --trust-repository "$MP_EVIDENCE_HOME/controller-trust" \
-        --instance-id "$instance_id" \
-        --output "$preflight" 2>&1)"; then
-        sudo -n rm -f "$preflight" "${preflight}.sha256"
-        sudo -n rmdir "$preflight_dir" 2>/dev/null || true
-        ui_error "The local ledger and controller-approved trust declarations could not produce a verified portable bundle. Automatic archival remains disabled.\n\n${result}"
+    mp_compose_init
+    if ! result="$("${MP_COMPOSE[@]}" exec -T backend \
+        python -m app.services.evidence_archive preflight 2>&1)"; then
+        ui_error "The current signed chain could not produce a verified portable archive. In the root web interface, open Governance > Trust & keys and complete Portable evidence archive trust, then retry. Automatic archival remains disabled.\n\n${result}"
         return 1
     fi
     bundle_controller_id="$(jq -er '.controller_id' <<< "$result" 2>/dev/null || true)"
-    sudo -n rm -f "$preflight" "${preflight}.sha256"
-    sudo -n rmdir "$preflight_dir" || return 1
-    [ -n "$bundle_controller_id" ] || { ui_error "Portable bundle verification returned no controller ID."; return 1; }
-    [ "$bundle_controller_id" = "$controller_id" ] \
-        || { ui_error "The entered controller ID does not match the verified portable bundle."; return 1; }
+    [[ "$bundle_controller_id" =~ ^ctl-[a-z0-9]{8,48}$ ]] \
+        || { ui_error "Portable bundle verification returned no valid controller ID."; return 1; }
+    controller_id="$bundle_controller_id"
     token="$(ui_password "Evidence Git archive" "Fine-grained GitHub personal access token")" || return 1
     repeat="$(ui_password "Evidence Git archive" "Repeat the Fine-grained GitHub personal access token")" || return 1
     if [ "$token" != "$repeat" ] || [[ "$token" != github_pat_* ]] || [ "${#token}" -lt 20 ]; then

@@ -1,16 +1,18 @@
 ﻿"""API v1 Router  -  wire all sub-routers."""
 from fastapi import APIRouter
-from app.api.v1 import auth, passkey, activation, publish, calendar, admin, notifications, history, gdpr, governance, general_schedule, public_schedule_links, evidence, evidence_keys
+from app.api.v1 import auth, passkey, activation, publish, calendar, admin, notifications, history, gdpr, governance, general_schedule, public_schedule_links, evidence, evidence_keys, setup
 
 api_router = APIRouter()
 
 api_router.include_router(auth.router, prefix="/auth", tags=["authentication"])
 api_router.include_router(passkey.router, prefix="/passkey", tags=["passkey"])
+api_router.include_router(setup.router, prefix="/setup", tags=["setup"])
 api_router.include_router(activation.router, prefix="/activation", tags=["activation"])
 api_router.include_router(publish.router, prefix="/publish", tags=["publish"])
 api_router.include_router(general_schedule.publish_router, prefix="/publish", tags=["publish"])
 api_router.include_router(calendar.router, prefix="/calendar", tags=["calendar"])
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
+api_router.include_router(admin.account_router, prefix="/account", tags=["account"])
 api_router.include_router(general_schedule.admin_router, prefix="/admin", tags=["admin"])
 api_router.include_router(public_schedule_links.admin_router, prefix="/admin", tags=["public-schedule-links"])
 api_router.include_router(public_schedule_links.public_router, prefix="/public-schedule", tags=["public-schedule"])

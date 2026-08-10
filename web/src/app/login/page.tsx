@@ -9,6 +9,7 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { Logo } from "@/components/Logo";
 import { Footer } from "@/components/Footer";
 import { getApiUrl } from "@/lib/environment";
+import { hardNavigate } from "@/lib/hardNavigation";
 import { passkeyErrorMessage } from "@/lib/passkeyError";
 import { startAuthentication } from "@simplewebauthn/browser";
 import { useServiceAvailability } from "@/contexts/ServiceAvailabilityContext";
@@ -70,7 +71,14 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const loginInFlightRef = useRef(false);
-  const { user, offlineAccess, offlineAccessExpired, refreshUser } = useAuth();
+  const {
+    user,
+    authStatus,
+    isLoading: authLoading,
+    offlineAccess,
+    offlineAccessExpired,
+    refreshUser,
+  } = useAuth();
   const { isReady } = useServiceAvailability();
   const router = useRouter();
 
@@ -82,11 +90,12 @@ export default function LoginPage() {
         const apiUrl = getApiUrl();
         const res = await fetch(`${apiUrl}/api/v1/passkey/bootstrap-status`, {
           credentials: "include",
+          cache: "no-store",
         });
         if (res.ok) {
           const data = await res.json();
-          if (data.needs_bootstrap) {
-            router.push("/bootstrap");
+          if (data.stage === "passkey") {
+            hardNavigate("/bootstrap");
             return;
           }
         }
@@ -98,19 +107,26 @@ export default function LoginPage() {
   }, [isReady, router]);
 
   useEffect(() => {
-    if (user && isReady) {
-      if (user.is_admin || user.is_root_admin) {
-        router.push("/admin");
+    if (!authLoading && authStatus === "authenticated" && user && isReady) {
+      if (user.commissioning_required) {
+        hardNavigate("/setup");
+      } else if (user.is_admin || user.is_root_admin) {
+        const requested = new URLSearchParams(window.location.search).get("next");
+        router.push(
+          user.is_root_admin && requested === "/recovery-key"
+            ? "/recovery-key"
+            : "/admin",
+        );
       } else if (user.is_issuer && user.event_id) {
         // Issuers see the calendar first; they reach admin via the top bar
         router.push(`/calendar?event=${user.event_id}`);
       } else if (user.event_id) {
         router.push(`/calendar?event=${user.event_id}`);
       } else {
-        router.push("/admin");
+        router.push("/unassigned");
       }
     }
-  }, [user, isReady, router]);
+  }, [authLoading, authStatus, user, isReady, router]);
 
   const handlePasskeyLogin = async () => {
     if (!isReady) return;
@@ -179,6 +195,11 @@ export default function LoginPage() {
       if (!exchangeRes.ok) {
         const err = await exchangeRes.json().catch(() => ({}));
         throw new Error(passkeyErrorMessage(err, "Failed to establish session"));
+      }
+      const exchangeData = await exchangeRes.json();
+      if (exchangeData.commissioning_required) {
+        hardNavigate("/setup");
+        return;
       }
 
       // Refresh the user from /me to populate AuthContext

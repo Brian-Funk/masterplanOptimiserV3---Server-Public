@@ -9,7 +9,9 @@ import json
 import logging
 import os
 from pathlib import Path
+import shutil
 import sys
+import tempfile
 import uuid
 from typing import Any
 
@@ -22,6 +24,7 @@ from app.core.ha import control_witness_ready, is_ha_enabled
 from app.core.ha_witness import require_write_permit
 from app.db.database import SessionLocal
 from app.models.evidence import EvidenceArchiveSubmission, EvidenceChainState
+from app.services import evidence_export
 
 
 LOGGER = logging.getLogger("evidence.archive")
@@ -31,8 +34,8 @@ if not TOOLS.is_dir():
 sys.path.insert(0, str(TOOLS))
 
 import evidence_git_uploader  # noqa: E402
+import evidence_bundle  # noqa: E402
 import github_token_client  # noqa: E402
-import portable_bundle  # noqa: E402
 
 
 def utcnow() -> datetime:
@@ -91,6 +94,79 @@ def _bundle_directory() -> Path:
     return path
 
 
+def _create_verified_bundle(
+    db: Session,
+    output: Path,
+    *,
+    expected_controller_id: str | None = None,
+    expected_instance_id: str | None = None,
+) -> dict[str, Any]:
+    """Create the archive from the same DB-backed evidence view as web export."""
+
+    directory = Path(tempfile.mkdtemp(prefix="mp-opt-evidence-archive."))
+    staged = directory / "evidence"
+    try:
+        evidence_export._stage_evidence(db, staged)
+        summary = evidence_bundle.create_bundle(staged, output)
+        return evidence_bundle.verify_bundle(
+            output,
+            expected_controller_id=expected_controller_id,
+            expected_instance_id=expected_instance_id,
+        )
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def preflight(db: Session) -> dict[str, Any]:
+    """Build and verify a disposable current bundle without contacting GitHub."""
+
+    state = db.get(EvidenceChainState, 1)
+    if state is None or not state.instance_id or not state.head_sha256:
+        raise RuntimeError("evidence_chain_is_unavailable")
+    directory = Path(tempfile.mkdtemp(prefix="mp-opt-evidence-archive-preflight."))
+    output = directory / "preflight.evidence.bundle"
+    try:
+        summary = _create_verified_bundle(
+            db,
+            output,
+            expected_instance_id=state.instance_id,
+        )
+        if summary["chain_head_sha256"] != state.head_sha256:
+            raise RuntimeError("bundle_chain_changed_during_preflight")
+        return summary | {"ready": True}
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def export_for_tui(db: Session) -> dict[str, Any]:
+    """Create the DB-complete ZIP in the evidence mount for guarded host pickup."""
+
+    state = db.get(EvidenceChainState, 1)
+    if state is None or not state.instance_id:
+        raise RuntimeError("evidence_chain_is_unavailable")
+    source, summary = evidence_export.create_complete_evidence_export(db, state.instance_id)
+    export_directory = evidence_home() / "exports"
+    export_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(export_directory, 0o700)
+    file_name = (
+        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        + f"_{summary['chain_head_sha256'][:12]}_accountability-evidence.zip"
+    )
+    output = export_directory / file_name
+    temporary = output.with_suffix(output.suffix + ".partial")
+    try:
+        if output.exists() or output.is_symlink() or temporary.exists() or temporary.is_symlink():
+            raise RuntimeError("evidence_export_destination_exists")
+        shutil.copyfile(source, temporary)
+        os.chmod(temporary, 0o600)
+        verified = evidence_bundle.verify_evidence_zip(temporary)
+        os.replace(temporary, output)
+        return verified | {"file_name": file_name, "container_path": str(output)}
+    finally:
+        temporary.unlink(missing_ok=True)
+        evidence_export.remove_complete_evidence_export(source)
+
+
 def enqueue_current_chain(db: Session) -> EvidenceArchiveSubmission | None:
     """Create one durable idempotent row without blocking local ledger writes."""
 
@@ -111,17 +187,17 @@ def enqueue_current_chain(db: Session) -> EvidenceArchiveSubmission | None:
         return existing
     output = _bundle_directory() / f"{state.head_sha256}.evidence.bundle"
     if output.exists():
-        summary = portable_bundle.verify_bundle(
+        summary = evidence_bundle.verify_bundle(
             output,
             expected_controller_id=settings.EVIDENCE_CONTROLLER_ID,
             expected_instance_id=state.instance_id,
         )
     else:
-        summary = portable_bundle.create_from_local(
-            evidence_home(),
-            Path(settings.EVIDENCE_TRUST_ROOT),
-            state.instance_id,
+        summary = _create_verified_bundle(
+            db,
             output,
+            expected_controller_id=settings.EVIDENCE_CONTROLLER_ID,
+            expected_instance_id=state.instance_id,
         )
     if summary["chain_head_sha256"] != state.head_sha256:
         raise RuntimeError("bundle_chain_changed_during_creation")
@@ -353,17 +429,25 @@ def cli(argv: list[str] | None = None) -> int:
     retry = commands.add_parser("retry-failed")
     retry.add_argument("--submission-id", required=True)
     commands.add_parser("status")
+    commands.add_parser("preflight")
+    commands.add_parser("export-tui")
     arguments = parser.parse_args(argv)
     db = SessionLocal()
     try:
         if arguments.command == "status":
             print(json.dumps(archive_status(db), sort_keys=True, default=str))
             return 0
+        if arguments.command == "preflight":
+            print(json.dumps(preflight(db), sort_keys=True, default=str))
+            return 0
+        if arguments.command == "export-tui":
+            print(json.dumps(export_for_tui(db), sort_keys=True, default=str))
+            return 0
         row = retry_submission(db, arguments.submission_id)
         db.commit()
         print(json.dumps({"submission_id": row.submission_id, "state": row.state}, sort_keys=True))
         return 0
-    except ValueError as exc:
+    except (ValueError, RuntimeError, evidence_bundle.BundleError) as exc:
         db.rollback()
         parser.exit(1, f"Evidence archive retry failed: {exc}\n")
     finally:

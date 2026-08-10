@@ -107,6 +107,47 @@ def test_smtp_token_is_provisioned_as_an_optional_docker_secret():
     assert "SMTP_TOKEN=" not in example_env
 
 
+def test_fresh_commissioning_provisions_the_optional_evidence_token_source():
+    """Both configuration and exact-commit activation satisfy Compose mounts."""
+
+    root = _server_root()
+    actions = (root / "deploy" / "management" / "actions.sh").read_text(
+        encoding="utf-8"
+    )
+    test_deployment = (root / "deploy" / "test-deployment.sh").read_text(
+        encoding="utf-8"
+    )
+    secret = "evidence_github_fine_grained_token"
+
+    assert f': > "$staging/secrets/{secret}"' in actions
+    assert f'if [ ! -e "$MP_ROOT/secrets/{secret}" ]; then' in test_deployment
+    assert "install -m 0600 /dev/null" in test_deployment
+    assert test_deployment.index("ensure_optional_compose_secret_sources") < test_deployment.index(
+        "mp_prepare_backend_secret_permissions", test_deployment.index("compose_activate()")
+    )
+
+
+def test_exact_activation_prepares_the_unprivileged_evidence_store():
+    """Unsigned activation must match signed deployment's evidence ownership."""
+
+    root = _server_root()
+    common = (root / "deploy" / "management" / "common.sh").read_text(
+        encoding="utf-8"
+    )
+    deploy_script = (root / "deploy" / "deploy.sh").read_text(encoding="utf-8")
+    test_deployment = (root / "deploy" / "test-deployment.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "mp_prepare_evidence_store()" in common
+    assert '[ -L "$evidence" ]' in common
+    assert 'install -d -o 10001 -g 10001 -m 0700 "$evidence"' in common
+    assert 'install -d -o 10001 -g 10001 -m 0700 "$evidence/public"' in common
+    assert "mp_prepare_evidence_store" in deploy_script
+    activation = test_deployment[test_deployment.index("compose_activate()") :]
+    assert activation.index("mp_prepare_evidence_store") < activation.index("mp_compose_init")
+
+
 def test_activation_email_brand_and_qr_assets_are_packaged_predictably():
     """Production must use the approved mail identity and deterministic artwork."""
 
@@ -163,6 +204,33 @@ def test_backend_runs_unprivileged_and_database_examples_fail_closed():
     assert "cap_drop:\n      - ALL" in production_compose
     assert "no-new-privileges:true" in production_compose
     assert 'chmod 1733 "$request_dir"' in common
+    assert 'chmod 0711 "$runtime_dir"' in common
+
+
+def test_unsigned_activation_uses_newly_installed_runtime_permission_helper():
+    """An operations update must take effect during its own exact-SHA deployment."""
+    script = (_server_root() / "deploy" / "test-deployment.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "prepare_runtime_from_installed_sources" in script
+    assert "source \"$MP_ROOT/deploy/management/common.sh\"" in script
+    assert 'stat -c %a "$MP_ROOT/runtime"' in script
+    assert "Runtime traversal permissions were not preserved" in script
+
+
+def test_deletion_case_label_migration_is_bounded_to_open_cases():
+    """Operator labels are backfilled for open cases and removed at completion."""
+    migration = (
+        _server_root()
+        / "deploy"
+        / "migrations"
+        / "20260803_deletion_case_event_labels.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "ADD COLUMN IF NOT EXISTS event_display_name VARCHAR(128)" in migration
+    assert "deletion_case.state <> 'complete'" in migration
+    assert "SET event_display_name = NULL" in migration
 
 
 def test_database_and_ip_secrets_have_guarded_lifecycle_paths():
@@ -325,14 +393,18 @@ def test_frontend_build_generates_and_reloads_build_specific_csp():
     actions = (root / "deploy" / "management" / "actions.sh").read_text(
         encoding="utf-8",
     )
+    common = (root / "deploy" / "management" / "common.sh").read_text(
+        encoding="utf-8",
+    )
 
     generator = "deploy/generate_frontend_csp.py"
     assert generator in deploy_script
     assert generator in actions
-    assert deploy_script.index("npm run build") < deploy_script.index(generator)
+    assert "npm run build" in common
+    assert deploy_script.index("mp_build_frontend_container") < deploy_script.index(generator)
     rebuild = actions[actions.index("mp_rebuild_frontend()") :]
     rebuild = rebuild[: rebuild.index("# Print one bounded service log selection")]
-    assert rebuild.index("npm run build") < rebuild.index(generator)
+    assert rebuild.index("mp_build_frontend_container") < rebuild.index(generator)
     assert rebuild.index(generator) < rebuild.index("mp_caddy_reload")
 
     for caddy_name in ("Caddyfile", "Caddyfile.local"):
@@ -347,3 +419,43 @@ def test_frontend_build_generates_and_reloads_build_specific_csp():
         in compose
     )
     assert "runtime/" in (root / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_published_root_commissioning_migrations_are_hash_pinned():
+    """Published expansion migrations must never be rewritten in place."""
+    expected = {
+        "20260804_root_commissioning.sql":
+            "f43a704fbb6a2a019935f162e93c14a4cc11b0135165f4c14ccfaf88dc323a51",
+        "20260805_signed_handoff_expansion.sql":
+            "f2003f65da37e9a70b02e4b6ec5e8a57ac71812c29db55c0a8f42a17b445790f",
+    }
+    migration_dir = _server_root() / "deploy" / "migrations"
+    for name, digest in expected.items():
+        assert hashlib.sha256((migration_dir / name).read_bytes()).hexdigest() == digest
+
+
+def test_root_commissioning_contract_follows_unchanged_expansion_migrations():
+    """The obsolete handoff column is removed only by a later migration."""
+    commissioning = (
+        _server_root()
+        / "deploy"
+        / "migrations"
+        / "20260804_root_commissioning.sql"
+    ).read_text(encoding="utf-8")
+    handoff = (
+        _server_root()
+        / "deploy"
+        / "migrations"
+        / "20260805_signed_handoff_expansion.sql"
+    ).read_text(encoding="utf-8")
+    contract = (
+        _server_root()
+        / "deploy"
+        / "migrations"
+        / "20260806_controller_trust_handoff_contract.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "ADD COLUMN IF NOT EXISTS trust_establishment_sha256" in commissioning
+    assert "ADD COLUMN IF NOT EXISTS trust_declaration_sha256" in handoff
+    assert "DROP COLUMN" not in handoff
+    assert "DROP COLUMN IF EXISTS trust_declaration_sha256" in contract

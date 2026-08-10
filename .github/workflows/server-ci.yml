@@ -116,7 +116,12 @@ jobs:
         working-directory: backend
         run: |
           python -m pip install --constraint requirements.lock.txt -r requirements.txt pip-audit
-          python -m pip_audit -r requirements.lock.txt
+          # CVE-2026-69247 affects only cryptography's PKCS#7 EnvelopedData
+          # decrypt APIs, which MP-OPT does not call. cryptography 50.0.0 is
+          # published, but WebAuthn's pyOpenSSL 26.3.0 dependency currently
+          # requires cryptography<50. Keep this one bounded exception until a
+          # compatible pyOpenSSL release permits the fixed lock.
+          python -m pip_audit -r requirements.lock.txt --ignore-vuln CVE-2026-69247
           python -m compileall app
       - name: Build and scan affected images
         if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.database == 'true' || needs.changes.outputs.caddy == 'true' || needs.changes.outputs.tools == 'true'
@@ -138,7 +143,7 @@ jobs:
           pull_with_retry aquasec/trivy:0.72.0
           if [[ "$BACKEND" == true ]]; then pull_with_retry python:3.14-alpine; fi
           if [[ "$CADDY" == true ]]; then pull_with_retry golang:1.26.5-alpine; pull_with_retry caddy:2-alpine; fi
-          if [[ "$DATABASE" == true ]]; then pull_with_retry golang:1.26.5-alpine; pull_with_retry postgres:18-alpine; fi
+          if [[ "$DATABASE" == true ]]; then pull_with_retry golang:1.26.5-alpine; pull_with_retry postgres:16-alpine; fi
           if [[ "$TOOLS" == true ]]; then pull_with_retry node:25-alpine; fi
           declare -a images=()
           if [[ "$BACKEND" == true ]]; then docker build -f infra/Dockerfile -t mp-opt-backend:ci .; images+=(mp-opt-backend:ci); fi
@@ -146,7 +151,7 @@ jobs:
           if [[ "$CADDY" == true ]]; then docker build -f infra/Dockerfile.caddy -t mp-opt-caddy:ci .; images+=(mp-opt-caddy:ci); fi
           if [[ "$TOOLS" == true ]]; then docker build -f infra/Dockerfile.tools -t mp-opt-tools:ci .; images+=(mp-opt-tools:ci); fi
           for image in "${images[@]}"; do
-            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v mp-opt-ci-trivy-cache:/root/.cache/ aquasec/trivy:0.72.0 image --quiet --scanners vuln --severity HIGH,CRITICAL --exit-code 1 "$image"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/deploy/security/trivyignore.yaml:/work/trivyignore.yaml:ro" -v mp-opt-ci-trivy-cache:/root/.cache/ aquasec/trivy:0.72.0 image --quiet --scanners vuln --severity HIGH,CRITICAL --ignorefile /work/trivyignore.yaml --exit-code 1 "$image"
           done
           if [[ "$CADDY" == true ]]; then
             docker run --rm -v "$PWD/infra/Caddyfile:/etc/caddy/Caddyfile:ro" \
@@ -177,7 +182,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:18
+        image: postgres:16
         env:
           POSTGRES_DB: masterplan_test
           POSTGRES_USER: masterplan_test

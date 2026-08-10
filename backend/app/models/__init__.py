@@ -1,6 +1,6 @@
 """Database model package."""
 
-from app.models.ha import HAClusterState
+from app.models.ha import HAClusterState, HAProtectionOperation
 from app.models.governance import (
     DataPolicyAcknowledgement,
     EventGovernanceOverride,
@@ -11,6 +11,7 @@ from app.models.deletion import (
     DeletionApprovalChallenge,
     DeletionChecklistApproval,
     DeletionCase,
+    DeletionRequiredProcessor,
     DeletionSubjectScope,
     DesktopDeletionWorkOrder,
 )
@@ -19,6 +20,8 @@ from app.models.evidence import (
     EvidenceChainState,
     EvidenceKey,
     EvidenceKeyRegistrationChallenge,
+    ProcessorIdentity,
+    ProcessorPolicyAcknowledgement,
     RootActionAuthorisation,
     EvidenceOperation,
     PrivacyActionReceipt,
@@ -27,11 +30,13 @@ from app.models.retention import RetentionSchedulerState
 
 __all__ = [
     "HAClusterState",
+    "HAProtectionOperation",
     "DataPolicyAcknowledgement",
     "EventGovernanceOverride",
     "GovernancePublication",
     "InstanceGovernanceProfile",
     "DeletionCase",
+    "DeletionRequiredProcessor",
     "DeletionApprovalChallenge",
     "DeletionSubjectScope",
     "DesktopDeletionWorkOrder",
@@ -40,6 +45,8 @@ __all__ = [
     "EvidenceChainState",
     "EvidenceKey",
     "EvidenceKeyRegistrationChallenge",
+    "ProcessorIdentity",
+    "ProcessorPolicyAcknowledgement",
     "RootActionAuthorisation",
     "EvidenceOperation",
     "PrivacyActionReceipt",

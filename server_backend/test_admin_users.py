@@ -24,6 +24,7 @@ def test_create_user_happy_path(db, admin_client):
     assert data["user"]["username"] == "new.user"
     assert data["user"]["is_activated"] is False
     assert "/activate#token=" in data["activation_url"]
+    assert data["expires_at"]
 
 
 def test_create_user_duplicate_username(db, admin_client):
@@ -170,6 +171,12 @@ def test_bulk_create_users_rejects_invalid_email(db, admin_client):
     })
 
     assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, list)
+    assert detail[0]["loc"][-1] == "email"
+    assert "email" in detail[0]["msg"].lower()
+    assert "input" not in detail[0]
+    assert "not-an-email" not in response.text
     assert db.query(User).filter_by(username="invalid.email").first() is None
 
 
@@ -242,6 +249,48 @@ def test_reauthenticated_root_can_set_issuer(db):
 
     assert response.status_code == 200
     assert response.json()["user"]["is_issuer"] is True
+
+
+def test_root_can_create_an_unassigned_ordinary_user(db, root_client):
+    response = root_client.post("/api/v1/admin/users", json={
+        "username": "awaiting.assignment",
+        "display_name": "Awaiting Assignment",
+        "event_id": None,
+    })
+
+    assert response.status_code == 200
+    assert response.json()["user"]["event_id"] is None
+
+
+def test_non_root_admin_cannot_create_an_unassigned_user(db, admin_client):
+    response = admin_client.post("/api/v1/admin/users", json={
+        "username": "unscoped.account",
+        "display_name": "Unscoped Account",
+        "event_id": None,
+    })
+
+    assert response.status_code == 422
+
+
+def test_reauthenticated_root_can_unassign_an_ordinary_user(db):
+    event, _ = create_test_event(db, name="Assignment Event")
+    root = create_test_user(db, username="assignment.root", is_root_admin=True, is_admin=True)
+    user = create_test_user(db, username="assigned.user", event_id=event.id)
+    client = _make_client(db, root, reauth=True)
+
+    response = client.put(f"/api/v1/admin/users/{user.id}", json={"event_id": None})
+
+    assert response.status_code == 200
+    assert response.json()["event_id"] is None
+
+
+def test_unassigning_a_user_requires_root_reauthentication(db, root_client):
+    event, _ = create_test_event(db, name="Protected Assignment Event")
+    user = create_test_user(db, username="protected.assignment", event_id=event.id)
+
+    response = root_client.put(f"/api/v1/admin/users/{user.id}", json={"event_id": None})
+
+    assert response.status_code == 403
 
 
 # ── GET /admin/users ──
@@ -441,7 +490,7 @@ def test_event_reassignment_clears_stale_person_link(db):
     target.linked_person_id = 42
     db.commit()
 
-    response = _make_client(db, actor).put(
+    response = _make_client(db, actor, reauth=True).put(
         f"/api/v1/admin/users/{target.id}",
         json={"event_id": second_event.id},
     )
@@ -449,6 +498,20 @@ def test_event_reassignment_clears_stale_person_link(db):
     assert response.status_code == 200
     assert response.json()["event_id"] == second_event.id
     assert response.json()["linked_person_id"] is None
+
+
+def test_event_reassignment_requires_reauthentication(db):
+    first_event, _ = create_test_event(db, name="Original Assignment")
+    second_event, _ = create_test_event(db, name="New Assignment")
+    actor = create_test_user(db, username="move.without.reauth", is_admin=True)
+    target = create_test_user(db, username="protected.move", event_id=first_event.id)
+
+    response = _make_client(db, actor).put(
+        f"/api/v1/admin/users/{target.id}",
+        json={"event_id": second_event.id},
+    )
+
+    assert response.status_code == 403
 
 
 def test_issuer_cannot_delete_another_issuer(db):

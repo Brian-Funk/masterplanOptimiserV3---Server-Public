@@ -11,8 +11,11 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 
 REPOSITORY = "Brian-Funk/masterplanOptimiserV3---Server-Public"
@@ -26,6 +29,65 @@ IDENTITY = (
     r"\.github/workflows/release\.yml@refs/(?:tags/v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$"
 )
 IMAGE = re.compile(r"^ghcr\.io/brian-funk/masterplanoptimiserv3---server/[a-z-]+@sha256:[0-9a-f]{64}$")
+LATEST_RELEASE_RETRY_DELAYS = (1, 2, 4)
+TRANSIENT_RELEASE_HTTP_STATUSES = {404, 408, 425, 429, 500, 502, 503, 504}
+
+
+class ReleaseDiscoveryError(RuntimeError):
+    """The stable release could not be resolved without weakening trust."""
+
+
+def latest_stable_tag(
+    repository: str = REPOSITORY,
+    *,
+    opener=urllib.request.urlopen,
+    sleeper=time.sleep,
+) -> str:
+    """Resolve the latest stable tag with bounded retries for transient failures."""
+
+    url = f"https://api.github.com/repos/{repository}/releases/latest"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "mp-opt-release-installer/1",
+        },
+    )
+    attempts = len(LATEST_RELEASE_RETRY_DELAYS) + 1
+    for attempt in range(attempts):
+        try:
+            with opener(request, timeout=30) as response:
+                payload = json.load(response)
+            tag = payload.get("tag_name") if isinstance(payload, dict) else None
+            if not isinstance(tag, str) or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
+                raise ReleaseDiscoveryError(
+                    "GitHub's latest release response has no stable semantic-version tag"
+                )
+            return tag
+        except urllib.error.HTTPError as error:
+            retryable = error.code in TRANSIENT_RELEASE_HTTP_STATUSES
+            detail = f"HTTP {error.code}"
+            cause = error
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            retryable = True
+            detail = type(error).__name__
+            cause = error
+
+        if not retryable or attempt == attempts - 1:
+            raise ReleaseDiscoveryError(
+                f"GitHub latest-release discovery failed after {attempt + 1} attempt(s): {detail}"
+            ) from cause
+        sleeper(LATEST_RELEASE_RETRY_DELAYS[attempt])
+
+    raise AssertionError("release discovery retry loop exited unexpectedly")
+
+
+def host_container_user() -> str:
+    """Return the POSIX owner used for private release-verification files."""
+
+    if not hasattr(os, "getuid") or not hasattr(os, "getgid"):
+        raise RuntimeError("signed release installation requires a POSIX host")
+    return f"{os.getuid()}:{os.getgid()}"
 
 
 def download(url: str, target: Path, limit: int) -> None:
@@ -41,7 +103,14 @@ def download(url: str, target: Path, limit: int) -> None:
 
 def run_cosign(work: Path, *arguments: str) -> None:
     subprocess.run(
-        ["docker", "run", "--rm", "-v", f"{work}:/work:ro", COSIGN_IMAGE, *arguments],
+        [
+            "docker", "run", "--rm",
+            "--user", host_container_user(),
+            "--env", "HOME=/tmp",
+            "-v", f"{work}:/work:ro",
+            COSIGN_IMAGE,
+            *arguments,
+        ],
         check=True,
     )
 
@@ -92,6 +161,20 @@ def signed_asset(manifest: dict, name: str) -> tuple[str, str]:
     if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise RuntimeError(f"signed release manifest has no valid {name} digest")
     return asset, digest
+
+
+def release_environment(tag: str, commit: str, images: dict[str, str]) -> str:
+    """Return the non-secret immutable image metadata for one signed release."""
+
+    return "\n".join([
+        f"MP_RELEASE_TAG={tag}",
+        f"MP_RELEASE_COMMIT={commit}",
+        f"MP_BACKEND_IMAGE={images['backend']}",
+        f"MP_CADDY_IMAGE={images['caddy']}",
+        f"MP_POSTGRES_IMAGE={images['postgres']}",
+        f"MP_TOOLS_IMAGE={images['tools']}",
+        "",
+    ])
 
 
 def swap_with_previous(current: Path, previous: Path) -> None:
@@ -149,18 +232,22 @@ def main() -> int:
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--tag", default="latest")
     parser.add_argument("--rollback", action="store_true")
+    parser.add_argument(
+        "--baseline-only",
+        action="store_true",
+        help=(
+            "verify and cache a signed rollback baseline without replacing "
+            "the active checkout or application assets"
+        ),
+    )
     args = parser.parse_args()
     root = args.repo_root.resolve()
+    if args.rollback and args.baseline_only:
+        parser.error("--rollback and --baseline-only are mutually exclusive")
     if args.rollback:
         return rollback(root)
     if args.tag == "latest":
-        with urllib.request.urlopen(
-            urllib.request.Request(
-                f"https://api.github.com/repos/{REPOSITORY}/releases/latest",
-                headers={"User-Agent": "mp-opt-release-installer/1"},
-            ), timeout=30,
-        ) as response:
-            tag = str(json.load(response)["tag_name"])
+        tag = latest_stable_tag()
     else:
         tag = args.tag
     if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
@@ -209,6 +296,17 @@ def main() -> int:
         extracted.mkdir()
         safe_extract(frontend_path, extracted, "frontend")
         safe_extract(operations_path, extracted, "operations")
+        if args.baseline_only:
+            # Unsigned commissioning needs verified immutable image references
+            # as a rollback anchor, but it must never activate signed release
+            # operations or frontend files. In particular, do not replace the
+            # campaign checkout and do not remove .test-deployment.env.
+            atomic_text(
+                root / ".release.env",
+                release_environment(tag, commit, images),
+            )
+            print(f"Verified signed rollback baseline {tag}")
+            return 0
         destination = root / "web/out"
         previous = root / "web/.out.previous"
         runtime = root / "runtime"
@@ -277,15 +375,7 @@ def main() -> int:
             shutil.copy2(extracted / "runtime/frontend-csp.caddy", policy)
             atomic_text(
                 root / ".release.env",
-                "\n".join([
-                    f"MP_RELEASE_TAG={tag}",
-                    f"MP_RELEASE_COMMIT={commit}",
-                    f"MP_BACKEND_IMAGE={images['backend']}",
-                    f"MP_CADDY_IMAGE={images['caddy']}",
-                    f"MP_POSTGRES_IMAGE={images['postgres']}",
-                    f"MP_TOOLS_IMAGE={images['tools']}",
-                    "",
-                ]),
+                release_environment(tag, commit, images),
             )
             (root / ".test-deployment.env").unlink(missing_ok=True)
         except Exception:
@@ -331,4 +421,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except ReleaseDiscoveryError as error:
+        print(f"Release discovery failed: {error}", file=sys.stderr)
+        raise SystemExit(1) from None

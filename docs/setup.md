@@ -108,14 +108,17 @@ domain/name, database password preference, VAPID contact, and optional SMTP
 settings. It then pauses while you point the hostname's DNS-only A record at
 the VPS and verifies public resolution before deployment.
 
-The TUI deploys the signed release, obtains public TLS automatically, displays
-the browser recovery-key generator URL as selectable text, stores only its
-public `age1...` recipient,
-validates Compose/database/Caddy/permissions, sends a real SMTP test when SMTP
-is enabled, and checks visible SPF, DKIM and DMARC records. The private
+The TUI deploys the signed release and obtains public TLS automatically. It
+then displays the root bootstrap URL and code, waits for successful root
+passkey registration, and retires the bootstrap secret before setup can
+continue. Sign in with that root passkey to open the root-only browser
+recovery-key generator. Until the private key download is acknowledged, that
+root session is restricted to the recovery page and logout; losing the
+bootstrap code after passkey registration does not prevent completion. The TUI
+stores only its public `age1...` recipient,
+then validates Compose/database/Caddy/permissions, sends a real SMTP test when
+SMTP is enabled, and checks visible SPF, DKIM and DMARC records. The private
 `AGE-SECRET-KEY-...` must be downloaded and backed up twice outside the VPS.
-
-Finally open the bootstrap URL shown by the TUI and register the root passkey.
 
 ## Fresh two-node HA server
 

@@ -28,6 +28,10 @@ def main() -> int:
     complete = commands.add_parser("complete-transfer")
     complete.add_argument("bundle_id")
     complete.add_argument("bundle_sha256")
+    critical_complete = commands.add_parser("critical-complete")
+    critical_complete.add_argument("operation_id")
+    critical_complete.add_argument("bundle_id")
+    critical_complete.add_argument("bundle_sha256")
     args = parser.parse_args()
     config = read_config()
     payload = {"node_id": config["HA_NODE_ID"]}
@@ -54,9 +58,15 @@ def main() -> int:
             "bundle_sha256": args.bundle_sha256,
             "generation": args.generation,
         })
-    else:
+    elif action == "complete-transfer":
         action = "transfer-complete"
         payload.update({
+            "bundle_id": args.bundle_id,
+            "bundle_sha256": args.bundle_sha256,
+        })
+    else:
+        payload.update({
+            "operation_id": args.operation_id,
             "bundle_id": args.bundle_id,
             "bundle_sha256": args.bundle_sha256,
         })

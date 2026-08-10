@@ -111,6 +111,7 @@ def create_session(
     user_agent: Optional[str] = None,
     accept_language: Optional[str] = None,
     is_privileged: bool = False,
+    reauthenticated: bool = False,
 ) -> AuthSession:
     """Create a new server-side session."""
     ttl_hours = (
@@ -127,6 +128,7 @@ def create_session(
         csrf_token=secrets.token_urlsafe(32),
         expires_at=now + timedelta(hours=ttl_hours),
         last_seen_at=now,
+        reauth_at=now if reauthenticated else None,
         ip_address=_hash_ip(ip_address),
         user_agent=_coarse_user_agent(user_agent),
         fingerprint=_compute_fingerprint(user_agent, accept_language),

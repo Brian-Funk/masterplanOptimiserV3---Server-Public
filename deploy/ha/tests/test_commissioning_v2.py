@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
 import unittest
+import urllib.error
 from unittest import mock
 
 from deploy.ha import pairing
@@ -18,9 +20,11 @@ from deploy.release import install_release
 ROOT = Path(__file__).resolve().parents[3]
 SETUP = (ROOT / "deploy/management/setup_v2.sh").read_text(encoding="utf-8")
 COMMON = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
+ACTIONS = (ROOT / "deploy/management/actions.sh").read_text(encoding="utf-8")
 DEPLOY = (ROOT / "deploy/deploy.sh").read_text(encoding="utf-8")
 WORKER = (ROOT / "infra/cloudflare-ha-witness/src/index.ts").read_text(encoding="utf-8")
 CADDY = (ROOT / "infra/Caddyfile.ha").read_text(encoding="utf-8")
+CADDY_STANDALONE = (ROOT / "infra/Caddyfile").read_text(encoding="utf-8")
 CADDY_IMAGE = (ROOT / "infra/Dockerfile.caddy").read_text(encoding="utf-8")
 RELEASE = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
 SCHEDULER = (ROOT / "deploy/ha/replication_scheduler.py").read_text(encoding="utf-8")
@@ -39,6 +43,232 @@ def shell_function(source: str, name: str) -> str:
 
 
 class PairingCodeTests(unittest.TestCase):
+    def test_join_address_is_bound_to_a_public_ssh_endpoint_when_available(self) -> None:
+        self.assertIn('observed_ipv4="$(awk \'{print $3}\' <<< "$SSH_CONNECTION")"', SETUP)
+        self.assertIn("value.is_global", SETUP)
+        self.assertIn('[ "$public_ip" = "$observed_ipv4" ]', SETUP)
+        self.assertIn("does not match the public IPv4 endpoint of this SSH session", SETUP)
+
+    def test_joiner_defers_reciprocal_ssh_until_primary_installs_its_key(self) -> None:
+        self.assertIn('verification="${5:-required}"', SETUP)
+        self.assertIn('"$(jq -r .age_recipient <<< "$peer")" deferred', SETUP)
+        self.assertIn("The current holder will verify reciprocal SSH", SETUP)
+        self.assertIn("did not present the registered host key", SETUP)
+
+    def test_converted_unsigned_pair_is_prepared_routed_replicated_then_finalised(self) -> None:
+        reconcile = shell_function(SETUP, "mp_setup_reconcile_primary_campaign_pin")
+        activate = shell_function(SETUP, "mp_setup_activate_converted_unsigned_pair")
+        resume = shell_function(SETUP, "mp_setup_primary_resume")
+        self.assertIn("merge-base --is-ancestor", reconcile)
+        self.assertIn(".campaign_commit=$commit", reconcile)
+        self.assertIn('test-deployment.sh" prepare-peer', activate)
+        self.assertLess(activate.index("prepare-peer"), activate.index("install_services.sh"))
+        self.assertIn('mp_setup_state_action "Preparing exact images for Node B"', activate)
+        self.assertIn('mp_setup_state_action "Installing Node A HA services"', activate)
+        self.assertIn('mp_setup_state_action "Activating HA routing"', activate)
+        self.assertIn('mp_setup_state_action "Verifying Node A HA health"', activate)
+        self.assertLess(activate.index("install_services.sh"), activate.index("witness_control.py\" ready"))
+        self.assertLess(activate.index("witness_control.py\" ready"), activate.index('up -d db backend caddy'))
+        self.assertLess(resume.index("internal-repin-setup"), resume.index("mp_setup_state_mark paired"))
+        self.assertIn('mp_setup_state_action "Replicating complete application state to Node B"', resume)
+        self.assertIn('mp_setup_state_action "Finalising Node B exact deployment"', resume)
+        self.assertIn('mp_setup_state_action "Verifying SMTP and DNS after HA conversion"', resume)
+        self.assertIn('mp_setup_state_action "Verifying automatic failover readiness"', resume)
+        self.assertIn("if ! mp_setup_state_has application_deployed; then", resume)
+        self.assertNotIn(
+            '[ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ] \\\n'
+            "        || ! mp_setup_state_has application_deployed; then",
+            resume,
+        )
+        self.assertLess(resume.index("mp_ha_replicate_now"), resume.index("internal-finalize-peer"))
+
+    @unittest.skipIf(os.name == "nt", "POSIX shell state contract")
+    def test_unsigned_state_pins_first_pushed_head_and_ignores_moving_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            state = work / "state"
+            fake_bin = work / "bin"
+            state.mkdir()
+            fake_bin.mkdir()
+            head = work / "head"
+            head.write_text("a" * 40, encoding="ascii")
+            fake_git = fake_bin / "git"
+            fake_git.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"$*\" == *'rev-parse HEAD'* ]]; then cat \"$FAKE_HEAD\"; exit 0; fi\n"
+                "if [[ \"$*\" == *'fetch --no-tags --force origin'* ]]; then exit \"${FAKE_FETCH_STATUS:-0}\"; fi\n"
+                "if [[ \"$*\" == *'rev-parse FETCH_HEAD'* ]]; then cat \"$FAKE_HEAD\"; exit 0; fi\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake_git.chmod(0o755)
+            policy = work / "policy"
+            policy.write_text("test\n", encoding="ascii")
+            script = r'''
+                export MP_ROOT="$1" MP_STATE="$2" MP_SETUP_V2_STATE="$2/setup.json"
+                export MP_DEPLOYMENT_POLICY_FILE="$3" FAKE_HEAD="$4"
+                export PATH="$5:$PATH"
+                source "$6/deploy/management/setup_v2.sh"
+                ui_error() { printf '%s\n' "$*" >&2; }
+                mp_setup_state_begin standalone-new
+                printf '%s\n' "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")"
+                printf '%s' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' > "$FAKE_HEAD"
+                mp_setup_state_begin standalone-new
+                printf '%s\n' "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(work),
+                 str(state), str(policy), str(head), str(fake_bin), str(ROOT)],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), ["a" * 40, "a" * 40])
+
+    @unittest.skipIf(os.name == "nt", "POSIX shell state contract")
+    def test_unsigned_state_rejects_unpushed_or_uppercase_head(self) -> None:
+        state_begin = shell_function(SETUP, "mp_setup_state_begin")
+        self.assertIn("Push the exact commit before commissioning", state_begin)
+        self.assertIn(r"^[0-9a-f]{40}$", state_begin)
+        self.assertLess(
+            state_begin.index("fetch --no-tags --force origin"),
+            state_begin.index('format:"mp-opt-setup-state-v2"'),
+        )
+
+    @unittest.skipIf(os.name == "nt", "POSIX shell secret contract")
+    def test_management_random_secret_is_urlsafe_and_pairing_compatible(self) -> None:
+        script = r'''
+            source "$1/deploy/management/common.sh"
+            for attempt in {1..32}; do
+                value="$(mp_random_secret)"
+                [[ "$value" =~ ^[A-Za-z0-9_-]{64}$ ]] || exit 2
+            done
+        '''
+        result = subprocess.run(
+            ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(ROOT)],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX shell state contract")
+    def test_convert_ha_pins_active_exact_receipt_not_management_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            state = work / "state"
+            fake_bin = work / "bin"
+            state.mkdir()
+            (state / "test-deployments").mkdir()
+            fake_bin.mkdir()
+            checkout = "a" * 40
+            receipt = "c" * 40
+            (work / ".env").write_text("DOMAIN=example.test\n", encoding="ascii")
+            (state / "test-deployments/current.json").write_text(
+                json.dumps({"current_commit": receipt}), encoding="utf-8"
+            )
+            fetched = work / "fetched"
+            fake_git = fake_bin / "git"
+            fake_git.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"$*\" == *'rev-parse HEAD'* ]]; then printf '%s\\n' \"$FAKE_CHECKOUT\"; exit 0; fi\n"
+                "if [[ \"$*\" == *'fetch --no-tags --force origin'* ]]; then printf '%s' \"${@: -1}\" > \"$FAKE_FETCHED\"; exit 0; fi\n"
+                "if [[ \"$*\" == *'rev-parse FETCH_HEAD'* ]]; then cat \"$FAKE_FETCHED\"; exit 0; fi\n"
+                "if [[ \"$*\" == *'merge-base --is-ancestor'* ]]; then exit 0; fi\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake_git.chmod(0o755)
+            policy = work / "policy"
+            policy.write_text("test\n", encoding="ascii")
+            script = r'''
+                export MP_ROOT="$1" MP_STATE="$2" MP_SETUP_V2_STATE="$2/setup.json"
+                export MP_DEPLOYMENT_POLICY_FILE="$3" FAKE_CHECKOUT="$4" FAKE_FETCHED="$5"
+                export PATH="$6:$PATH"
+                source "$7/deploy/management/setup_v2.sh"
+                ui_error() { printf '%s\n' "$*" >&2; }
+                mp_setup_state_begin convert-ha
+                jq -r .campaign_commit "$MP_SETUP_V2_STATE"
+                jq --arg stale "$FAKE_CHECKOUT" '.campaign_commit=$stale' \
+                    "$MP_SETUP_V2_STATE" > "$MP_SETUP_V2_STATE.stale"
+                mv "$MP_SETUP_V2_STATE.stale" "$MP_SETUP_V2_STATE"
+                mp_setup_state_begin convert-ha
+                jq -r .campaign_commit "$MP_SETUP_V2_STATE"
+                old_pin="$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")"
+                next_commit="$(printf 'd%.0s' {1..40})"
+                jq -n --arg current "$next_commit" --arg previous "$(printf 'e%.0s' {1..40})" \
+                    '{current_commit:$current,previous_commit:$previous}' \
+                    > "$MP_STATE/test-deployments/current.json"
+                mp_setup_state_begin convert-ha
+                jq -r .campaign_commit "$MP_SETUP_V2_STATE"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(work),
+                 str(state), str(policy), checkout, str(fetched), str(fake_bin),
+                 str(ROOT)], text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), [receipt, receipt, "d" * 40])
+
+    def test_state_update_preserves_the_jq_now_variable_for_jq(self) -> None:
+        state_update = shell_function(SETUP, "mp_setup_state_update")
+        self.assertIn('"$filter | .updated_at=\\$now"', state_update)
+        self.assertNotIn('"$filter | .updated_at=$now"', state_update)
+
+    @unittest.skipIf(os.name == "nt", "POSIX shell state contract")
+    def test_state_update_executes_and_atomically_replaces_the_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            state = work / "setup.json"
+            state.write_text(
+                json.dumps({
+                    "format": "mp-opt-setup-state-v2",
+                    "completed": [],
+                    "updated_at": "before",
+                }),
+                encoding="utf-8",
+            )
+            script = r'''
+                export MP_ROOT="$1" MP_STATE="$2" MP_SETUP_V2_STATE="$3"
+                source "$1/deploy/management/setup_v2.sh"
+                mp_setup_state_update '.completed=["verified"]'
+                jq -r '.completed[0],.updated_at' "$MP_SETUP_V2_STATE"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(ROOT),
+                 str(work), str(state)],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            lines = result.stdout.splitlines()
+            self.assertEqual(lines[0], "verified")
+            self.assertRegex(lines[1], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+            # The authoritative setup.json must remain; only mktemp's
+            # setup.XXXXXX staging files must be absent after the atomic move.
+            self.assertEqual(list(work.glob("setup.??????")), [])
+
+    def test_operator_owned_values_have_neutral_examples_not_deployment_presets(self) -> None:
+        guided = shell_function(ACTIONS, "mp_guided_initial_configuration")
+        configure_smtp = shell_function(ACTIONS, "mp_configure_smtp")
+        node_material = shell_function(SETUP, "mp_setup_prepare_node_material")
+        standalone_dns = shell_function(SETUP, "mp_setup_verify_standalone_dns")
+        smtp_dns = shell_function(SETUP, "mp_setup_verify_smtp_and_dns")
+
+        self.assertNotIn("mp-opt.net", guided)
+        self.assertNotIn("smtp.protonmail.ch", guided)
+        self.assertNotIn("access@", guided)
+        self.assertNotIn("smtp.protonmail.ch", configure_smtp)
+        self.assertIn("schedule.example.org", guided)
+        self.assertIn("admin@example.org", guided)
+        self.assertIn("smtp.example.org", guided)
+        self.assertIn("notifications@example.org", guided)
+        self.assertIn("support@example.org", guided)
+
+        for prompt in (node_material, standalone_dns):
+            self.assertNotIn("api.ipify.org", prompt)
+            self.assertNotIn("api64.ipify.org", prompt)
+            self.assertIn("203.0.113.10", prompt)
+            self.assertIn("2001:db8::10", prompt)
+        self.assertNotIn('"default")', smtp_dns)
+        self.assertIn("default or provider1", smtp_dns)
+
     def test_full_loss_runbook_links_the_current_destructive_gate(self) -> None:
         self.assertIn(
             "[destructive recovery drill completion gate]"
@@ -52,12 +282,14 @@ class PairingCodeTests(unittest.TestCase):
 
     def test_round_trip_and_tamper_detection(self) -> None:
         document = {
-            "format": "mp-opt-ha-join-v1",
+            "format": "mp-opt-ha-join-v2",
             "cluster_id": "mp-opt-cluster-1234",
             "domain": "calendar.example.org",
             "witness_url": "https://witness.example.workers.dev",
             "pairing_secret": "a" * 48,
             "node_id": "node-b",
+            "deployment_lane": "unsigned",
+            "campaign_commit": "a" * 40,
         }
         encoded = pairing.encode_document(document)
         self.assertEqual(pairing.decode_code(encoded), document)
@@ -94,11 +326,28 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn("const exactPairingRetry", WORKER)
         self.assertNotIn("delete cluster.pairing", WORKER)
 
+    def test_witness_secrets_are_deployed_atomically_and_binding_is_repairable(self) -> None:
+        deploy = shell_function(SETUP, "mp_setup_deploy_witness")
+        repair = shell_function(SETUP, "mp_setup_repair_witness_admin_secret")
+        primary = shell_function(SETUP, "mp_setup_primary_create")
+        self.assertIn("--secrets-file /run/mp-opt-witness-secrets.json", deploy)
+        self.assertIn("ADMIN_TOKEN:$admin", deploy)
+        self.assertIn("CLOUDFLARE_DNS_API_TOKEN:$dns", deploy)
+        self.assertNotIn("secret put", deploy)
+        self.assertIn("--secrets-file /run/mp-opt-witness-secrets.json", repair)
+        self.assertIn("{ADMIN_TOKEN:$admin}", repair)
+        self.assertNotIn("CLOUDFLARE_DNS_API_TOKEN:$dns", repair)
+        self.assertIn("remote API returned HTTP 401([^0-9]|$)", primary)
+        self.assertIn("mp_setup_repair_witness_admin_secret", primary)
+
     def test_local_pending_receipts_cover_both_remote_commit_boundaries(self) -> None:
         self.assertIn("pending-witness-bootstrap.json", SETUP)
         self.assertIn("mp-opt-pending-witness-bootstrap-v1", SETUP)
         self.assertIn("pending-local-join.json", SETUP)
-        self.assertIn("mp-opt-pending-local-join-v1", SETUP)
+        self.assertIn("mp-opt-pending-local-join-v2", SETUP)
+        self.assertIn("mp-opt-ha-join-v2", SETUP)
+        self.assertIn("deployment_lane:$lane", SETUP)
+        self.assertIn("campaign_commit:", SETUP)
         self.assertLess(
             SETUP.index('mv "$bootstrap_tmp" "$MP_SETUP_V2_PENDING_BOOTSTRAP"'),
             SETUP.index('mp_setup_witness_call bootstrap'),
@@ -160,16 +409,64 @@ class PairingCodeTests(unittest.TestCase):
             self.assertIn("Replace the lost peer", ha)
             self.assertNotIn("Fresh two-node HA", ha)
 
+    def test_cancelling_after_completed_commissioning_preserves_the_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            state.mkdir()
+            checkpoint = state / "setup-state.json"
+            checkpoint.write_text(
+                json.dumps({
+                    "format": "mp-opt-setup-state-v2",
+                    "mode": "standalone-new",
+                    "state": "complete",
+                    "completed": ["validated", "smtp_verified"],
+                }),
+                encoding="utf-8",
+            )
+            (root / ".env").write_text("DOMAIN=example.test\n", encoding="utf-8")
+            script = r'''
+                export MP_ROOT="$1" MP_STATE="$2"
+                export MP_SETUP_V2_STATE="$2/setup-state.json"
+                source "$3/deploy/management/setup_v2.sh"
+                ui_menu() { printf 'cancel\n'; }
+                ui_message() { :; }
+                ui_error() { return 1; }
+                mp_ha_role() { printf 'standalone\n'; }
+                mp_setup_v2
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash",
+                 str(root), str(state), str(ROOT)],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(checkpoint.is_file())
+            self.assertEqual(
+                json.loads(checkpoint.read_text(encoding="utf-8"))["state"],
+                "complete",
+            )
+
     def test_every_supported_setup_has_guarded_checkpoint_order(self) -> None:
         standalone = shell_function(SETUP, "mp_setup_standalone")
         for earlier, later in (
-            ("mp_guided_initial_configuration", "mp_setup_present_bootstrap"),
-            ("mp_setup_present_bootstrap", "mp_setup_verify_standalone_dns"),
-            ("mp_setup_verify_standalone_dns", 'deploy/deploy.sh" --no-pull'),
-            ('deploy/deploy.sh" --no-pull', "mp_configure_recovery_recipient"),
+            ("mp_guided_initial_configuration", "mp_setup_verify_standalone_dns"),
+            ("mp_setup_verify_standalone_dns", "mp_setup_deploy_application"),
+            ("mp_setup_deploy_application", "mp_setup_register_root_passkey"),
+            ("mp_setup_register_root_passkey", "mp_validate_installation"),
             ("mp_validate_installation", "mp_setup_verify_smtp_and_dns"),
         ):
             self.assertLess(standalone.index(earlier), standalone.index(later))
+
+        primary_resume = shell_function(SETUP, "mp_setup_primary_resume")
+        self.assertLess(
+            primary_resume.index("mp_setup_deploy_application"),
+            primary_resume.index("mp_setup_register_root_passkey"),
+        )
+        self.assertLess(
+            primary_resume.index("mp_setup_register_root_passkey"),
+            primary_resume.index("mp_ha_replicate_now"),
+        )
 
         primary = shell_function(SETUP, "mp_setup_primary_create")
         self.assertLess(primary.index("migration_snapshot"), primary.index("witness_bootstrap"))
@@ -202,6 +499,96 @@ class PairingCodeTests(unittest.TestCase):
             replacement.index('mp_setup_state_begin replace-primary'),
         )
 
+    def test_test_policy_verifies_baseline_without_replacing_campaign_checkout(self) -> None:
+        install = shell_function(SETUP, "mp_setup_install_signed_release")
+        self.assertIn('.deployment_lane // "signed"', install)
+        self.assertIn("--baseline-only", install)
+        self.assertIn("without activating signed application files", install)
+        self.assertNotIn("git -C", install)
+        self.assertNotIn("restore --source", SETUP)
+
+    def test_unsigned_setup_has_one_pinned_application_checkpoint(self) -> None:
+        state = shell_function(SETUP, "mp_setup_state_begin")
+        standalone = shell_function(SETUP, "mp_setup_standalone")
+        reconcile = shell_function(SETUP, "mp_setup_reconcile_unsigned_application")
+        self.assertIn('format:"mp-opt-setup-state-v2"', state)
+        self.assertIn('deployment_lane:$lane', state)
+        self.assertIn('campaign_commit:', state)
+        self.assertIn('test-deployments/current.json', state)
+        self.assertIn('Commissioning will not pin the management checkout', state)
+        self.assertIn('merge-base --is-ancestor "$pinned" "$receipt"', state)
+        self.assertIn('fetch --no-tags --force origin "$commit"', state)
+        self.assertIn('rev-parse FETCH_HEAD', state)
+        self.assertNotIn("test_commit_deployed", SETUP)
+        self.assertNotIn("root_passkey_registered", SETUP)
+        self.assertIn("application_deployed", standalone)
+        self.assertIn("root_commissioning_complete", standalone)
+        self.assertIn("Recovering exact deployment", reconcile)
+        self.assertIn("mp_wait_for_health 45", reconcile)
+        self.assertIn("Automatic fallback is prohibited", reconcile)
+
+    def test_setup_failure_returns_to_menu_with_specific_resume_state(self) -> None:
+        setup = shell_function(SETUP, "mp_setup_v2")
+        self.assertIn("SETUP_ACTION_PAUSED", setup)
+        self.assertIn("The exact lane and commit remain pinned", setup)
+        self.assertIn('return 0', setup)
+
+    def test_resume_notice_explicitly_continues_and_next_action_is_current(self) -> None:
+        setup = shell_function(SETUP, "mp_setup_v2")
+        continue_message = shell_function(COMMON, "ui_continue_message")
+        standalone = shell_function(SETUP, "mp_setup_standalone")
+        primary = shell_function(SETUP, "mp_setup_primary_create")
+        self.assertIn('ui_continue_message "Resuming commissioning"', setup)
+        self.assertIn('--ok-label "Continue"', continue_message)
+        self.assertIn('--ok-button "Continue"', continue_message)
+        for workflow in (standalone, primary):
+            self.assertLess(
+                workflow.index('mp_setup_state_action "Protected configuration"'),
+                workflow.index("mp_guided_initial_configuration"),
+            )
+        self.assertIn('mp_setup_state_action "Deploying HA witness"', primary)
+        self.assertIn('mp_setup_state_action "Registering Node A with HA witness"', primary)
+        self.assertIn('mp_setup_state_action "Waiting for Node B join"', primary)
+        primary_resume = shell_function(SETUP, "mp_setup_primary_resume")
+        self.assertIn("Join code renewal pending", primary_resume)
+        self.assertIn("Resume setup after that time", primary_resume)
+
+    def test_standalone_dns_wait_retries_at_thirty_second_intervals(self) -> None:
+        script = r'''
+            TEST_ROOT="$(mktemp -d)"
+            trap 'rm -rf -- "$TEST_ROOT"' EXIT
+            export MP_ROOT="$PWD" MP_STATE="$TEST_ROOT/state"
+            mkdir -p "$MP_STATE"
+            source deploy/management/setup_v2.sh
+            export MP_DNS_POLL_INTERVAL_SECONDS=30
+            TEST_ATTEMPTS="$TEST_ROOT/attempts"
+            TEST_SLEEPS="$TEST_ROOT/sleeps"
+            export TEST_ATTEMPTS TEST_SLEEPS
+            dig() {
+                local count=0
+                [ -s "$TEST_ATTEMPTS" ] && count="$(cat "$TEST_ATTEMPTS")"
+                count=$((count + 1))
+                printf '%s\n' "$count" > "$TEST_ATTEMPTS"
+                if [ "$count" -lt 3 ]; then
+                    printf '203.0.113.9\n'
+                else
+                    printf '198.51.100.7\n'
+                fi
+            }
+            sleep() { printf '%s\n' "$1" >> "$TEST_SLEEPS"; }
+            mp_setup_wait_for_standalone_dns example.test 198.51.100.7
+            printf 'attempts=%s\n' "$(cat "$TEST_ATTEMPTS")"
+            printf 'sleeps=%s\n' "$(paste -sd, "$TEST_SLEEPS")"
+        '''
+        result = subprocess.run(
+            ["bash", "-Eeuo", "pipefail", "-c", script], cwd=ROOT,
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("attempts=3", result.stdout)
+        self.assertIn("sleeps=30,30", result.stdout)
+        self.assertIn("Public DNS now resolves", result.stdout)
+
     def test_launcher_resumes_before_showing_waiting_for_primary(self) -> None:
         launcher = (ROOT / "manage.sh").read_text(encoding="utf-8")
         self.assertLess(
@@ -225,6 +612,15 @@ class DnsOnlyHaTests(unittest.TestCase):
         self.assertIn("dns.providers.mpopt_witness", CADDY_IMAGE)
         self.assertNotIn("CLOUDFLARE_DNS_API_TOKEN", CADDY_IMAGE)
 
+    def test_recovery_key_route_requires_root_and_fresh_passkey(self) -> None:
+        for caddy in (CADDY_STANDALONE, CADDY):
+            self.assertIn("@recoveryKey path /recovery-key", caddy)
+            self.assertIn("forward_auth @recoveryKey backend:8000", caddy)
+            self.assertIn("uri /api/v1/auth/root-access", caddy)
+        page = (ROOT / "web/src/app/recovery-key/page.tsx").read_text(encoding="utf-8")
+        self.assertIn("/api/v1/auth/recovery-key-access", page)
+        self.assertIn("withReauth", page)
+
     def test_setup_hardcodes_nodes_and_guides_legacy_retirement(self) -> None:
         self.assertIn("node-a", SETUP)
         self.assertIn("node-b", SETUP)
@@ -233,6 +629,93 @@ class DnsOnlyHaTests(unittest.TestCase):
 
 
 class SignedReleaseTests(unittest.TestCase):
+    @staticmethod
+    def github_error(status: int) -> urllib.error.HTTPError:
+        return urllib.error.HTTPError(
+            "https://api.github.com/repos/example/releases/latest",
+            status,
+            "simulated",
+            {},
+            None,
+        )
+
+    def test_release_discovery_retries_a_transient_404_then_succeeds(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value = io.BytesIO(b'{"tag_name":"v3.8.0"}')
+        opener = mock.Mock(side_effect=[self.github_error(404), response])
+        sleeper = mock.Mock()
+
+        self.assertEqual(
+            install_release.latest_stable_tag(opener=opener, sleeper=sleeper),
+            "v3.8.0",
+        )
+        self.assertEqual(opener.call_count, 2)
+        sleeper.assert_called_once_with(1)
+
+    def test_release_discovery_exhausts_bounded_retries_without_busy_looping(self) -> None:
+        opener = mock.Mock(
+            side_effect=[
+                self.github_error(404)
+                for _ in range(len(install_release.LATEST_RELEASE_RETRY_DELAYS) + 1)
+            ]
+        )
+        sleeper = mock.Mock()
+
+        with self.assertRaisesRegex(
+            install_release.ReleaseDiscoveryError,
+            r"failed after 4 attempt\(s\): HTTP 404",
+        ):
+            install_release.latest_stable_tag(opener=opener, sleeper=sleeper)
+
+        self.assertEqual(opener.call_count, 4)
+        self.assertEqual(
+            [call.args[0] for call in sleeper.call_args_list],
+            list(install_release.LATEST_RELEASE_RETRY_DELAYS),
+        )
+
+    def test_release_discovery_failure_does_not_create_installation_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(
+                install_release,
+                "latest_stable_tag",
+                side_effect=install_release.ReleaseDiscoveryError("simulated"),
+            ), mock.patch(
+                "sys.argv",
+                ["install_release.py", "--repo-root", str(root)],
+            ):
+                with self.assertRaises(install_release.ReleaseDiscoveryError):
+                    install_release.main()
+
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_cosign_reads_private_host_files_as_their_owner_without_widening_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            manifest = work / "release-manifest.json"
+            manifest.write_text("{}", encoding="utf-8")
+            work.chmod(0o700)
+            manifest.chmod(0o600)
+
+            with mock.patch.object(
+                install_release,
+                "host_container_user",
+                return_value="1000:1000",
+            ), mock.patch.object(subprocess, "run") as run:
+                install_release.run_cosign(work, "verify-blob", "/work/release-manifest.json")
+
+            command = run.call_args.args[0]
+            self.assertEqual(command[:7], [
+                "docker", "run", "--rm",
+                "--user", "1000:1000",
+                "--env", "HOME=/tmp",
+            ])
+            self.assertIn(f"{work}:/work:ro", command)
+            if os.name == "posix":
+                self.assertEqual(work.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(manifest.stat().st_mode & 0o777, 0o600)
+            self.assertTrue(run.call_args.kwargs["check"])
+
     def test_release_contains_signed_operations_frontend_and_images(self) -> None:
         self.assertIn("operations.tar.gz", RELEASE)
         self.assertIn("cosign sign-blob", RELEASE)
@@ -248,6 +731,105 @@ class SignedReleaseTests(unittest.TestCase):
             install_release.COSIGN_IMAGE,
             r"^ghcr\.io/sigstore/cosign/cosign@sha256:[0-9a-f]{64}$",
         )
+
+    def test_baseline_only_returns_before_any_live_checkout_replacement(self) -> None:
+        baseline = INSTALL_RELEASE.index("if args.baseline_only:")
+        first_live_replacement = INSTALL_RELEASE.index('destination = root / "web/out"')
+        self.assertLess(baseline, first_live_replacement)
+        block = INSTALL_RELEASE[baseline:first_live_replacement]
+        self.assertIn('root / ".release.env"', block)
+        self.assertIn("Verified signed rollback baseline", block)
+        self.assertNotIn("unlink(", block)
+        self.assertNotIn("replace(", block)
+        self.assertNotIn("rmtree", block)
+
+    def test_release_environment_contains_only_public_immutable_metadata(self) -> None:
+        images = {
+            name: f"ghcr.io/example/{name}@sha256:{index * 64}"
+            for name, index in zip(("backend", "caddy", "postgres", "tools"), "1234")
+        }
+        contents = install_release.release_environment("v3.8.0", "a" * 40, images)
+        self.assertIn("MP_RELEASE_TAG=v3.8.0", contents)
+        self.assertIn(f"MP_RELEASE_COMMIT={'a' * 40}", contents)
+        self.assertNotIn("SECRET", contents)
+        self.assertNotIn("PASSWORD", contents)
+
+    def test_baseline_only_preserves_campaign_files_and_test_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sentinels = {
+                "deploy/campaign.txt": "campaign deploy\n",
+                "infra/campaign.txt": "campaign infra\n",
+                "web/out/campaign.txt": "campaign frontend\n",
+                "runtime/frontend-csp.caddy": "campaign csp\n",
+                "manage.sh": "campaign manage\n",
+                "configure-production.sh": "campaign configure\n",
+                ".test-deployment.env": "MP_TEST_COMMIT=" + "b" * 40 + "\n",
+            }
+            for relative, contents in sentinels.items():
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(contents, encoding="utf-8")
+
+            frontend = b"verified frontend archive"
+            operations = b"verified operations archive"
+            images = {
+                name: (
+                    "ghcr.io/brian-funk/masterplanoptimiserv3---server/"
+                    f"{name}@sha256:{index * 64}"
+                )
+                for name, index in zip(("backend", "caddy", "postgres", "tools"), "1234")
+            }
+            manifest = {
+                "format": "mp-opt-release-v1",
+                "tag": "v3.8.0",
+                "commit": "a" * 40,
+                "images": images,
+                "frontend": {
+                    "asset": "web-out.tar.gz",
+                    "sha256": install_release.hashlib.sha256(frontend).hexdigest(),
+                },
+                "operations": {
+                    "asset": "operations.tar.gz",
+                    "sha256": install_release.hashlib.sha256(operations).hexdigest(),
+                },
+            }
+
+            def fake_download(_url: str, target: Path, _limit: int) -> None:
+                payload = {
+                    "release-manifest.json": json.dumps(manifest).encode(),
+                    "release-manifest.bundle": b"verified bundle",
+                    "web-out.tar.gz": frontend,
+                    "operations.tar.gz": operations,
+                }[target.name]
+                target.write_bytes(payload)
+
+            with mock.patch.object(
+                install_release, "latest_stable_tag", return_value="v3.8.0"
+            ), mock.patch.object(
+                install_release, "download", side_effect=fake_download
+            ), mock.patch.object(
+                install_release, "run_cosign"
+            ), mock.patch.object(
+                install_release, "safe_extract"
+            ), mock.patch.object(
+                install_release.subprocess, "run"
+            ), mock.patch(
+                "sys.argv",
+                [
+                    "install_release.py", "--repo-root", str(root),
+                    "--baseline-only",
+                ],
+            ):
+                self.assertEqual(install_release.main(), 0)
+
+            for relative, contents in sentinels.items():
+                self.assertEqual((root / relative).read_text(encoding="utf-8"), contents)
+            self.assertFalse((root / ".deploy.previous").exists())
+            self.assertFalse((root / ".infra.previous").exists())
+            release_environment = (root / ".release.env").read_text(encoding="utf-8")
+            self.assertIn("MP_RELEASE_TAG=v3.8.0", release_environment)
+            self.assertIn("MP_TOOLS_IMAGE=", release_environment)
 
     def test_bootstrap_rejects_moving_refs_and_does_not_execute_remote_shell(self) -> None:
         self.assertNotIn("get.docker.com", BOOTSTRAP)

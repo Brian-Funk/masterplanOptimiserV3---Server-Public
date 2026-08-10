@@ -62,7 +62,9 @@ RECORD_TYPES = frozenset(
         "trust_key.registered",
         "trust_key.rotated",
         "trust_key.revoked",
-        "trust.role_statement_imported",
+        "commissioning.recovery_key_acknowledged",
+        "commissioning.completed",
+        "desktop.policy_acknowledged",
         "data_subject.deletion.requested",
         "data_subject.deletion.withdrawn",
         "data_subject.deletion.accepted",
@@ -71,20 +73,25 @@ RECORD_TYPES = frozenset(
         "data_subject.live_data_purged",
         "deletion.peer_confirmed",
         "deletion.clean_backup_verified",
+        "deletion.peer_snapshot_resolution_remediated",
         "deletion.event_requested",
         "deletion.event_accepted",
         "deletion.event_access_revoked",
         "deletion.desktop_work_order_created",
         "deletion.desktop_report_received",
+        "deletion.desktop_copy_resolution",
+        "deletion.desktop_absence_confirmed",
         "deletion.desktop_actions_resolved",
         "deletion.event_live_data_purged",
         "deletion.backup_inventory_resolved",
+        "deletion.backup_not_applicable",
         "deletion.checklist_created",
         "deletion.checklist_approved",
         "deletion.completed",
         "backup.export_confirmed",
         "backup.superseded",
         "evidence.bundle_exported",
+        "evidence.archive_trust_bound",
         "evidence.git_anchor_imported",
         "evidence.git_archive_completed",
         "privacy_action.created",
@@ -187,6 +194,15 @@ PAYLOAD_FIELDS = frozenset(
         "controller_role",
         "instance_id",
         "entity_id",
+        "processor_entity_id",
+        "processor_key_id",
+        "processor_assignment_id",
+        "local_resolution_id",
+        "peer_snapshot_resolution_id",
+        "snapshotted_key_id",
+        "completed_key_id",
+        "snapshotted_public_key_sha256",
+        "completed_public_key_sha256",
         "algorithm",
         "root_credential_id_sha256",
         "root_action_sha256",
@@ -194,6 +210,36 @@ PAYLOAD_FIELDS = frozenset(
         "server_verification",
         "ledger_signer_role",
         "statement_sha256",
+        "document_sha256",
+        "evidence_package_sha256",
+        "policy_sha256",
+        "recipient_sha256",
+        "trust_establishment_sha256",
+        "checks_sha256",
+        "previous_chain_head_sha256",
+        "download_acknowledged",
+        "local_reimport_verified",
+        "trust_scope",
+        "governance_authorisation",
+        "deletion_receipt_sha256",
+        "copy_resolution_sha256",
+        "desktop_processor_receipts",
+        "server_receipts",
+        "clean_backup_sha256",
+        "backup_not_applicable_sha256",
+        "local_resolution_sha256",
+        "peer_snapshot_resolution_sha256",
+        "peer_resolution_digest",
+        "original_final_receipt_sha256",
+        "peer_node_id",
+        "local_snapshot_count",
+        "retained_local_snapshot_count",
+        "peer_retained_local_snapshot_count",
+        "peer_superseded_local_snapshot_receipt_sha256s",
+        "superseded_local_snapshot_receipt_sha256s",
+        "superseded_portable_package_ids",
+        "policy_version",
+        "disposition",
         "signed_at",
         "submission_id",
         "controller_id",
@@ -201,6 +247,7 @@ PAYLOAD_FIELDS = frozenset(
         "pull_request_head_sha",
         "merge_commit_sha",
         "archive_status",
+        "reconciled_at",
         "archive_repository_id",
         "evidence_operation_id",
         "evidence_workflow_type",
@@ -223,6 +270,9 @@ UUID_FIELDS = frozenset(
         "anchor_id",
         "repository_id",
         "instance_id",
+        "processor_assignment_id",
+        "local_resolution_id",
+        "peer_snapshot_resolution_id",
     }
 )
 HASH_FIELDS = frozenset(
@@ -252,8 +302,25 @@ HASH_FIELDS = frozenset(
         "previous_proof_sha256",
         "signature_sha256",
         "root_credential_id_sha256",
+        "evidence_package_sha256",
         "root_action_sha256",
         "statement_sha256",
+        "document_sha256",
+        "policy_sha256",
+        "recipient_sha256",
+        "trust_establishment_sha256",
+        "checks_sha256",
+        "previous_chain_head_sha256",
+        "deletion_receipt_sha256",
+        "copy_resolution_sha256",
+        "snapshotted_public_key_sha256",
+        "completed_public_key_sha256",
+        "clean_backup_sha256",
+        "backup_not_applicable_sha256",
+        "local_resolution_sha256",
+        "peer_snapshot_resolution_sha256",
+        "peer_resolution_digest",
+        "original_final_receipt_sha256",
     }
 )
 TIMESTAMP_FIELDS = frozenset(
@@ -267,6 +334,7 @@ TIMESTAMP_FIELDS = frozenset(
         "retain_until",
         "peer_confirmed_at",
         "signed_at",
+        "reconciled_at",
     }
 )
 
@@ -429,11 +497,20 @@ def _validate_payload(value: Any, *, path: str = "payload") -> None:
                 if not isinstance(item, str) or not re.fullmatch(r"sub-[0-9a-f]{32}", item):
                     raise EvidenceError(f"{child_path} must be an archive submission ID")
             elif field == "controller_id":
-                if not isinstance(item, str) or not re.fullmatch(r"ctl-[a-z0-9]{16}", item):
+                if not isinstance(item, str) or not re.fullmatch(r"ctl-[a-z0-9]{8,48}", item):
                     raise EvidenceError(f"{child_path} must be a controller ID")
             elif field == "pull_request_number":
                 if not isinstance(item, int) or isinstance(item, bool) or not 1 <= item <= 2147483647:
                     raise EvidenceError(f"{child_path} must be a positive pull request number")
+            elif field == "local_snapshot_count":
+                if not isinstance(item, int) or isinstance(item, bool) or item != 1:
+                    raise EvidenceError(f"{child_path} must be exactly one")
+            elif field == "retained_local_snapshot_count":
+                if not isinstance(item, int) or isinstance(item, bool) or item < 1:
+                    raise EvidenceError(f"{child_path} must be a positive snapshot count")
+            elif field == "peer_retained_local_snapshot_count":
+                if not isinstance(item, int) or isinstance(item, bool) or item < 0:
+                    raise EvidenceError(f"{child_path} must be a non-negative snapshot count")
             elif isinstance(item, dict):
                 _validate_payload(item, path=child_path)
             elif isinstance(item, list):
@@ -442,8 +519,20 @@ def _validate_payload(value: Any, *, path: str = "payload") -> None:
                 for index, entry in enumerate(item):
                     if isinstance(entry, dict):
                         _validate_payload(entry, path=f"{child_path}[{index}]")
-                    elif field in {"package_ids", "outstanding_backup_ids"}:
+                    elif field in {
+                        "package_ids",
+                        "outstanding_backup_ids",
+                        "superseded_portable_package_ids",
+                    }:
                         _canonical_uuid(entry, f"{child_path}[{index}]")
+                    elif field in {
+                        "superseded_local_snapshot_receipt_sha256s",
+                        "peer_superseded_local_snapshot_receipt_sha256s",
+                    }:
+                        if not isinstance(entry, str) or not SHA256_RE.fullmatch(entry):
+                            raise EvidenceError(
+                                f"{child_path}[{index}] must be a lower-case SHA-256 digest"
+                            )
                     elif not isinstance(entry, str) or not SAFE_ENUM_RE.fullmatch(entry):
                         raise EvidenceError(f"{child_path} entries must be bounded enums")
             elif isinstance(item, str):

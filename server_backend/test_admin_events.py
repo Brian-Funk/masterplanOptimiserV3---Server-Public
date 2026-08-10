@@ -1,7 +1,24 @@
 """Tests for admin event endpoints."""
+from types import SimpleNamespace
+
+from app.core.config import settings
+from app.models.event import Event
+from app.models.ha import HAProtectionOperation
 from server_backend.conftest import (
     create_test_event, create_test_user, _make_client,
 )
+
+PUBLISH_SECRET = "p" * 48
+
+
+def protected_event_body(**values):
+    return {
+        "publish_secret": PUBLISH_SECRET,
+        "idempotency_key": values.pop(
+            "idempotency_key", "11111111-1111-4111-8111-111111111111"
+        ),
+        **values,
+    }
 
 
 # ── POST /admin/events ──
@@ -9,27 +26,77 @@ from server_backend.conftest import (
 
 def test_create_event(db, admin_client):
     """Admin can create an event; publish secret returned once."""
-    r = admin_client.post("/api/v1/admin/events", json={
-        "name": "New Event",
-        "location": "Zurich",
-        "start_date": "2026-08-01",
-        "end_date": "2026-08-10",
-    })
+    r = admin_client.post("/api/v1/admin/events", json=protected_event_body(
+        name="New Event", location="Zurich",
+        start_date="2026-08-01", end_date="2026-08-10",
+    ))
     assert r.status_code == 200
     data = r.json()
     assert data["event"]["name"] == "New Event"
     assert data["event"]["evidence_id"]
     assert "publish_secret" in data
-    assert len(data["publish_secret"]) > 20
+    assert data["publish_secret"] == PUBLISH_SECRET
 
 
 def test_create_event_minimal(db, admin_client):
     """Event can be created with just a name."""
-    r = admin_client.post("/api/v1/admin/events", json={
-        "name": "Minimal Event",
-    })
+    r = admin_client.post("/api/v1/admin/events", json=protected_event_body(name="Minimal Event"))
     assert r.status_code == 200
     assert r.json()["event"]["name"] == "Minimal Event"
+
+
+def test_create_event_rejects_end_date_before_start_date(db, admin_client):
+    response = admin_client.post("/api/v1/admin/events", json=protected_event_body(
+        name="Invalid date range", start_date="2031-08-20", end_date="2031-08-12",
+    ))
+
+    assert response.status_code == 422
+    assert "End date must be on or after start date" in response.text
+
+
+def test_create_event_allows_same_day_range(db, admin_client):
+    response = admin_client.post("/api/v1/admin/events", json=protected_event_body(
+        name="Same-day event", start_date="2031-08-20", end_date="2031-08-20",
+    ))
+
+    assert response.status_code == 200
+    assert response.json()["event"]["end_date"] == "2031-08-20"
+
+
+def test_ha_event_creation_is_durable_idempotent_and_returns_only_after_polling(
+    db, root_client, monkeypatch, tmp_path,
+):
+    import app.main as main_module
+    from app.core import ha_replication
+
+    request_dir = tmp_path / "ha-requests"
+    monkeypatch.setattr(settings, "HA_MODE", "ha")
+    monkeypatch.setattr(settings, "HA_CLUSTER_ID", "cluster-test")
+    monkeypatch.setattr(settings, "HA_NODE_ID", "node-a")
+    monkeypatch.setattr(settings, "HA_REPLICATION_REQUEST_DIR", str(request_dir))
+    monkeypatch.setattr(main_module, "control_witness_ready", lambda: True)
+    monkeypatch.setattr(main_module, "assess_readiness", lambda _db: SimpleNamespace(ready=True))
+    monkeypatch.setattr(main_module, "require_write_permit", lambda **_kwargs: None)
+    monkeypatch.setattr(ha_replication, "witness_post", lambda *_args, **_kwargs: {})
+    body = protected_event_body(
+        name="Standby protected event",
+        idempotency_key="99999999-9999-4999-8999-999999999999",
+    )
+
+    first = root_client.post("/api/v1/admin/events", json=body)
+    assert first.status_code == 202
+    assert first.json()["publish_secret"] is None
+    operation_id = first.json()["protection_operation_id"]
+    assert operation_id
+    assert db.query(Event).filter(Event.name == "Standby protected event").count() == 1
+    operation = db.get(HAProtectionOperation, operation_id)
+    assert operation.state == "pending"
+    assert (request_dir / f"{operation_id}.json").is_file()
+
+    repeated = root_client.post("/api/v1/admin/events", json=body)
+    assert repeated.status_code == 202
+    assert repeated.json()["protection_operation_id"] == operation_id
+    assert db.query(Event).filter(Event.name == "Standby protected event").count() == 1
 
 
 # ── GET /admin/events ──
@@ -62,9 +129,7 @@ def test_issuer_cannot_create_event(db):
     )
     client = _make_client(db, issuer)
 
-    r = client.post("/api/v1/admin/events", json={
-        "name": "Should Fail",
-    })
+    r = client.post("/api/v1/admin/events", json=protected_event_body(name="Should Fail"))
     assert r.status_code == 403
 
 
@@ -143,8 +208,15 @@ def test_delete_event_not_found(db, reauth_admin_client):
 def test_regenerate_secret(db, reauth_admin_client):
     """Admin with reauth can regenerate an event's publish secret."""
     event, old_secret = create_test_event(db, name="Regen Evt")
-    r = reauth_admin_client.post(f"/api/v1/admin/events/{event.id}/regenerate-secret")
+    new_value = "n" * 48
+    r = reauth_admin_client.post(
+        f"/api/v1/admin/events/{event.id}/regenerate-secret",
+        json={
+            "publish_secret": new_value,
+            "idempotency_key": "22222222-2222-4222-8222-222222222222",
+        },
+    )
     assert r.status_code == 200
     new_secret = r.json()["publish_secret"]
     assert new_secret != old_secret
-    assert len(new_secret) > 20
+    assert new_secret == new_value

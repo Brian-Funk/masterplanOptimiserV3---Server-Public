@@ -132,6 +132,10 @@ ensure_secret_files() {
 }
 
 ensure_secret_files
+mp_prepare_backend_secret_permissions || {
+    echo "  ERROR: Backend secret permissions could not be prepared." >&2
+    exit 1
+}
 
 # ── 2. Pull latest code ─────────────────────────────────────
 if [ "$PULL_LATEST" -eq 1 ] && [ ! -f "$REPO_DIR/.release.env" ]; then
@@ -168,8 +172,7 @@ chmod 755 "$REPO_DIR/manage.sh" "$REPO_DIR/configure-production.sh" \
 chmod 755 "$REPO_DIR/deploy/ha/"*.sh
 if sudo -n true >/dev/null 2>&1; then
     sudo ln -sf "$REPO_DIR/manage.sh" /usr/local/bin/mp-opt
-    sudo install -d -o 10001 -g 10001 -m 0700 "$REPO_DIR/state/evidence"
-    sudo install -d -o 10001 -g 10001 -m 0700 "$REPO_DIR/state/evidence/public"
+    mp_prepare_evidence_store
     mp_publish_audit_head
 else
     echo "  ERROR: Passwordless sudo is required to prepare the protected evidence store."
@@ -201,11 +204,7 @@ if [ -f "$REPO_DIR/.release.env" ]; then
         || { echo "  ERROR: Signed frontend assets are incomplete. Reinstall the release."; exit 1; }
 else
     echo "[3/5] Building frontend..."
-    docker run --rm \
-        -v "$REPO_DIR/web:/app" \
-        -w /app \
-        node:22-alpine \
-        sh -c "npm ci --no-audit && npm audit --omit=dev --audit-level=high && npm run lint && npm run build"
+    mp_build_frontend_container "$REPO_DIR"
     python3 "$REPO_DIR/deploy/stamp_service_worker.py" "$REPO_DIR/web/out/sw.js" \
         "$(git -C "$REPO_DIR" rev-parse HEAD)"
     python3 "$REPO_DIR/deploy/generate_frontend_csp.py" "$REPO_DIR/web/out" \
@@ -284,8 +283,20 @@ for i in $(seq 1 15); do
         echo "       Backend healthy!"
         break
     fi
+    printf '       Waiting for public HTTPS health (%d/15)...\n' "$i"
     if [ "$i" -eq 15 ]; then
-        echo "  ERROR: Backend not responding. Check: docker compose logs backend"
+        if "${MP_COMPOSE[@]}" exec -T backend python -c \
+            'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3).read()' \
+            >/dev/null 2>&1; then
+            echo "  ERROR: The backend is healthy, but trusted public HTTPS is unavailable."
+            if [ "$(mp_caddy_mode)" = container ] \
+                && "${MP_COMPOSE[@]}" logs --tail 200 caddy 2>&1 | grep -q 'rateLimited'; then
+                echo "  The certificate authority has rate-limited certificate issuance."
+                echo "  Preserve Caddy certificate storage and resume after the retry time shown below."
+            fi
+        else
+            echo "  ERROR: The backend health endpoint is not responding."
+        fi
         "${MP_COMPOSE[@]}" logs --tail 100 backend >&2 || true
         case "$(mp_caddy_mode)" in
             container) "${MP_COMPOSE[@]}" logs --tail 100 caddy >&2 || true ;;

@@ -82,6 +82,13 @@ mp_snapshot_copy_configuration() {
         : > "$payload/metadata/compose-override-absent" || return 1
     fi
     caddy_mode="$(mp_caddy_mode)"
+    case "$caddy_mode" in
+        container|host) ;;
+        *)
+            printf '%s\n' 'Snapshot creation stopped: the active Caddy topology could not be resolved.' >&2
+            return 1
+            ;;
+    esac
     printf '%s\n' "$caddy_mode" > "$payload/metadata/caddy-topology" || return 1
     if [ "$include_caddy" = "yes" ] \
         && [ "$caddy_mode" = "host" ] \
@@ -121,17 +128,23 @@ mp_snapshot_dump_database() {
 # Bind a database-bearing snapshot to the exact signed ledger state captured
 # while application writes are paused. This contains no personal data.
 mp_snapshot_write_evidence_anchor() {
-    local payload="$1" head
+    local payload="$1" head copied_head
     mkdir -p "$payload/metadata" || return 1
     head="$MP_ROOT/state/evidence/ledger/chain-head.json"
-    if [ -s "$head" ] && [ ! -L "$head" ]; then
+    copied_head="$payload/evidence/ledger/chain-head.json"
+    if [ -s "$copied_head" ] && [ ! -L "$copied_head" ]; then
         jq -e '{format:"mp-opt-snapshot-evidence-anchor-v1", instance_id, chain_id,
-            records, head_sha256}' "$head" > "$payload/metadata/evidence-anchor.json" \
+            records, head_sha256}' "$copied_head" > "$payload/metadata/evidence-anchor.json" \
             || return 1
-        chmod 600 "$payload/metadata/evidence-anchor.json" || return 1
+    elif sudo -n test -s "$head" && sudo -n test ! -L "$head"; then
+        sudo -n cat "$head" \
+            | jq -e '{format:"mp-opt-snapshot-evidence-anchor-v1", instance_id, chain_id,
+                records, head_sha256}' > "$payload/metadata/evidence-anchor.json" \
+            || return 1
     else
         return 1
     fi
+    chmod 600 "$payload/metadata/evidence-anchor.json" || return 1
 }
 
 # Make encrypted payload permissions independent of the invoking shell's
@@ -722,7 +735,8 @@ mp_snapshot_create_interactive() {
 
 # Deep-verify a selected snapshot using a transient private age identity.
 mp_snapshot_verify_interactive() {
-    local selected identity expected_recipient
+    local selected identity expected_recipient compliance_receipts="" compliance_note=""
+    local compliance_error_file compliance_error compliance_removed_count="0"
     selected="$(mp_snapshot_select "Choose a snapshot to verify")" || return 1
     expected_recipient="$(jq -r '.encryption.recipient // empty' "$selected/receipt.json" 2>/dev/null || true)"
     if [ -n "$expected_recipient" ]; then
@@ -732,7 +746,24 @@ mp_snapshot_verify_interactive() {
     fi
     if mp_snapshot_verify_path "$selected" "$identity"; then
         mp_remove_identity_file "$identity"
-        ui_message "Snapshot verified" "The recovery identity, archive hash, payload hashes, file sizes and database catalogue all match."
+        if declare -F mp_compliance_emit_backup_receipts >/dev/null; then
+            compliance_error_file="$(mktemp "$MP_STATE/compliance-error.XXXXXX")" || return 1
+            compliance_receipts="$(mp_compliance_emit_backup_receipts "$selected" 2>"$compliance_error_file")" || {
+                compliance_error="$(mp_compliance_error_message "$compliance_error_file")"
+                rm -f "$compliance_error_file"
+                ui_error "The snapshot was verified, but pending deletion recovery receipts could not be recorded. The verified snapshot was retained.\n\n${compliance_error}"
+                return 1
+            }
+            rm -f "$compliance_error_file"
+            if [ -n "$compliance_receipts" ]; then
+                compliance_removed_count="$(awk -F '\t' '$1 == "RESOLVED" { print $2 }' <<< "$compliance_receipts" | tail -n 1)"
+                [[ "$compliance_removed_count" =~ ^[0-9]+$ ]] || compliance_removed_count="0"
+                compliance_note="\n\nPending deletion recovery receipts were recorded. ${compliance_removed_count} pre-deletion local snapshot(s) were removed automatically. External workstation copies remain separately accountable. The web page will detect the receipts automatically."
+            elif find "$MP_ROOT/runtime/compliance-requests" -maxdepth 1 -type f -name '*.json' -print -quit 2>/dev/null | grep -q .; then
+                compliance_note="\n\nA deletion workflow is still waiting. Export this verified snapshot to the workstation and confirm its SHA-256; MP-OPT will then record the recovery receipt."
+            fi
+        fi
+        ui_message "Snapshot verified" "The recovery identity, archive hash, payload hashes, file sizes and database catalogue all match.${compliance_note}"
     else
         mp_remove_identity_file "$identity"
         ui_error "Deep verification failed. The snapshot was not modified or restored."
@@ -756,8 +787,9 @@ mp_snapshot_restore_database() {
 mp_snapshot_restore_configuration() {
     local payload="$1"
     local target_password escaped_password secrets_stage secrets_old secret_file
-    local snapshot_caddy_mode current_caddy_mode
+    local snapshot_caddy_mode current_caddy_mode optional_evidence_token
     [ -f "$payload/config/.env" ] || return 0
+    MP_SNAPSHOT_APPLY_STAGE="configuration-topology"
     if [ -f "$payload/metadata/caddy-topology" ]; then
         snapshot_caddy_mode="$(tr -d '\r\n' < "$payload/metadata/caddy-topology")"
         current_caddy_mode="$(mp_caddy_mode)"
@@ -773,9 +805,11 @@ mp_snapshot_restore_configuration() {
             || { printf 'This snapshot requires host Caddy, but host Caddy is unavailable.\n' >&2; return 1; }
         sudo caddy validate --config "$payload/config/Caddyfile" --adapter caddyfile >/dev/null || return 1
     fi
+    MP_SNAPSHOT_APPLY_STAGE="configuration-environment"
     cp -a "$payload/config/.env" "$MP_ROOT/.env" || return 1
     chmod 600 "$MP_ROOT/.env" || return 1
     cmp -s "$payload/config/.env" "$MP_ROOT/.env" || return 1
+    MP_SNAPSHOT_APPLY_STAGE="configuration-secrets"
     if [ -d "$payload/config/secrets" ]; then
         secrets_stage="$MP_ROOT/.secrets.restore.$$"
         secrets_old="$MP_ROOT/.secrets.restore-old.$$"
@@ -806,8 +840,22 @@ mp_snapshot_restore_configuration() {
     else
         mkdir -p "$MP_ROOT/secrets" || return 1
     fi
+    MP_SNAPSHOT_APPLY_STAGE="configuration-secret-permissions"
     chmod 700 "$MP_ROOT/secrets" || return 1
     find "$MP_ROOT/secrets" -maxdepth 1 -type f -exec chmod 600 {} + || return 1
+    optional_evidence_token="$MP_ROOT/secrets/evidence_github_fine_grained_token"
+    if [ -e "$optional_evidence_token" ] \
+        && { [ -L "$optional_evidence_token" ] || [ ! -f "$optional_evidence_token" ]; }; then
+        printf '%s\n' 'The optional Evidence archive credential path is unsafe.' >&2
+        return 1
+    fi
+    # The credential is intentionally excluded from snapshots. Compose still
+    # requires a regular bind source, so restore recreates only the empty,
+    # disabled-state placeholder and never invents or recovers a token.
+    if [ ! -e "$optional_evidence_token" ]; then
+        install -m 0600 /dev/null "$optional_evidence_token" || return 1
+    fi
+    MP_SNAPSHOT_APPLY_STAGE="configuration-compose-override"
     if [ -f "$payload/config/docker-compose.override.yml" ]; then
         cp -a "$payload/config/docker-compose.override.yml" "$MP_ROOT/infra/docker-compose.override.yml" || return 1
         chmod 600 "$MP_ROOT/infra/docker-compose.override.yml" || return 1
@@ -815,18 +863,23 @@ mp_snapshot_restore_configuration() {
     elif [ -f "$payload/metadata/compose-override-absent" ]; then
         rm -f "$MP_ROOT/infra/docker-compose.override.yml" || return 1
     fi
+    MP_SNAPSHOT_APPLY_STAGE="configuration-host-caddy"
     if [ -f "$payload/config/Caddyfile" ]; then
         sudo install -o root -g root -m 0644 "$payload/config/Caddyfile" "$MP_HOST_CADDYFILE" || return 1
         cmp -s "$payload/config/Caddyfile" "$MP_HOST_CADDYFILE" || return 1
     fi
 
+    MP_SNAPSHOT_APPLY_STAGE="configuration-database-secret"
     mp_migrate_database_secret || return 1
     target_password="$(cat "$MP_ROOT/secrets/database_password")" || return 1
     escaped_password="$(printf '%s' "$target_password" | sed "s/'/''/g")" || return 1
     mp_compose_init
+    MP_SNAPSHOT_APPLY_STAGE="configuration-database-role"
     printf "ALTER ROLE masterplan PASSWORD '%s';\n" "$escaped_password" \
         | "${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U masterplan -d postgres >/dev/null || return 1
     unset target_password escaped_password
+    MP_SNAPSHOT_APPLY_STAGE="configuration-backend-secret-permissions"
+    mp_prepare_backend_secret_permissions || return 1
     return 0
 }
 
@@ -888,17 +941,52 @@ mp_snapshot_guard_privacy_actions() {
 # store. Therefore its database must describe the exact same ledger head.
 # Reject incompatibility before replacing any live database.
 mp_snapshot_guard_evidence_head() {
-    local extracted="$1" anchor current
+    local extracted="$1" anchor current anchor_head current_head
     [ -f "$extracted/payload/database/masterplan.dump" ] || return 0
     anchor="$extracted/payload/metadata/evidence-anchor.json"
     current="$MP_ROOT/state/evidence/ledger/chain-head.json"
-    if [ ! -s "$anchor" ] || [ -L "$anchor" ] || [ ! -s "$current" ] || [ -L "$current" ]; then
+    if [ ! -s "$anchor" ] || [ -L "$anchor" ] \
+        || ! sudo -n test -s "$current" || ! sudo -n test ! -L "$current"; then
         printf '%s\n' 'Restore blocked: required signed-evidence anchor is missing.' >&2
         return 1
     fi
-    if [ "$(jq -r '.head_sha256 // empty' "$anchor")" \
-        != "$(jq -r '.head_sha256 // empty' "$current")" ]; then
+    anchor_head="$(jq -er '.head_sha256 | select(type == "string" and test("^[0-9a-f]{64}$"))' "$anchor")" \
+        || { printf '%s\n' 'Restore blocked: snapshot evidence anchor is invalid.' >&2; return 1; }
+    current_head="$(sudo -n cat "$current" 2>/dev/null \
+        | jq -er '.head_sha256 | select(type == "string" and test("^[0-9a-f]{64}$"))')" \
+        || { printf '%s\n' 'Restore blocked: current protected evidence head is unreadable or invalid.' >&2; return 1; }
+    if [ "$anchor_head" != "$current_head" ]; then
         printf '%s\n' 'Restore blocked: snapshot database and current signed-evidence ledger have different heads. Choose a compatible newer snapshot; the ledger will not be rewound.' >&2
+        return 1
+    fi
+}
+
+# Reject a cross-topology or unresolved configuration snapshot before stopping
+# services or replacing the database. The same check remains in the
+# configuration-restore function as defence in depth.
+mp_snapshot_guard_caddy_topology() {
+    local extracted="$1" marker snapshot_mode current_mode
+    [ -f "$extracted/payload/config/.env" ] || return 0
+    marker="$extracted/payload/metadata/caddy-topology"
+    if [ ! -s "$marker" ] || [ -L "$marker" ]; then
+        printf '%s\n' 'Restore blocked: snapshot Caddy topology is missing.' >&2
+        return 1
+    fi
+    snapshot_mode="$(tr -d '\r\n' < "$marker")"
+    current_mode="$(mp_caddy_mode)"
+    case "$snapshot_mode" in container|host) ;; *)
+        printf 'Restore blocked: snapshot Caddy topology is invalid: %s.\n' "$snapshot_mode" >&2
+        return 1
+        ;;
+    esac
+    case "$current_mode" in container|host) ;; *)
+        printf '%s\n' 'Restore blocked: current Caddy topology is unavailable.' >&2
+        return 1
+        ;;
+    esac
+    if [ "$snapshot_mode" != "$current_mode" ]; then
+        printf 'Restore blocked: snapshot Caddy topology is %s, but this installation uses %s.\n' \
+            "$snapshot_mode" "$current_mode" >&2
         return 1
     fi
 }
@@ -925,7 +1013,9 @@ SQL
         2>/dev/null || true)"
     if [ "$registered_root" = t ]; then
         : > "$MP_ROOT/secrets/root_bootstrap_token" || return 1
-        chmod 600 "$MP_ROOT/secrets/root_bootstrap_token" || return 1
+        # Truncating the retired token must not undo the backend-readable
+        # ownership and mode established during configuration restore.
+        mp_prepare_backend_secret_permissions || return 1
     fi
 }
 
@@ -934,6 +1024,8 @@ mp_snapshot_apply() {
     local snapshot_path="$1"
     local identity_file="$2"
     local temporary payload domain restored_database=false
+    MP_SNAPSHOT_APPLY_MUTATED=false
+    MP_SNAPSHOT_APPLY_STAGE="extract-and-verify"
     temporary="$(mktemp -d "${MP_SNAPSHOTS}/.restore.XXXXXX")" || return 1
     chmod 700 "$temporary" || { rm -rf "$temporary"; return 1; }
     if ! mp_snapshot_extract "$snapshot_path" "$identity_file" "$temporary" \
@@ -943,31 +1035,44 @@ mp_snapshot_apply() {
         return 1
     fi
     payload="$temporary/payload"
+    MP_SNAPSHOT_APPLY_STAGE="evidence-head-preflight"
     mp_snapshot_guard_evidence_head "$temporary" || {
         rm -rf "$temporary"
         return 1
     }
+    MP_SNAPSHOT_APPLY_STAGE="privacy-action-preflight"
     mp_snapshot_guard_privacy_actions "$temporary" || {
         rm -rf "$temporary"
         return 1
     }
+    MP_SNAPSHOT_APPLY_STAGE="caddy-topology-preflight"
+    mp_snapshot_guard_caddy_topology "$temporary" || {
+        rm -rf "$temporary"
+        return 1
+    }
     mp_compose_init
+    MP_SNAPSHOT_APPLY_STAGE="stop-backend"
+    MP_SNAPSHOT_APPLY_MUTATED=true
     "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
     if [ -f "$payload/database/masterplan.dump" ]; then
         restored_database=true
+        MP_SNAPSHOT_APPLY_STAGE="database-restore"
         mp_snapshot_restore_database "$payload/database/masterplan.dump" || {
             rm -rf "$temporary"
             return 1
         }
+        MP_SNAPSHOT_APPLY_STAGE="database-migrations"
         mp_apply_migrations || {
             rm -rf "$temporary"
             return 1
         }
     fi
+    MP_SNAPSHOT_APPLY_STAGE="configuration-restore"
     mp_snapshot_restore_configuration "$payload" || {
         rm -rf "$temporary"
         return 1
     }
+    MP_SNAPSHOT_APPLY_STAGE="compose-validation"
     mp_compose_validate || {
         rm -rf "$temporary"
         return 1
@@ -981,31 +1086,37 @@ mp_snapshot_apply() {
             return 1
         }
     elif [ "$restored_database" = true ]; then
+        MP_SNAPSHOT_APPLY_STAGE="access-revocation"
         mp_snapshot_revoke_restored_access || {
             rm -rf "$temporary"
             return 1
         }
     fi
+    MP_SNAPSHOT_APPLY_STAGE="service-start"
     "${MP_COMPOSE[@]}" up -d --force-recreate >/dev/null || {
         rm -rf "$temporary"
         return 1
     }
     if [ "$(mp_caddy_mode)" = "host" ]; then
+        MP_SNAPSHOT_APPLY_STAGE="host-caddy-reload"
         mp_caddy_reload || {
             rm -rf "$temporary"
             return 1
         }
     fi
+    MP_SNAPSHOT_APPLY_STAGE="caddy-validation"
     mp_caddy_validate || {
         rm -rf "$temporary"
         return 1
     }
     domain="$(mp_env_get DOMAIN)" || { rm -rf "$temporary"; return 1; }
+    MP_SNAPSHOT_APPLY_STAGE="public-health"
     if ! mp_wait_for_health 30; then
         rm -rf "$temporary"
         return 1
     fi
     rm -rf "$temporary"
+    MP_SNAPSHOT_APPLY_STAGE="complete"
     printf '%s\n' "$domain" >/dev/null
 }
 
@@ -1013,6 +1124,7 @@ mp_snapshot_apply() {
 mp_snapshot_restore_interactive() {
     mp_require_ha_maintenance_window || return 1
     local selected identity rollback_identity="" pre_snapshot pre_name selected_recipient current_recipient
+    local failed_stage rollback_stage
     selected="$(mp_snapshot_select "Choose a snapshot to restore")" || return 1
     selected_recipient="$(jq -r '.encryption.recipient // empty' "$selected/receipt.json" 2>/dev/null || true)"
     current_recipient="$(mp_recovery_recipient)" || {
@@ -1045,6 +1157,7 @@ mp_snapshot_restore_interactive() {
         [ "$rollback_identity" = "$identity" ] || mp_remove_identity_file "$rollback_identity"
         return 1
     fi
+    ui_clear_terminal
     pre_name="pre-restore-$(date -u +%Y%m%dT%H%M%SZ)"
     pre_snapshot="$(mp_snapshot_create full "$pre_name")" || {
         mp_remove_identity_file "$identity"
@@ -1100,15 +1213,27 @@ mp_snapshot_restore_interactive() {
         return 0
     fi
 
-    mp_audit "snapshot.restore" "failed" "$(basename "$selected")"
+    failed_stage="${MP_SNAPSHOT_APPLY_STAGE:-unknown}"
+    mp_audit "snapshot.restore" "failed" "$(basename "$selected"):${failed_stage}"
+    if [ "${MP_SNAPSHOT_APPLY_MUTATED:-false}" != true ]; then
+        mp_remove_identity_file "$identity"
+        [ "$rollback_identity" = "$identity" ] || mp_remove_identity_file "$rollback_identity"
+        ui_error "Restore was rejected during protected preflight (${failed_stage}). No database, configuration, or service state was changed."
+        return 1
+    fi
     if mp_snapshot_apply "$pre_snapshot" "$rollback_identity"; then
         mp_remove_identity_file "$identity"
         [ "$rollback_identity" = "$identity" ] || mp_remove_identity_file "$rollback_identity"
         ui_error "Restore verification failed. The automatic rollback snapshot was restored successfully."
     else
+        rollback_stage="${MP_SNAPSHOT_APPLY_STAGE:-unknown}"
         mp_remove_identity_file "$identity"
         [ "$rollback_identity" = "$identity" ] || mp_remove_identity_file "$rollback_identity"
-        ui_error "Restore and automatic rollback both failed. Services remain stopped. Use the verified pre-restore snapshot: $(basename "$pre_snapshot")"
+        if mp_wait_for_health 1; then
+            ui_error "Restore failed during ${failed_stage}; automatic rollback also reported failure during ${rollback_stage}, but public health is currently available. Do not retry until the retained state has been verified. Use the verified pre-restore snapshot if recovery is required: $(basename "$pre_snapshot")"
+        else
+            ui_error "Restore failed during ${failed_stage} and automatic rollback failed during ${rollback_stage}. Application health is unavailable. Use the verified pre-restore snapshot: $(basename "$pre_snapshot")"
+        fi
     fi
     return 1
 }
@@ -1119,8 +1244,8 @@ mp_snapshot_delete_interactive() {
     selected="$(mp_snapshot_select "Choose a snapshot to delete permanently" any)" || return 1
     label="$(basename "$selected")"
     if ! ui_require_phrase "Delete snapshot" \
-        "This permanently deletes the encrypted archive and its receipt." \
-        "DELETE $label"; then
+        "This permanently deletes $label, including its encrypted archive and receipt." \
+        "DELETE SNAPSHOT"; then
         return 1
     fi
     rm -rf -- "$selected"

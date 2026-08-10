@@ -99,4 +99,8 @@ def test_publish_endpoint_has_no_legacy_runtime_fallback(db) -> None:
     )
 
     assert response.status_code == 422
-    assert response.json()["detail"] == "Validation error"
+    assert response.json()["detail"] == [{
+        "type": "missing",
+        "loc": ["body", "contract_version"],
+        "msg": "Field required",
+    }]

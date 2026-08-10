@@ -4,7 +4,7 @@ import json
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -54,7 +54,11 @@ from app.core.rate_limit import (
     passkey_registration_rate_key,
     runtime_limit,
 )
-from app.core.security import ensure_recent_reauth, get_current_user
+from app.core.security import (
+    ensure_recent_reauth,
+    get_current_user,
+)
+from app.core.commissioning import commissioning_stage
 from app.core.sessions import revoke_all_user_sessions, validate_session
 from app.db.database import get_db
 from app.models.user import (
@@ -76,6 +80,7 @@ class BootstrapStatusResponse(BaseModel):
     needs_bootstrap: bool
     bootstrap_configured: bool
     bootstrap_disabled: bool
+    stage: Literal["passkey", "setup", "complete"]
     policy_version: str
     policy_sha256: str
     policy_text: str
@@ -109,9 +114,22 @@ def _root_needs_bootstrap(db: Session) -> bool:
     root = db.query(User).filter(User.is_root_admin == True).first()  # noqa: E712
     if root is None:
         return True
-    return not db.query(WebAuthnCredential).filter(
+    credential = db.query(WebAuthnCredential).filter(
         WebAuthnCredential.user_id == root.id
     ).first()
+    return credential is None
+
+
+def _bootstrap_stage(db: Session) -> Literal["passkey", "setup", "complete"]:
+    root = db.query(User).filter(User.is_root_admin == True).first()  # noqa: E712
+    if root is None:
+        return "passkey"
+    credential = db.query(WebAuthnCredential).filter(
+        WebAuthnCredential.user_id == root.id
+    ).first()
+    if credential is None:
+        return "passkey"
+    return "complete" if commissioning_stage(db) == "complete" else "setup"
 
 
 def _bootstrap_is_disabled(db: Session) -> bool:
@@ -134,13 +152,23 @@ def _require_bootstrap_token(request: Request, db: Session) -> None:
         raise HTTPException(status_code=403, detail="Invalid root bootstrap code")
 
 
-def _active_user(user_id: int, db: Session, *, require_activated: bool = True) -> User:
+def _active_user(
+    user_id: int,
+    db: Session,
+    *,
+    require_activated: bool = True,
+    allow_root_recovery: bool = False,
+) -> User:
     """Load an account that is currently permitted to authenticate."""
     user = db.query(User).filter(User.id == user_id).first()
     if (
         user is None
         or not user.is_active
-        or (require_activated and not user.is_activated)
+        or (
+            require_activated
+            and not user.is_activated
+            and not (allow_root_recovery and user.is_root_admin)
+        )
     ):
         raise HTTPException(status_code=401, detail="Authentication failed")
     return user
@@ -264,6 +292,7 @@ def bootstrap_status(db: Session = Depends(get_db)):
         needs_bootstrap=_root_needs_bootstrap(db),
         bootstrap_configured=bool(settings.ROOT_BOOTSTRAP_TOKEN) and not disabled,
         bootstrap_disabled=disabled,
+        stage=_bootstrap_stage(db),
         policy_version=BOOTSTRAP_POLICY_VERSION,
         policy_sha256=BOOTSTRAP_POLICY_SHA256,
         policy_text=BOOTSTRAP_POLICY_TEXT,
@@ -275,8 +304,8 @@ def bootstrap_status(db: Session = Depends(get_db)):
 def bootstrap_begin(request: Request, db: Session = Depends(get_db)):
     """Start root registration after verifying the operator bootstrap code."""
     _require_bootstrap_token(request, db)
-    if not _root_needs_bootstrap(db):
-        raise HTTPException(status_code=403, detail="Bootstrap already completed")
+    if _bootstrap_stage(db) != "passkey":
+        raise HTTPException(status_code=403, detail="Root passkey registration is already complete")
     root = db.query(User).filter(User.is_root_admin == True).first()  # noqa: E712
     if root is None:
         raise HTTPException(status_code=500, detail="Root admin user not found")
@@ -366,12 +395,9 @@ def bootstrap_complete(
             user=root,
         )
         raise HTTPException(status_code=409, detail="Passkey is already registered") from exc
+    # Authentication is available immediately; commissioning is enforced by
+    # authoritative deployment facts rather than the account activation flag.
     root.is_activated = True
-    disabled = db.query(ServerSetting).filter(ServerSetting.key == "root_bootstrap_disabled").first()
-    if disabled is None:
-        db.add(ServerSetting(key="root_bootstrap_disabled", value="true"))
-    else:
-        disabled.value = "true"
     setup_acknowledgement = {
         "governance_setup_ack_instance_id": stable_instance_id(db),
         "governance_setup_ack_root_user_id": str(root.id),
@@ -385,6 +411,12 @@ def bootstrap_complete(
             db.add(ServerSetting(key=key, value=value))
         else:
             row.value = value
+    disabled = db.query(ServerSetting).filter(ServerSetting.key == "root_bootstrap_disabled").first()
+    if disabled is None:
+        db.add(ServerSetting(key="root_bootstrap_disabled", value="true"))
+    else:
+        disabled.value = "true"
+    raw_code = _create_exchange_code(root.id, db)
     audit(
         db,
         user=root,
@@ -393,7 +425,12 @@ def bootstrap_complete(
         request=request,
     )
     db.commit()
-    return {"status": "ok", "message": "Root passkey registered successfully"}
+    return {
+        "status": "commissioning_required",
+        "exchange_code": raw_code,
+        "setup_url": "/setup",
+        "message": "Root passkey registered. Continue the three-step commissioning wizard.",
+    }
 
 
 @router.post("/register/begin")
@@ -732,7 +769,11 @@ def auth_complete(
         _record_verification_failure(db, request, action="passkey.auth_failed")
         raise HTTPException(status_code=400, detail="Authentication failed")
     try:
-        user = _active_user(stored_credential.user_id, db)
+        user = _active_user(
+            stored_credential.user_id,
+            db,
+            allow_root_recovery=True,
+        )
     except HTTPException as exc:
         denied_user = db.query(User).filter(User.id == stored_credential.user_id).first()
         _record_verification_failure(

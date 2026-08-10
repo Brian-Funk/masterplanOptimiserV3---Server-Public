@@ -17,6 +17,10 @@ vi.mock("@/contexts/ServiceAvailabilityContext", () => ({
 vi.mock("@/components/Logo", () => ({ Logo: () => <div>Masterplan Optimiser</div> }));
 vi.mock("@/components/ThemeToggle", () => ({ ThemeToggle: () => <button>Theme</button> }));
 vi.mock("@/lib/environment", () => ({ getApiUrl: () => "https://server.test" }));
+vi.mock("@/lib/scheduleDays", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/scheduleDays")>();
+  return { ...original, currentWorkingDate: () => "2026-08-01" };
+});
 
 const payload = {
   event: {

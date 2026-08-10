@@ -1,9 +1,15 @@
 """Portable public evidence bundle and Git staging tests."""
 
+import base64
+import hashlib
 import json
 from pathlib import Path
 import subprocess
 import sys
+import zipfile
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +20,72 @@ import evidence_bundle  # noqa: E402
 import evidence_manifest  # noqa: E402
 
 
-def _ledger(tmp_path: Path) -> Path:
+def _bind_archive_trust(home: Path, instance_private: Path, instance_public_path: Path) -> None:
+    controller_private = Ed25519PrivateKey.generate()
+    controller_public = controller_private.public_key().public_bytes(
+        serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH,
+    ).decode("ascii")
+    instance_public = evidence_manifest.canonical_public_key(
+        instance_public_path.read_text(encoding="ascii")
+    )
+    controller_key_id = evidence_manifest.key_id(controller_public)
+    document = {
+        "format": "mp-opt-controller-archive-trust-v1",
+        "instance_id": "11111111-1111-4111-8111-111111111111",
+        "controller_id": "ctl-controller000001",
+        "controller_key_id": controller_key_id,
+        "controller_public_key_sha256": hashlib.sha256(controller_public.encode("ascii")).hexdigest(),
+        "instance_key_id": evidence_manifest.key_id(instance_public),
+        "instance_public_key_sha256": hashlib.sha256(instance_public.encode("ascii")).hexdigest(),
+        "scope": "accountability_evidence_archive",
+        "signed_at": "2026-08-05T10:00:00Z",
+    }
+    canonical_document = (
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    proof = {
+        "format": "mp-opt-ed25519-signature-v1",
+        "key_id": controller_key_id,
+        "namespace": "mp-opt-role-trust-v1",
+        "signature": base64.b64encode(
+            controller_private.sign(b"mp-opt-role-trust-v1\0" + canonical_document)
+        ).decode("ascii"),
+    }
+    package = {
+        "format": "mp-opt-signed-controller-archive-trust-v1",
+        "namespace": "mp-opt-role-trust-v1",
+        "document": document,
+        "proof": proof,
+        "controller_public_key": controller_public,
+        "instance_public_key": instance_public,
+    }
+    raw = (json.dumps(package, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    archive_trust = home / "archive-trust"
+    archive_trust.mkdir()
+    (archive_trust / f"{digest}.json").write_bytes(raw)
+    evidence_manifest.append_record(
+        home / "ledger",
+        instance_id=document["instance_id"],
+        chain_id="22222222-2222-4222-8222-222222222222",
+        record_type="evidence.archive_trust_bound",
+        payload={
+            "controller_id": document["controller_id"],
+            "controller_key_id": controller_key_id,
+            "key_id": document["instance_key_id"],
+            "public_key_sha256": document["instance_public_key_sha256"],
+            "statement_sha256": digest,
+            "proof_sha256": hashlib.sha256(
+                (json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            ).hexdigest(),
+            "status": "verified",
+        },
+        private_key=instance_private,
+        public_key=instance_public_path,
+    )
+
+
+def _ledger(tmp_path: Path, *, with_processor_artifact: bool = False) -> Path:
     home = tmp_path / "evidence"
     private = tmp_path / "key"
     public = home / "public" / "instance_signing_key.pub"
@@ -33,6 +104,71 @@ def _ledger(tmp_path: Path) -> Path:
         private_key=private,
         public_key=public,
     )
+    _bind_archive_trust(home, private, public)
+    if with_processor_artifact:
+        processor_private = Ed25519PrivateKey.generate()
+        processor_public = processor_private.public_key().public_bytes(
+            serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH,
+        ).decode("ascii")
+        processor_key_id = evidence_manifest.key_id(processor_public)
+        fingerprint = hashlib.sha256(processor_public.encode("ascii")).hexdigest()
+        document = {
+            "format": "mp-opt-desktop-policy-acknowledgement-v1",
+            "instance_id": "11111111-1111-4111-8111-111111111111",
+            "event_ref": "33333333-3333-4333-8333-333333333333",
+            "entity_id": "prc-synthetic0001",
+            "key_id": processor_key_id,
+            "role": "processor",
+            "algorithm": "Ed25519",
+            "public_key_sha256": fingerprint,
+            "policy_version": 1,
+            "policy_sha256": "a" * 64,
+            "acknowledged_at": evidence_manifest.utc_now(),
+        }
+        canonical_document = (
+            json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+        signature = processor_private.sign(b"mp-opt-desktop-evidence-v1\0" + canonical_document)
+        proof = {
+            "format": "mp-opt-ed25519-signature-v1",
+            "key_id": processor_key_id,
+            "namespace": "mp-opt-desktop-evidence-v1",
+            "signature": base64.b64encode(signature).decode("ascii"),
+        }
+        package = {
+            "format": "mp-opt-signed-desktop-evidence-v1",
+            "namespace": "mp-opt-desktop-evidence-v1",
+            "document": document,
+            "proof": proof,
+            "public_key": processor_public,
+        }
+        raw = (json.dumps(package, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        package_digest = hashlib.sha256(raw).hexdigest()
+        artifacts = home / "artifacts"
+        artifacts.mkdir()
+        (artifacts / f"{package_digest}.json").write_bytes(raw)
+        evidence_manifest.append_record(
+            home / "ledger",
+            instance_id="11111111-1111-4111-8111-111111111111",
+            chain_id="22222222-2222-4222-8222-222222222222",
+            record_type="desktop.policy_acknowledged",
+            payload={
+                "event_ref": document["event_ref"],
+                "entity_id": document["entity_id"],
+                "key_id": processor_key_id,
+                "policy_version": 1,
+                "policy_sha256": document["policy_sha256"],
+                "document_sha256": hashlib.sha256(canonical_document).hexdigest(),
+                "signature_sha256": hashlib.sha256(
+                    (json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                ).hexdigest(),
+                "evidence_package_sha256": package_digest,
+                "public_key_sha256": fingerprint,
+                "status": "verified",
+            },
+            private_key=private,
+            public_key=public,
+        )
     return home
 
 
@@ -47,9 +183,31 @@ def test_bundle_round_trip_and_idempotent_git_staging(tmp_path):
 
     assert created["bundle_sha256"] == evidence_bundle.sha256_file(bundle)
     assert verified["valid"] is True
-    assert verified["record_count"] == 1
+    assert verified["record_count"] == 2
     assert first["status"] == "staged"
     assert second["status"] == "already_staged"
+
+
+def test_complete_zip_is_deterministic_exact_and_verified(tmp_path):
+    home = _ledger(tmp_path)
+    first_bundle = tmp_path / "first.evidence"
+    second_bundle = tmp_path / "second.evidence"
+    first_zip = tmp_path / "first.zip"
+    second_zip = tmp_path / "second.zip"
+
+    evidence_bundle.create_bundle(home, first_bundle)
+    evidence_bundle.create_bundle(home, second_bundle)
+    evidence_bundle.create_evidence_zip(home, first_zip)
+    evidence_bundle.create_evidence_zip(home, second_zip)
+
+    assert first_bundle.read_bytes() == second_bundle.read_bytes()
+    assert first_zip.read_bytes() == second_zip.read_bytes()
+    result = evidence_bundle.verify_evidence_zip(first_zip)
+    assert result["valid"] is True
+    assert result["valid_zip"] is True
+    with zipfile.ZipFile(first_zip) as archive:
+        assert tuple(archive.namelist()) == evidence_bundle.ZIP_MEMBERS
+        assert evidence_bundle.PUBLIC_VERIFIER_URL.encode("ascii") in archive.read("VERIFYING.txt")
 
 
 def test_bundle_tampering_is_rejected(tmp_path):
@@ -68,3 +226,129 @@ def test_bundle_tampering_is_rejected(tmp_path):
         pass
     else:
         raise AssertionError("tampered evidence bundle was accepted")
+
+
+def test_bundle_verifies_referenced_desktop_signature_and_rejects_tampering(tmp_path):
+    home = _ledger(tmp_path, with_processor_artifact=True)
+    bundle = tmp_path / "processor.evidence"
+    evidence_bundle.create_bundle(home, bundle)
+    assert evidence_bundle.verify_bundle(bundle)["processor_artifact_count"] == 1
+
+    artifact = next((home / "artifacts").glob("*.json"))
+    document = json.loads(artifact.read_text(encoding="utf-8"))
+    document["document"]["policy_version"] = 2
+    raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    artifact.write_bytes(raw)
+    tampered = tmp_path / "tampered.evidence"
+    try:
+        evidence_bundle.create_bundle(home, tampered)
+    except evidence_bundle.BundleError:
+        pass
+    else:
+        raise AssertionError("tampered Desktop evidence artifact was accepted")
+
+
+def test_complete_zip_verifies_deletion_domain_digests(tmp_path):
+    home = _ledger(tmp_path)
+    private = tmp_path / "key"
+    public = home / "public" / "instance_signing_key.pub"
+    artifacts = home / "artifacts"
+    artifacts.mkdir()
+    processor_private = Ed25519PrivateKey.generate()
+    processor_public = processor_private.public_key().public_bytes(
+        serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH,
+    ).decode("ascii")
+    processor_key_id = evidence_manifest.key_id(processor_public)
+    fingerprint = hashlib.sha256(processor_public.encode("ascii")).hexdigest()
+    case_id = "44444444-4444-4444-8444-444444444444"
+    event_ref = "33333333-3333-4333-8333-333333333333"
+
+    def append_artifact(record_type, operation_id, digest_field, document, extra_payload):
+        signed_document = (
+            json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        signature = processor_private.sign(b"mp-opt-desktop-evidence-v1\0" + signed_document)
+        proof = {
+            "format": "mp-opt-ed25519-signature-v1",
+            "key_id": processor_key_id,
+            "namespace": "mp-opt-desktop-evidence-v1",
+            "signature": base64.b64encode(signature).decode("ascii"),
+        }
+        package = {
+            "format": "mp-opt-signed-desktop-evidence-v1",
+            "namespace": "mp-opt-desktop-evidence-v1",
+            "document": document,
+            "proof": proof,
+            "public_key": processor_public,
+        }
+        raw = (json.dumps(package, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        package_digest = hashlib.sha256(raw).hexdigest()
+        (artifacts / f"{package_digest}.json").write_bytes(raw)
+        domain_document = json.dumps(
+            document,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        evidence_manifest.append_record(
+            home / "ledger",
+            instance_id="11111111-1111-4111-8111-111111111111",
+            chain_id="22222222-2222-4222-8222-222222222222",
+            record_type=record_type,
+            payload={
+                "case_id": case_id,
+                "event_ref": event_ref,
+                "processor_entity_id": "prc-synthetic0001",
+                "processor_key_id": processor_key_id,
+                "completed_public_key_sha256": fingerprint,
+                digest_field: hashlib.sha256(domain_document).hexdigest(),
+                "signature_sha256": hashlib.sha256(
+                    (json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                ).hexdigest(),
+                "evidence_package_sha256": package_digest,
+                "status": "verified",
+                **extra_payload,
+            },
+            private_key=private,
+            public_key=public,
+            record_id=operation_id,
+        )
+
+    append_artifact(
+        "deletion.desktop_report_received",
+        "55555555-5555-4555-8555-555555555555",
+        "report_sha256",
+        {
+            "format": "mp-opt-desktop-deletion-receipt-v2",
+            "event_ref": event_ref,
+            "key_id": processor_key_id,
+            "public_key_sha256": fingerprint,
+        },
+        {
+            "work_order_id": "66666666-6666-4666-8666-666666666666",
+            "outstanding_actions": [],
+        },
+    )
+    append_artifact(
+        "deletion.desktop_copy_resolution",
+        "77777777-7777-4777-8777-777777777777",
+        "copy_resolution_sha256",
+        {
+            "format": "mp-opt-desktop-copy-resolution-v1",
+            "event_ref": event_ref,
+            "key_id": processor_key_id,
+            "public_key_sha256": fingerprint,
+        },
+        {
+            "work_order_id": "66666666-6666-4666-8666-666666666666",
+            "disposition": "no_known_local_copies",
+        },
+    )
+
+    output = tmp_path / "deletion-evidence.zip"
+    created = evidence_bundle.create_evidence_zip(home, output)
+    verified = evidence_bundle.verify_evidence_zip(output)
+
+    assert created["processor_artifact_count"] == 2
+    assert verified["processor_artifact_count"] == 2

@@ -20,6 +20,7 @@ DEPLOYMENT_POLICY = Path(os.getenv("MP_DEPLOYMENT_POLICY_FILE", "/etc/mp-opt/dep
 CONTROL_PATH = ROOT / "runtime/ha-control.json"
 RECEIVER_PATH = ROOT / "runtime/ha-receiver.json"
 SMTP_STATUS_PATH = ROOT / "runtime/ha-smtp-status.json"
+CONNECTION_DRAIN_PATH = ROOT / "runtime/ha-connection-drain.json"
 
 
 def read_config() -> dict[str, str]:
@@ -121,7 +122,7 @@ def smtp_state() -> dict:
         return {}
 
 
-def local_healthy(config: dict[str, str]) -> bool:
+def compose_command() -> list[str]:
     compose = [
         "docker", "compose", "--env-file", str(ROOT / ".env"),
     ]
@@ -137,6 +138,11 @@ def local_healthy(config: dict[str, str]) -> bool:
     override = ROOT / "infra/docker-compose.override.yml"
     if override.is_file():
         compose.extend(["-f", str(override)])
+    return compose
+
+
+def local_healthy(config: dict[str, str]) -> bool:
+    compose = compose_command()
     result = subprocess.run(
         [*compose, "exec", "-T", "backend", "python", "-c",
          'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3).read()'],
@@ -144,6 +150,60 @@ def local_healthy(config: dict[str, str]) -> bool:
         check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     return result.returncode == 0
+
+
+def drain_standby_client_connections(config: dict[str, str], state: dict) -> bool:
+    """Close pre-handoff HTTP pools after DNS has had time to converge."""
+
+    generation = state.get("generation")
+    transition = state.get("transition") if isinstance(state.get("transition"), dict) else {}
+    recovery = state.get("last_recovery") if isinstance(state.get("last_recovery"), dict) else {}
+    routing = state.get("routing") if isinstance(state.get("routing"), dict) else {}
+    if (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 1
+        or state.get("holder_node_id") == config["HA_NODE_ID"]
+        or state.get("routing_ready") is not True
+        or transition.get("phase") != "stable"
+        or recovery.get("kind") not in {"planned_handoff", "automatic_failover"}
+    ):
+        return False
+    try:
+        completed_at = datetime.fromisoformat(
+            str(recovery["completed_at"]).replace("Z", "+00:00")
+        )
+        if completed_at.tzinfo is None:
+            return False
+    except (KeyError, TypeError, ValueError):
+        return False
+    ttl = routing.get("ttl", 60)
+    if not isinstance(ttl, int) or isinstance(ttl, bool):
+        ttl = 60
+    ttl = max(5, min(300, ttl))
+    if (datetime.now(timezone.utc) - completed_at.astimezone(timezone.utc)).total_seconds() < ttl + 5:
+        return False
+    try:
+        marker = json.loads(CONNECTION_DRAIN_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        marker = {}
+    if isinstance(marker, dict) and marker.get("generation") == generation:
+        return False
+    subprocess.run(
+        [*compose_command(), "restart", "caddy"],
+        check=True,
+        timeout=45,
+        env={**os.environ, **config},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    atomic_json(CONNECTION_DRAIN_PATH, {
+        "format": "mp-opt-ha-connection-drain-v1",
+        "generation": generation,
+        "holder_node_id": state.get("holder_node_id"),
+        "drained_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    })
+    return True
 
 
 def promote(config: dict[str, str], generation: int) -> None:
@@ -185,6 +245,8 @@ def one_iteration(config: dict[str, str]) -> dict:
         state = post(config, "ready", {"node_id": config["HA_NODE_ID"]})
         state.update({"node_id": config["HA_NODE_ID"], "observed_at": datetime.now(timezone.utc).isoformat()})
         atomic_json(CONTROL_PATH, state)
+    elif state.get("holder_node_id") != config["HA_NODE_ID"]:
+        drain_standby_client_connections(config, state)
     return state
 
 

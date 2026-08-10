@@ -14,6 +14,15 @@ import {
 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api";
+import {
+  newIdempotencyKey,
+  pendingSecrets,
+  pollProtection,
+  protectionStageLabel,
+  randomSecret,
+  removePendingSecret,
+  retainPendingSecret,
+} from "@/lib/haProtection";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
@@ -42,12 +51,15 @@ export interface PublicScheduleLinkRecord {
   created_at: string;
   updated_at: string | null;
   created_by_id: number | null;
-  status: "active" | "expired" | "invalidated" | "unavailable";
+  status: "active" | "expired" | "invalidated" | "unavailable" | "securing";
   views: PublicScheduleLinkPermission[];
+  protection_operation_id?: string | null;
+  protection_state?: string | null;
+  protection_stage?: string | null;
 }
 
 interface PublicScheduleLinkCreated extends PublicScheduleLinkRecord {
-  share_url: string;
+  share_url?: string | null;
 }
 
 /** Props for the Public Schedule link-management tab. */
@@ -96,6 +108,8 @@ function statusClasses(status: PublicScheduleLinkRecord["status"]): string {
       return "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400";
     case "expired":
       return "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400";
+    case "securing":
+      return "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300";
     default:
       return "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300";
   }
@@ -122,6 +136,7 @@ export function PublicScheduleLinksTab({ eventId }: PublicScheduleLinksTabProps)
   const [copied, setCopied] = useState(false);
   const [confirmInvalidateId, setConfirmInvalidateId] = useState<number | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const [protectionStages, setProtectionStages] = useState<Record<string, string>>({});
 
   const loadData = useCallback(async () => {
     if (!eventId) {
@@ -159,6 +174,38 @@ export function PublicScheduleLinksTab({ eventId }: PublicScheduleLinksTabProps)
     }
   }, [eventId]);
 
+  const monitorCreatedLink = useCallback((pending: ReturnType<typeof pendingSecrets>[number]) => {
+    setProtectionStages((current) => ({ ...current, [pending.operationId]: "queued" }));
+    void pollProtection(pending.operationId, (operation) => {
+      setProtectionStages((current) => ({ ...current, [pending.operationId]: operation.stage }));
+    }).then((operation) => {
+      if (operation.state !== "accepted") {
+        setError("Standby protection needs attention. The link remains locked and cannot be used.");
+        return;
+      }
+      setGeneratedUrl(`${window.location.origin}/shared-schedule#token=${pending.secret}`);
+      setCopied(false);
+      removePendingSecret(pending.operationId);
+      void loadData();
+    }).catch((cause) => {
+      setError(cause instanceof Error ? cause.message : "Protection status is unavailable.");
+    });
+  }, [loadData]);
+
+  const monitorOperation = useCallback((operationId: string) => {
+    setProtectionStages((current) => ({ ...current, [operationId]: "queued" }));
+    void pollProtection(operationId, (operation) => {
+      setProtectionStages((current) => ({ ...current, [operationId]: operation.stage }));
+    }).then((operation) => {
+      if (operation.state !== "accepted") {
+        setError("Standby protection needs attention. The change remains durable and locked.");
+      }
+      void loadData();
+    }).catch((cause) => {
+      setError(cause instanceof Error ? cause.message : "Protection status is unavailable.");
+    });
+  }, [loadData]);
+
   useEffect(() => {
     setEditorOpen(false);
     setEditingLink(null);
@@ -166,7 +213,10 @@ export function PublicScheduleLinksTab({ eventId }: PublicScheduleLinksTabProps)
     setConfirmInvalidateId(null);
     setConfirmDeleteId(null);
     loadData();
-  }, [loadData]);
+    pendingSecrets()
+      .filter((pending) => pending.kind === "public-link-create")
+      .forEach((pending) => monitorCreatedLink(pending));
+  }, [loadData, monitorCreatedLink]);
 
   const editorViews = useMemo(() => {
     const byId = new Map<number, PublicScheduleLinkViewOption & { available: boolean }>();
@@ -226,6 +276,8 @@ export function PublicScheduleLinksTab({ eventId }: PublicScheduleLinksTabProps)
     setSaving(true);
     setError("");
     try {
+      const idempotencyKey = newIdempotencyKey();
+      const token = editingLink ? null : randomSecret();
       const path = editingLink
         ? `/api/v1/admin/events/${eventId}/public-schedule-links/${editingLink.id}`
         : `/api/v1/admin/events/${eventId}/public-schedule-links`;
@@ -235,15 +287,33 @@ export function PublicScheduleLinksTab({ eventId }: PublicScheduleLinksTabProps)
           description: description.trim(),
           expires_at: new Date(expiresAt).toISOString(),
           view_ids: selectedViewIds,
+          idempotency_key: idempotencyKey,
+          ...(token ? { token } : {}),
         }),
       });
       if (!response.ok) {
         throw new Error(await responseError(response, "Could not save the public link."));
       }
       const data = (await response.json()) as PublicScheduleLinkCreated | PublicScheduleLinkRecord;
-      if (!editingLink && "share_url" in data) {
-        setGeneratedUrl(`${window.location.origin}${data.share_url}`);
-        setCopied(false);
+      if (editingLink && data.protection_operation_id) {
+        monitorOperation(data.protection_operation_id);
+      }
+      if (!editingLink && token) {
+        if (data.protection_operation_id) {
+          const pending = {
+            operationId: data.protection_operation_id,
+            idempotencyKey,
+            kind: "public-link-create" as const,
+            resourceId: data.id,
+            secret: token,
+            createdAt: new Date().toISOString(),
+          };
+          retainPendingSecret(pending);
+          monitorCreatedLink(pending);
+        } else {
+          setGeneratedUrl(`${window.location.origin}${("share_url" in data && data.share_url) || `/shared-schedule#token=${token}`}`);
+          setCopied(false);
+        }
       }
       closeEditor();
       await loadData();
@@ -269,11 +339,17 @@ export function PublicScheduleLinksTab({ eventId }: PublicScheduleLinksTabProps)
     try {
       const response = await apiFetch(
         `/api/v1/admin/events/${eventId}/public-schedule-links/${linkId}/invalidate`,
-        { method: "POST", body: JSON.stringify({}) },
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": newIdempotencyKey() },
+          body: JSON.stringify({}),
+        },
       );
       if (!response.ok) {
         throw new Error(await responseError(response, "Could not invalidate the public link."));
       }
+      const result = await response.json().catch(() => null);
+      if (result?.protection_operation_id) monitorOperation(result.protection_operation_id);
       setConfirmInvalidateId(null);
       await loadData();
     } catch (invalidateError) {
@@ -291,11 +367,13 @@ export function PublicScheduleLinksTab({ eventId }: PublicScheduleLinksTabProps)
     try {
       const response = await apiFetch(
         `/api/v1/admin/events/${eventId}/public-schedule-links/${linkId}`,
-        { method: "DELETE" },
+        { method: "DELETE", headers: { "Idempotency-Key": newIdempotencyKey() } },
       );
       if (!response.ok) {
         throw new Error(await responseError(response, "Could not delete the public link."));
       }
+      const result = response.status === 204 ? null : await response.json().catch(() => null);
+      if (result?.protection_operation_id) monitorOperation(result.protection_operation_id);
       setConfirmDeleteId(null);
       await loadData();
     } catch (deleteError) {
@@ -529,6 +607,14 @@ export function PublicScheduleLinksTab({ eventId }: PublicScheduleLinksTabProps)
                     >
                       {link.status}
                     </span>
+                    {link.status === "securing" && (
+                      <p className="mt-1 text-xs text-blue-700 dark:text-blue-300">
+                        {protectionStageLabel(
+                          (link.protection_operation_id && protectionStages[link.protection_operation_id])
+                          || link.protection_stage,
+                        )}
+                      </p>
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-1">
@@ -555,7 +641,7 @@ export function PublicScheduleLinksTab({ eventId }: PublicScheduleLinksTabProps)
                         </>
                       ) : confirmInvalidateId === link.id ? (
                           <>
-                            <button
+                            {link.status !== "securing" && <button
                               type="button"
                               onClick={() => handleInvalidate(link.id)}
                               className="rounded p-1.5 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20"
@@ -563,7 +649,7 @@ export function PublicScheduleLinksTab({ eventId }: PublicScheduleLinksTabProps)
                               title="Confirm invalidation"
                             >
                               <Check size={16} />
-                            </button>
+                            </button>}
                             <button
                               type="button"
                               onClick={() => setConfirmInvalidateId(null)}

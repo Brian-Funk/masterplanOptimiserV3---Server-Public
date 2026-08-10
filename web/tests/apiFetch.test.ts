@@ -18,7 +18,7 @@ Object.defineProperty(document, "cookie", {
   value: "csrf_token=test-csrf-123",
 });
 
-import { apiFetch } from "@/lib/api";
+import { apiFetch, retryServiceTransition } from "@/lib/api";
 
 beforeEach(() => {
   mockFetch.mockReset();
@@ -133,5 +133,33 @@ describe("apiFetch", () => {
     // Should not add an empty CSRF header
     expect(call[1].headers["X-CSRF-Token"]).toBeUndefined();
     document.cookie = originalCookie;
+  });
+
+  it("retries an idempotent request through a bounded service transition", async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(new Response("", { status: 502 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }));
+    const wait = vi.fn().mockResolvedValue(undefined);
+
+    const response = await retryServiceTransition(request, {
+      delaysMs: [1],
+      wait,
+    });
+
+    expect(response.status).toBe(200);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(wait).toHaveBeenCalledWith(1);
+  });
+
+  it("returns the final upstream response after bounded retries are exhausted", async () => {
+    const request = vi.fn().mockResolvedValue(new Response("", { status: 503 }));
+
+    const response = await retryServiceTransition(request, {
+      delaysMs: [1, 2],
+      wait: async () => undefined,
+    });
+
+    expect(response.status).toBe(503);
+    expect(request).toHaveBeenCalledTimes(3);
   });
 });

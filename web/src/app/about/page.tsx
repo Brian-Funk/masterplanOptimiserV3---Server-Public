@@ -1,103 +1,88 @@
-import Link from "next/link";
+import Link from 'next/link';
+
+import {
+  PublicInformationSection,
+  PublicInformationShell,
+} from '@/components/PublicInformationShell';
+import { PUBLIC_TEXT_LINK_CLASS } from '@/lib/publicLinks';
+
+const technologies = [
+  ['Next.js', 'User interface framework', 'https://nextjs.org/'],
+  ['React', 'Component model', 'https://react.dev/'],
+  ['FastAPI', 'Backend API', 'https://fastapi.tiangolo.com/'],
+  ['Google OR-Tools', 'Constraint-based schedule optimisation', 'https://developers.google.com/optimization'],
+  ['SQLAlchemy', 'Database access', 'https://www.sqlalchemy.org/'],
+  ['Tailwind CSS', 'Design system', 'https://tailwindcss.com/'],
+  ['WebAuthn and passkeys', 'Passwordless authentication', 'https://developer.mozilla.org/en-US/docs/Web/API/Web_Authentication_API'],
+] as const;
 
 export default function AboutPage() {
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
-      <div className="max-w-3xl mx-auto px-6 py-12">
-        <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100 mb-8">
-          About
-        </h1>
+    <PublicInformationShell
+      lead='What Masterplan Optimiser does, how this build was produced, and who maintains the project.'
+      section='about'
+      title='About'
+    >
+      <PublicInformationSection title='Masterplan Optimiser'>
+        <p>
+          Masterplan Optimiser is an open-source scheduling and resource-allocation platform for
+          event organisers. It combines constraint-based optimisation with a focused calendar
+          interface for planning complex multi-day events.
+        </p>
+      </PublicInformationSection>
 
-        <div className="space-y-6 text-gray-700 dark:text-gray-300">
-          <section>
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100 mt-6 mb-3">
-              Masterplan Optimiser
-            </h2>
-            <p>
-              Masterplan Optimiser is a scheduling and resource-allocation
-              platform built for event organisers. It combines constraint-based
-              optimisation with an intuitive calendar interface to help teams
-              plan complex multi-day events efficiently.
-            </p>
-          </section>
+      <PublicInformationSection title='Technology'>
+        <p>
+          The application is built from reviewed open-source components. See the{' '}
+          <Link className={PUBLIC_TEXT_LINK_CLASS} href='/third-party-notices'>
+            complete third-party notices
+          </Link>.
+        </p>
+        <ul className='grid list-none gap-3 p-0 sm:grid-cols-2'>
+          {technologies.map(([name, purpose, href]) => (
+            <li className='rounded-xl border border-gray-200 p-4 dark:border-gray-700' key={name}>
+              <a className={PUBLIC_TEXT_LINK_CLASS} href={href} rel='noopener noreferrer' target='_blank'>
+                {name}
+              </a>
+              <p className='mt-1 text-sm'>{purpose}</p>
+            </li>
+          ))}
+        </ul>
+      </PublicInformationSection>
 
-          <section>
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100 mt-6 mb-3">
-              Credits
-            </h2>
-            <p>
-              Designed and developed by{" "}
-              <strong className="text-gray-900 dark:text-gray-100">
-                Brian Funk
-              </strong>
-              .
-            </p>
-          </section>
+      <PublicInformationSection title='Credits'>
+        <p>
+          Designed and developed by{' '}
+          <a className={PUBLIC_TEXT_LINK_CLASS} href='https://github.com/Brian-Funk' rel='noopener noreferrer' target='_blank'>
+            Brian Funk
+          </a>.
+        </p>
+      </PublicInformationSection>
 
-          <section>
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100 mt-6 mb-3">
-              Technology
-            </h2>
-            <p>Built with the following open-source technologies:</p>
-            <ul className="list-disc pl-6 mt-2 space-y-1">
-              <li>
-                <strong>Next.js</strong> &amp; <strong>React</strong> - user
-                interface
-              </li>
-              <li>
-                <strong>FastAPI</strong> - backend API
-              </li>
-              <li>
-                <strong>Google OR-Tools</strong> - constraint-based schedule
-                optimisation
-              </li>
-              <li>
-                <strong>SQLAlchemy</strong> - database access
-              </li>
-              <li>
-                <strong>Tailwind CSS</strong> - styling
-              </li>
-              <li>
-                <strong>WebAuthn / Passkeys</strong> - passwordless
-                authentication
-              </li>
-            </ul>
-          </section>
-
-          <section>
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100 mt-6 mb-3">
-              Version
-            </h2>
-            <p>
-              Web Application&ensp;
-              <code className="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-sm">
-                v{process.env.NEXT_PUBLIC_APP_VERSION}
-              </code>
-            </p>
-            <p className="mt-2 break-all text-sm">
-              Corresponding source for this exact build: {" "}
+      <PublicInformationSection title='Build identity'>
+        <dl className='grid gap-3 sm:grid-cols-2'>
+          <div className='rounded-xl border border-gray-200 p-4 dark:border-gray-700'>
+            <dt className='text-sm text-gray-500 dark:text-gray-400'>Web application</dt>
+            <dd className='mt-1 font-semibold text-gray-900 dark:text-gray-100'>
+              v{process.env.NEXT_PUBLIC_APP_VERSION}
+            </dd>
+          </div>
+          <div className='rounded-xl border border-gray-200 p-4 dark:border-gray-700'>
+            <dt className='text-sm text-gray-500 dark:text-gray-400'>Corresponding source</dt>
+            <dd className='mt-1 break-all text-sm'>
               <a
-                className="text-blue-600 underline dark:text-blue-400"
+                className={PUBLIC_TEXT_LINK_CLASS}
                 href={process.env.NEXT_PUBLIC_SOURCE_URL}
-                rel="noreferrer"
-                target="_blank"
+                rel='noreferrer'
+                target='_blank'
               >
                 {process.env.NEXT_PUBLIC_SOURCE_REPOSITORY_URL}@
                 {process.env.NEXT_PUBLIC_SOURCE_REVISION}
               </a>
-            </p>
-          </section>
-        </div>
-
-        <div className="mt-12 pt-6 border-t border-gray-200 dark:border-gray-700">
-          <Link
-            href="/login"
-            className="text-blue-600 dark:text-blue-400 hover:underline text-sm"
-          >
-            &larr; Back to Login
-          </Link>
-        </div>
-      </div>
-    </div>
+            </dd>
+          </div>
+        </dl>
+      </PublicInformationSection>
+    </PublicInformationShell>
   );
 }

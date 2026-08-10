@@ -162,6 +162,26 @@ class PortableSnapshotTests(unittest.TestCase):
                 portable_snapshot.validate_package(package)
             self.assertFalse((root / "escape").exists())
 
+    def test_changed_tar_framing_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self.create_snapshot(root)
+            package = root / "recovery.mpopt-snapshot"
+            portable_snapshot.create_package(source, package)
+            original = package.read_bytes()
+
+            package.write_bytes(original[:-1])
+            with self.assertRaisesRegex(portable_snapshot.PackageError, "non-canonical TAR length"):
+                portable_snapshot.validate_package(package)
+
+            package.write_bytes(original + (b"\0" * tarfile.RECORDSIZE))
+            with self.assertRaisesRegex(portable_snapshot.PackageError, "non-canonical TAR length"):
+                portable_snapshot.validate_package(package)
+
+            package.write_bytes(original[:-1] + b"\1")
+            with self.assertRaisesRegex(portable_snapshot.PackageError, "non-zero trailing TAR padding"):
+                portable_snapshot.validate_package(package)
+
     def test_symbolic_link_snapshot_member_is_rejected(self) -> None:
         if not hasattr(os, "symlink"):
             self.skipTest("symbolic links are unavailable")

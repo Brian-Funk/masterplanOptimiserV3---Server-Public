@@ -19,11 +19,19 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 
-REGISTRATION_FORMAT = "mp-opt-trust-key-registration-v1"
-DECLARATION_FORMAT = "mp-opt-controller-trust-declaration-v1"
-PROCESSOR_STATEMENT_FORMAT = "mp-opt-processor-statement-v1"
+REGISTRATION_FORMAT = "mp-opt-controller-trust-registration-v2"
+PROCESSOR_EVENT_REGISTRATION_FORMAT = "mp-opt-processor-event-registration-v1"
+DESKTOP_POLICY_ACK_FORMAT = "mp-opt-desktop-policy-acknowledgement-v1"
+DESKTOP_DELETION_FORMAT = "mp-opt-desktop-deletion-receipt-v2"
+DESKTOP_COPY_RESOLUTION_FORMAT = "mp-opt-desktop-copy-resolution-v1"
+DESKTOP_WORK_ORDER_CLAIM_FORMAT = "mp-opt-desktop-work-order-claim-v1"
 SIGNATURE_FORMAT = "mp-opt-ed25519-signature-v1"
 TRUST_NAMESPACE = "mp-opt-role-trust-v1"
+DESKTOP_EVIDENCE_NAMESPACE = "mp-opt-desktop-evidence-v1"
+SIGNED_DESKTOP_EVIDENCE_PACKAGE_FORMAT = "mp-opt-signed-desktop-evidence-v1"
+ARCHIVE_TRUST_FORMAT = "mp-opt-controller-archive-trust-v1"
+SIGNED_ARCHIVE_TRUST_PACKAGE_FORMAT = "mp-opt-signed-controller-archive-trust-v1"
+ARCHIVE_TRUST_SCOPE = "accountability_evidence_archive"
 TRUST_ROLES = frozenset({"controller", "processor"})
 ROTATION_REASONS = frozenset({"routine", "lost", "compromised"})
 REVOCATION_REASONS = frozenset({"retired", "lost", "compromised", "role_changed"})
@@ -136,6 +144,8 @@ def action_payload(document: dict[str, Any]) -> dict[str, Any]:
         "role": document.get("role"),
         "algorithm": document.get("algorithm"),
         "public_key_sha256": document.get("public_key_sha256"),
+        "trust_scope": document.get("trust_scope"),
+        "governance_authorisation": document.get("governance_authorisation"),
         "supersedes_key_id": document.get("supersedes_key_id"),
         "reason": document.get("reason"),
     }
@@ -148,7 +158,8 @@ def action_sha256(document: dict[str, Any]) -> str:
 def validate_registration_document(document: dict[str, Any]) -> None:
     fields = {
         "format", "challenge_id", "action", "instance_id", "entity_id", "key_id",
-        "role", "algorithm", "public_key_sha256", "supersedes_key_id", "reason",
+        "role", "algorithm", "public_key_sha256", "trust_scope",
+        "governance_authorisation", "supersedes_key_id", "reason",
         "action_sha256", "nonce", "created_at", "expires_at",
     }
     if not isinstance(document, dict) or set(document) != fields or document.get("format") != REGISTRATION_FORMAT:
@@ -157,6 +168,12 @@ def validate_registration_document(document: dict[str, Any]) -> None:
     validate_entity(document["role"], document["entity_id"])
     if document["action"] not in {"register", "rotate"} or document["algorithm"] != "Ed25519":
         raise TrustEvidenceError("registration action or algorithm is invalid")
+    if document.get("role") != "controller":
+        raise TrustEvidenceError("the controller registration role is invalid")
+    if document.get("trust_scope") != "controller_governance_authority":
+        raise TrustEvidenceError("the controller trust scope is invalid")
+    if document.get("governance_authorisation") != "root_passkey_per_publication":
+        raise TrustEvidenceError("the governance authorisation scope is invalid")
     if not isinstance(document["key_id"], str) or not KEY_ID_RE.fullmatch(document["key_id"]):
         raise TrustEvidenceError("registration key ID is invalid")
     if not isinstance(document["public_key_sha256"], str) or not SHA256_RE.fullmatch(document["public_key_sha256"]):
@@ -182,50 +199,192 @@ def validate_registration_document(document: dict[str, Any]) -> None:
     canonical_json(document)
 
 
-def signature_envelope(*, key_identifier: str, signature: bytes) -> dict[str, str]:
+def signature_envelope(*, key_identifier: str, signature: bytes, namespace: str = TRUST_NAMESPACE) -> dict[str, str]:
     if not KEY_ID_RE.fullmatch(key_identifier) or len(signature) != 64:
         raise TrustEvidenceError("Ed25519 signature material is invalid")
-    return {"format": SIGNATURE_FORMAT, "key_id": key_identifier, "namespace": TRUST_NAMESPACE, "signature": base64.b64encode(signature).decode("ascii")}
+    return {"format": SIGNATURE_FORMAT, "key_id": key_identifier, "namespace": namespace, "signature": base64.b64encode(signature).decode("ascii")}
 
 
-def signing_bytes(document: dict[str, Any]) -> bytes:
-    return TRUST_NAMESPACE.encode("ascii") + b"\0" + canonical_json(document)
+def signing_bytes(document: dict[str, Any], *, namespace: str = TRUST_NAMESPACE) -> bytes:
+    return namespace.encode("ascii") + b"\0" + canonical_json(document)
 
 
-def verify_signature(document: dict[str, Any], envelope: dict[str, Any], public_key: str) -> str:
+def verify_signature(
+    document: dict[str, Any], envelope: dict[str, Any], public_key: str,
+    *, namespace: str = TRUST_NAMESPACE,
+) -> str:
     if not isinstance(envelope, dict) or set(envelope) != {"format", "key_id", "namespace", "signature"}:
         raise TrustEvidenceError("signature envelope is invalid")
     canonical = canonical_public_key(public_key)
-    if envelope["format"] != SIGNATURE_FORMAT or envelope["namespace"] != TRUST_NAMESPACE or envelope["key_id"] != key_id(canonical):
+    if envelope["format"] != SIGNATURE_FORMAT or envelope["namespace"] != namespace or envelope["key_id"] != key_id(canonical):
         raise TrustEvidenceError("signature identity is invalid")
     try: signature = base64.b64decode(envelope["signature"], validate=True)
     except (ValueError, TypeError) as exc: raise TrustEvidenceError("signature encoding is invalid") from exc
     if len(signature) != 64: raise TrustEvidenceError("signature length is invalid")
     key = serialization.load_ssh_public_key(canonical.encode("ascii"))
     assert isinstance(key, Ed25519PublicKey)
-    try: key.verify(signature, signing_bytes(document))
+    try: key.verify(signature, signing_bytes(document, namespace=namespace))
     except Exception as exc: raise TrustEvidenceError("signature verification failed") from exc
     return hashlib.sha256(canonical_json(envelope)).hexdigest()
 
 
-def validate_role_statement(document: dict[str, Any], *, role: str, entity_id: str, instance_id: str, row_key_id: str, fingerprint: str) -> None:
-    expected_format = DECLARATION_FORMAT if role == "controller" else PROCESSOR_STATEMENT_FORMAT
-    fields = {"format", "instance_id", "entity_id", "key_id", "role", "algorithm", "public_key_sha256", "statement_type", "statement_sha256", "created_at"}
-    if set(document) != fields or document.get("format") != expected_format:
-        raise TrustEvidenceError("role statement fields are invalid")
-    if document.get("instance_id") != instance_id or document.get("entity_id") != entity_id or document.get("key_id") != row_key_id:
-        raise TrustEvidenceError("role statement targets another instance, entity, or key")
-    if document.get("role") != role or document.get("algorithm") != "Ed25519" or document.get("public_key_sha256") != fingerprint:
-        raise TrustEvidenceError("role statement has the wrong trust role or fingerprint")
-    if role == "controller" and document.get("statement_type") != "initial_trust_declaration":
-        raise TrustEvidenceError("controller key may sign only controller trust declarations here")
-    if role == "processor" and document.get("statement_type") not in {"publication", "conversion", "erasure", "receipt"}:
-        raise TrustEvidenceError("processor statement type is unsupported")
-    if not isinstance(document.get("statement_sha256"), str) or not SHA256_RE.fullmatch(document["statement_sha256"]):
-        raise TrustEvidenceError("exact statement digest is invalid")
-    if parse_timestamp(document.get("created_at"), "created_at") > datetime.now(timezone.utc) + timedelta(minutes=5):
-        raise TrustEvidenceError("role statement time is too far in the future")
+def signed_desktop_evidence_package(
+    document: dict[str, Any], envelope: dict[str, Any], public_key: str,
+) -> tuple[str, str, str, str]:
+    """Return a canonical, independently verifiable public Desktop artifact.
+
+    The package contains no private key material. Its digest is suitable for
+    inclusion in the instance-signed ledger, while the package itself can be
+    retained in an evidence export for later offline verification.
+    """
+
+    canonical_key = canonical_public_key(public_key)
+    signature_digest = verify_signature(
+        document, envelope, canonical_key, namespace=DESKTOP_EVIDENCE_NAMESPACE,
+    )
+    document_digest = hashlib.sha256(canonical_json(document)).hexdigest()
+    package = {
+        "format": SIGNED_DESKTOP_EVIDENCE_PACKAGE_FORMAT,
+        "namespace": DESKTOP_EVIDENCE_NAMESPACE,
+        "document": document,
+        "proof": envelope,
+        "public_key": canonical_key,
+    }
+    rendered = canonical_json(package)
+    return (
+        rendered.decode("utf-8"),
+        hashlib.sha256(rendered).hexdigest(),
+        document_digest,
+        signature_digest,
+    )
+
+
+def processor_event_action_payload(document: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "format": "mp-opt-processor-event-action-v1",
+        "action": document.get("action"),
+        "instance_id": document.get("instance_id"),
+        "event_ref": document.get("event_ref"),
+        "entity_id": document.get("entity_id"),
+        "key_id": document.get("key_id"),
+        "role": document.get("role"),
+        "algorithm": document.get("algorithm"),
+        "public_key_sha256": document.get("public_key_sha256"),
+        "supersedes_key_id": document.get("supersedes_key_id"),
+        "reason": document.get("reason"),
+    }
+
+
+def processor_event_action_sha256(document: dict[str, Any]) -> str:
+    return hashlib.sha256(canonical_json(processor_event_action_payload(document))).hexdigest()
+
+
+def validate_processor_event_registration(document: dict[str, Any]) -> None:
+    fields = {
+        "format", "challenge_id", "action", "instance_id", "event_ref",
+        "entity_id", "key_id", "role", "algorithm", "public_key_sha256",
+        "supersedes_key_id", "reason", "action_sha256", "nonce",
+        "created_at", "expires_at",
+    }
+    if set(document) != fields or document.get("format") != PROCESSOR_EVENT_REGISTRATION_FORMAT:
+        raise TrustEvidenceError("processor event registration fields are invalid")
+    _uuid(document["challenge_id"], "challenge_id")
+    _uuid(document["instance_id"], "instance_id")
+    _uuid(document["event_ref"], "event_ref")
+    validate_entity("processor", document["entity_id"])
+    if document.get("role") != "processor" or document.get("algorithm") != "Ed25519":
+        raise TrustEvidenceError("processor event registration role is invalid")
+    if document.get("action") not in {"register", "rotate", "assign"}:
+        raise TrustEvidenceError("processor event registration action is invalid")
+    if not isinstance(document.get("key_id"), str) or not KEY_ID_RE.fullmatch(document["key_id"]):
+        raise TrustEvidenceError("processor event registration key ID is invalid")
+    if not isinstance(document.get("public_key_sha256"), str) or not SHA256_RE.fullmatch(document["public_key_sha256"]):
+        raise TrustEvidenceError("processor event registration fingerprint is invalid")
+    if document.get("action_sha256") != processor_event_action_sha256(document):
+        raise TrustEvidenceError("processor event registration action digest is invalid")
+    if document["action"] in {"register", "assign"}:
+        if document.get("supersedes_key_id") is not None or document.get("reason") is not None:
+            raise TrustEvidenceError("new processor assignment cannot contain rotation metadata")
+    elif (
+        not isinstance(document.get("supersedes_key_id"), str)
+        or not KEY_ID_RE.fullmatch(document["supersedes_key_id"])
+        or document.get("reason") not in ROTATION_REASONS
+    ):
+        raise TrustEvidenceError("processor rotation metadata is invalid")
+    try: nonce = base64.b64decode(document["nonce"], validate=True)
+    except (TypeError, ValueError) as exc: raise TrustEvidenceError("processor event registration nonce is invalid") from exc
+    if len(nonce) != 32: raise TrustEvidenceError("processor event registration nonce must contain 32 bytes")
+    created = parse_timestamp(document["created_at"], "created_at")
+    expires = parse_timestamp(document["expires_at"], "expires_at")
+    if expires <= created or expires > created + timedelta(minutes=15):
+        raise TrustEvidenceError("processor event registration lifetime is invalid")
     canonical_json(document)
+
+
+def validate_archive_trust_document(
+    document: dict[str, Any], *, instance_id: str,
+    controller_entity_id: str, controller_key_id: str,
+    controller_fingerprint: str, instance_key_id: str,
+    instance_fingerprint: str, require_fresh: bool = True,
+) -> None:
+    """Validate one controller-signed binding for portable evidence archives."""
+
+    fields = {
+        "format", "instance_id", "controller_id", "controller_key_id",
+        "controller_public_key_sha256", "instance_key_id",
+        "instance_public_key_sha256", "scope", "signed_at",
+    }
+    if set(document) != fields or document.get("format") != ARCHIVE_TRUST_FORMAT:
+        raise TrustEvidenceError("archive trust document fields are invalid")
+    _uuid(document["instance_id"], "instance_id")
+    validate_entity("controller", document["controller_id"])
+    if (
+        document["instance_id"] != instance_id
+        or document["controller_id"] != controller_entity_id
+        or document["controller_key_id"] != controller_key_id
+        or document["controller_public_key_sha256"] != controller_fingerprint
+        or document["instance_key_id"] != instance_key_id
+        or document["instance_public_key_sha256"] != instance_fingerprint
+        or document["scope"] != ARCHIVE_TRUST_SCOPE
+    ):
+        raise TrustEvidenceError("archive trust document targets another controller or deployment")
+    if not KEY_ID_RE.fullmatch(str(document["controller_key_id"])) or not KEY_ID_RE.fullmatch(str(document["instance_key_id"])):
+        raise TrustEvidenceError("archive trust key identity is invalid")
+    if not SHA256_RE.fullmatch(str(document["controller_public_key_sha256"])) or not SHA256_RE.fullmatch(str(document["instance_public_key_sha256"])):
+        raise TrustEvidenceError("archive trust fingerprint is invalid")
+    signed_at = parse_timestamp(document["signed_at"], "signed_at")
+    now = datetime.now(timezone.utc)
+    if require_fresh and (signed_at < now - timedelta(minutes=15) or signed_at > now + timedelta(minutes=2)):
+        raise TrustEvidenceError("archive trust document is stale or dated in the future")
+    canonical_json(document)
+
+
+def validate_desktop_evidence_document(
+    document: dict[str, Any], *, instance_id: str, event_ref: str,
+    entity_id: str, row_key_id: str, fingerprint: str,
+) -> str:
+    """Validate the common identity boundary for an allowed Desktop document."""
+
+    allowed = {
+        DESKTOP_POLICY_ACK_FORMAT,
+        DESKTOP_DELETION_FORMAT,
+        DESKTOP_COPY_RESOLUTION_FORMAT,
+        DESKTOP_WORK_ORDER_CLAIM_FORMAT,
+    }
+    if document.get("format") not in allowed:
+        raise TrustEvidenceError("the processor may sign only typed Desktop evidence")
+    if (
+        document.get("instance_id") != instance_id
+        or document.get("event_ref") != event_ref
+        or document.get("entity_id") != entity_id
+        or document.get("key_id") != row_key_id
+        or document.get("role") != "processor"
+        or document.get("algorithm") != "Ed25519"
+        or document.get("public_key_sha256") != fingerprint
+    ):
+        raise TrustEvidenceError("Desktop evidence targets another deployment, event, entity, or key")
+    canonical_json(document)
+    return str(document["format"])
 
 
 # Compatibility exception names are intentionally absent: callers must use

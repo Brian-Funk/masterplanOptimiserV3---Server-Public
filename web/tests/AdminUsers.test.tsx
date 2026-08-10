@@ -8,10 +8,12 @@ import { deriveUsernameFromDisplayName } from "@/lib/adminUsers";
 
 const mockApiFetch = vi.hoisted(() => vi.fn());
 const mockPush = vi.hoisted(() => vi.fn());
+const mockReplace = vi.hoisted(() => vi.fn());
 const mockUseAuth = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/api", () => ({
   apiFetch: mockApiFetch,
+  retryServiceTransition: (request: () => Promise<Response>) => request(),
 }));
 
 vi.mock("@/contexts/AuthContext", () => ({
@@ -19,7 +21,7 @@ vi.mock("@/contexts/AuthContext", () => ({
 }));
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: mockPush }),
+  useRouter: () => ({ push: mockPush, replace: mockReplace }),
 }));
 
 vi.mock("@/components/PasskeyManager", () => ({
@@ -80,6 +82,7 @@ describe("Admin users", () => {
   beforeEach(() => {
     mockApiFetch.mockReset();
     mockPush.mockReset();
+    mockReplace.mockReset();
     mockUseAuth.mockReturnValue({
       user: rootUser,
       logout: vi.fn(),
@@ -92,6 +95,303 @@ describe("Admin users", () => {
     expect(deriveUsernameFromDisplayName("  Alpha   Tester  ")).toBe(
       "alpha.tester",
     );
+  });
+
+  it("does not redirect while authentication is being rechecked", () => {
+    mockUseAuth.mockReturnValue({
+      user: null,
+      logout: vi.fn(),
+      isLoggingOut: false,
+      isLoading: false,
+      authStatus: "checking",
+    });
+
+    render(<AdminPage />);
+
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  it("never strands a participant on the administration loading state", async () => {
+    mockUseAuth.mockReturnValue({
+      user: {
+        ...issuerUser,
+        is_issuer: false,
+        event_id: 7,
+      },
+      logout: vi.fn(),
+      isLoading: false,
+      authStatus: "authenticated",
+    });
+
+    render(<AdminPage />);
+
+    expect(
+      screen.getByRole("heading", { name: "Administration is not available" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mockReplace).toHaveBeenCalledWith("/calendar?event=7"),
+    );
+  });
+
+  it("keeps an explicit All events context when only one event exists", async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Users" }));
+    const eventContext = await screen.findByLabelText("Event context");
+    await user.selectOptions(eventContext, "7");
+    expect(eventContext).toHaveValue("7");
+    await user.selectOptions(eventContext, "");
+    expect(eventContext).toHaveValue("");
+  });
+
+  it("starts an accountable event deletion case instead of calling direct deletion", async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      if (path === "/api/v1/admin/deletion-requests/events/7") {
+        return jsonResponse({ request_id: "del-event-example-1", state: "awaiting_desktop_report" });
+      }
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Events" }));
+    await user.click(await screen.findByTitle("Start accountable event deletion"));
+    expect(
+      screen.getByText('Start an accountable deletion case for "OWIII"?'),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Start deletion case" }));
+
+    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledWith(
+      "/api/v1/admin/deletion-requests/events/7",
+      {
+        method: "POST",
+        body: "{}",
+      },
+    ));
+    expect(await screen.findByText("Deletion case started for OWIII.")).toBeInTheDocument();
+    expect(screen.getByText("del-event-example-1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open deletion progress" })).toBeInTheDocument();
+  });
+
+  it("explains the HA protection wait while creating an event", async () => {
+    let finishCreate: ((response: Response) => void) | undefined;
+    mockApiFetch.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === "/api/v1/admin/events" && options?.method === "POST") {
+        return new Promise<Response>((resolve) => { finishCreate = resolve; });
+      }
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      if (path === "/api/v1/governance/public") return jsonResponse({ configured: false });
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+    await user.click(await screen.findByRole("button", { name: "Events" }));
+    await user.click(screen.getByRole("button", { name: "New Event" }));
+    await user.type(screen.getByLabelText("Participant-visible event name"), "HA event");
+    await user.click(screen.getByRole("button", { name: "Create Event" }));
+
+    expect(screen.getByRole("button", { name: "Creating and protecting on standby..." })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "the one-time publisher token appears only after the peer accepts",
+    );
+
+    finishCreate?.(jsonResponse({ publish_secret: "synthetic-secret" }));
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+    expect(screen.queryByLabelText("Participant-visible event name")).not.toBeInTheDocument();
+    expect(screen.getByText("Publish secret (shown once - save it now):")).toBeInTheDocument();
+  });
+
+  it("shows the server reason when an event deletion case is rejected", async () => {
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      if (path === "/api/v1/admin/deletion-requests/events/7") {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({ detail: "Signed evidence is not available." }),
+        } as Response;
+      }
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+    await user.click(await screen.findByRole("button", { name: "Events" }));
+    await user.click(await screen.findByTitle("Start accountable event deletion"));
+    await user.click(screen.getByRole("button", { name: "Start deletion case" }));
+
+    expect(await screen.findByText("Signed evidence is not available.")).toBeInTheDocument();
+    expect(screen.queryByText(/Deletion case started/)).not.toBeInTheDocument();
+  });
+
+  it("shows one calm account-settings area without repeating summary details", async () => {
+    const managedUser = {
+      ...rootUser,
+      id: 22,
+      username: "participant.a",
+      display_name: "Participant A",
+      email: "participant-a@example.com",
+      is_root_admin: false,
+      is_admin: false,
+      can_edit: true,
+      event_id: 7,
+      tags: ["phase3"],
+      is_active: true,
+      is_activated: false,
+    };
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      if (path === "/api/v1/admin/users") return jsonResponse([managedUser]);
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+    await user.click(await screen.findByRole("button", { name: "Users" }));
+    await user.click(await screen.findByTitle("Account details"));
+
+    expect(screen.getByText("Account settings")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("participant-a@example.com")).toBeInTheDocument();
+    expect(screen.queryByTitle("Show people tagged phase3")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export user data" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove or delete account" })).toBeInTheDocument();
+  });
+
+  it("keeps issuer access unchanged and explains a failed update", async () => {
+    const managedUser = {
+      ...issuerUser,
+      id: 5,
+      username: "new.issuer",
+      display_name: "New Issuer",
+      is_issuer: false,
+      event_id: 7,
+      tags: [],
+    };
+    mockApiFetch.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      if (path === "/api/v1/admin/users" && !options?.method) return jsonResponse([managedUser]);
+      if (path === "/api/v1/admin/users/5" && options?.method === "PUT") {
+        return {
+          ok: false,
+          status: 502,
+          json: async () => ({}),
+        } as Response;
+      }
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+    await user.click(await screen.findByRole("button", { name: "Users" }));
+    await user.click(await screen.findByTitle("Account details"));
+    await user.click(screen.getByRole("checkbox", { name: "Issuer access" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Issuer access could not be updated. Nothing was changed; try again.",
+    );
+    expect(screen.getByRole("checkbox", { name: "Issuer access" })).not.toBeChecked();
+  });
+
+  it("automatically starts signed deletion when a used account cannot be removed directly", async () => {
+    const managedUser = {
+      ...issuerUser,
+      id: 23,
+      username: "unassigned",
+      display_name: "Unassigned",
+      email: "unassigned@example.test",
+      is_issuer: false,
+      event_id: null,
+      tags: [],
+      is_active: true,
+      is_activated: true,
+    };
+    mockApiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      if (path === "/api/v1/admin/users") return jsonResponse([managedUser]);
+      if (path === "/api/v1/admin/users/23" && init?.method === "DELETE") {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            detail: {
+              code: "SIGNED_DELETION_REQUIRED",
+              message: "Signed deletion required",
+            },
+          }),
+        } as Response;
+      }
+      if (path === "/api/v1/admin/users/23/gdpr-delete") {
+        return jsonResponse({
+          request_id: "del-account-example-1",
+          state: "ready_for_live_purge",
+          message: "Access was revoked; this server-only account is ready for live-data deletion.",
+        });
+      }
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+    await user.click(await screen.findByRole("button", { name: "Users" }));
+    await user.click(await screen.findByTitle("Account details"));
+    await user.click(screen.getByRole("button", { name: "Remove or delete account" }));
+    await user.click(screen.getByRole("button", { name: "Continue with deletion" }));
+
+    await waitFor(() => expect(mockApiFetch).toHaveBeenCalledWith(
+      "/api/v1/admin/users/23/gdpr-delete",
+      { method: "DELETE", body: JSON.stringify({}) },
+    ));
+    expect(await screen.findByText("Accountable deletion started for Unassigned.")).toBeInTheDocument();
+    expect(screen.getByText("del-account-example-1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open deletion progress" })).toBeInTheDocument();
+  });
+
+  it("shows the stored expiry for an individually generated activation link", async () => {
+    const managedUser = {
+      ...rootUser,
+      id: 23,
+      username: "pending.user",
+      display_name: "Pending User",
+      is_root_admin: false,
+      is_admin: false,
+      event_id: 7,
+      is_active: true,
+      is_activated: false,
+      has_valid_email: false,
+    };
+    mockApiFetch.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      if (path === "/api/v1/admin/users" && !options?.method) {
+        return jsonResponse([managedUser]);
+      }
+      if (
+        path === "/api/v1/admin/users/23/activation-link" &&
+        options?.method === "POST"
+      ) {
+        return jsonResponse({
+          activation_url: "/activate#token=pending-token",
+          expires_at: "2030-12-31T23:59:00Z",
+          purpose: "initial_setup",
+        });
+      }
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    render(<AdminPage />);
+    await user.click(await screen.findByRole("button", { name: "Users" }));
+    await user.click(await screen.findByTitle("Generate activation link"));
+
+    expect(await screen.findByText(/Expires .*your local time/)).toBeInTheDocument();
   });
 
   it("lets an issuer create a user without sending an event id", async () => {
@@ -119,6 +419,7 @@ describe("Admin users", () => {
               deletion_requested_at: null,
             },
             activation_url: "/activate#token=abc",
+            expires_at: "2030-12-31T23:59:00Z",
           });
         }
         return jsonResponse([]);
@@ -143,6 +444,13 @@ describe("Admin users", () => {
         "event_id",
       );
     });
+
+    expect(await screen.findByText("Activation link ready")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy link" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show QR code" })).toBeInTheDocument();
+    expect(screen.getByText(/Expires .*your local time/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByText("Activation link ready")).not.toBeInTheDocument();
   });
 
   it("bulk creates users with derived usernames and bulk tags", async () => {

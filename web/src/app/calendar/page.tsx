@@ -6,8 +6,10 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useServiceAvailability } from "@/contexts/ServiceAvailabilityContext";
 import { apiFetch } from "@/lib/api";
 import { getApiUrl } from "@/lib/environment";
+import { hardNavigate } from "@/lib/hardNavigation";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { AuthenticatedHeaderActions } from "@/components/AuthenticatedHeaderActions";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Logo } from "@/components/Logo";
 import { DynamicPWA } from "@/components/DynamicPWA";
@@ -575,6 +577,10 @@ function CalendarContent() {
         const res = await apiFetch(`/api/v1/calendar/${eventId}`);
         if ([502, 503, 504].includes(res.status)) {
           await loadCachedCalendar();
+          return;
+        }
+        if (res.status === 401) {
+          hardNavigate("/login");
           return;
         }
         if (!res.ok) {
@@ -1300,7 +1306,7 @@ function CalendarContent() {
           </p>
           <Button
             variant="outline"
-            onClick={() => (isOfflineError ? fetchCalendar() : router.push("/login"))}
+            onClick={() => (isOfflineError ? fetchCalendar() : hardNavigate("/login"))}
           >
             {isOfflineError ? "Retry" : "Back to Login"}
           </Button>
@@ -1328,8 +1334,9 @@ function CalendarContent() {
               )}
             </div>
           </div>
-          <div className="hidden items-center gap-2 md:flex">
-            {(user?.is_admin || user?.is_root_admin) && (
+          <div className="flex items-center gap-1 md:gap-2">
+            <div className="hidden items-center gap-2 md:flex">
+              {(user?.is_admin || user?.is_root_admin) && (
               <button
                 onClick={() => router.push("/admin")}
                 className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800 transition-colors"
@@ -1338,8 +1345,8 @@ function CalendarContent() {
               >
                 <ArrowLeft size={20} />
               </button>
-            )}
-            {user?.is_issuer && !user?.is_admin && !user?.is_root_admin && (
+              )}
+              {user?.is_issuer && !user?.is_admin && !user?.is_root_admin && (
               <button
                 onClick={() => router.push("/admin")}
                 className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800 transition-colors"
@@ -1348,33 +1355,12 @@ function CalendarContent() {
               >
                 <Settings size={20} />
               </button>
-            )}
-            {serviceReady && eventId > 0 &&
-              ((!user?.is_admin && !user?.is_root_admin) ||
-                user?.is_issuer) && <NotificationBell eventId={eventId} />}
-            <ThemeToggle />
-            {user && (
-              <button
-                onClick={() => router.push("/account/security")}
-                className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800 transition-colors"
-                aria-label="Account security"
-                title="Account security"
-              >
-                <Shield size={20} />
-              </button>
-            )}
-            {user && (
-              <button
-                onClick={handleLogout}
-                disabled={isLoggingOut}
-                aria-busy={isLoggingOut}
-                className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 disabled:cursor-wait disabled:opacity-60 dark:text-gray-400 dark:hover:bg-gray-800 transition-colors"
-                aria-label={isLoggingOut ? "Logging out" : "Logout"}
-                title={isLoggingOut ? "Logging out…" : "Logout"}
-              >
-                {isLoggingOut ? <RefreshCw size={20} className="animate-spin" /> : <LogOut size={20} />}
-              </button>
-            )}
+              )}
+              {serviceReady && eventId > 0 &&
+                ((!user?.is_admin && !user?.is_root_admin) ||
+                  user?.is_issuer) && <NotificationBell eventId={eventId} />}
+            </div>
+            <AuthenticatedHeaderActions iconSize={20} />
           </div>
         </div>
       </header>
@@ -1409,7 +1395,7 @@ function CalendarContent() {
           <AnnouncementBanner eventId={eventId} />
         )}
 
-        {user && (user.can_edit || user.is_admin || user.is_issuer) && !data?.data_policy_acknowledged && (
+        {user && (user.can_edit || user.is_admin || user.is_root_admin || user.is_issuer) && !data?.data_policy_acknowledged && (
           <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
             <p className="font-semibold">Permitted-data acknowledgement required</p>
             <p className="mt-1">Do not enter health, dietary, safeguarding, political, religious, disciplinary or unrelated private information. Optional fields must be necessary for event scheduling.</p>
@@ -1419,7 +1405,7 @@ function CalendarContent() {
             </div>
           </div>
         )}
-        {user && (user.can_edit || user.is_admin || user.is_issuer) && data?.data_policy_acknowledged && (
+        {user && (user.can_edit || user.is_admin || user.is_root_admin || user.is_issuer) && data?.data_policy_acknowledged && (
           <p className="mb-4 text-right text-xs text-gray-500 dark:text-gray-400"><a className="underline" href={data.data_policy_version ? `${getApiUrl()}/api/v1/governance/public/versions/${data.data_policy_version}/data-policy.html` : "/data-policy"}>Permitted-data policy{data.data_policy_version ? ` v${data.data_policy_version}` : ""}</a>{data.data_policy_sha256 && <span className="ml-2 font-mono">{data.data_policy_sha256.slice(0, 12)}...</span>}</p>
         )}
 

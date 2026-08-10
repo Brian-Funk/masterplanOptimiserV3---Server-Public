@@ -15,8 +15,10 @@ export MP_ROOT
 # shellcheck source=../management/common.sh
 source "$MP_ROOT/deploy/management/common.sh"
 mp_load_ha_config
-install -d -m 0700 "$MP_ROOT/runtime" "$MP_ROOT/runtime/ha-requests" \
+install -d -m 0711 "$MP_ROOT/runtime"
+install -d -m 0700 "$MP_ROOT/runtime/ha-requests" \
     "$MP_ROOT/runtime/ha-deferred-requests" "$MP_ROOT/runtime/ha-jobs"
+install -d -m 0711 "$MP_ROOT/runtime/ha-operation-results"
 install -d -m 0700 "$HOME/.config" "$HOME/.config/mp-opt-server" \
     "$HOME/masterplan-snapshots"
 install -d -m 0700 "$HOME/.local/state/mp-opt-ha-replication" \

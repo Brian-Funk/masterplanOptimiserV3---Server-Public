@@ -215,7 +215,10 @@ mp_ui_size_profile() {
 # Print the current terminal height and width with safe non-TTY fallbacks.
 mp_terminal_dimensions() {
     local dimensions rows columns
-    dimensions="$(stty size </dev/tty 2>/dev/null || true)"
+    dimensions=""
+    if mp_has_terminal; then
+        dimensions="$(stty size 2>/dev/null || true)"
+    fi
     read -r rows columns <<< "$dimensions"
     [[ "$rows" =~ ^[0-9]+$ ]] && [ "$rows" -gt 0 ] || rows="${LINES:-30}"
     [[ "$columns" =~ ^[0-9]+$ ]] && [ "$columns" -gt 0 ] || columns="${COLUMNS:-120}"
@@ -324,6 +327,29 @@ ui_message() {
     esac
 }
 
+# Present an informational checkpoint whose acknowledgement advances the
+# current workflow. Keep this distinct from ui_message, whose Return label is
+# appropriate when an action is finished and control goes back to a menu.
+ui_continue_message() {
+    local title="$1"
+    local message="$2"
+    local height width unused
+    read -r height width unused < <(mp_ui_geometry prompt)
+    case "$(mp_tui_backend)" in
+        dialog)
+            dialog --backtitle "$MP_TUI_BACKTITLE" --title "$title" \
+                --ok-label "Continue" --msgbox "$message" "$height" "$width" \
+                </dev/tty >/dev/tty 2>/dev/tty
+            ;;
+        whiptail)
+            whiptail --backtitle "$MP_TUI_BACKTITLE" --title "$title" \
+                --ok-button "Continue" --msgbox "$message" "$height" "$width" \
+                </dev/tty >/dev/tty 2>/dev/tty
+            ;;
+        *) printf '\n[%s]\n%s\n' "$title" "$message" >&2 ;;
+    esac
+}
+
 # Show selectable ordinary terminal text outside dialog/whiptail. This is used
 # for short-lived values that an operator must copy without persisting them in
 # a report file. Clear before presentation and again on return so the terminal
@@ -345,15 +371,15 @@ ui_copyable_terminal_text() {
     fi
     exec {tty_fd}<>"$tty" || return 1
     {
-        printf '%s' "$clear_sequence"
-        printf '\n============================================================\n'
-        printf '%s\n' "$title"
-        printf '============================================================\n\n'
-        printf 'This is normal selectable terminal text.\n\n'
-        printf '----- COPY FROM HERE -----\n'
-        printf '%s\n' "$body"
-        printf '%s\n' '----- END COPYABLE TEXT -----'
-        printf '\n============================================================\n'
+        printf '%s' "$clear_sequence" &&
+        printf '\n============================================================\n' &&
+        printf '%s\n' "$title" &&
+        printf '============================================================\n\n' &&
+        printf 'This is normal selectable terminal text.\n\n' &&
+        printf '%s\n' '----- COPY FROM HERE -----' &&
+        printf '%s\n' "$body" &&
+        printf '%s\n' '----- END COPYABLE TEXT -----' &&
+        printf '\n============================================================\n' &&
         printf '%s\n' "$guidance"
     } >&"$tty_fd" || status=1
     if [ "$status" -eq 0 ]; then
@@ -542,6 +568,14 @@ mp_sanitise_terminal_stream() {
 }
 
 # Run a long command inside the preferred TUI output window.
+ui_clear_terminal() {
+    if mp_has_terminal; then
+        printf '\033[2J\033[3J\033[H' >/dev/tty 2>/dev/null || true
+    else
+        clear 2>/dev/null || true
+    fi
+}
+
 ui_run_command() {
     local title="$1"
     local message="$2"
@@ -552,6 +586,7 @@ ui_run_command() {
     read -r info_height info_width unused < <(mp_ui_geometry info)
     report="$(mktemp "${MP_STATE}/command-output.XXXXXX")" || return 1
     chmod 600 "$report" || { rm -f "$report"; return 1; }
+    ui_clear_terminal
     status=0
     case "$(mp_tui_backend)" in
         dialog)
@@ -711,6 +746,80 @@ mp_validate_snapshot_name() {
     [ "${#value}" -ge 1 ] && [ "${#value}" -le 64 ] && [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
 }
 
+# Give the fixed unprivileged backend identity read-only access to the exact
+# secrets mounted by Compose. The operator remains the owner so guarded TUI
+# rotations can replace them; the mode-0700 parent directory prevents the
+# runtime group from traversing the canonical host secret store.
+mp_prepare_backend_secret_permissions() {
+    local file
+    local -a files=(
+        "$MP_ROOT/secrets/database_password"
+        "$MP_ROOT/secrets/ip_hmac_key"
+        "$MP_ROOT/secrets/secret_key"
+        "$MP_ROOT/secrets/vapid_private_key"
+        "$MP_ROOT/secrets/root_bootstrap_token"
+        "$MP_ROOT/secrets/smtp_token"
+        "$MP_ROOT/secrets/evidence_signing_key"
+        "$MP_ROOT/secrets/evidence_github_fine_grained_token"
+        "$MP_HA_HOME/secrets/node_token"
+    )
+    for file in "${files[@]}"; do
+        [ -e "$file" ] || continue
+        [ -f "$file" ] && [ ! -L "$file" ] || {
+            printf 'Refusing unsafe backend secret path: %s\n' "$file" >&2
+            return 1
+        }
+        sudo -n chown ":10001" -- "$file" || return 1
+        chmod 0640 -- "$file" || return 1
+    done
+}
+
+# Prepare the append-only evidence bind source for the fixed unprivileged
+# backend identity. Refuse symlinks so a privileged ownership change cannot be
+# redirected outside the installation.
+mp_prepare_evidence_store() {
+    local evidence="$MP_ROOT/state/evidence"
+    if [ -e "$evidence" ] && { [ ! -d "$evidence" ] || [ -L "$evidence" ]; }; then
+        printf 'Refusing unsafe evidence store path: %s\n' "$evidence" >&2
+        return 1
+    fi
+    sudo -n install -d -o 10001 -g 10001 -m 0700 "$evidence" || return 1
+    sudo -n install -d -o 10001 -g 10001 -m 0700 "$evidence/public"
+}
+
+# Return the expected mode for a protected operator file. Runtime secrets are
+# deliberately group-readable by the fixed, unprivileged backend identity;
+# every other protected file remains owner-only.
+mp_expected_protected_file_mode() {
+    local file="$1"
+    case "$file" in
+        "$MP_ROOT/secrets/database_password"|"$MP_ROOT/secrets/ip_hmac_key"|"$MP_ROOT/secrets/secret_key"|"$MP_ROOT/secrets/vapid_private_key"|"$MP_ROOT/secrets/root_bootstrap_token"|"$MP_ROOT/secrets/smtp_token"|"$MP_ROOT/secrets/evidence_signing_key"|"$MP_ROOT/secrets/evidence_github_fine_grained_token"|"$MP_HA_HOME/secrets/node_token")
+            printf '640\n'
+            ;;
+        *)
+            printf '600\n'
+            ;;
+    esac
+}
+
+# Validate protected file modes against the deployment permission contract.
+mp_validate_protected_file_modes() {
+    local file mode expected failed=0
+    while IFS= read -r file; do
+        mode="$(stat -c '%a' "$file")" || { failed=1; continue; }
+        expected="$(mp_expected_protected_file_mode "$file")"
+        if [ "$mode" != "$expected" ]; then
+            printf 'UNSAFE MODE: %s is %s (expected %s)\n' "$file" "$mode" "$expected"
+            failed=1
+        fi
+    done < <(
+        find "$MP_ROOT/secrets" -maxdepth 1 -type f -print
+        printf '%s\n' "$MP_ROOT/.env"
+        [ ! -f "$MP_HA_HOME/secrets/node_token" ] || printf '%s\n' "$MP_HA_HOME/secrets/node_token"
+    )
+    return "$failed"
+}
+
 # Build the exact production Compose command, including the local override.
 mp_compose_init() {
     mp_load_ha_config || return 1
@@ -755,19 +864,31 @@ mp_root_bootstrap_is_disabled() {
     mp_compose_init || return 1
     "${MP_COMPOSE[@]}" up -d db >/dev/null 2>&1 || return 1
     disabled="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d masterplan -Atqc \
-        "SELECT EXISTS (
-            SELECT 1 FROM server_settings WHERE key='root_bootstrap_disabled' AND value='true'
-            UNION ALL
-            SELECT 1 FROM users u JOIN webauthn_credentials c ON c.user_id=u.id
-            WHERE u.is_root_admin
-        )" 2>/dev/null || true)"
+        "SELECT
+            EXISTS (
+                SELECT 1 FROM server_settings
+                WHERE key='root_bootstrap_disabled' AND value='true'
+            )
+            AND EXISTS (
+                SELECT 1 FROM users u
+                JOIN webauthn_credentials c ON c.user_id=u.id
+                WHERE u.is_root_admin
+            )" 2>/dev/null || true)"
     [ "$disabled" = t ]
 }
 
 mp_retire_root_bootstrap_secret() {
     if mp_root_bootstrap_is_disabled; then
-        : > "$MP_ROOT/secrets/root_bootstrap_token" || return 1
-        chmod 600 "$MP_ROOT/secrets/root_bootstrap_token" || return 1
+        local token="$MP_ROOT/secrets/root_bootstrap_token"
+        [ -f "$token" ] && [ ! -L "$token" ] || return 1
+        # Normal post-commissioning operations must not rewrite an already
+        # retired token. This keeps read-only workers read-only while still
+        # allowing a guarded operator action to retire stale material.
+        if [ -s "$token" ]; then
+            : > "$token" || return 1
+            chmod 600 "$token" || return 1
+            mp_prepare_backend_secret_permissions || return 1
+        fi
     fi
 }
 
@@ -777,9 +898,10 @@ mp_prepare_frontend_csp_runtime() {
     local runtime_dir="$MP_ROOT/runtime"
     local policy_path="$runtime_dir/frontend-csp.caddy"
     local request_dir="$runtime_dir/ha-requests"
+    local operation_result_dir="$runtime_dir/ha-operation-results"
     local compliance_request_dir="$runtime_dir/compliance-requests"
     local compliance_receipt_dir="$runtime_dir/compliance-receipts"
-    local owner
+    local owner directory
 
     if [ -d "$policy_path" ]; then
         if find "$policy_path" -mindepth 1 -print -quit | grep -q .; then
@@ -795,23 +917,81 @@ mp_prepare_frontend_csp_runtime() {
         return 1
     fi
 
+    owner="$(id -u):$(id -g)"
     mkdir -p "$runtime_dir" 2>/dev/null || true
     [ -d "$runtime_dir" ] || return 1
     if [ ! -w "$runtime_dir" ]; then
-        owner="$(id -u):$(id -g)"
         sudo -n chown "$owner" "$runtime_dir" || return 1
     fi
     [ -w "$runtime_dir" ]
-    mkdir -p "$request_dir" "$compliance_request_dir" "$compliance_receipt_dir" || return 1
+    # Containers run as dedicated non-host UIDs. Permit traversal to the
+    # deliberately mounted child paths without allowing directory listing.
+    chmod 0711 "$runtime_dir" || return 1
+    for directory in "$request_dir" "$compliance_request_dir" "$compliance_receipt_dir"; do
+        if [ -e "$directory" ] && { [ ! -d "$directory" ] || [ -L "$directory" ]; }; then
+            printf 'Refusing unsafe runtime request path: %s\n' "$directory" >&2
+            return 1
+        fi
+        mkdir -p "$directory" 2>/dev/null || true
+        [ -d "$directory" ] || return 1
+        [ "$(stat -c '%u:%g' "$directory")" = "$owner" ] \
+            || sudo -n chown "$owner" "$directory" \
+            || return 1
+    done
     # The unprivileged API may enqueue opaque replication jobs without being
     # able to list or replace requests created by another process.
     chmod 1733 "$request_dir" || return 1
+    if [ -e "$operation_result_dir" ] && { [ ! -d "$operation_result_dir" ] || [ -L "$operation_result_dir" ]; }; then
+        printf 'Refusing unsafe HA operation-result path: %s\n' "$operation_result_dir" >&2
+        return 1
+    fi
+    mkdir -p "$operation_result_dir" 2>/dev/null || true
+    [ -d "$operation_result_dir" ] || return 1
+    [ "$(stat -c '%u:%g' "$operation_result_dir")" = "$owner" ] \
+        || sudo -n chown "$owner" "$operation_result_dir" \
+        || return 1
+    # UUID filenames are known only to the authenticated caller. The backend
+    # may traverse and read a named 0644 result but cannot list the directory.
+    chmod 0711 "$operation_result_dir" || return 1
     chmod 1733 "$compliance_request_dir" || return 1
     # Receipts contain only UUIDs, timestamps and public digests. The host TUI
     # writes them and the unprivileged backend reads them through a read-only
     # bind mount; signatures prevent a readable file from being trusted after
     # modification.
     chmod 0755 "$compliance_receipt_dir" || return 1
+}
+
+# Build the static frontend in the pinned Node container while preserving an
+# exact corresponding-source identity. The deliberately small Node image does
+# not contain git and mounts only web/, so resolve the public repository and
+# immutable revision on the host and pass them into Next.js explicitly.
+mp_build_frontend_container() {
+    local repository_root="${1:-$MP_ROOT}" repository revision source_url owner
+    local -a source_environment
+    repository="${MP_PUBLIC_SOURCE_REPOSITORY_URL:-}"
+    revision="${MP_PUBLIC_SOURCE_REVISION:-}"
+    source_url="${MP_PUBLIC_SOURCE_URL:-}"
+    [ -n "$repository" ] \
+        || repository="$(git -C "$repository_root" remote get-url origin)" \
+        || return 1
+    [ -n "$revision" ] \
+        || revision="$(git -C "$repository_root" rev-parse HEAD)" \
+        || return 1
+    [[ "$revision" =~ ^[0-9a-f]{40}$ ]] \
+        || { printf 'Frontend source revision is not an exact commit SHA.\n' >&2; return 1; }
+    source_environment=(
+        -e "MP_PUBLIC_SOURCE_REPOSITORY_URL=$repository"
+        -e "MP_PUBLIC_SOURCE_REVISION=$revision"
+    )
+    if [ -n "$source_url" ]; then
+        source_environment+=(-e "MP_PUBLIC_SOURCE_URL=$source_url")
+    fi
+    owner="$(stat -c '%u:%g' "$repository_root/web")" || return 1
+    [[ "$owner" =~ ^[0-9]+:[0-9]+$ ]] \
+        || { printf 'Frontend source ownership could not be determined.\n' >&2; return 1; }
+    docker run --rm --user "$owner" -e HOME=/tmp "${source_environment[@]}" \
+        -v "$repository_root/web:/app" -w /app node:22-alpine \
+        sh -c 'npm ci --no-audit && npm audit --omit=dev --audit-level=high && npm run lint && npm run build'
 }
 
 # Print the active reverse-proxy topology without changing service state.
@@ -1003,6 +1183,14 @@ WITH contract(ordinal, invariant, satisfied) AS (
                 WHERE table_schema = 'public'
                   AND table_name = 'ha_cluster_state'
                   AND column_name = 'updated_at'
+            ), FALSE)),
+        (12, 'audit_log.ip_hash_accepts_versioned_hmac',
+            COALESCE((
+                SELECT character_maximum_length >= 80
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'audit_log'
+                  AND column_name = 'ip_hash'
             ), FALSE))
 )
 SELECT invariant, CASE WHEN satisfied THEN 'pass' ELSE 'fail' END
@@ -1241,9 +1429,9 @@ mp_configure_recovery_recipient() {
     local recipient current probe fingerprint old_fingerprint role scope_message domain handoff
     domain="$(mp_env_get DOMAIN 2>/dev/null || true)"
     if [ -n "$domain" ]; then
-        printf -v handoff 'Recovery-key generator URL:\nhttps://%s/recovery-key' "$domain"
+        printf -v handoff 'Sign in with the registered root passkey:\nhttps://%s/login?next=/recovery-key\n\nRoot-only recovery-key generator URL:\nhttps://%s/recovery-key' "$domain" "$domain"
         ui_copyable_terminal_text "Recovery encryption" "$handoff" \
-            "Copy the URL, create and save the private identity in two protected places on the workstation, then press Enter to return and paste only the public age1… recipient." \
+            "Sign in with the root passkey, create and save the private identity in two protected places on the workstation, then press Enter to return and paste only the public age1... recipient." \
             || return 1
     fi
     recipient="$(ui_input "Recovery encryption" "Paste the public age recipient beginning with age1")" || return 1
@@ -1369,7 +1557,7 @@ mp_remove_identity_file() {
 
 # Create a secure random URL-safe operator secret.
 mp_random_secret() {
-    openssl rand -base64 48 | tr -d '\n'
+    openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n'
 }
 
 # Return a redacted configuration report suitable for terminal display.
@@ -1405,14 +1593,43 @@ mp_permissions_report() {
     done
 }
 
-# Apply every committed idempotent SQL migration in filename order.
+# Apply each immutable SQL migration once in filename order. Historical
+# installations predate the ledger, so their first ledger-aware deployment
+# safely reconciles the idempotent scripts and records their exact hashes.
 mp_apply_migrations() {
-    local migration
+    local migration name hash recorded
     mp_compose_init
+    "${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 \
+        -U masterplan -d masterplan -c \
+        "CREATE TABLE IF NOT EXISTS mp_schema_migrations (
+            name VARCHAR(255) PRIMARY KEY,
+            sha256 VARCHAR(64) NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );" >/dev/null || return 1
     for migration in "$MP_ROOT"/deploy/migrations/*.sql; do
         [ -f "$migration" ] || continue
-        printf '       Applying migration: %s\n' "$(basename "$migration")"
+        name="$(basename "$migration")"
+        [[ "$name" =~ ^[0-9]{8}_[a-z0-9_]+\.sql$ ]] \
+            || { printf '       Invalid migration filename: %s\n' "$name" >&2; return 1; }
+        hash="$(sha256sum "$migration" | awk '{print $1}')" || return 1
+        recorded="$("${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 \
+            -U masterplan -d masterplan -Atqc \
+            "SELECT sha256 FROM mp_schema_migrations WHERE name = '$name';")" \
+            || return 1
+        if [ -n "$recorded" ]; then
+            [ "$recorded" = "$hash" ] \
+                || { printf '       Applied migration hash changed: %s\n' "$name" >&2; return 1; }
+            printf '       Migration already applied: %s\n' "$name"
+            continue
+        fi
+        printf '       Applying migration: %s\n' "$name"
         "${MP_COMPOSE[@]}" exec -T db psql \
-            -v ON_ERROR_STOP=1 -U masterplan -d masterplan < "$migration" >/dev/null
+            -v ON_ERROR_STOP=1 -U masterplan -d masterplan < "$migration" >/dev/null \
+            || { printf '       Migration failed: %s\n' "$name" >&2; return 1; }
+        "${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 \
+            -U masterplan -d masterplan -c \
+            "INSERT INTO mp_schema_migrations (name, sha256) VALUES ('$name', '$hash');" \
+            >/dev/null \
+            || { printf '       Migration ledger update failed: %s\n' "$name" >&2; return 1; }
     done
 }

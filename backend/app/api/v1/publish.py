@@ -5,11 +5,13 @@ Authentication: Bearer token matching an event's publish_secret_hash.
 Strategy: full publish replaces the event schedule; date-scoped publish replaces only
 the requested published days.
 """
+import base64
 import hashlib
 import json
 import logging
+import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -17,8 +19,27 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.core.rate_limit import limiter, runtime_limit
+from app.core.config import settings
 from app.core.retention import materialise_event_purge_deadline
 from app.core.audit import audit
+from app.core.evidence import EvidenceUnavailable, append_record, initialise
+from app.core.governance import current_policy_identity
+from app.core.operator_evidence import (
+    DESKTOP_EVIDENCE_NAMESPACE,
+    PROCESSOR_EVENT_REGISTRATION_FORMAT,
+    ROTATION_REASONS,
+    TrustEvidenceError,
+    canonical_json,
+    canonical_public_key,
+    key_id,
+    processor_event_action_sha256,
+    public_key_sha256,
+    signed_desktop_evidence_package,
+    validate_desktop_evidence_document,
+    validate_entity,
+    validate_processor_event_registration,
+    verify_signature,
+)
 from app.core.schedule_days import (
     event_schedule_day_range,
     merge_schedule_day_range,
@@ -27,6 +48,7 @@ from app.core.schedule_days import (
 )
 from app.db.database import get_db
 from app.models.event import Event
+from app.models.ha import HAProtectionOperation
 from app.models.published import (
     PublishedPerson,
     PublishedPersonUnavailability,
@@ -35,7 +57,17 @@ from app.models.published import (
 )
 from app.models.user import User
 from app.models.deletion import DeletionCase, DesktopDeletionWorkOrder
-from app.core.deletion_cases import apply_desktop_report, claim_work_order
+from app.models.evidence import (
+    EvidenceKey,
+    EvidenceKeyRegistrationChallenge,
+    ProcessorIdentity,
+    ProcessorPolicyAcknowledgement,
+)
+from app.core.deletion_cases import (
+    apply_desktop_copy_resolution,
+    apply_desktop_report,
+    claim_work_order,
+)
 from app.core.publish_contract import (
     FieldPurpose,
     FieldType,
@@ -179,6 +211,38 @@ class PublishPayload(BaseModel):
     unavailabilities: List[PersonUnavailabilityIn] = Field(default_factory=list)
     publish_scope: Optional[Literal["full", "dates"]] = "full"
     dates: Optional[List[str]] = None
+
+
+class ProcessorPublicPackageIn(BaseModel):
+    """Public-only event processor enrolment material."""
+
+    model_config = ConfigDict(extra="forbid")
+    format: Literal["mp-opt-processor-public-key-v1"]
+    instance_id: None = None
+    entity_id: str = Field(pattern=r"^prc-[a-z0-9]{8,48}$")
+    key_id: str = Field(pattern=r"^ek-[0-9a-f]{16}$")
+    role: Literal["processor"]
+    algorithm: Literal["Ed25519"]
+    public_key: str = Field(min_length=32, max_length=2048)
+    public_key_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    supersedes_key_id: str | None = Field(default=None, pattern=r"^ek-[0-9a-f]{16}$")
+    rotation_reason: Literal["routine", "lost", "compromised"] | None = None
+    display_label: str | None = Field(default=None, max_length=128)
+    created_at: str = Field(max_length=32)
+    signature_namespace: Literal["mp-opt-role-trust-v1"]
+
+
+class ProcessorPossessionProofIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    challenge: dict[str, Any]
+    proof: dict[str, Any]
+    previous_proof: dict[str, Any] | None = None
+
+
+class SignedDesktopDocumentIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    document: dict[str, Any]
+    proof: dict[str, Any]
 
 
 class PublishResponse(BaseModel):
@@ -441,6 +505,24 @@ def _authenticate_event(request: Request, db: Session) -> Event:
     )
     if event is None:
         raise HTTPException(status_code=401, detail="Invalid publish secret")
+    if settings.HA_MODE == "ha":
+        pending_protection = db.query(HAProtectionOperation).filter(
+            HAProtectionOperation.resource_type == "event",
+            HAProtectionOperation.resource_id == str(event.id),
+            HAProtectionOperation.operation_type.in_([
+                "publisher-secret-create", "publisher-secret-rotation", "publisher-secret-import",
+            ]),
+            HAProtectionOperation.state.in_(["pending", "indeterminate"]),
+        ).first()
+        if pending_protection is not None:
+            raise HTTPException(
+                status_code=423,
+                detail={
+                    "code": "STANDBY_PROTECTION_PENDING",
+                    "operation_id": pending_protection.id,
+                    "message": "This publisher credential is still being secured on the standby.",
+                },
+            )
 
     # Check secret rotation policy
     from app.core import runtime_settings
@@ -468,6 +550,312 @@ def _require_publishing_allowed(event: Event) -> None:
                 "message": "Publishing is disabled because the event deletion workflow has started.",
             },
         )
+
+
+def _utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _processor_key_for_event(
+    db: Session, event: Event, *, entity_id: str, requested_key_id: str,
+) -> tuple[ProcessorIdentity, EvidenceKey]:
+    identity = db.query(ProcessorIdentity).filter(
+        ProcessorIdentity.event_evidence_id == event.evidence_id,
+        ProcessorIdentity.entity_id == entity_id,
+        ProcessorIdentity.status == "active",
+    ).first()
+    if identity is None:
+        raise TrustEvidenceError("the processor identity is not active for this event")
+    key = db.query(EvidenceKey).filter(
+        EvidenceKey.key_id == requested_key_id,
+        EvidenceKey.entity_id == identity.entity_id,
+        EvidenceKey.role == "processor",
+        EvidenceKey.activated_at.isnot(None),
+        EvidenceKey.revoked_at.is_(None),
+    ).first()
+    if key is None or identity.active_key_id != key.key_id:
+        raise TrustEvidenceError("the processor key is not the active key for this event")
+    return identity, key
+
+
+@router.post("/processor-keys/enrolments", status_code=202)
+@limiter.limit("10/minute")
+def begin_processor_event_enrolment(
+    body: ProcessorPublicPackageIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Create an event-bound proof challenge from public Desktop material."""
+
+    event = _authenticate_event(request, db)
+    try:
+        validate_entity("processor", body.entity_id)
+        state = initialise(db)
+        if state is None:
+            raise EvidenceUnavailable("required evidence is unavailable")
+        public = canonical_public_key(body.public_key)
+        identifier = key_id(public)
+        fingerprint = public_key_sha256(public)
+        if identifier != body.key_id or fingerprint != body.public_key_sha256:
+            raise TrustEvidenceError("the processor public package fingerprint is inconsistent")
+        identity = db.query(ProcessorIdentity).filter(
+            ProcessorIdentity.instance_id == state.instance_id,
+            ProcessorIdentity.entity_id == body.entity_id,
+        ).first()
+        if identity is not None and identity.event_evidence_id != event.evidence_id:
+            raise TrustEvidenceError("this processor identity is immutably assigned to another event")
+        existing_key = db.query(EvidenceKey).filter(EvidenceKey.key_id == identifier).first()
+        if existing_key is not None and identity is not None and identity.active_key_id == identifier:
+            return {"status": "active", "key_id": identifier, "entity_id": body.entity_id, "event_ref": event.evidence_id}
+        purpose = "rotate" if body.supersedes_key_id else "register"
+        previous = None
+        if purpose == "rotate":
+            if body.rotation_reason not in ROTATION_REASONS:
+                raise TrustEvidenceError("processor rotation requires a bounded reason")
+            previous = db.query(EvidenceKey).filter(
+                EvidenceKey.key_id == body.supersedes_key_id,
+                EvidenceKey.entity_id == body.entity_id,
+                EvidenceKey.role == "processor",
+                EvidenceKey.revoked_at.is_(None),
+            ).first()
+            if previous is None or identity is None or identity.active_key_id != previous.key_id:
+                raise TrustEvidenceError("the superseded key is not active for this event processor")
+        elif body.rotation_reason is not None:
+            raise TrustEvidenceError("new processor enrolment cannot include a rotation reason")
+        duplicate = db.query(EvidenceKeyRegistrationChallenge).filter(
+            EvidenceKeyRegistrationChallenge.key_id == identifier,
+            EvidenceKeyRegistrationChallenge.event_evidence_id == event.evidence_id,
+            EvidenceKeyRegistrationChallenge.used_at.is_(None),
+        ).first()
+        if duplicate is not None and _utc(duplicate.expires_at) >= datetime.now(timezone.utc):
+            return {"status": "challenge", "challenge": json.loads(duplicate.challenge_json), "challenge_sha256": duplicate.challenge_sha256}
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        expires = now + timedelta(minutes=10)
+        document = {
+            "format": PROCESSOR_EVENT_REGISTRATION_FORMAT,
+            "challenge_id": str(uuid.uuid4()),
+            "action": purpose,
+            "instance_id": state.instance_id,
+            "event_ref": event.evidence_id,
+            "entity_id": body.entity_id,
+            "key_id": identifier,
+            "role": "processor",
+            "algorithm": "Ed25519",
+            "public_key_sha256": fingerprint,
+            "supersedes_key_id": previous.key_id if previous else None,
+            "reason": body.rotation_reason if previous else None,
+            "action_sha256": "",
+            "nonce": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+            "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        document["action_sha256"] = processor_event_action_sha256(document)
+        validate_processor_event_registration(document)
+        rendered = canonical_json(document)
+        challenge = EvidenceKeyRegistrationChallenge(
+            challenge_id=document["challenge_id"], purpose=purpose,
+            instance_id=state.instance_id, entity_id=body.entity_id,
+            event_id=event.id, event_evidence_id=event.evidence_id,
+            event_display_name=event.name, display_label=body.display_label,
+            public_key=public, public_key_sha256=fingerprint, key_id=identifier,
+            role="processor", supersedes_key_id=previous.key_id if previous else None,
+            rotation_reason=body.rotation_reason if previous else None,
+            challenge_json=rendered.decode("utf-8"),
+            challenge_sha256=hashlib.sha256(rendered).hexdigest(),
+            action_sha256=document["action_sha256"], expires_at=expires,
+        )
+        db.add(challenge)
+        db.commit()
+        return {"status": "challenge", "challenge": document, "challenge_sha256": challenge.challenge_sha256}
+    except (EvidenceUnavailable, TrustEvidenceError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={"code": "PROCESSOR_ENROLMENT_REJECTED", "message": str(exc)}) from exc
+
+
+@router.post("/processor-keys/enrolments/{challenge_id}/proof", status_code=202)
+@limiter.limit("10/minute")
+def submit_processor_event_proof(
+    challenge_id: str,
+    body: ProcessorPossessionProofIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Verify Desktop possession and leave the assignment pending root approval."""
+
+    event = _authenticate_event(request, db)
+    try:
+        validate_processor_event_registration(body.challenge)
+        challenge = db.query(EvidenceKeyRegistrationChallenge).filter(
+            EvidenceKeyRegistrationChallenge.challenge_id == challenge_id,
+            EvidenceKeyRegistrationChallenge.event_evidence_id == event.evidence_id,
+            EvidenceKeyRegistrationChallenge.used_at.is_(None),
+        ).first()
+        rendered = canonical_json(body.challenge)
+        if (
+            challenge is None
+            or challenge.challenge_json.encode("utf-8") != rendered
+            or challenge.challenge_sha256 != hashlib.sha256(rendered).hexdigest()
+            or _utc(challenge.expires_at) < datetime.now(timezone.utc)
+        ):
+            raise TrustEvidenceError("the processor enrolment challenge is unavailable or changed")
+        if challenge.possession_proof_sha256 is not None:
+            return {"status": "pending_root_approval", "challenge_id": challenge.challenge_id, "key_id": challenge.key_id}
+        challenge.possession_proof_sha256 = verify_signature(body.challenge, body.proof, challenge.public_key)
+        if challenge.purpose == "rotate":
+            previous = db.query(EvidenceKey).filter(EvidenceKey.key_id == challenge.supersedes_key_id).first()
+            if previous is None:
+                raise TrustEvidenceError("the superseded processor key is unavailable")
+            if challenge.rotation_reason == "routine" and body.previous_proof is None:
+                raise TrustEvidenceError("routine rotation requires proof from the old key")
+            if body.previous_proof is not None:
+                challenge.previous_proof_sha256 = verify_signature(body.challenge, body.previous_proof, previous.public_key)
+        db.commit()
+        return {"status": "pending_root_approval", "challenge_id": challenge.challenge_id, "key_id": challenge.key_id, "event_ref": event.evidence_id}
+    except (TrustEvidenceError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={"code": "PROCESSOR_PROOF_REJECTED", "message": str(exc)}) from exc
+
+
+@router.get("/processor-keys/status")
+@limiter.limit("30/minute")
+def processor_event_key_status(request: Request, db: Session = Depends(get_db)):
+    event = _authenticate_event(request, db)
+    identities = db.query(ProcessorIdentity).filter(
+        ProcessorIdentity.event_evidence_id == event.evidence_id,
+    ).order_by(ProcessorIdentity.created_at).all()
+    pending = db.query(EvidenceKeyRegistrationChallenge).filter(
+        EvidenceKeyRegistrationChallenge.event_evidence_id == event.evidence_id,
+        EvidenceKeyRegistrationChallenge.possession_proof_sha256.isnot(None),
+        EvidenceKeyRegistrationChallenge.used_at.is_(None),
+    ).all()
+    return {
+        "event_ref": event.evidence_id,
+        "processors": [{
+            "entity_id": row.entity_id,
+            "display_label": row.display_label,
+            "status": row.status,
+            "active_key_id": row.active_key_id,
+        } for row in identities],
+        "pending": [{"challenge_id": row.challenge_id, "entity_id": row.entity_id, "key_id": row.key_id} for row in pending],
+    }
+
+
+@router.post("/processor-policy-acknowledgements", status_code=201)
+@limiter.limit("20/minute")
+def record_processor_policy_acknowledgement(
+    body: SignedDesktopDocumentIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    event = _authenticate_event(request, db)
+    try:
+        document = body.document
+        exact_fields = {
+            "format", "instance_id", "event_ref", "entity_id", "key_id", "role",
+            "algorithm", "public_key_sha256", "policy_version", "policy_sha256",
+            "acknowledged_at",
+        }
+        if set(document) != exact_fields:
+            raise TrustEvidenceError("Desktop policy acknowledgement fields are invalid")
+        identity, key = _processor_key_for_event(
+            db, event, entity_id=str(document.get("entity_id")), requested_key_id=str(document.get("key_id")),
+        )
+        validate_desktop_evidence_document(
+            document, instance_id=key.instance_id, event_ref=event.evidence_id,
+            entity_id=identity.entity_id, row_key_id=key.key_id, fingerprint=key.public_key_sha256,
+        )
+        current = current_policy_identity(db)
+        if current is None or document.get("policy_version") != current[0] or document.get("policy_sha256") != current[1]:
+            raise TrustEvidenceError("the permitted-data policy changed; review its current version")
+        acknowledged_at = datetime.fromisoformat(str(document["acknowledged_at"]).replace("Z", "+00:00"))
+        package_json, package_digest, document_digest, signature_digest = (
+            signed_desktop_evidence_package(document, body.proof, key.public_key)
+        )
+        rendered = canonical_json(document)
+        existing = db.query(ProcessorPolicyAcknowledgement).filter(
+            ProcessorPolicyAcknowledgement.event_evidence_id == event.evidence_id,
+            ProcessorPolicyAcknowledgement.entity_id == identity.entity_id,
+            ProcessorPolicyAcknowledgement.policy_version == current[0],
+            ProcessorPolicyAcknowledgement.policy_sha256 == current[1],
+        ).first()
+        if existing is not None:
+            if existing.evidence_package_sha256 != package_digest:
+                raise TrustEvidenceError("a different signed acknowledgement is already recorded")
+            return {
+                "status": "acknowledged",
+                "document_sha256": existing.document_sha256,
+                "instance_record_sha256": existing.instance_record_sha256,
+                "evidence_package_sha256": existing.evidence_package_sha256,
+            }
+        row = ProcessorPolicyAcknowledgement(
+            instance_id=key.instance_id, event_evidence_id=event.evidence_id,
+            entity_id=identity.entity_id, key_id=key.key_id,
+            policy_version=current[0], policy_sha256=current[1],
+            document_json=rendered.decode("utf-8"), document_sha256=document_digest,
+            signature_sha256=signature_digest, acknowledged_at=acknowledged_at,
+            evidence_package_json=package_json,
+            evidence_package_sha256=package_digest,
+        )
+        db.add(row)
+        db.flush()
+        row.instance_record_sha256 = append_record(
+            db, workflow_type="desktop_policy", workflow_id=row.acknowledgement_id,
+            operation_type="acknowledged", record_type="desktop.policy_acknowledged",
+            payload={
+                "event_ref": event.evidence_id, "entity_id": identity.entity_id,
+                "key_id": key.key_id, "policy_version": current[0],
+                "policy_sha256": current[1], "document_sha256": document_digest,
+                "signature_sha256": signature_digest, "status": "verified",
+                "evidence_package_sha256": package_digest,
+                "public_key_sha256": key.public_key_sha256,
+            },
+        )
+        db.commit()
+        return {
+            "status": "acknowledged",
+            "document_sha256": document_digest,
+            "instance_record_sha256": row.instance_record_sha256,
+            "evidence_package_sha256": package_digest,
+        }
+    except (EvidenceUnavailable, TrustEvidenceError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={"code": "PROCESSOR_POLICY_REJECTED", "message": str(exc)}) from exc
+
+
+@router.get("/processor-policy-acknowledgements/current")
+@limiter.limit("60/minute")
+def current_processor_policy_acknowledgement(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Return the Server-authoritative acknowledgement for this event and policy."""
+
+    event = _authenticate_event(request, db)
+    current = current_policy_identity(db)
+    if current is None:
+        return {"acknowledged": False, "policy_version": None, "policy_sha256": None}
+    row = db.query(ProcessorPolicyAcknowledgement).filter(
+        ProcessorPolicyAcknowledgement.event_evidence_id == event.evidence_id,
+        ProcessorPolicyAcknowledgement.policy_version == current[0],
+        ProcessorPolicyAcknowledgement.policy_sha256 == current[1],
+        ProcessorPolicyAcknowledgement.evidence_package_sha256.isnot(None),
+    ).order_by(ProcessorPolicyAcknowledgement.id.desc()).first()
+    if row is None:
+        return {
+            "acknowledged": False,
+            "policy_version": current[0],
+            "policy_sha256": current[1],
+        }
+    return {
+        "acknowledged": True,
+        "policy_version": row.policy_version,
+        "policy_sha256": row.policy_sha256,
+        "entity_id": row.entity_id,
+        "key_id": row.key_id,
+        "document_sha256": row.document_sha256,
+        "instance_record_sha256": row.instance_record_sha256,
+        "evidence_package_sha256": row.evidence_package_sha256,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -782,11 +1170,17 @@ class DesktopDeletionCounts(BaseModel):
 
 
 class DesktopDeletionReportIn(BaseModel):
-    """Current desktop deletion report contract."""
+    """Processor-signed Desktop deletion receipt document."""
 
     model_config = ConfigDict(extra="forbid")
 
-    version: Literal[1]
+    format: Literal["mp-opt-desktop-deletion-receipt-v2"]
+    instance_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+    entity_id: str = Field(pattern=r"^prc-[a-z0-9]{8,48}$")
+    key_id: str = Field(pattern=r"^ek-[0-9a-f]{16}$")
+    role: Literal["processor"]
+    algorithm: Literal["Ed25519"]
+    public_key_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     work_order_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
     event_ref: str = Field(pattern=r"^[0-9a-f-]{36}$")
     subject_ref: Optional[str] = Field(None, pattern=r"^[0-9a-f-]{36}$")
@@ -799,6 +1193,41 @@ class DesktopDeletionReportIn(BaseModel):
     completed_at: str = Field(max_length=40)
 
 
+class DesktopWorkOrderClaimIn(BaseModel):
+    """Processor-signed request to claim its own event work order."""
+
+    model_config = ConfigDict(extra="forbid")
+    format: Literal["mp-opt-desktop-work-order-claim-v1"]
+    instance_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+    event_ref: str = Field(pattern=r"^[0-9a-f-]{36}$")
+    entity_id: str = Field(pattern=r"^prc-[a-z0-9]{8,48}$")
+    key_id: str = Field(pattern=r"^ek-[0-9a-f]{16}$")
+    role: Literal["processor"]
+    algorithm: Literal["Ed25519"]
+    public_key_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    work_order_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+    requested_at: str = Field(max_length=40)
+
+
+class DesktopCopyResolutionIn(BaseModel):
+    """Processor statement about Desktop-local backups and exports."""
+
+    model_config = ConfigDict(extra="forbid")
+    format: Literal["mp-opt-desktop-copy-resolution-v1"]
+    instance_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+    event_ref: str = Field(pattern=r"^[0-9a-f-]{36}$")
+    entity_id: str = Field(pattern=r"^prc-[a-z0-9]{8,48}$")
+    key_id: str = Field(pattern=r"^ek-[0-9a-f]{16}$")
+    role: Literal["processor"]
+    algorithm: Literal["Ed25519"]
+    public_key_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    work_order_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+    disposition: Literal["no_known_local_copies", "relevant_local_copies_deleted"]
+    software_inventory_complete: bool
+    operator_confirmation: Literal["LOCAL COPIES RESOLVED"]
+    completed_at: str = Field(max_length=40)
+
+
 def _desktop_work_order_detail(work_order: DesktopDeletionWorkOrder) -> dict:
     """Return the pseudonymous fields required by the paired desktop."""
 
@@ -808,12 +1237,16 @@ def _desktop_work_order_detail(work_order: DesktopDeletionWorkOrder) -> dict:
         "event_ref": work_order.event_ref,
         "subject_ref": work_order.subject_ref,
         "operation": work_order.operation,
+        "processor_entity_id": work_order.processor_entity_id,
+        "processor_key_id": work_order.processor_key_id,
         "state": work_order.state,
         "created_at": work_order.created_at,
         "claimed_at": work_order.claimed_at,
         "claim_expires_at": work_order.claim_expires_at,
         "reported_at": work_order.reported_at,
         "report_sha256": work_order.report_sha256,
+        "report_signature_sha256": work_order.report_signature_sha256,
+        "copy_resolution_sha256": work_order.copy_resolution_sha256,
     }
 
 
@@ -837,6 +1270,7 @@ def list_desktop_deletion_work_orders(
 @limiter.limit("10/minute")
 def claim_desktop_deletion_work_order(
     work_order_id: str,
+    body: SignedDesktopDocumentIn,
     request: Request,
     db: Session = Depends(get_db),
 ):
@@ -850,8 +1284,22 @@ def claim_desktop_deletion_work_order(
     if work_order is None:
         raise HTTPException(status_code=404, detail="Deletion work order not found")
     try:
+        document = DesktopWorkOrderClaimIn.model_validate(body.document).model_dump(mode="json")
+        identity, key = _processor_key_for_event(
+            db, event, entity_id=document["entity_id"], requested_key_id=document["key_id"],
+        )
+        if document["work_order_id"] != work_order.work_order_id or work_order.processor_entity_id != identity.entity_id:
+            raise TrustEvidenceError("the work-order claim belongs to another processor assignment")
+        validate_desktop_evidence_document(
+            document, instance_id=key.instance_id, event_ref=event.evidence_id,
+            entity_id=identity.entity_id, row_key_id=key.key_id, fingerprint=key.public_key_sha256,
+        )
+        requested_at = datetime.fromisoformat(document["requested_at"].replace("Z", "+00:00"))
+        if requested_at.tzinfo is None or abs((datetime.now(timezone.utc) - requested_at.astimezone(timezone.utc)).total_seconds()) > 300:
+            raise TrustEvidenceError("the work-order claim time is outside the allowed window")
+        verify_signature(document, body.proof, key.public_key, namespace=DESKTOP_EVIDENCE_NAMESPACE)
         capability = claim_work_order(work_order)
-    except ValueError as exc:
+    except (TrustEvidenceError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     db.commit()
     return {
@@ -864,7 +1312,7 @@ def claim_desktop_deletion_work_order(
 @limiter.limit("20/minute")
 def report_desktop_deletion_work_order(
     work_order_id: str,
-    body: DesktopDeletionReportIn,
+    body: SignedDesktopDocumentIn,
     request: Request,
     db: Session = Depends(get_db),
 ):
@@ -884,14 +1332,34 @@ def report_desktop_deletion_work_order(
         raise HTTPException(status_code=409, detail="Deletion case no longer exists")
     capability = request.headers.get("x-deletion-claim", "")
     try:
+        document = DesktopDeletionReportIn.model_validate(body.document).model_dump(mode="json")
+        if document["work_order_id"] != work_order.work_order_id:
+            raise TrustEvidenceError("the Desktop deletion receipt targets another work order")
+        identity, key = _processor_key_for_event(
+            db, event, entity_id=document["entity_id"], requested_key_id=document["key_id"],
+        )
+        if work_order.processor_entity_id != identity.entity_id:
+            raise TrustEvidenceError("the Desktop deletion receipt belongs to another processor assignment")
+        validate_desktop_evidence_document(
+            document, instance_id=key.instance_id, event_ref=event.evidence_id,
+            entity_id=identity.entity_id, row_key_id=key.key_id, fingerprint=key.public_key_sha256,
+        )
+        package_json, package_digest, _, signature_digest = (
+            signed_desktop_evidence_package(document, body.proof, key.public_key)
+        )
         digest = apply_desktop_report(
             db,
             case,
             work_order,
             claim_capability=capability,
-            report=body.model_dump(mode="json"),
+            report=document,
+            signature_sha256=signature_digest,
+            evidence_package_json=package_json,
+            evidence_package_sha256=package_digest,
+            completed_key_id=key.key_id,
+            completed_public_key_sha256=key.public_key_sha256,
         )
-    except ValueError as exc:
+    except (TrustEvidenceError, ValueError) as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     db.commit()
@@ -901,3 +1369,53 @@ def report_desktop_deletion_work_order(
         "report_sha256": digest,
         "case_state": case.state,
     }
+
+
+@router.post("/deletion-work-orders/{work_order_id}/copy-resolution")
+@limiter.limit("20/minute")
+def report_desktop_copy_resolution(
+    work_order_id: str,
+    body: SignedDesktopDocumentIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Verify the processor's Desktop-local backup/export disposition."""
+
+    event = _authenticate_event(request, db)
+    work_order = db.query(DesktopDeletionWorkOrder).filter(
+        DesktopDeletionWorkOrder.work_order_id == work_order_id,
+        DesktopDeletionWorkOrder.event_id == event.id,
+    ).first()
+    if work_order is None:
+        raise HTTPException(status_code=404, detail="Deletion work order not found")
+    case = db.query(DeletionCase).filter(DeletionCase.id == work_order.case_id).first()
+    if case is None:
+        raise HTTPException(status_code=409, detail="Deletion case no longer exists")
+    try:
+        document = DesktopCopyResolutionIn.model_validate(body.document).model_dump(mode="json")
+        if document["work_order_id"] != work_order.work_order_id:
+            raise TrustEvidenceError("the local-copy resolution targets another work order")
+        identity, key = _processor_key_for_event(
+            db, event, entity_id=document["entity_id"], requested_key_id=document["key_id"],
+        )
+        if work_order.processor_entity_id != identity.entity_id:
+            raise TrustEvidenceError("the local-copy resolution belongs to another processor assignment")
+        validate_desktop_evidence_document(
+            document, instance_id=key.instance_id, event_ref=event.evidence_id,
+            entity_id=identity.entity_id, row_key_id=key.key_id, fingerprint=key.public_key_sha256,
+        )
+        package_json, package_digest, _, signature_digest = (
+            signed_desktop_evidence_package(document, body.proof, key.public_key)
+        )
+        digest = apply_desktop_copy_resolution(
+            db, case, work_order, document=document,
+            signature_sha256=signature_digest, completed_key_id=key.key_id,
+            completed_public_key_sha256=key.public_key_sha256,
+            evidence_package_json=package_json,
+            evidence_package_sha256=package_digest,
+        )
+        db.commit()
+        return {"status": "recorded", "work_order_id": work_order.work_order_id, "copy_resolution_sha256": digest, "case_state": case.state}
+    except (TrustEvidenceError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

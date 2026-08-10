@@ -567,10 +567,22 @@ def test_production_configurator_delegates_to_guarded_wizard():
     assert "Configure SMTP activation email now?" in actions
     assert "You can safely skip this" in actions
     assert 'printf \'%s\' "$smtp_token" > "$staging/secrets/smtp_token"' in actions
+    assert ': > "$staging/secrets/evidence_github_fine_grained_token"' in actions
     assert "SMTP_TOKEN=" not in _read(".env.example")
     assert "SECRET_KEY=" not in _read(".env.example")
     assert "ROOT_BOOTSTRAP_TOKEN=" not in _read(".env.example")
     assert "VAPID_PRIVATE_KEY=" not in _read(".env.example")
+
+
+def test_smtp_test_reports_the_safe_one_off_process_error():
+    """A failed Docker exec must not direct the operator to unrelated backend logs."""
+
+    actions = _read("deploy/management/actions.sh")
+
+    assert "MP_SMTP_ERROR:{exc.code}:{exc}" in actions
+    assert "The SMTP test process failed before returning a safe diagnostic." in actions
+    assert "Review Configuration > SMTP and retry the guarded test." in actions
+    assert "Review backend logs." not in actions
 
 
 def test_redacted_configuration_hides_database_urls_and_secret_keys(tmp_path: Path):
@@ -706,9 +718,9 @@ def test_initial_wizard_can_skip_smtp_without_putting_secrets_in_env(tmp_path: P
         ui_message() { return 0; }
         ui_input() {
             case "$2" in
-                "Public application domain") printf '%s\n' 'mp-opt.net' ;;
+                "Public application domain (for example schedule.example.org)") printf '%s\n' 'schedule.example.org' ;;
                 "Passkey application name") printf '%s\n' 'Masterplan Access' ;;
-                "VAPID contact email") printf '%s\n' 'access@mp-opt.net' ;;
+                "VAPID contact email (for example admin@example.org)") printf '%s\n' 'admin@example.org' ;;
                 *) return 1 ;;
             esac
         }
@@ -730,6 +742,8 @@ def test_initial_wizard_can_skip_smtp_without_putting_secrets_in_env(tmp_path: P
         test -s "$MP_ROOT/secrets/evidence_signing_key.pub"
         test -e "$MP_ROOT/secrets/smtp_token"
         test ! -s "$MP_ROOT/secrets/smtp_token"
+        test -e "$MP_ROOT/secrets/evidence_github_fine_grained_token"
+        test ! -s "$MP_ROOT/secrets/evidence_github_fine_grained_token"
         ! grep -Eq '^(DATABASE_URL|POSTGRES_PASSWORD|SECRET_KEY|IP_HMAC_KEY|ROOT_BOOTSTRAP_TOKEN|VAPID_PRIVATE_KEY|SMTP_TOKEN)=' "$MP_ROOT/.env"
         grep -Fxq 'SMTP_HOST=' "$MP_ROOT/.env"
         grep -Eq '^MP_INSTANCE_ID=[0-9a-f-]{36}$' "$MP_ROOT/.env"
@@ -963,6 +977,19 @@ def test_restore_verifies_then_creates_verified_rollback_before_apply():
     apply_selected = body.index('mp_snapshot_apply "$selected"')
     assert first_verify < pre_create < pre_verify < apply_selected
     assert 'mp_snapshot_apply "$pre_snapshot"' in body
+    assert body.index("ui_clear_terminal") < pre_create
+
+
+def test_snapshot_deletion_uses_fixed_confirmation_phrase():
+    """Deleting the selected snapshot must not require retyping its long generated name."""
+
+    snapshots = _read("deploy/management/snapshots.sh")
+    start = snapshots.index("mp_snapshot_delete_interactive()")
+    end = snapshots.index("mp_snapshot_list_interactive()")
+    body = snapshots[start:end]
+
+    assert '"DELETE SNAPSHOT"' in body
+    assert '"DELETE $label"' not in body
 
 
 def test_management_audit_chain_verifier_detects_tampering(tmp_path: Path):
@@ -1050,10 +1077,16 @@ def test_accountability_export_is_copyable_and_never_publishes_automatically():
     root = _server_root()
     evidence = (root / "deploy/management/evidence.sh").read_text(encoding="utf-8")
     menu = (root / "manage.sh").read_text(encoding="utf-8")
-    assert "ui_copyable_terminal_text \"Accountability evidence exported\"" in evidence
+    assert "ui_copyable_terminal_text \"Complete accountability evidence exported\"" in evidence
+    assert "sudo -n env PYTHONDONTWRITEBYTECODE=1 python3" in evidence
+    assert "export-tui" in evidence
+    assert "zip_sha256" in evidence
+    assert "mounted evidence export changed after backend verification" in evidence
+    assert "accountability.evidence.sha256" in evidence
+    assert "VERIFYING.txt" in evidence
     assert "scp deploy@" in evidence
     assert "SHA-256:" in evidence
-    assert "stage-archive" in evidence
+    assert "stage-git" in evidence
     assert "git push" in evidence
     assert "intentionally not created automatically" in evidence
     assert "gh repo create" not in evidence

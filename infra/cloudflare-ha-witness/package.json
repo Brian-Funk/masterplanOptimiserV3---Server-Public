@@ -10,8 +10,13 @@
     "test": "npm run test:unit && wrangler deploy --dry-run --outdir .wrangler/dry-run",
     "check": "npm run test:unit && wrangler deploy --dry-run --outdir .wrangler/dry-run"
   },
+  "dependencies": {
+    "wrangler": "^4.118.0"
+  },
   "devDependencies": {
-    "typescript": "^7.0.2",
-    "wrangler": "^4.115.0"
+    "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "undici": "7.29.0"
   }
 }

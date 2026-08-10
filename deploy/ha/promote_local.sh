@@ -67,7 +67,7 @@ registered_root="$("${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 \
     2>/dev/null || true)"
 if [ "$registered_root" = "t" ]; then
     : > "$MP_ROOT/secrets/root_bootstrap_token"
-    chmod 600 "$MP_ROOT/secrets/root_bootstrap_token"
+    chmod 0640 "$MP_ROOT/secrets/root_bootstrap_token"
 fi
 
 "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend >/dev/null

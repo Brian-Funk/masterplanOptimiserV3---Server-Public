@@ -20,15 +20,34 @@ from app.models.evidence import EvidenceKey
 
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 RECOVERY_KEY_ID = re.compile(r"^rk-[0-9a-f]{16}$")
-RECEIPT_FIELDS = {
+RECEIPT_COMMON_FIELDS = {
     "format", "receipt_id", "job_id", "instance_id", "workflow_type",
     "workflow_id", "event_ref", "subject_ref", "privacy_action_id",
     "privacy_action_sequence", "live_purge_receipt_sha256", "package_id",
     "live_data_purged_at",
     "package_sha256", "package_size", "archive_sha256", "recovery_key_id",
     "snapshot_created_at", "snapshot_evidence_head_sha256", "deep_verified_at",
-    "portable_confirmed_at",
+    "portable_confirmed_at", "superseded_portable_packages",
 }
+RECEIPT_V3_FIELDS = RECEIPT_COMMON_FIELDS | {"local_snapshot_count"}
+RECEIPT_V4_FIELDS = RECEIPT_COMMON_FIELDS | {
+    "local_resolution_id", "local_resolution_sha256",
+    "superseded_local_snapshot_receipt_sha256s",
+    "retained_local_snapshot_count",
+}
+SUPERSEDED_PORTABLE_FIELDS = {
+    "package_id", "package_sha256", "package_size", "archive_sha256",
+    "recovery_key_id", "snapshot_created_at", "portable_confirmed_at",
+}
+PEER_RESOLUTION_FIELDS = {
+    "format", "resolution_id", "job_id", "instance_id", "workflow_type", "workflow_id", "event_ref",
+    "subject_ref", "privacy_action_id", "privacy_action_sequence",
+    "live_purge_receipt_sha256", "live_data_purged_at", "clean_receipt_sha256",
+    "replacement_package_id", "replacement_package_sha256", "source_node_id",
+    "target_node_id", "resolved_at", "superseded_local_snapshot_receipt_sha256s",
+    "retained_local_snapshot_count", "resolution_sha256",
+}
+NODE_ID = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 
 
 def _timestamp(value: object) -> datetime:
@@ -130,6 +149,25 @@ def queue_clean_backup_request(
         raise EvidenceUnavailable("The host compliance agent is unavailable") from exc
 
 
+def cancel_pending_clean_backup_request(*, job_id: str) -> None:
+    """Cancel only a request that has not produced any host receipt."""
+
+    _uuid(job_id, "job_id")
+    request_path = Path(settings.COMPLIANCE_REQUEST_DIR) / f"{job_id}.json"
+    receipt_path = Path(settings.COMPLIANCE_RECEIPT_DIR) / f"{job_id}.json"
+    signature_path = Path(str(receipt_path) + ".sig")
+    try:
+        if any(path.is_symlink() for path in (request_path, receipt_path, signature_path)):
+            raise EvidenceUnavailable("The compliance path is unsafe")
+        if receipt_path.exists() or signature_path.exists():
+            raise EvidenceUnavailable("The recovery snapshot has already produced a receipt")
+        if request_path.exists() and not request_path.is_file():
+            raise EvidenceUnavailable("The compliance request path is unsafe")
+        request_path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise EvidenceUnavailable("The host compliance agent is unavailable") from exc
+
+
 def verified_clean_backup_receipt(
     db: Session,
     *,
@@ -140,10 +178,12 @@ def verified_clean_backup_receipt(
     path = Path(settings.COMPLIANCE_RECEIPT_DIR) / f"{job_id}.json"
     signature_path = Path(str(path) + ".sig")
     try:
+        if path.is_symlink() or signature_path.is_symlink():
+            raise EvidenceUnavailable("The compliance receipt path is unsafe")
+        if not path.exists() or not signature_path.exists():
+            raise EvidenceUnavailable("The verified host receipt is not available yet")
         if (
-            path.is_symlink()
-            or signature_path.is_symlink()
-            or not path.is_file()
+            not path.is_file()
             or not signature_path.is_file()
             or signature_path.stat().st_size > 16 * 1024
         ):
@@ -166,10 +206,20 @@ def verified_clean_backup_receipt(
     except json.JSONDecodeError as exc:
         raise EvidenceUnavailable("The compliance receipt is invalid JSON") from exc
     canonical = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-    if raw != canonical or not isinstance(document, dict) or set(document) != RECEIPT_FIELDS:
+    if raw != canonical or not isinstance(document, dict):
         raise EvidenceUnavailable("The compliance receipt schema is invalid")
-    if document.get("format") != "mp-opt-clean-backup-receipt-v1":
+    receipt_format = document.get("format")
+    expected_fields = (
+        RECEIPT_V3_FIELDS
+        if receipt_format == "mp-opt-clean-backup-receipt-v3"
+        else RECEIPT_V4_FIELDS
+        if receipt_format == "mp-opt-clean-backup-receipt-v4"
+        else None
+    )
+    if expected_fields is None:
         raise EvidenceUnavailable("The compliance receipt format is invalid")
+    if set(document) != expected_fields:
+        raise EvidenceUnavailable("The compliance receipt schema is invalid")
     for field in ("receipt_id", "job_id", "instance_id", "workflow_id", "event_ref", "privacy_action_id", "package_id"):
         _uuid(document.get(field), field)
     if document.get("subject_ref") is not None:
@@ -195,11 +245,143 @@ def verified_clean_backup_receipt(
     size = document.get("package_size")
     if not isinstance(size, int) or isinstance(size, bool) or size < 1:
         raise EvidenceUnavailable("The compliance receipt package size is invalid")
+    if receipt_format == "mp-opt-clean-backup-receipt-v3":
+        if document.get("local_snapshot_count") != 1:
+            raise EvidenceUnavailable("Superseded local recovery snapshots remain")
+        document["retained_local_snapshot_count"] = document["local_snapshot_count"]
+        document["local_resolution_id"] = None
+        document["local_resolution_sha256"] = None
+        document["superseded_local_snapshot_receipt_sha256s"] = []
+    else:
+        _uuid(document.get("local_resolution_id"), "local_resolution_id")
+        if not SHA256.fullmatch(str(document.get("local_resolution_sha256", ""))):
+            raise EvidenceUnavailable("The local snapshot resolution digest is invalid")
+        retained_count = document.get("retained_local_snapshot_count")
+        if (
+            not isinstance(retained_count, int)
+            or isinstance(retained_count, bool)
+            or retained_count < 1
+        ):
+            raise EvidenceUnavailable("The retained local snapshot count is invalid")
+        local_receipts = document.get("superseded_local_snapshot_receipt_sha256s")
+        if not isinstance(local_receipts, list) or len(local_receipts) > 128:
+            raise EvidenceUnavailable("The superseded local snapshot inventory is invalid")
+        if len(set(local_receipts)) != len(local_receipts) or any(
+            not isinstance(digest, str) or not SHA256.fullmatch(digest)
+            for digest in local_receipts
+        ):
+            raise EvidenceUnavailable("The superseded local snapshot inventory is invalid")
     purged_at = _timestamp(expected["live_data_purged_at"])
     created_at = _timestamp(document.get("snapshot_created_at"))
     verified_at = _timestamp(document.get("deep_verified_at"))
     confirmed_at = _timestamp(document.get("portable_confirmed_at"))
     if created_at < purged_at or verified_at < created_at or confirmed_at < verified_at:
         raise EvidenceUnavailable("The clean backup was not verified after the privacy action")
+    superseded = document.get("superseded_portable_packages")
+    if not isinstance(superseded, list) or len(superseded) > 128:
+        raise EvidenceUnavailable("The superseded portable-package inventory is invalid")
+    package_ids: set[str] = set()
+    for package in superseded:
+        if not isinstance(package, dict) or set(package) != SUPERSEDED_PORTABLE_FIELDS:
+            raise EvidenceUnavailable("The superseded portable-package inventory is invalid")
+        package_id = _uuid(package.get("package_id"), "superseded package_id")
+        if package_id == document["package_id"] or package_id in package_ids:
+            raise EvidenceUnavailable("The superseded portable-package inventory is inconsistent")
+        package_ids.add(package_id)
+        for field in ("package_sha256", "archive_sha256"):
+            if not SHA256.fullmatch(str(package.get(field, ""))):
+                raise EvidenceUnavailable("The superseded portable package contains an invalid digest")
+        if not RECOVERY_KEY_ID.fullmatch(str(package.get("recovery_key_id", ""))):
+            raise EvidenceUnavailable("The superseded portable package recovery key is invalid")
+        package_size = package.get("package_size")
+        if not isinstance(package_size, int) or isinstance(package_size, bool) or package_size < 1:
+            raise EvidenceUnavailable("The superseded portable package size is invalid")
+        package_created_at = _timestamp(package.get("snapshot_created_at"))
+        package_confirmed_at = _timestamp(package.get("portable_confirmed_at"))
+        if package_created_at >= purged_at or package_confirmed_at < package_created_at:
+            raise EvidenceUnavailable("The superseded portable package timeline is invalid")
+    document["receipt_sha256"] = hashlib.sha256(raw).hexdigest()
+    return document
+
+
+def verified_peer_snapshot_resolution_receipt(
+    db: Session,
+    *,
+    job_id: str,
+    expected: dict,
+) -> dict:
+    """Verify the current HA peer's signed, case-bound local resolution receipt."""
+
+    _uuid(job_id, "job_id")
+    path = Path(settings.COMPLIANCE_RECEIPT_DIR) / f"{job_id}.peer.json"
+    signature_path = Path(str(path) + ".sig")
+    try:
+        if path.is_symlink() or signature_path.is_symlink():
+            raise EvidenceUnavailable("The peer compliance receipt path is unsafe")
+        if not path.is_file() or not signature_path.is_file():
+            raise EvidenceUnavailable("The verified peer snapshot receipt is not available yet")
+        if path.stat().st_size > 64 * 1024 or signature_path.stat().st_size > 16 * 1024:
+            raise EvidenceUnavailable("The peer compliance receipt path is unsafe")
+        raw = path.read_bytes()
+        signature = signature_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise EvidenceUnavailable("The verified peer snapshot receipt is not available yet") from exc
+    key = db.query(EvidenceKey).filter(
+        EvidenceKey.role == "instance", EvidenceKey.revoked_at.is_(None),
+    ).one_or_none()
+    if key is None:
+        raise EvidenceUnavailable("The instance evidence key is unavailable")
+    _verify_detached_bytes(content=raw, signature=signature, public_key=key.public_key)
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise EvidenceUnavailable("The peer snapshot receipt is invalid JSON") from exc
+    canonical = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    if (
+        raw != canonical or not isinstance(document, dict)
+        or set(document) != PEER_RESOLUTION_FIELDS
+        or document.get("format") != "mp-opt-peer-snapshot-resolution-v1"
+    ):
+        raise EvidenceUnavailable("The peer snapshot receipt schema is invalid")
+    for field in (
+        "resolution_id", "job_id", "instance_id", "workflow_id", "event_ref",
+        "privacy_action_id", "replacement_package_id",
+    ):
+        _uuid(document.get(field), field)
+    if document.get("subject_ref") is not None:
+        _uuid(document.get("subject_ref"), "subject_ref")
+    if document.get("job_id") != job_id:
+        raise EvidenceUnavailable("The peer snapshot receipt does not match this job")
+    for field, value in expected.items():
+        if document.get(field) != value:
+            raise EvidenceUnavailable("The peer snapshot receipt does not match this workflow")
+    if (
+        not NODE_ID.fullmatch(str(document.get("source_node_id", "")))
+        or not NODE_ID.fullmatch(str(document.get("target_node_id", "")))
+        or document.get("source_node_id") != settings.HA_NODE_ID
+        or document.get("target_node_id") != settings.HA_PEER_NODE_ID
+    ):
+        raise EvidenceUnavailable("The peer snapshot receipt does not match this HA pair")
+    sequence = document.get("privacy_action_sequence")
+    if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
+        raise EvidenceUnavailable("The peer snapshot receipt privacy sequence is invalid")
+    for field in (
+        "live_purge_receipt_sha256", "clean_receipt_sha256",
+        "replacement_package_sha256", "resolution_sha256",
+    ):
+        if not SHA256.fullmatch(str(document.get(field, ""))):
+            raise EvidenceUnavailable("The peer snapshot receipt contains an invalid digest")
+    purged_at = _timestamp(document.get("live_data_purged_at"))
+    resolved_at = _timestamp(document.get("resolved_at"))
+    if resolved_at < purged_at:
+        raise EvidenceUnavailable("The peer snapshot resolution predates the privacy action")
+    retained = document.get("retained_local_snapshot_count")
+    if not isinstance(retained, int) or isinstance(retained, bool) or retained < 0:
+        raise EvidenceUnavailable("The peer retained-snapshot count is invalid")
+    removed = document.get("superseded_local_snapshot_receipt_sha256s")
+    if not isinstance(removed, list) or len(removed) > 128 or len(set(removed)) != len(removed):
+        raise EvidenceUnavailable("The peer superseded-snapshot inventory is invalid")
+    if any(not isinstance(value, str) or not SHA256.fullmatch(value) for value in removed):
+        raise EvidenceUnavailable("The peer superseded-snapshot inventory is invalid")
     document["receipt_sha256"] = hashlib.sha256(raw).hexdigest()
     return document

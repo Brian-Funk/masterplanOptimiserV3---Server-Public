@@ -4,6 +4,26 @@ from server_backend.conftest import (
 )
 
 
+def _activate_processor(db, event):
+    from datetime import datetime, timezone
+    from app.models.evidence import EvidenceKey, ProcessorIdentity
+
+    key = EvidenceKey(
+        key_id="ek-1234567890abcdef", public_key="ssh-ed25519 " + "A" * 44,
+        public_key_sha256="f" * 64,
+        instance_id="11111111-1111-4111-8111-111111111111",
+        entity_id="prc-synthetic0001", role="processor",
+        activated_at=datetime.now(timezone.utc),
+    )
+    identity = ProcessorIdentity(
+        instance_id=key.instance_id, entity_id=key.entity_id, event_id=event.id,
+        event_evidence_id=event.evidence_id, event_display_name=event.name,
+        status="active", active_key_id=key.key_id,
+        activated_at=datetime.now(timezone.utc),
+    )
+    db.add_all([key, identity]); db.flush()
+
+
 # ── GET /admin/users/{id}/export ──
 
 
@@ -70,6 +90,186 @@ def test_gdpr_anonymise_server_only_user_is_ready_for_live_purge(db, reauth_admi
     ).first() is None
 
 
+def test_guided_deletion_advances_machine_steps_and_stops_for_backup_policy(db):
+    """The web workflow purges and prepares review without exposing internal buttons."""
+
+    from app.models.user import User
+
+    root = create_test_user(
+        db, username="guided.root", display_name="Guided Root",
+        is_root_admin=True, is_admin=True, event_id=None,
+    )
+    client = _make_client(db, root, reauth=True)
+    target = create_test_user(
+        db, username="guided.target", display_name="Guided Target", event_id=None,
+    )
+    target_id = target.id
+
+    started = client.delete(f"/api/v1/admin/users/{target.id}/gdpr-delete")
+    assert started.status_code == 200
+    request_id = started.json()["request_id"]
+
+    advanced = client.post(f"/api/v1/admin/deletion-requests/{request_id}/advance", json={})
+    assert advanced.status_code == 200
+    assert advanced.json()["advanced"] == ["live_data_purged"]
+    assert advanced.json()["state"] == "awaiting_clean_backup"
+    assert db.query(User).filter_by(id=target_id).first() is None
+
+    no_backups = client.post(
+        f"/api/v1/admin/deletion-requests/{request_id}/no-controlled-backups",
+        json={},
+    )
+    assert no_backups.status_code == 200
+    assert no_backups.json()["evidence"]["backup_not_applicable"]
+
+    prepared = client.post(f"/api/v1/admin/deletion-requests/{request_id}/advance", json={})
+    assert prepared.status_code == 200
+    assert prepared.json()["advanced"] == ["completion_review_prepared"]
+    assert prepared.json()["state"] == "awaiting_approvals"
+
+
+def test_ha_deletion_automatically_queues_peer_and_recovery_work(
+    db, monkeypatch,
+):
+    """One poll chains deterministic HA work without extra root buttons."""
+
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    import uuid
+
+    import app.main as main_module
+    from app.api.v1 import gdpr
+    from app.models.ha import HAProtectionOperation
+
+    root = create_test_user(
+        db, username="guided.ha.root", display_name="Guided HA Root",
+        is_root_admin=True, is_admin=True, event_id=None,
+    )
+    client = _make_client(db, root, reauth=True)
+    target = create_test_user(
+        db, username="guided.ha.target", display_name="Guided HA Target", event_id=None,
+    )
+    started = client.delete(f"/api/v1/admin/users/{target.id}/gdpr-delete")
+    assert started.status_code == 200
+    request_id = started.json()["request_id"]
+    queued = []
+
+    monkeypatch.setattr(gdpr.settings, "HA_MODE", "ha")
+    monkeypatch.setattr(main_module, "control_witness_ready", lambda: True)
+    monkeypatch.setattr(
+        main_module, "assess_readiness", lambda _db: SimpleNamespace(ready=True),
+    )
+    monkeypatch.setattr(main_module, "require_write_permit", lambda **_kwargs: None)
+
+    def create_operation(session, **values):
+        operation = HAProtectionOperation(
+            id=str(uuid.uuid4()), mutation_sequence=901, state="pending", stage="queued",
+            **values,
+        )
+        session.add(operation)
+        session.flush()
+        return operation
+
+    def accept_operation(_session, operation):
+        operation.state = "accepted"
+        operation.stage = "accepted"
+        operation.accepted_bundle_id = str(uuid.uuid4())
+        operation.accepted_bundle_sha256 = "a" * 64
+        operation.accepted_generation = 4
+        operation.accepted_at = datetime.now(timezone.utc)
+
+    def confirm_peer(_session, case, protection):
+        case.peer_confirmation_sha256 = "b" * 64
+        case.peer_confirmed_at = protection.accepted_at
+        case.peer_bundle_id = protection.bundle_id
+        case.peer_bundle_sha256 = protection.bundle_sha256
+        case.peer_generation = protection.generation
+        case.peer_accepted_at = protection.accepted_at
+        case.state = "awaiting_clean_backup"
+
+    monkeypatch.setattr(gdpr, "create_protection_operation", create_operation)
+    monkeypatch.setattr(gdpr, "queue_protection_operation", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gdpr, "sync_protection_operation", accept_operation)
+    monkeypatch.setattr(gdpr, "confirm_case_peer", confirm_peer)
+    monkeypatch.setattr(
+        gdpr, "queue_clean_backup_request",
+        lambda **values: queued.append(values),
+    )
+
+    advanced = client.post(f"/api/v1/admin/deletion-requests/{request_id}/advance", json={})
+
+    assert advanced.status_code == 200
+    assert advanced.json()["advanced"] == [
+        "live_data_purged",
+        "peer_replication_confirmed",
+        "recovery_snapshot_requested",
+    ]
+    assert advanced.json()["state"] == "awaiting_clean_backup"
+    assert advanced.json()["evidence"]["peer"] == "b" * 64
+    assert advanced.json()["clean_backup_bridge"]["job_id"]
+    assert queued[0]["workflow_id"] == request_id
+
+
+def test_event_erasure_detail_includes_temporary_operator_label(db):
+    """The root UI can identify an open event case without signing its name."""
+    event, _ = create_test_event(db, name="Readable Deletion Event")
+    root = create_test_user(
+        db,
+        username="event.label.root",
+        is_root_admin=True,
+        is_admin=True,
+        event_id=None,
+    )
+    client = _make_client(db, root, reauth=True)
+
+    response = client.post(
+        f"/api/v1/admin/deletion-requests/events/{event.id}",
+        json={},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["event_name"] == "Readable Deletion Event"
+
+
+def test_gdpr_anonymise_activated_unassigned_account_uses_instance_scope(
+    db, reauth_admin_client,
+):
+    """An activated account without an event can still enter signed erasure."""
+    import uuid
+
+    from app.models.deletion import DeletionCase, DesktopDeletionWorkOrder
+    from app.models.user import User
+
+    user = create_test_user(db, username="unassigned.used", event_id=None)
+
+    response = reauth_admin_client.delete(
+        f"/api/v1/admin/users/{user.id}/gdpr-delete"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "ready_for_live_purge"
+    case = db.query(DeletionCase).filter_by(
+        request_id=response.json()["request_id"]
+    ).one()
+    assert uuid.UUID(case.event_evidence_id)
+    assert case.event_evidence_id != case.subject_evidence_id
+    assert case.desktop_deletion_required is False
+    assert db.query(DesktopDeletionWorkOrder).filter_by(case_id=case.id).count() == 0
+    retained = db.query(User).filter(User.id == user.id).one()
+    assert retained.is_active is False
+
+
+def test_unassigned_account_can_submit_own_signed_deletion_request(db):
+    """Self-service deletion does not require an artificial event assignment."""
+    user = create_test_user(db, username="unassigned.self", event_id=None)
+    client = _make_client(db, user, reauth=True)
+
+    response = client.post("/api/v1/user/deletion-requests")
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "submitted"
+
+
 def test_gdpr_anonymise_removes_event_linked_identity_and_audit_name(db, reauth_admin_client):
     """Deletion removes duplicated participant identity rather than only unlinking it."""
     import json
@@ -84,6 +284,7 @@ def test_gdpr_anonymise_removes_event_linked_identity_and_audit_name(db, reauth_
     )
 
     event, _ = create_test_event(db, name="Deletion Event")
+    _activate_processor(db, event)
     person = PublishedPerson(
         event_id=event.id, external_person_id=77,
         first_name="Personal", last_name="Name", email="personal@example.test",
@@ -143,7 +344,13 @@ def test_gdpr_anonymise_removes_event_linked_identity_and_audit_name(db, reauth_
         work_order,
         claim_capability=capability,
         report={
-            "version": 1,
+            "format": "mp-opt-desktop-deletion-receipt-v2",
+            "instance_id": "11111111-1111-4111-8111-111111111111",
+            "entity_id": work_order.processor_entity_id,
+            "key_id": work_order.processor_key_id,
+            "role": "processor",
+            "algorithm": "Ed25519",
+            "public_key_sha256": "f" * 64,
             "work_order_id": work_order.work_order_id,
             "event_ref": event.evidence_id,
             "subject_ref": user.evidence_subject_id,
@@ -165,6 +372,10 @@ def test_gdpr_anonymise_removes_event_linked_identity_and_audit_name(db, reauth_
             "outstanding_actions": [],
             "completed_at": "2026-07-28T10:30:00+00:00",
         },
+        signature_sha256="a" * 64,
+        evidence_package_json="{}", evidence_package_sha256="c" * 64,
+        completed_key_id=work_order.processor_key_id,
+        completed_public_key_sha256="f" * 64,
     )
     purge_subject_live_data(db, case, user)
     db.commit()

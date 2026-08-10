@@ -1,5 +1,6 @@
 """Regression checks for the production dependency and image security policy."""
 
+import json
 from pathlib import Path
 import unittest
 
@@ -46,7 +47,7 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
         self.assertIn("apk add --no-cache font-dejavu", dockerfile)
         self.assertIn("PIP_ROOT_USER_ACTION=ignore", dockerfile)
         self.assertIn("pip check", dockerfile)
-        self.assertIn("pip uninstall --yes setuptools wheel", dockerfile)
+        self.assertIn("python -m pip uninstall --yes pip", dockerfile)
 
     def test_runtime_images_are_hardened_without_replacing_entrypoints(self) -> None:
         caddy = (ROOT / "infra/Dockerfile.caddy").read_text(encoding="utf-8")
@@ -90,12 +91,31 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
         self.assertIn("RUN apk upgrade --no-cache", caddy)
         self.assertIn("ARG GO_VERSION=1.26.5", postgres)
         self.assertIn("go install github.com/tianon/gosu@${GOSU_VERSION}", postgres)
-        self.assertIn("FROM postgres:18-alpine", postgres)
+        self.assertIn("FROM postgres:16-alpine", postgres)
         self.assertIn("FROM node:25-alpine", tools)
-        self.assertIn("ARG WRANGLER_VERSION=4.115.0", tools)
         self.assertIn("RUN apk upgrade --no-cache", tools)
         self.assertNotIn("ENTRYPOINT", postgres)
-        self.assertIn('npm install --global "wrangler@${WRANGLER_VERSION}"', tools)
+        self.assertIn("infra/cloudflare-ha-witness/package-lock.json", tools)
+        self.assertIn("npm ci --omit=dev --no-audit --no-fund", tools)
+        self.assertIn(
+            "ln -s /opt/wrangler/node_modules/.bin/wrangler /usr/local/bin/wrangler",
+            tools,
+        )
+        witness_package = json.loads(
+            (ROOT / "infra/cloudflare-ha-witness/package.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        witness_lock = json.loads(
+            (ROOT / "infra/cloudflare-ha-witness/package-lock.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(witness_package["dependencies"]["wrangler"], "^4.118.0")
+        self.assertEqual(witness_package["overrides"]["undici"], "7.29.0")
+        self.assertEqual(
+            witness_lock["packages"]["node_modules/undici"]["version"], "7.29.0"
+        )
         self.assertIn("/usr/local/lib/node_modules/npm", tools)
         self.assertIn("/usr/local/lib/node_modules/corepack", tools)
         self.assertIn("/opt/yarn-v*", tools)
@@ -109,30 +129,46 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
 
     def test_deploy_refreshes_images_sequentially_with_buildkit(self) -> None:
         deploy = (ROOT / "deploy/deploy.sh").read_text(encoding="utf-8")
+        common = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
 
         self.assertIn("export DOCKER_BUILDKIT=1", deploy)
         self.assertIn("for service in db caddy backend", deploy)
         self.assertIn('build --pull "$service"', deploy)
-        self.assertIn("node:22-alpine", deploy)
+        self.assertIn("mp_build_frontend_container", deploy)
+        self.assertIn("node:22-alpine", common)
 
-    def test_ci_audits_dependencies_and_fails_on_any_serious_cve(self) -> None:
+    def test_ci_audits_dependencies_with_one_bounded_non_applicable_exception(self) -> None:
         workflow = (ROOT / ".github/workflows/server-ci.yml").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("python -m pip_audit -r requirements.lock.txt", workflow)
+        self.assertIn("--ignore-vuln CVE-2026-69247", workflow)
+        self.assertIn("does not call", workflow)
+        self.assertIn("pyOpenSSL 26.3.0", workflow)
+        self.assertEqual(workflow.count("--ignore-vuln"), 1)
         self.assertIn(
             "pip install --constraint requirements.lock.txt -r requirements.txt",
             workflow,
         )
         self.assertIn("aquasec/trivy:0.72.0", workflow)
+        self.assertIn("--ignorefile /work/trivyignore.yaml", workflow)
+        trivy_ignore = (ROOT / "deploy/security/trivyignore.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(trivy_ignore.count("CVE-"), 1)
+        self.assertIn("CVE-2026-69247", trivy_ignore)
+        self.assertIn("pkg:pypi/cryptography@49.0.0", trivy_ignore)
+        self.assertIn("expired_at: 2026-08-18", trivy_ignore)
+        self.assertIn("PKCS#7 EnvelopedData decrypt APIs are not used", trivy_ignore)
+        self.assertIn("pyOpenSSL 26.3.0", trivy_ignore)
         self.assertIn("pull_with_retry()", workflow)
         self.assertIn('for attempt in 1 2 3; do', workflow)
         for image in (
             "python:3.14-alpine",
             "golang:1.26.5-alpine",
             "caddy:2-alpine",
-            "postgres:18-alpine",
+            "postgres:16-alpine",
             "aquasec/trivy:0.72.0",
         ):
             self.assertIn(image, workflow)

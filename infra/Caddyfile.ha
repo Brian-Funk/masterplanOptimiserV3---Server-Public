@@ -28,6 +28,14 @@
 		reverse_proxy backend:8000
 	}
 
+	# The browser-local recovery-key generator is delivered only to an
+	# authenticated root session. Its page performs an additional fresh-passkey
+	# check before enabling key generation.
+	@recoveryKey path /recovery-key /recovery-key/ /recovery-key.html
+	forward_auth @recoveryKey backend:8000 {
+		uri /api/v1/auth/root-access
+	}
+
 	handle /health {
 		reverse_proxy backend:8000
 	}
@@ -45,6 +53,8 @@
 	# hours can strand an installed desktop client on an obsolete HA state flow.
 	@serviceWorker path /sw.js
 	header @serviceWorker Cache-Control "no-cache, no-store, must-revalidate"
+	@authenticationShell path /login /login/ /login.html /bootstrap /bootstrap/ /bootstrap.html
+	header @authenticationShell Cache-Control "no-cache, no-store, must-revalidate"
 
 	handle {
 		root * /srv/static

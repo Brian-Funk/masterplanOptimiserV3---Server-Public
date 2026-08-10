@@ -5,20 +5,52 @@
 MP_PORTABLE_TOOL="${MP_ROOT}/deploy/management/portable_snapshot.py"
 MP_PORTABLE_EXPORTS="${MP_STATE}/portable-exports"
 MP_PORTABLE_IMPORTS="${MP_STATE}/portable-imports"
+MP_PORTABLE_EXPORT_INVENTORY="${MP_PORTABLE_EXPORT_INVENTORY:-$MP_STATE/portable-export-inventory}"
 MP_PORTABLE_LAST_IMPORT_STATE="${MP_PORTABLE_LAST_IMPORT_STATE:-$MP_STATE/portable-last-import.json}"
 
 mp_compliance_emit_backup_receipts() {
-    local selected="$1"
+    local selected="$1" ha_args=()
+    mp_load_ha_config || return 1
+    if [ "${HA_MODE:-standalone}" = ha ]; then
+        ha_args=(
+            --ha-mode ha
+            --ha-node-id "$HA_NODE_ID"
+            --ha-peer-node-id "$HA_PEER_NODE_ID"
+            --ha-peer-ssh "$HA_PEER_SSH"
+        )
+    fi
     python3 "$MP_ROOT/deploy/management/compliance_receipts.py" \
         --requests "$MP_ROOT/runtime/compliance-requests" \
         --receipts "$MP_ROOT/runtime/compliance-receipts" \
+        --snapshots "$MP_SNAPSHOTS" \
+        --portable-inventory "$MP_PORTABLE_EXPORT_INVENTORY" \
+        --resolution-journals "$MP_STATE/compliance-resolutions" \
         --snapshot-receipt "$selected/receipt.json" \
-        --instance-key "$MP_ROOT/secrets/evidence_signing_key"
+        --instance-key "$MP_ROOT/secrets/evidence_signing_key" \
+        "${ha_args[@]}"
+}
+
+# Convert bounded receipt-emitter diagnostics into an actionable operator
+# message without displaying raw paths or cryptographic material.
+mp_compliance_error_message() {
+    local error_file="$1" diagnostic
+    diagnostic="$(head -c 512 "$error_file" 2>/dev/null || true)"
+    case "$diagnostic" in
+        "A pre-deletion local snapshot remains"*|"A superseded local snapshot"*|"The local snapshot resolution"*|"The HA peer could not resolve"*)
+            printf '%s\n' "The verified replacement remains valid, but automatic removal of pre-deletion VPS snapshots did not finish safely. Retry Deep verify to resume the protected resolution journal."
+            ;;
+        "Compliance receipt signing failed"*)
+            printf '%s\n' "The instance evidence key could not sign the recovery receipt. Check the protected evidence-key configuration, then retry Deep verify."
+            ;;
+        *)
+            printf '%s\n' "The pending deletion recovery receipt could not be validated. Review the snapshot inventory and evidence configuration, then retry Deep verify."
+            ;;
+    esac
 }
 
 mp_portable_initialise() {
-    mkdir -p "$MP_PORTABLE_EXPORTS" "$MP_PORTABLE_IMPORTS" || return 1
-    chmod 700 "$MP_PORTABLE_EXPORTS" "$MP_PORTABLE_IMPORTS" || return 1
+    mkdir -p "$MP_PORTABLE_EXPORTS" "$MP_PORTABLE_IMPORTS" "$MP_PORTABLE_EXPORT_INVENTORY" || return 1
+    chmod 700 "$MP_PORTABLE_EXPORTS" "$MP_PORTABLE_IMPORTS" "$MP_PORTABLE_EXPORT_INVENTORY" || return 1
     find "$MP_PORTABLE_EXPORTS" "$MP_PORTABLE_IMPORTS" \
         -mindepth 1 -maxdepth 1 -type d -mmin +1440 -exec rm -rf -- {} + 2>/dev/null || true
 }
@@ -188,7 +220,7 @@ ${body}" \
 # workstation path and private recovery identity are deliberately never kept.
 mp_portable_record_confirmed_export() {
     local selected="$1" package_id="$2" package_hash="$3" package_size="$4"
-    local snapshot_name archive_hash key_id receipt_tmp state_tmp confirmed_at
+    local snapshot_name snapshot_created_at archive_hash key_id receipt_tmp state_tmp inventory_tmp confirmed_at
     snapshot_name="$(basename "$selected")"
     [[ "$snapshot_name" =~ ^[0-9]{8}T[0-9]{6}Z_(database|secrets|full)_[A-Za-z0-9._-]{1,64}$ ]] || return 1
     [ "$(readlink -f "$(dirname "$selected")")" = "$(readlink -f "$MP_SNAPSHOTS")" ] || return 1
@@ -201,6 +233,7 @@ mp_portable_record_confirmed_export() {
     [[ "$package_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || return 1
     [[ "$package_hash" =~ ^[0-9a-f]{64}$ ]] && [[ "$package_size" =~ ^[0-9]+$ ]] || return 1
     archive_hash="$(jq -er '.archive_sha256 | select(test("^[0-9a-f]{64}$"))' "$selected/receipt.json")" || return 1
+    snapshot_created_at="$(jq -er '.created_at | select(type == "string")' "$selected/receipt.json")" || return 1
     key_id="$(jq -er '.encryption.recovery_key_id | select(type == "string" and length > 0)' "$selected/receipt.json")" || return 1
     [ "$(sha256sum "$selected/snapshot.tar.age" | awk '{print $1}')" = "$archive_hash" ] || return 1
     confirmed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -245,6 +278,28 @@ mp_portable_record_confirmed_export() {
         }
     ' > "$state_tmp" || { rm -f "$state_tmp"; return 1; }
     chmod 600 "$state_tmp" && mv "$state_tmp" "$MP_MANUAL_EXPORT_STATE" || return 1
+    inventory_tmp="$(mktemp "$MP_PORTABLE_EXPORT_INVENTORY/.${package_id}.XXXXXX")" || return 1
+    jq -n --arg snapshot "$snapshot_name" --arg snapshot_created_at "$snapshot_created_at" \
+        --arg confirmed_at "$confirmed_at" --arg package_id "$package_id" \
+        --arg package_hash "$package_hash" --arg archive_hash "$archive_hash" \
+        --arg key_id "$key_id" --argjson package_size "$package_size" '
+        {
+          format: "mp-opt-portable-export-inventory-v1",
+          state: "operator-sha256-confirmed",
+          snapshot: $snapshot,
+          snapshot_created_at: $snapshot_created_at,
+          confirmed_at: $confirmed_at,
+          package_id: $package_id,
+          package_sha256: $package_hash,
+          package_size: $package_size,
+          archive_sha256: $archive_hash,
+          recovery_key_id: $key_id
+        }
+    ' > "$inventory_tmp" || { rm -f "$inventory_tmp"; return 1; }
+    chmod 600 "$inventory_tmp" && mv "$inventory_tmp" "$MP_PORTABLE_EXPORT_INVENTORY/${package_id}.json" || {
+        rm -f "$inventory_tmp"
+        return 1
+    }
     if declare -F mp_snapshot_publish_status >/dev/null; then
         mp_snapshot_publish_status || true
     fi
@@ -275,6 +330,7 @@ mp_portable_mark_export_required() {
 
 mp_snapshot_export_portable_interactive() {
     local selected style transfer host local_path ticket directory output result report package_id package_hash package_size
+    local compliance_receipts="" compliance_note="" compliance_error_file compliance_error compliance_removed_count="0"
     mp_require_commands python3 jq sha256sum || return 1
     mp_portable_initialise || return 1
     selected="$(mp_snapshot_select "Choose a v2 snapshot to export")" || return 1
@@ -324,10 +380,24 @@ mp_snapshot_export_portable_interactive() {
             return 1
         fi
         if declare -F mp_compliance_emit_backup_receipts >/dev/null; then
-            mp_compliance_emit_backup_receipts "$selected" || true
+            compliance_error_file="$(mktemp "$MP_STATE/compliance-error.XXXXXX")" || return 1
+            compliance_receipts="$(mp_compliance_emit_backup_receipts "$selected" 2>"$compliance_error_file")" || {
+                compliance_error="$(mp_compliance_error_message "$compliance_error_file")"
+                rm -f "$compliance_error_file"
+                ui_error "The workstation export was verified, but pending deletion recovery receipts could not be recorded. The export remains valid.\n\n${compliance_error}"
+                return 1
+            }
+            rm -f "$compliance_error_file"
+            if [ -n "$compliance_receipts" ]; then
+                compliance_removed_count="$(awk -F '\t' '$1 == "RESOLVED" { print $2 }' <<< "$compliance_receipts" | tail -n 1)"
+                [[ "$compliance_removed_count" =~ ^[0-9]+$ ]] || compliance_removed_count="0"
+                compliance_note="\n\nPending deletion recovery receipts were recorded. ${compliance_removed_count} pre-deletion local snapshot(s) were removed automatically. External workstation copies remain separately accountable. The web page will detect the receipts automatically."
+            elif find "$MP_ROOT/runtime/compliance-requests" -maxdepth 1 -type f -name '*.json' -print -quit 2>/dev/null | grep -q .; then
+                compliance_note="\n\nA deletion workflow is still waiting. Deep-verify this snapshot now; MP-OPT will then record the recovery receipt."
+            fi
         fi
         ui_message "Portable snapshot exported" \
-            "The workstation copy was operator-confirmed and its public recovery receipt was recorded.\n\nPackage ID: ${package_id}\nPackage SHA-256: ${package_hash}\n\nThe temporary VPS export was removed."
+            "The workstation copy was operator-confirmed and its public recovery receipt was recorded.\n\nPackage ID: ${package_id}\nPackage SHA-256: ${package_hash}\n\nThe temporary VPS export was removed.${compliance_note}"
     else
         mp_audit "snapshot.portable-export" "pending" "$(basename "$selected"):sha256:${package_hash}"
         ui_message "Portable export retained" "The protected VPS copy remains for 24 hours so the transfer can be retried."

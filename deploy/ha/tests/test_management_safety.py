@@ -25,6 +25,8 @@ ACTIONS_SOURCE = (ROOT / "deploy/management/actions.sh").read_text(encoding="utf
 ROTATION_SOURCE = (ROOT / "deploy/management/recovery_rotation.sh").read_text(encoding="utf-8")
 INSTALL_SERVICES_SOURCE = (ROOT / "deploy/ha/install_services.sh").read_text(encoding="utf-8")
 AUTOMATIC_SNAPSHOTS_SOURCE = (ROOT / "deploy/ha/automatic_snapshots.sh").read_text(encoding="utf-8")
+REPLICATION_SERVICE_SOURCE = (ROOT / "deploy/ha/mp-opt-ha-replication.service").read_text(encoding="utf-8")
+REPLICATION_SOURCE = (ROOT / "deploy/ha/replicate_now.sh").read_text(encoding="utf-8")
 RECOVERY_KEY_PATH = ROOT / "deploy/ha/recovery_key_setup.py"
 PORTABLE_TOOL_PATH = ROOT / "deploy/management/portable_snapshot.py"
 SPEC = importlib.util.spec_from_file_location("recovery_key_setup", RECOVERY_KEY_PATH)
@@ -73,7 +75,176 @@ class CaddyConversionSafetyTests(unittest.TestCase):
         self.assertIn("mp_unlock()", COMMON_SOURCE)
 
 
+class TerminalExitSafetyTests(unittest.TestCase):
+    def test_every_management_exit_clears_the_operator_terminal(self) -> None:
+        cleanup = function_body(MENU_SOURCE, "mp_cleanup")
+        self.assertIn("clear </dev/tty >/dev/tty", cleanup)
+        self.assertIn("trap mp_cleanup EXIT TERM", MENU_SOURCE)
+
+    def test_command_log_clear_never_opens_tty_without_a_terminal(self) -> None:
+        clear_terminal = function_body(COMMON_SOURCE, "ui_clear_terminal")
+        self.assertIn("if mp_has_terminal", clear_terminal)
+        self.assertNotIn("if [ -w /dev/tty ]", clear_terminal)
+        self.assertIn("clear 2>/dev/null || true", clear_terminal)
+
+
+class HASelftestSourceSafetyTests(unittest.TestCase):
+    def test_unsigned_selftests_require_the_clean_active_exact_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            installation = root / "installation"
+            state = root / "state"
+            source = home / ".local/share/mp-opt-test-deploy/source"
+            tests = source / "deploy/ha/tests"
+            tests.mkdir(parents=True)
+            installation.mkdir()
+            (state / "test-deployments").mkdir(parents=True)
+            (tests / "sentinel.txt").write_text("exact\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(source), "init", "-q"], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(source), "commit", "-qm", "exact"], check=True)
+            commit = subprocess.check_output(
+                ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+            ).strip()
+            (installation / ".test-deployment.env").write_text(
+                f"MP_TEST_COMMIT={commit}\n", encoding="utf-8"
+            )
+            (state / "test-deployments/current.json").write_text(
+                json.dumps({"current_commit": commit}), encoding="utf-8"
+            )
+            policy = root / "deployment-policy"
+            policy.write_text("test\n", encoding="utf-8")
+            helper = function_body(HA_SOURCE, "mp_ha_selftest_root")
+            script = f"""
+                set -e
+                export HOME={shlex.quote(str(home))}
+                MP_ROOT={shlex.quote(str(installation))}
+                MP_STATE={shlex.quote(str(state))}
+                MP_DEPLOYMENT_POLICY_FILE={shlex.quote(str(policy))}
+                ui_error() {{ printf '%s\\n' "$*" >&2; }}
+                {helper}
+                [ "$(mp_ha_selftest_root)" = {shlex.quote(str(source))} ]
+                printf 'dirty\\n' >> {shlex.quote(str(tests / 'sentinel.txt'))}
+                ! mp_ha_selftest_root >/dev/null 2>&1
+            """
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class SnapshotServiceSafetyTests(unittest.TestCase):
+    def test_deep_verify_retries_pending_deletion_recovery_receipts(self) -> None:
+        verify = function_body(SNAPSHOT_SOURCE, "mp_snapshot_verify_interactive")
+        export = function_body(PORTABLE_SOURCE, "mp_snapshot_export_portable_interactive")
+        self.assertIn('mp_compliance_emit_backup_receipts "$selected"', verify)
+        self.assertIn("mp_compliance_error_message", verify)
+        self.assertIn("Pending deletion recovery receipts were recorded", verify)
+        self.assertIn("pre-deletion local snapshot(s) were removed automatically", verify)
+        self.assertIn("Export this verified snapshot", verify)
+        self.assertIn('mp_compliance_emit_backup_receipts "$selected"', export)
+        self.assertIn("mp_compliance_error_message", export)
+        self.assertNotIn('mp_compliance_emit_backup_receipts "$selected" || true', export)
+        self.assertIn("pre-deletion local snapshot(s) were removed automatically", export)
+        self.assertIn("Deep-verify this snapshot now", export)
+
+    def test_compliance_inventory_failure_is_actionable(self) -> None:
+        mapper = function_body(PORTABLE_SOURCE, "mp_compliance_error_message")
+        self.assertIn("pre-deletion local snapshot", mapper)
+        self.assertIn("automatic removal", mapper)
+        self.assertIn("Retry Deep verify", mapper)
+        self.assertNotIn("private", mapper.lower())
+
+    def test_portable_exports_are_durably_inventoried_for_deletion_cases(self) -> None:
+        record = function_body(PORTABLE_SOURCE, "mp_portable_record_confirmed_export")
+        bridge = function_body(PORTABLE_SOURCE, "mp_compliance_emit_backup_receipts")
+        self.assertIn("MP_PORTABLE_EXPORT_INVENTORY", PORTABLE_SOURCE)
+        self.assertIn('"$MP_PORTABLE_EXPORT_INVENTORY/${package_id}.json"', record)
+        self.assertIn('mp-opt-portable-export-inventory-v1', record)
+        self.assertIn('--portable-inventory "$MP_PORTABLE_EXPORT_INVENTORY"', bridge)
+        self.assertIn('--resolution-journals "$MP_STATE/compliance-resolutions"', bridge)
+
+    def test_backend_secret_contract_is_group_readable_without_broadening_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            secrets = root / "secrets"
+            secrets.mkdir(mode=0o700)
+            names = (
+                "database_password", "ip_hmac_key", "secret_key",
+                "vapid_private_key", "root_bootstrap_token", "smtp_token",
+                "evidence_signing_key", "evidence_github_fine_grained_token",
+            )
+            for name in names:
+                path = secrets / name
+                path.write_text("synthetic", encoding="utf-8")
+                path.chmod(0o600)
+            ha_home = root / "ha"
+            ha_secrets = ha_home / "secrets"
+            ha_secrets.mkdir(parents=True, mode=0o700)
+            ha_token = ha_secrets / "node_token"
+            ha_token.write_text("synthetic-ha-token", encoding="utf-8")
+            ha_token.chmod(0o600)
+            log = root / "sudo.log"
+            command = f'''
+                set -Eeuo pipefail
+                export MP_ROOT={shlex.quote(str(root))}
+                export MP_HA_HOME={shlex.quote(str(ha_home))}
+                export TEST_SUDO_LOG={shlex.quote(str(log))}
+                source {shlex.quote(str(ROOT / "deploy/management/common.sh"))}
+                sudo() {{
+                    [ "$1" != -n ] || shift
+                    printf '%s\n' "$*" >> "$TEST_SUDO_LOG"
+                }}
+                mp_prepare_backend_secret_permissions
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", command],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(stat.S_IMODE(secrets.stat().st_mode), 0o700)
+            self.assertTrue(all(
+                stat.S_IMODE((secrets / name).stat().st_mode) == 0o640
+                for name in names
+            ))
+            self.assertEqual(stat.S_IMODE(ha_token.stat().st_mode), 0o640)
+            chowns = log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(chowns), len(names) + 1)
+            self.assertTrue(all(
+                line.startswith("chown :10001 -- ")
+                for line in chowns
+            ))
+
+    def test_installation_validation_uses_the_backend_secret_permission_contract(self) -> None:
+        validation = function_body(ACTIONS_SOURCE, "mp_validate_installation")
+        expected_mode = function_body(COMMON_SOURCE, "mp_expected_protected_file_mode")
+        mode_validation = function_body(COMMON_SOURCE, "mp_validate_protected_file_modes")
+
+        self.assertIn("mp_validate_protected_file_modes || failed=1", validation)
+        self.assertNotIn('[ "$mode" != "600" ]', validation)
+        for name in (
+            "database_password", "ip_hmac_key", "secret_key",
+            "vapid_private_key", "root_bootstrap_token", "smtp_token",
+            "evidence_signing_key", "evidence_github_fine_grained_token",
+        ):
+            self.assertIn(f'"$MP_ROOT/secrets/{name}"', expected_mode)
+        self.assertIn('"$MP_HA_HOME/secrets/node_token"', expected_mode)
+        self.assertIn("printf '640\\n'", expected_mode)
+        self.assertIn("printf '600\\n'", expected_mode)
+        self.assertIn('expected="$(mp_expected_protected_file_mode "$file")"', mode_validation)
+
+    def test_runtime_bind_sources_reclaim_only_safe_exact_directories(self) -> None:
+        runtime = function_body(COMMON_SOURCE, "mp_prepare_frontend_csp_runtime")
+        self.assertIn("Refusing unsafe runtime request path", runtime)
+        self.assertIn('[ ! -d "$directory" ] || [ -L "$directory" ]', runtime)
+        self.assertIn('stat -c \'%u:%g\' "$directory"', runtime)
+        self.assertIn('sudo -n chown "$owner" "$directory"', runtime)
+        self.assertIn('chmod 1733 "$compliance_request_dir"', runtime)
+        self.assertIn('chmod 0755 "$compliance_receipt_dir"', runtime)
+
     def test_snapshot_payload_permissions_do_not_depend_on_operator_umask(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -136,6 +307,47 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
         self.assertNotIn("AGE-SECRET-KEY", function_body(SNAPSHOT_SOURCE, "mp_snapshot_publish_status"))
 
 
+class ReplicationServiceSafetyTests(unittest.TestCase):
+    def test_replication_worker_keeps_hardening_and_copies_via_backend(self) -> None:
+        self.assertIn("User=deploy", REPLICATION_SERVICE_SOURCE)
+        self.assertIn("ProtectSystem=strict", REPLICATION_SERVICE_SOURCE)
+        self.assertIn("ProtectHome=read-only", REPLICATION_SERVICE_SOURCE)
+        self.assertIn("NoNewPrivileges=true", REPLICATION_SERVICE_SOURCE)
+        self.assertIn("/opt/masterplan/runtime", REPLICATION_SERVICE_SOURCE)
+        self.assertIn("/home/deploy/.local/state/mp-opt-ha-replication", REPLICATION_SERVICE_SOURCE)
+        self.assertIn('exec -T backend tar -C /evidence -cf - .', REPLICATION_SOURCE)
+        self.assertIn('tar --no-same-owner -C "$stage/payload/evidence" -xf -', REPLICATION_SOURCE)
+        self.assertNotIn('sudo -n cp -a "$MP_ROOT/state/evidence/."', REPLICATION_SOURCE)
+
+    def test_replication_snapshot_is_bounded_and_revalidates_the_writer_lease(self) -> None:
+        self.assertIn("SET lock_timeout TO '30s';", REPLICATION_SOURCE)
+        self.assertIn('read -r -t "$snapshot_wait_seconds"', REPLICATION_SOURCE)
+        self.assertGreaterEqual(REPLICATION_SOURCE.count("assert_current_holder"), 4)
+        snapshot_commit = REPLICATION_SOURCE.index('wait "$snapshot_pid"')
+        captured_guard = REPLICATION_SOURCE.index(
+            "assert_current_holder", snapshot_commit,
+        )
+        archive_hash = REPLICATION_SOURCE.index('archive_hash="$(sha256sum', captured_guard)
+        transfer_guard = REPLICATION_SOURCE.index(
+            "assert_current_holder", archive_hash,
+        )
+        peer_transfer = REPLICATION_SOURCE.index(
+            'response="$(ssh -o BatchMode=yes', transfer_guard,
+        )
+        self.assertLess(snapshot_commit, captured_guard)
+        self.assertLess(captured_guard, archive_hash)
+        self.assertLess(archive_hash, transfer_guard)
+        self.assertLess(transfer_guard, peer_transfer)
+
+    def test_retired_bootstrap_token_is_not_rewritten_by_read_only_workers(self) -> None:
+        retirement = function_body(COMMON_SOURCE, "mp_retire_root_bootstrap_secret")
+        self.assertIn('if [ -s "$token" ]; then', retirement)
+        self.assertLess(
+            retirement.index('if [ -s "$token" ]; then'),
+            retirement.index(': > "$token"'),
+        )
+
+
 class RecoveryKeyWorkflowTests(unittest.TestCase):
     RECIPIENT = "age1" + "a" * 58
 
@@ -170,6 +382,7 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
                 jq() {{
                     case "$*" in
                         *holder_node_id*//*) printf '%s\n' node-a ;;
+                        *generation*//*) printf '%s\n' 7 ;;
                         *automatic_failover*) printf '%s\n' false ;;
                         *) cat >/dev/null ;;
                     esac
@@ -421,6 +634,8 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
         self.assertIn(r"\033[2J\033[3J\033[H", selectable)
         self.assertLess(selectable.index("clear_sequence="), selectable.index("normal selectable terminal text"))
         self.assertIn("normal selectable terminal text", selectable)
+        self.assertIn("printf '%s\\n' '----- COPY FROM HERE -----'", selectable)
+        self.assertIn("'----- COPY FROM HERE -----' &&", selectable)
         self.assertNotIn("ui_text_file", presenter)
         self.assertIn("mp_portable_show_copyable_commands", exporter)
         self.assertIn("mp_portable_show_copyable_commands", importer)
@@ -532,6 +747,8 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
         self.assertNotIn("UPDATE public_schedule_links", body)
         self.assertNotIn("publish_secret_hash", body)
         self.assertNotIn("DELETE FROM webauthn_credentials", body)
+        self.assertIn('mp_prepare_backend_secret_permissions', body)
+        self.assertNotIn('chmod 600 "$MP_ROOT/secrets/root_bootstrap_token"', body)
 
     def test_restore_refuses_snapshot_older_than_retained_privacy_action(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -584,8 +801,9 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
                 export MP_ROOT={shlex.quote(str(installation))}
                 source {shlex.quote(str(ROOT / "deploy/management/snapshots.sh"))}
                 mp_env_get() {{ printf '%s\n' required; }}
+                sudo() {{ [ "$1" != -n ] || shift; "$@"; }}
                 jq() {{
-                    python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("head_sha256", ""))' "${{@: -1}}"
+                    python3 -c 'import json, pathlib, sys; p=pathlib.Path(sys.argv[1]); data=json.load(open(p)) if p.is_file() else json.load(sys.stdin); print(data.get("head_sha256", ""))' "${{@: -1}}"
                 }}
                 ! mp_snapshot_guard_evidence_head {shlex.quote(str(extracted))}
                 cp {shlex.quote(str(anchor))} {shlex.quote(str(current))}
@@ -600,6 +818,44 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("different heads", result.stderr)
 
+    def test_evidence_head_guard_reads_backend_owned_head_through_sudo(self) -> None:
+        body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_guard_evidence_head")
+        self.assertIn('sudo -n test -s "$current"', body)
+        self.assertIn('sudo -n test ! -L "$current"', body)
+        self.assertIn('sudo -n cat "$current"', body)
+        self.assertNotIn('jq -r \'.head_sha256 // empty\' "$current"', body)
+
+    def test_snapshot_topology_is_resolved_and_checked_before_mutation(self) -> None:
+        copy_body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_copy_configuration")
+        self.assertIn("container|host", copy_body)
+        self.assertIn("active Caddy topology could not be resolved", copy_body)
+        guard_body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_guard_caddy_topology")
+        self.assertIn('snapshot_mode="$(tr -d', guard_body)
+        self.assertIn('current_mode="$(mp_caddy_mode)"', guard_body)
+        apply_body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_apply")
+        self.assertLess(
+            apply_body.index('mp_snapshot_guard_caddy_topology "$temporary"'),
+            apply_body.index("MP_SNAPSHOT_APPLY_MUTATED=true"),
+        )
+
+    def test_restore_recreates_only_empty_optional_evidence_token_source(self) -> None:
+        body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_restore_configuration")
+        self.assertIn('optional_evidence_token="$MP_ROOT/secrets/evidence_github_fine_grained_token"', body)
+        self.assertIn('install -m 0600 /dev/null "$optional_evidence_token"', body)
+        self.assertIn("intentionally excluded from snapshots", body)
+        for stage in (
+            "configuration-topology",
+            "configuration-environment",
+            "configuration-secrets",
+            "configuration-secret-permissions",
+            "configuration-compose-override",
+            "configuration-host-caddy",
+            "configuration-database-secret",
+            "configuration-database-role",
+            "configuration-backend-secret-permissions",
+        ):
+            self.assertIn(f'MP_SNAPSHOT_APPLY_STAGE="{stage}"', body)
+
     def test_database_snapshot_pauses_writes_and_records_evidence_anchor(self) -> None:
         body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_create")
         self.assertLess(body.index('stop backend'), body.index('mp_snapshot_dump_database'))
@@ -613,6 +869,25 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
         self.assertIn('rollback_identity', body)
         self.assertIn('mp_snapshot_verify_path "$pre_snapshot" "$rollback_identity"', body)
         self.assertIn('mp_snapshot_apply "$pre_snapshot" "$rollback_identity"', body)
+        self.assertIn('MP_SNAPSHOT_APPLY_MUTATED', body)
+        self.assertIn('No database, configuration, or service state was changed.', body)
+        self.assertLess(body.index("ui_clear_terminal"), body.index("mp_snapshot_create full"))
+
+    def test_snapshot_delete_uses_a_short_fixed_confirmation_phrase(self) -> None:
+        body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_delete_interactive")
+        self.assertIn('"DELETE SNAPSHOT"', body)
+        self.assertNotIn('"DELETE $label"', body)
+
+    def test_restore_preflight_failure_does_not_attempt_rollback(self) -> None:
+        body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_restore_interactive")
+        preflight_exit = body.index('if [ "${MP_SNAPSHOT_APPLY_MUTATED:-false}" != true ]')
+        rollback_apply = body.index('mp_snapshot_apply "$pre_snapshot" "$rollback_identity"', preflight_exit)
+        self.assertLess(preflight_exit, rollback_apply)
+        apply_body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_apply")
+        self.assertLess(
+            apply_body.index('MP_SNAPSHOT_APPLY_STAGE="evidence-head-preflight"'),
+            apply_body.index('MP_SNAPSHOT_APPLY_MUTATED=true'),
+        )
 
     def test_rotation_preserves_originals_until_verified_baseline(self) -> None:
         transform = function_body(ROTATION_SOURCE, "mp_snapshot_reencrypt_path")
@@ -663,11 +938,13 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
             selected = snapshots / "20260718T120000Z_full_baseline"
             selected.mkdir(parents=True)
             state.mkdir()
+            (state / "portable-export-inventory").mkdir()
             archive = selected / "snapshot.tar.age"
             archive.write_bytes(b"encrypted-test-archive")
             archive_hash = __import__("hashlib").sha256(archive.read_bytes()).hexdigest()
             (selected / "receipt.json").write_text(json.dumps({
                 "format": "mp-opt-snapshot-receipt-v2",
+                "created_at": "2026-07-18T12:00:00Z",
                 "archive_sha256": archive_hash,
                 "verification": "deep-verified",
                 "encryption": {"recovery_key_id": "age-key-test"},

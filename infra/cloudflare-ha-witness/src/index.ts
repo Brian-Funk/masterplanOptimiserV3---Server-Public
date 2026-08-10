@@ -57,6 +57,18 @@ interface AcmeChallengeRecord {
   expiresAt: number;
 }
 
+interface CriticalOperationGuard {
+  operationId: string;
+  mutationSequence: number;
+  openedAt: number;
+  expiresAt: number;
+  state: "open" | "completed" | "cancelled" | "expired";
+  closedAt?: number;
+  expiredAt?: number;
+  bundleId?: string;
+  bundleSha256?: string;
+}
+
 interface ClusterRecord {
   clusterId: string;
   holderNodeId: string;
@@ -93,6 +105,7 @@ interface ClusterRecord {
     generation: number;
     expiresAt: number;
   };
+  criticalOperations?: CriticalOperationGuard[];
 }
 
 interface TransitionSummary {
@@ -123,6 +136,7 @@ const MAX_RESPONSE_INCIDENTS = 20;
 const MAX_RESPONSE_INCIDENT_GROUPS = 10;
 const DNS_TTL_SECONDS = 60;
 const ACME_CHALLENGE_TTL_SECONDS = 120;
+const CRITICAL_OPERATION_GUARD_SECONDS = 15 * 60;
 
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), {
   status,
@@ -207,6 +221,18 @@ export class ClusterLease extends DurableObject<Env> {
     return Boolean(token && node && await sha256(token) === node.tokenHash);
   }
 
+  private activeCriticalOperations(cluster: ClusterRecord, now: number): CriticalOperationGuard[] {
+    for (const guard of cluster.criticalOperations || []) {
+      if (guard.state === "open" && guard.expiresAt < now) {
+        guard.state = "expired";
+        guard.expiredAt = now;
+      }
+    }
+    return (cluster.criticalOperations || []).filter(
+      (guard) => guard.state === "open" && guard.expiresAt >= now,
+    );
+  }
+
   private response(cluster: ClusterRecord, now: number, shouldPromote = false) {
     this.pruneIncidents(cluster, now);
     const retainedIncidents = cluster.incidents || [];
@@ -225,6 +251,15 @@ export class ClusterLease extends DurableObject<Env> {
       observed_at: new Date(now).toISOString(),
       routing_ready: cluster.routingReady,
       automatic_failover: cluster.automaticFailover,
+      critical_operation_guard_count: this.activeCriticalOperations(cluster, now).length,
+      critical_operation_incidents: (cluster.criticalOperations || [])
+        .filter((guard) => guard.state === "expired")
+        .slice(-10)
+        .map((guard) => ({
+          operation_id: guard.operationId,
+          mutation_sequence: guard.mutationSequence,
+          expired_at: new Date(guard.expiredAt || guard.expiresAt).toISOString(),
+        })),
       failover_delay_seconds: FAILOVER_DELAY_SECONDS,
       routing: cluster.routing ? {
         provider: cluster.routing.provider,
@@ -678,6 +713,75 @@ export class ClusterLease extends DurableObject<Env> {
       return json({ pairing_open: true, expires_at: new Date(cluster.pairing.expiresAt).toISOString() });
     }
 
+    if (action === "critical-begin") {
+      if (nodeId !== cluster.holderNodeId || !cluster.routingReady) {
+        return json({ error: "not-holder" }, 409);
+      }
+      const operationId = String(body.operation_id || "");
+      const mutationSequence = Number(body.mutation_sequence || 0);
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operationId) ||
+          !Number.isSafeInteger(mutationSequence) || mutationSequence < 1) {
+        return json({ error: "invalid-critical-operation" }, 400);
+      }
+      const existing = (cluster.criticalOperations || []).find(
+        (guard) => guard.operationId === operationId,
+      );
+      if (existing) {
+        if (existing.mutationSequence !== mutationSequence || existing.state !== "open") {
+          return json({ error: "critical-operation-conflict" }, 409);
+        }
+        return json({ opened: true, expires_at: new Date(existing.expiresAt).toISOString() });
+      }
+      cluster.criticalOperations = [
+        ...(cluster.criticalOperations || []).slice(-99),
+        {
+          operationId,
+          mutationSequence,
+          openedAt: now,
+          expiresAt: now + CRITICAL_OPERATION_GUARD_SECONDS * 1000,
+          state: "open",
+        },
+      ];
+      await this.ctx.storage.put("cluster", cluster);
+      return json({ opened: true, expires_at: new Date(now + CRITICAL_OPERATION_GUARD_SECONDS * 1000).toISOString() });
+    }
+
+    if (action === "critical-complete") {
+      if (nodeId !== cluster.holderNodeId) return json({ error: "not-holder" }, 409);
+      const operationId = String(body.operation_id || "");
+      const bundleId = String(body.bundle_id || "");
+      const bundleSha256 = String(body.bundle_sha256 || "");
+      const guard = (cluster.criticalOperations || []).find(
+        (candidate) => candidate.operationId === operationId,
+      );
+      if (!guard || guard.state !== "open" ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(bundleId) ||
+          !/^[0-9a-f]{64}$/.test(bundleSha256)) {
+        return json({ error: "critical-operation-mismatch" }, 409);
+      }
+      guard.state = "completed";
+      guard.closedAt = now;
+      guard.bundleId = bundleId;
+      guard.bundleSha256 = bundleSha256;
+      await this.ctx.storage.put("cluster", cluster);
+      return json({ completed: true });
+    }
+
+    if (action === "critical-cancel") {
+      if (nodeId !== cluster.holderNodeId) return json({ error: "not-holder" }, 409);
+      const operationId = String(body.operation_id || "");
+      const guard = (cluster.criticalOperations || []).find(
+        (candidate) => candidate.operationId === operationId,
+      );
+      if (!guard || guard.state !== "open") {
+        return json({ error: "critical-operation-mismatch" }, 409);
+      }
+      guard.state = "cancelled";
+      guard.closedAt = now;
+      await this.ctx.storage.put("cluster", cluster);
+      return json({ cancelled: true });
+    }
+
     if (action === "heartbeat") {
       this.pruneIncidents(cluster, now);
       for (const [candidateId, candidate] of Object.entries(cluster.nodes)) {
@@ -732,6 +836,7 @@ export class ClusterLease extends DurableObject<Env> {
         cluster.automaticFailover && node.healthy && node.bundleId &&
         node.bundleGeneration === cluster.generation &&
         cluster.nodes[cluster.holderNodeId]?.criticalPending !== true &&
+        this.activeCriticalOperations(cluster, now).length === 0 &&
         (!cluster.activeTransfer || cluster.activeTransfer.expiresAt < now) &&
         (!cluster.writePermitUntil || cluster.writePermitUntil < now) &&
         now - cluster.holderLastSeenAt >= this.failoverDelayMs
@@ -852,7 +957,8 @@ export class ClusterLease extends DurableObject<Env> {
       if (enable) {
         const peer = Object.entries(cluster.nodes).find(([id]) => id !== nodeId)?.[1];
         const holder = cluster.nodes[nodeId];
-        if (!cluster.routingReady || holder.criticalPending || !peer?.healthy ||
+        if (!cluster.routingReady || holder.criticalPending ||
+            this.activeCriticalOperations(cluster, now).length > 0 || !peer?.healthy ||
             now - peer.lastHeartbeatAt > this.leaseTtlMs || !peer.bundleId ||
             peer.bundleGeneration !== cluster.generation ||
             !peer.releaseHash || peer.releaseHash !== holder.releaseHash) {
@@ -872,7 +978,7 @@ export class ClusterLease extends DurableObject<Env> {
       if (cluster.activeTransfer && cluster.activeTransfer.expiresAt >= now) {
         return json({ error: "replication-transfer-active" }, 409);
       }
-      if (cluster.nodes[nodeId].criticalPending) {
+      if (cluster.nodes[nodeId].criticalPending || this.activeCriticalOperations(cluster, now).length > 0) {
         return json({ error: "critical-replication-pending" }, 409);
       }
       const target = String(body.target_node_id || "");
@@ -1073,7 +1179,7 @@ export class ClusterLease extends DurableObject<Env> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const match = new URL(request.url).pathname.match(/^\/v1\/clusters\/([A-Za-z0-9._-]{8,128})\/(bootstrap|join|configure-dns|decommission|pair-state|pair-open|heartbeat|write-permit|ready|automatic|handoff|transfer-authorize|transfer-complete|acme-present|acme-cleanup)$/);
+    const match = new URL(request.url).pathname.match(/^\/v1\/clusters\/([A-Za-z0-9._-]{8,128})\/(bootstrap|join|configure-dns|decommission|pair-state|pair-open|heartbeat|write-permit|ready|automatic|handoff|transfer-authorize|transfer-complete|critical-begin|critical-complete|critical-cancel|acme-present|acme-cleanup)$/);
     if (!match) return json({ error: "not-found" }, 404);
     return env.CLUSTERS.getByName(match[1]).fetch(request);
   },

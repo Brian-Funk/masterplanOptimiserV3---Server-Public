@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.core.audit import AUDIT_ACTIONS, audit
+from app.core import sessions
 from app.models.audit import AuditLog
 from server_backend.conftest import create_test_user
 
@@ -63,6 +64,24 @@ def test_new_audit_rows_do_not_persist_denormalised_username(db):
 
     row = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
     assert row.username is None
+
+
+def test_audit_ip_hash_column_accepts_the_versioned_hmac(monkeypatch):
+    """Production IP pseudonyms must fit both fresh and upgraded schemas."""
+    monkeypatch.setattr(
+        sessions.settings,
+        "IP_HMAC_KEY",
+        "audit-ip-width-regression-key-with-sufficient-entropy",
+    )
+    pseudonym = sessions._hash_ip("203.0.113.10")
+    assert pseudonym is not None
+    assert len(pseudonym) <= AuditLog.__table__.c.ip_hash.type.length
+
+    root = Path(__file__).resolve().parents[1]
+    migration = (
+        root / "deploy" / "migrations" / "20260801_audit_ip_hash_width.sql"
+    ).read_text(encoding="utf-8")
+    assert "ALTER COLUMN ip_hash TYPE VARCHAR(80)" in migration
 
 
 def test_literal_audit_actions_used_by_backend_are_in_the_fixed_vocabulary():

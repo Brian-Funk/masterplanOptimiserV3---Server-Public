@@ -12,10 +12,10 @@ import zipfile
 import os
 from pathlib import Path
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 from sqlalchemy.exc import IntegrityError
@@ -44,14 +44,28 @@ from app.core.activation_email import (
     activation_url as absolute_activation_url,
     build_activation_message,
     build_test_message,
+    mail_is_configured,
     normalise_recipient,
     recover_stale_deliveries,
     render_activation_qr_png,
     safe_mail_settings,
 )
+from app.core.activation_mail_governance import (
+    ActivationMailGovernanceError,
+    resolve_activation_mail_governance,
+)
 from app.core.audit import audit
 from app.core.config import settings
-from app.core.ha_replication import protect_current_state, request_ha_replication
+from app.core.event_dates import require_valid_event_date_range
+from app.core.ha_replication import (
+    cancel_uncommitted_protection,
+    create_protection_operation,
+    find_protection_operation,
+    queue_protection_operation,
+    request_ha_replication,
+    sync_protection_operation,
+)
+from app.core.ha_witness import HAWritePermitError
 from app.core.retention import materialise_event_purge_deadline, retention_status
 from app.core.governance import current_policy_identity, require_current_policy_identity
 from app.core.web_edits import (
@@ -61,6 +75,7 @@ from app.core.web_edits import (
 )
 from app.core.security import (
     get_current_user,
+    get_current_user_for_commissioning,
     require_admin,
     require_admin_or_issuer,
     require_recent_reauth,
@@ -90,6 +105,7 @@ from app.core.passkey_ceremonies import (
     create_ceremony,
 )
 from app.models.event import Event
+from app.models.ha import HAProtectionOperation
 from app.models.audit import AuditLog
 from app.models.deletion import DeletionCase
 from app.models.governance import DataPolicyAcknowledgement, GovernancePublication
@@ -104,6 +120,7 @@ from app.models.user import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+account_router = APIRouter()
 
 
 def _ensure_aware_utc(value: datetime | None) -> datetime | None:
@@ -128,7 +145,7 @@ def _ensure_aware_utc(value: datetime | None) -> datetime | None:
 )
 def reauth_begin(
     request: Request,
-    admin: User = Depends(get_current_user),
+    admin: User = Depends(get_current_user_for_commissioning),
     db: Session = Depends(get_db),
 ):
     """Start a passkey re-authentication challenge for the current account."""
@@ -161,7 +178,7 @@ def reauth_begin(
 def reauth_complete(
     body: CeremonyCompletion,
     request: Request,
-    admin: User = Depends(get_current_user),
+    admin: User = Depends(get_current_user_for_commissioning),
     db: Session = Depends(get_db),
 ):
     """Verify passkey re-authentication and mark the current session."""
@@ -258,10 +275,17 @@ class EventCreateIn(BaseModel):
         pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     )
     location: Optional[str] = Field(None, max_length=256)
-    start_date: Optional[str] = None  # YYYY-MM-DD
-    end_date: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
     policy_version: Optional[int] = Field(None, ge=1)
     policy_sha256: Optional[str] = Field(None, pattern=r"^[0-9a-f]{64}$")
+    publish_secret: str = Field(..., min_length=32, max_length=128)
+    idempotency_key: str = Field(..., pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> "EventCreateIn":
+        require_valid_event_date_range(self.start_date, self.end_date)
+        return self
 
 
 class EventOut(BaseModel):
@@ -283,6 +307,9 @@ class EventOut(BaseModel):
     secret_age_days: Optional[int] = None
     logo_color_1: Optional[str] = None
     logo_color_2: Optional[str] = None
+    protection_operation_id: Optional[str] = None
+    protection_state: Optional[str] = None
+    protection_stage: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -291,7 +318,39 @@ class EventCreateResponse(BaseModel):
     """Event creation response that includes the one-time publish secret."""
 
     event: EventOut
-    publish_secret: str  # Raw secret  -  shown ONCE
+    publish_secret: Optional[str] = None
+    protection_operation_id: Optional[str] = None
+    protection_state: Optional[str] = None
+    protection_stage: Optional[str] = None
+
+
+class HAProtectionStatusOut(BaseModel):
+    operation_id: str
+    operation_type: str
+    resource_type: str
+    resource_id: Optional[str] = None
+    mutation_sequence: int
+    state: str
+    stage: str
+    error_code: Optional[str] = None
+    accepted_bundle_id: Optional[str] = None
+    accepted_bundle_sha256: Optional[str] = None
+    accepted_generation: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+    accepted_at: Optional[datetime] = None
+
+
+class ProtectedSecretMutationIn(BaseModel):
+    publish_secret: str = Field(..., min_length=32, max_length=128)
+    idempotency_key: str = Field(..., pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
+
+
+class ProtectedSecretMutationOut(BaseModel):
+    publish_secret: Optional[str] = None
+    protection_operation_id: Optional[str] = None
+    protection_state: Optional[str] = None
+    protection_stage: Optional[str] = None
 
 
 class WebEditItemOut(BaseModel):
@@ -414,6 +473,7 @@ class UserCreateResponse(BaseModel):
 
     user: UserOut
     activation_url: str  # One-time link for passkey setup
+    expires_at: datetime
 
 
 class BulkUserCreateError(BaseModel):
@@ -678,10 +738,102 @@ class UserTagActionOut(BaseModel):
 # Event endpoints
 # ---------------------------------------------------------------------------
 
+def _operation_out(operation: HAProtectionOperation) -> HAProtectionStatusOut:
+    return HAProtectionStatusOut(
+        operation_id=operation.id,
+        operation_type=operation.operation_type,
+        resource_type=operation.resource_type,
+        resource_id=operation.resource_id,
+        mutation_sequence=int(operation.mutation_sequence),
+        state=operation.state,
+        stage=operation.stage,
+        error_code=operation.error_code,
+        accepted_bundle_id=operation.accepted_bundle_id,
+        accepted_bundle_sha256=operation.accepted_bundle_sha256,
+        accepted_generation=operation.accepted_generation,
+        created_at=operation.created_at,
+        updated_at=operation.updated_at,
+        accepted_at=operation.accepted_at,
+    )
+
+
+def _event_operation(event_id: int, db: Session) -> HAProtectionOperation | None:
+    return (
+        db.query(HAProtectionOperation)
+        .filter(
+            HAProtectionOperation.resource_type == "event",
+            HAProtectionOperation.resource_id == str(event_id),
+            HAProtectionOperation.operation_type.in_([
+                "publisher-secret-create", "publisher-secret-import",
+            ]),
+        )
+        .order_by(HAProtectionOperation.mutation_sequence.desc())
+        .first()
+    )
+
+
+def _event_out(event: Event, db: Session, *, now: datetime | None = None) -> EventOut:
+    operation = _event_operation(event.id, db) if settings.HA_MODE == "ha" else None
+    if operation is not None and operation.state not in {"accepted", "cancelled"}:
+        sync_protection_operation(db, operation)
+    display_status = (
+        "securing"
+        if operation is not None and operation.state in {"pending", "indeterminate"}
+        else event.status
+    )
+    current = now or datetime.now(timezone.utc)
+    return EventOut(
+        id=event.id,
+        evidence_id=event.evidence_id,
+        name=event.name,
+        location=event.location,
+        start_date=event.start_date.isoformat() if event.start_date else None,
+        end_date=event.end_date.isoformat() if event.end_date else None,
+        status=display_status,
+        purge_grace_days=event.purge_grace_days,
+        purge_due_at=event.purge_due_at,
+        purge_case_request_id=event.purge_case_request_id,
+        purge_started_at=event.purge_started_at,
+        created_at=event.created_at,
+        secret_created_at=event.secret_created_at,
+        secret_age_days=(current - _ensure_aware_utc(event.secret_created_at)).days
+        if event.secret_created_at else None,
+        logo_color_1=None,
+        logo_color_2=None,
+        protection_operation_id=operation.id if operation else None,
+        protection_state=operation.state if operation else None,
+        protection_stage=operation.stage if operation else None,
+    )
+
+
+@router.get("/ha-protection-operations/{operation_id}", response_model=HAProtectionStatusOut)
+def get_ha_protection_operation(
+    operation_id: str,
+    admin: User = Depends(require_root_admin_read_only),
+    db: Session = Depends(get_db),
+):
+    """Return the durable status of one standby-protected mutation."""
+
+    del admin
+    try:
+        parsed = uuid.UUID(operation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Protection operation not found") from exc
+    if str(parsed) != operation_id:
+        raise HTTPException(status_code=404, detail="Protection operation not found")
+    operation = db.query(HAProtectionOperation).filter(HAProtectionOperation.id == operation_id).first()
+    if operation is None:
+        raise HTTPException(status_code=404, detail="Protection operation not found")
+    sync_protection_operation(db, operation)
+    db.commit()
+    db.refresh(operation)
+    return _operation_out(operation)
+
 @router.post("/events", response_model=EventCreateResponse)
 @limiter.limit("20/minute")
 def create_event(
     request: Request,
+    response: Response,
     body: EventCreateIn,
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
@@ -702,15 +854,34 @@ def create_event(
         policy_version, policy_sha256 = require_current_policy_identity(
             body.policy_version, body.policy_sha256, db
         )
-    raw_secret = secrets.token_urlsafe(48)
-    secret_hash = hashlib.sha256(raw_secret.encode()).hexdigest()
+    secret_hash = hashlib.sha256(body.publish_secret.encode()).hexdigest()
+    if settings.HA_MODE == "ha":
+        try:
+            existing_operation = find_protection_operation(db, body.idempotency_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid idempotency key") from exc
+        if existing_operation is not None:
+            if existing_operation.operation_type != "publisher-secret-create":
+                raise HTTPException(status_code=409, detail="Idempotency key is already in use")
+            event = db.query(Event).filter(Event.id == int(existing_operation.resource_id or 0)).first()
+            if event is None or event.publish_secret_hash != secret_hash:
+                raise HTTPException(status_code=409, detail="Idempotent event request does not match")
+            sync_protection_operation(db, existing_operation)
+            db.commit()
+            response.status_code = status.HTTP_202_ACCEPTED
+            return EventCreateResponse(
+                event=_event_out(event, db),
+                protection_operation_id=existing_operation.id,
+                protection_state=existing_operation.state,
+                protection_stage=existing_operation.stage,
+            )
 
     event = Event(
         evidence_id=body.evidence_id,
         name=body.name,
         location=body.location,
-        start_date=datetime.strptime(body.start_date, "%Y-%m-%d").date() if body.start_date else None,
-        end_date=datetime.strptime(body.end_date, "%Y-%m-%d").date() if body.end_date else None,
+        start_date=body.start_date,
+        end_date=body.end_date,
         status="draft",
         publish_secret_hash=secret_hash,
         secret_created_at=datetime.now(timezone.utc),
@@ -726,46 +897,45 @@ def create_event(
             policy_sha256=policy_sha256,
             scope="event_creator",
         ))
-    db.commit()
-    db.refresh(event)
-
     audit(db, user=admin, action="event.create", resource_type="event",
           resource_id=event.id, request=request)
-    db.commit()
-
-    protection = protect_current_state("publisher-secret-create")
-    if not protection.protected:
-        db.delete(event)
+    protection: HAProtectionOperation | None = None
+    try:
+        protection = create_protection_operation(
+            db,
+            idempotency_key=body.idempotency_key,
+            operation_type="publisher-secret-create",
+            resource_type="event",
+            resource_id=str(event.id),
+        )
         db.commit()
-        request_ha_replication("publisher-secret-create-rollback")
+    except HAWritePermitError as exc:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
         raise HTTPException(
             status_code=503,
-            detail={
-                "code": "standby_protection_failed",
-                "message": "The event was not created because its publisher token could not be protected on the standby.",
-            },
-        )
+            detail={"code": "ha_guard_unavailable", "message": "The standby protection guard is unavailable."},
+        ) from exc
+    except Exception:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise
+    db.refresh(event)
+    if protection is not None:
+        db.refresh(protection)
+        if not queue_protection_operation(protection):
+            protection.state = "indeterminate"
+            protection.stage = "attention_required"
+            protection.error_code = "replication_agent_unavailable"
+            db.commit()
+        response.status_code = status.HTTP_202_ACCEPTED
 
     return EventCreateResponse(
-        event=EventOut(
-            id=event.id,
-            evidence_id=event.evidence_id,
-            name=event.name,
-            location=event.location,
-            start_date=event.start_date.isoformat() if event.start_date else None,
-            end_date=event.end_date.isoformat() if event.end_date else None,
-            status=event.status,
-            purge_grace_days=event.purge_grace_days,
-            purge_due_at=event.purge_due_at,
-            purge_case_request_id=event.purge_case_request_id,
-            purge_started_at=event.purge_started_at,
-            created_at=event.created_at,
-            secret_created_at=event.secret_created_at,
-            secret_age_days=0,
-            logo_color_1=None,
-            logo_color_2=None,
-        ),
-        publish_secret=raw_secret,
+        event=_event_out(event, db),
+        publish_secret=body.publish_secret if protection is None else None,
+        protection_operation_id=protection.id if protection else None,
+        protection_state=protection.state if protection else None,
+        protection_stage=protection.stage if protection else None,
     )
 
 
@@ -778,27 +948,9 @@ def list_events(
 
     events = db.query(Event).order_by(Event.created_at.desc()).all()
     now = datetime.now(timezone.utc)
-    return [
-        EventOut(
-            id=e.id,
-            evidence_id=e.evidence_id,
-            name=e.name,
-            location=e.location,
-            start_date=e.start_date.isoformat() if e.start_date else None,
-            end_date=e.end_date.isoformat() if e.end_date else None,
-            status=e.status,
-            purge_grace_days=e.purge_grace_days,
-            purge_due_at=e.purge_due_at,
-            purge_case_request_id=e.purge_case_request_id,
-            purge_started_at=e.purge_started_at,
-            created_at=e.created_at,
-            secret_created_at=e.secret_created_at,
-            secret_age_days=(now - _ensure_aware_utc(e.secret_created_at)).days if e.secret_created_at else None,
-            logo_color_1=None,
-            logo_color_2=None,
-        )
-        for e in events
-    ]
+    values = [_event_out(event, db, now=now) for event in events]
+    db.commit()
+    return values
 
 
 def _web_edit_audit_entries(
@@ -967,10 +1119,12 @@ def revert_event_web_edits(
     )
 
 
-@router.post("/events/{event_id}/regenerate-secret")
+@router.post("/events/{event_id}/regenerate-secret", response_model=ProtectedSecretMutationOut)
 def regenerate_event_secret(
     event_id: int,
     request: Request,
+    response: Response,
+    body: ProtectedSecretMutationIn,
     admin: User = Depends(require_admin_recent_reauth),
     db: Session = Depends(get_db),
 ):
@@ -987,30 +1141,67 @@ def regenerate_event_secret(
             },
         )
 
-    previous_hash = event.publish_secret_hash
-    previous_created_at = event.secret_created_at
-    raw_secret = secrets.token_urlsafe(48)
-    event.publish_secret_hash = hashlib.sha256(raw_secret.encode()).hexdigest()
+    secret_hash = hashlib.sha256(body.publish_secret.encode()).hexdigest()
+    if settings.HA_MODE == "ha":
+        existing_operation = find_protection_operation(db, body.idempotency_key)
+        if existing_operation is not None:
+            if existing_operation.operation_type != "publisher-secret-rotation" or existing_operation.resource_id != str(event.id):
+                raise HTTPException(status_code=409, detail="Idempotency key is already in use")
+            if event.publish_secret_hash != secret_hash:
+                raise HTTPException(status_code=409, detail="Idempotent rotation request does not match")
+            sync_protection_operation(db, existing_operation)
+            db.commit()
+            response.status_code = status.HTTP_202_ACCEPTED
+            return ProtectedSecretMutationOut(
+                protection_operation_id=existing_operation.id,
+                protection_state=existing_operation.state,
+                protection_stage=existing_operation.stage,
+            )
+        pending = db.query(HAProtectionOperation).filter(
+            HAProtectionOperation.operation_type == "publisher-secret-rotation",
+            HAProtectionOperation.resource_type == "event",
+            HAProtectionOperation.resource_id == str(event.id),
+            HAProtectionOperation.state.in_(["pending", "indeterminate"]),
+        ).first()
+        if pending is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "protection_pending", "operation_id": pending.id},
+            )
+    event.publish_secret_hash = secret_hash
     event.secret_created_at = datetime.now(timezone.utc)
     audit(db, user=admin, action="event.regenerate_secret", resource_type="event",
           resource_id=event.id, request=request)
-    db.commit()
-
-    protection = protect_current_state("publisher-secret-rotation")
-    if not protection.protected:
-        event.publish_secret_hash = previous_hash
-        event.secret_created_at = previous_created_at
-        db.commit()
-        request_ha_replication("publisher-secret-rotation-rollback")
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "standby_protection_failed",
-                "message": "The publisher token was not rotated because the standby did not accept the protected state.",
-            },
+    protection: HAProtectionOperation | None = None
+    try:
+        protection = create_protection_operation(
+            db, idempotency_key=body.idempotency_key,
+            operation_type="publisher-secret-rotation", resource_type="event",
+            resource_id=str(event.id),
         )
-
-    return {"publish_secret": raw_secret}
+        db.commit()
+    except HAWritePermitError as exc:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise HTTPException(status_code=503, detail="The standby protection guard is unavailable") from exc
+    except Exception:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise
+    if protection is not None:
+        db.refresh(protection)
+        if not queue_protection_operation(protection):
+            protection.state = "indeterminate"
+            protection.stage = "attention_required"
+            protection.error_code = "replication_agent_unavailable"
+            db.commit()
+        response.status_code = status.HTTP_202_ACCEPTED
+    return ProtectedSecretMutationOut(
+        publish_secret=body.publish_secret if protection is None else None,
+        protection_operation_id=protection.id if protection else None,
+        protection_state=protection.state if protection else None,
+        protection_stage=protection.stage if protection else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1047,12 +1238,18 @@ def create_user(
     if existing:
         raise HTTPException(status_code=409, detail="Username already taken")
 
-    # Validate event exists  -  event_id is mandatory for non-root users
+    # Root may prepare an ordinary account before deciding its event. Other
+    # operators remain event-scoped, and privileged roles must always have an
+    # event so they cannot acquire ambiguous global access.
     if not body.event_id:
-        raise HTTPException(status_code=422, detail="event_id is required")
-    event = db.query(Event).filter(Event.id == body.event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
+        if not admin.is_root_admin:
+            raise HTTPException(status_code=422, detail="event_id is required")
+        if body.is_admin or body.is_issuer:
+            raise HTTPException(status_code=422, detail="Privileged users require an event")
+    else:
+        event = db.query(Event).filter(Event.id == body.event_id).first()
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
 
     user = User(
         username=body.username,
@@ -1083,7 +1280,11 @@ def create_user(
 
     activation_url = f"/activate#token={raw_token}"
 
-    return UserCreateResponse(user=_user_out(user), activation_url=activation_url)
+    return UserCreateResponse(
+        user=_user_out(user),
+        activation_url=activation_url,
+        expires_at=_ensure_aware_utc(_link.expires_at),
+    )
 
 
 @router.post("/users/bulk", response_model=BulkUserCreateResponse)
@@ -1329,7 +1530,7 @@ def update_user(
             raise HTTPException(status_code=403, detail="Issuers cannot change admin status")
         if body.is_issuer is not None:
             raise HTTPException(status_code=403, detail="Issuers cannot change issuer status")
-        if body.event_id is not None and body.event_id != admin.event_id:
+        if "event_id" in body.model_fields_set and body.event_id != admin.event_id:
             raise HTTPException(status_code=403, detail="Issuers cannot reassign users to other events")
 
     # Only a recently re-authenticated root may change global roles.
@@ -1343,13 +1544,21 @@ def update_user(
     if body.is_active is not None and body.is_active != user.is_active:
         ensure_recent_reauth(admin, db)
 
-    if body.event_id is not None:
+    event_field_supplied = "event_id" in body.model_fields_set
+    if event_field_supplied and body.event_id is None:
+        if not admin.is_root_admin:
+            raise HTTPException(status_code=403, detail="Only root admin can unassign users")
+        if user.is_admin or user.is_issuer:
+            raise HTTPException(status_code=409, detail="Privileged users require an event")
+    if event_field_supplied and body.event_id is not None:
         event = db.query(Event).filter(Event.id == body.event_id).first()
         if event is None:
             raise HTTPException(status_code=404, detail="Event not found")
 
-    event_changed = body.event_id is not None and body.event_id != user.event_id
-    effective_event_id = body.event_id if body.event_id is not None else user.event_id
+    event_changed = event_field_supplied and body.event_id != user.event_id
+    if event_changed:
+        ensure_recent_reauth(admin, db)
+    effective_event_id = body.event_id if event_field_supplied else user.event_id
     linked_person = None
     if body.linked_person_id is not None:
         linked_person = (
@@ -1391,7 +1600,7 @@ def update_user(
         user.linked_person_id = body.linked_person_id
         if linked_person is not None:
             user.evidence_subject_id = linked_person.evidence_subject_id
-    if body.event_id is not None:
+    if event_field_supplied:
         user.event_id = body.event_id
         if event_changed and "linked_person_id" not in body.model_fields_set:
             user.linked_person_id = None
@@ -1540,6 +1749,7 @@ class BatchActivationLinkItem(BaseModel):
     username: str
     display_name: str
     activation_url: str
+    expires_at: datetime
     purpose: Literal["initial_setup"] = "initial_setup"
 
 
@@ -1591,6 +1801,7 @@ class ActivationLinkOut(BaseModel):
     """One manually distributed link and its resolved registration purpose."""
 
     activation_url: str
+    expires_at: datetime
     purpose: Literal["initial_setup", "additional_passkey", "credential_reset"]
 
 
@@ -1650,15 +1861,6 @@ class ActivationEmailDeliveryOut(BaseModel):
     purpose: Literal["initial_setup", "additional_passkey", "credential_reset"]
 
 
-def _event_name(user: User, db: Session) -> str | None:
-    """Return the event name used in activation email body copy."""
-
-    if user.event_id is None:
-        return None
-    event = db.query(Event.name).filter(Event.id == user.event_id).first()
-    return event[0] if event else None
-
-
 def _latest_retryable_delivery(
     user_id: int,
     db: Session,
@@ -1700,7 +1902,7 @@ def _record_not_attempted(
         status="not_attempted",
         error_code=error.code,
         error_message=error.safe_message,
-        includes_qr=True,
+        includes_qr=False,
         completed_at=datetime.now(timezone.utc),
     )
     db.add(delivery)
@@ -1771,6 +1973,19 @@ def _send_user_activation_email(
             purpose=in_progress.purpose,
         )
 
+    try:
+        governance = resolve_activation_mail_governance(user=user, db=db)
+    except ActivationMailGovernanceError as exc:
+        return _record_not_attempted(
+            user=user,
+            admin=admin,
+            error=ActivationMailError(exc.code, exc.safe_message),
+            purpose=purpose,
+            retry_of_id=retry_of_id,
+            request=request,
+            db=db,
+        )
+
     recipient = normalise_recipient(user.email)
     raw_token, link = create_activation_link(
         user_id=user.id,
@@ -1781,21 +1996,15 @@ def _send_user_activation_email(
         permit_email_delivery_start=True,
     )
     url = absolute_activation_url(raw_token)
-    policy_identity = current_policy_identity(db)
-    policy_url = (
-        f"{settings.WEBAUTHN_ORIGIN.rstrip('/')}/api/v1/governance/public/versions/"
-        f"{policy_identity[0]}/privacy.html"
-        if policy_identity else None
-    )
     try:
         message, message_id = build_activation_message(
             recipient=recipient,
             display_name=user.display_name,
-            event_name=_event_name(user, db),
             url=url,
             expires_at=link.expires_at,
             purpose=purpose,
-            policy_url=policy_url,
+            governance=governance,
+            self_service_requested=admin.id == user.id,
         )
     except Exception as exc:
         logger.error("Activation email rendering failed (%s)", type(exc).__name__)
@@ -2048,6 +2257,7 @@ def batch_activation_links(
             "username": u.username,
             "display_name": u.display_name,
             "activation_url": f"/activate#token={raw_token}",
+            "expires_at": _ensure_aware_utc(_link.expires_at),
         })
     audit(
         db,
@@ -2472,8 +2682,177 @@ def create_user_activation_link(
 
     return ActivationLinkOut(
         activation_url=f"/activate#token={raw_token}",
+        expires_at=_ensure_aware_utc(_link.expires_at),
         purpose=purpose,
     )
+
+
+def _is_management_account(user: User) -> bool:
+    """Return whether passkey additions use the direct re-authenticated path."""
+
+    return bool(user.is_root_admin or user.is_admin or user.is_issuer)
+
+
+@account_router.get("/additional-passkey")
+def get_additional_passkey_capability(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the safe enrollment mode for the current account."""
+
+    if _is_management_account(current_user):
+        return {
+            "mode": "direct",
+            "self_service_enabled": True,
+            "email_available": bool(current_user.email),
+            "mail_configured": mail_is_configured(),
+            "can_request": False,
+            "message": "Management passkeys are added directly after passkey re-authentication.",
+        }
+
+    enabled = runtime_settings.get_int(
+        "self_service_additional_passkeys_enabled", db
+    ) == 1
+    email_available = True
+    try:
+        normalise_recipient(current_user.email)
+    except ActivationMailError:
+        email_available = False
+    smtp_ready = mail_is_configured()
+    governance_ready = False
+    governance_message: str | None = None
+    if enabled and email_available and smtp_ready:
+        try:
+            resolve_activation_mail_governance(user=current_user, db=db)
+            governance_ready = True
+        except ActivationMailGovernanceError as error:
+            governance_message = error.safe_message
+    if not enabled:
+        message = "Additional passkey enrollment is not enabled for participant accounts."
+    elif not email_available:
+        message = (
+            "Your email address has not been added by an administrator. "
+            "Contact an administrator to make additional-passkey enrollment available."
+        )
+    elif not smtp_ready:
+        message = (
+            "Email delivery is not configured for this deployment. "
+            "Contact an administrator to add another passkey."
+        )
+    elif not governance_ready:
+        message = governance_message or (
+            "Participant email delivery is waiting for published Governance settings."
+        )
+    else:
+        message = (
+            "A one-time enrollment link can be sent to the email address "
+            "recorded by your administrator."
+        )
+    return {
+        "mode": "email",
+        "self_service_enabled": enabled,
+        "email_available": email_available,
+        "mail_configured": smtp_ready,
+        "governance_ready": governance_ready,
+        "can_request": enabled and email_available and smtp_ready and governance_ready,
+        "per_minute": runtime_settings.get_int(
+            "self_service_passkey_emails_per_minute", db
+        ),
+        "per_day": runtime_settings.get_int(
+            "self_service_passkey_emails_per_day", db
+        ),
+        "message": message,
+    }
+
+
+@account_router.post(
+    "/additional-passkey/email",
+    response_model=ActivationEmailResult,
+)
+@limiter.limit("20/minute")
+def request_additional_passkey_email(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Send a purpose-bound link only to the signed-in participant's address."""
+
+    if _is_management_account(current_user):
+        raise HTTPException(
+            status_code=409,
+            detail="Management accounts add passkeys directly after re-authentication.",
+        )
+    if runtime_settings.get_int("self_service_additional_passkeys_enabled", db) != 1:
+        raise HTTPException(
+            status_code=403,
+            detail="Additional passkey enrollment is not enabled for participant accounts.",
+        )
+    try:
+        normalise_recipient(current_user.email)
+    except ActivationMailError as error:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Your email address has not been added by an administrator. "
+                "Contact an administrator to make additional-passkey enrollment available."
+            ),
+        ) from error
+    if not mail_is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Email delivery is not configured for this deployment. "
+                "Contact an administrator to add another passkey."
+            ),
+        )
+
+    now = datetime.now(timezone.utc)
+    self_service_attempts = db.query(ActivationEmailDelivery).filter(
+        ActivationEmailDelivery.user_id == current_user.id,
+        ActivationEmailDelivery.requested_by_id == current_user.id,
+        ActivationEmailDelivery.purpose == ADDITIONAL_PASSKEY,
+    )
+    minute_limit = runtime_settings.get_int(
+        "self_service_passkey_emails_per_minute", db
+    )
+    day_limit = runtime_settings.get_int("self_service_passkey_emails_per_day", db)
+    if self_service_attempts.filter(
+        ActivationEmailDelivery.started_at >= now - timedelta(minutes=1)
+    ).count() >= minute_limit:
+        raise HTTPException(
+            status_code=429,
+            detail="The per-minute additional-passkey email limit has been reached. Try again shortly.",
+            headers={"Retry-After": "60"},
+        )
+    if self_service_attempts.filter(
+        ActivationEmailDelivery.started_at >= now - timedelta(days=1)
+    ).count() >= day_limit:
+        raise HTTPException(
+            status_code=429,
+            detail="The daily additional-passkey email limit has been reached. Contact an administrator if access is urgent.",
+            headers={"Retry-After": "86400"},
+        )
+
+    try:
+        with ActivationMailer() as mailer:
+            return _send_user_activation_email(
+                user=current_user,
+                admin=current_user,
+                mailer=mailer,
+                request=request,
+                db=db,
+                purpose=ADDITIONAL_PASSKEY,
+            )
+    except ActivationMailError as error:
+        return _record_not_attempted(
+            user=current_user,
+            admin=current_user,
+            error=error,
+            purpose=ADDITIONAL_PASSKEY,
+            retry_of_id=None,
+            request=request,
+            db=db,
+        )
 
 
 @router.get("/users/{user_id}/activation-links")
@@ -2619,10 +2998,15 @@ class ImportEventIn(BaseModel):
     )
     name: str = Field(..., max_length=128)
     location: Optional[str] = Field(None, max_length=256)
-    start_date: Optional[str] = Field(None, max_length=16)  # YYYY-MM-DD
-    end_date: Optional[str] = Field(None, max_length=16)
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
 
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> "ImportEventIn":
+        require_valid_event_date_range(self.start_date, self.end_date)
+        return self
 
 
 class ImportSetupIn(BaseModel):
@@ -2630,6 +3014,8 @@ class ImportSetupIn(BaseModel):
 
     event: ImportEventIn
     users: List[ImportUserIn] = Field(default_factory=list, max_length=1000)
+    publish_secret: str = Field(..., min_length=32, max_length=128)
+    idempotency_key: str = Field(..., pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
 
     model_config = ConfigDict(extra="forbid")
 
@@ -2645,29 +3031,48 @@ class ImportSetupResponse(BaseModel):
     """Import response with generated publish secret and user links."""
 
     event: EventOut
-    publish_secret: str
+    publish_secret: Optional[str] = None
     users: List[ImportUserOut]
+    protection_operation_id: Optional[str] = None
+    protection_state: Optional[str] = None
+    protection_stage: Optional[str] = None
 
 
 @router.post("/import-setup", response_model=ImportSetupResponse)
 @limiter.limit("5/minute")
 def import_setup(
     request: Request,
+    response: Response,
     body: ImportSetupIn,
     admin: User = Depends(require_admin_recent_reauth),
     db: Session = Depends(get_db),
 ):
-    """Import event + users from a JSON export. Server generates the publish secret."""
-    # Create event
-    raw_secret = secrets.token_urlsafe(48)
-    secret_hash = hashlib.sha256(raw_secret.encode()).hexdigest()
+    """Import event + users with a browser/Desktop-generated publish secret."""
+    secret_hash = hashlib.sha256(body.publish_secret.encode()).hexdigest()
+    if settings.HA_MODE == "ha":
+        existing_operation = find_protection_operation(db, body.idempotency_key)
+        if existing_operation is not None:
+            if existing_operation.operation_type != "publisher-secret-import":
+                raise HTTPException(status_code=409, detail="Idempotency key is already in use")
+            event = db.query(Event).filter(Event.id == int(existing_operation.resource_id or 0)).first()
+            if event is None or event.publish_secret_hash != secret_hash:
+                raise HTTPException(status_code=409, detail="Idempotent setup import does not match")
+            sync_protection_operation(db, existing_operation)
+            db.commit()
+            response.status_code = status.HTTP_202_ACCEPTED
+            return ImportSetupResponse(
+                event=_event_out(event, db), users=[],
+                protection_operation_id=existing_operation.id,
+                protection_state=existing_operation.state,
+                protection_stage=existing_operation.stage,
+            )
 
     event = Event(
         evidence_id=body.event.evidence_id,
         name=body.event.name,
         location=body.event.location,
-        start_date=datetime.strptime(body.event.start_date, "%Y-%m-%d").date() if body.event.start_date else None,
-        end_date=datetime.strptime(body.event.end_date, "%Y-%m-%d").date() if body.event.end_date else None,
+        start_date=body.event.start_date,
+        end_date=body.event.end_date,
         status="draft",
         publish_secret_hash=secret_hash,
     )
@@ -2697,11 +3102,13 @@ def import_setup(
         db.add(user)
         db.flush()
 
-        raw_token, _link = create_activation_link(
+        raw_token, activation_link = create_activation_link(
             user_id=user.id,
             created_by_id=admin.id,
             db=db,
         )
+        if settings.HA_MODE == "ha":
+            activation_link.delivery_pending = True
 
         user_results.append(ImportUserOut(
             user=UserOut(
@@ -2728,48 +3135,38 @@ def import_setup(
 
     audit(db, user=admin, action="event.import_setup", resource_type="event",
           resource_id=event.id, request=request)
-    db.commit()
-
-    protection = protect_current_state("publisher-secret-import")
-    if not protection.protected:
-        imported_user_ids = [result.user.id for result in user_results]
-        if imported_user_ids:
-            db.query(ActivationLink).filter(
-                ActivationLink.user_id.in_(imported_user_ids)
-            ).delete(synchronize_session=False)
-            db.query(User).filter(User.id.in_(imported_user_ids)).delete(
-                synchronize_session=False
-            )
-        db.delete(event)
-        db.commit()
-        request_ha_replication("publisher-secret-import-rollback")
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "standby_protection_failed",
-                "message": "The setup was not imported because its publisher token could not be protected on the standby.",
-            },
+    protection: HAProtectionOperation | None = None
+    try:
+        protection = create_protection_operation(
+            db, idempotency_key=body.idempotency_key,
+            operation_type="publisher-secret-import", resource_type="event",
+            resource_id=str(event.id),
         )
+        db.commit()
+    except HAWritePermitError as exc:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise HTTPException(status_code=503, detail="The standby protection guard is unavailable") from exc
+    except Exception:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise
+    if protection is not None:
+        db.refresh(protection)
+        if not queue_protection_operation(protection):
+            protection.state = "indeterminate"
+            protection.stage = "attention_required"
+            protection.error_code = "replication_agent_unavailable"
+            db.commit()
+        response.status_code = status.HTTP_202_ACCEPTED
 
     return ImportSetupResponse(
-        event=EventOut(
-            id=event.id,
-            evidence_id=event.evidence_id,
-            name=event.name,
-            location=event.location,
-            start_date=event.start_date.isoformat() if event.start_date else None,
-            end_date=event.end_date.isoformat() if event.end_date else None,
-            status=event.status,
-            purge_grace_days=event.purge_grace_days,
-            purge_due_at=event.purge_due_at,
-            purge_case_request_id=event.purge_case_request_id,
-            purge_started_at=event.purge_started_at,
-            created_at=event.created_at,
-            logo_color_1=None,
-            logo_color_2=None,
-        ),
-        publish_secret=raw_secret,
+        event=_event_out(event, db),
+        publish_secret=body.publish_secret if protection is None else None,
         users=user_results,
+        protection_operation_id=protection.id if protection else None,
+        protection_state=protection.state if protection else None,
+        protection_stage=protection.stage if protection else None,
     )
 
 
@@ -2894,9 +3291,10 @@ def update_security_settings(
     """Update root-admin security settings after re-authentication."""
     updated = []
     errors = []
+    governance_impact = runtime_settings.governance_impact(db)
     for key, value in body.settings.items():
         try:
-            runtime_settings.set_value(key, int(value), db)
+            governance_impact = runtime_settings.set_value(key, int(value), db)
             updated.append(key)
         except (KeyError, ValueError, TypeError) as exc:
             errors.append({"key": key, "error": str(exc)})
@@ -2907,7 +3305,7 @@ def update_security_settings(
         db.commit()
         if "ha_replication_interval_minutes" in updated and settings.HA_MODE == "ha":
             _request_ha_replication("settings-change")
-    return {"updated": updated, "errors": errors}
+    return {"updated": updated, "errors": errors, "governance_impact": governance_impact}
 
 
 # ---------------------------------------------------------------------------

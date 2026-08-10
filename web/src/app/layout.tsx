@@ -1,16 +1,8 @@
 import type { Metadata } from "next";
-import { Source_Sans_3 } from "next/font/google";
 import "./globals.css";
 import ClientProviders from "./ClientProviders";
 
-const sourceSans = Source_Sans_3({
-  subsets: ["latin"],
-  display: "swap",
-  variable: "--font-source-sans",
-});
-
 export const metadata: Metadata = {
-  metadataBase: new URL("https://mp-opt.net"),
   title: "Masterplan Optimiser",
   description:
     "Collaborative scheduling and masterplan optimisation for live events.",
@@ -19,14 +11,12 @@ export const metadata: Metadata = {
     description:
       "Collaborative scheduling and masterplan optimisation for live events.",
     type: "website",
-    images: [{ url: "/og-image.png", width: 1200, height: 630 }],
   },
   twitter: {
     card: "summary_large_image",
     title: "Masterplan Optimiser",
     description:
       "Collaborative scheduling and masterplan optimisation for live events.",
-    images: ["/og-image.png"],
   },
   robots: "noindex, nofollow",
   icons: {
@@ -45,7 +35,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={sourceSans.variable} suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning>
       <body>
         <ClientProviders>{children}</ClientProviders>
       </body>

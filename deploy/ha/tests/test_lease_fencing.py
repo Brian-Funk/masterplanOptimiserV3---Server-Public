@@ -178,11 +178,58 @@ class LeaseFencingTests(unittest.TestCase):
             patch.object(lease_agent, "release_hash", return_value="a" * 40),
             patch.object(lease_agent, "post", return_value=witness_state) as post,
             patch.object(lease_agent, "atomic_json"),
+            patch.object(lease_agent, "drain_standby_client_connections"),
         ):
             lease_agent.one_iteration(config)
         payload = post.call_args.args[2]
         self.assertEqual(payload["bundle_id"], "bundle-generation-9")
         self.assertEqual(payload["bundle_generation"], 9)
+
+    def test_standby_drains_pre_handoff_connections_once_after_dns_ttl(self) -> None:
+        now = datetime.now(timezone.utc)
+        state = {
+            "holder_node_id": "node-a",
+            "generation": 3,
+            "routing_ready": True,
+            "transition": {"phase": "stable"},
+            "routing": {"ttl": 60},
+            "last_recovery": {
+                "kind": "planned_handoff",
+                "completed_at": (now - timedelta(seconds=70)).isoformat(),
+            },
+        }
+        config = {"HA_NODE_ID": "node-b"}
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "drain.json"
+            with (
+                patch.object(lease_agent, "CONNECTION_DRAIN_PATH", marker),
+                patch.object(lease_agent, "compose_command", return_value=["compose"]),
+                patch.object(lease_agent.subprocess, "run") as run,
+            ):
+                self.assertTrue(lease_agent.drain_standby_client_connections(config, state))
+                self.assertFalse(lease_agent.drain_standby_client_connections(config, state))
+            run.assert_called_once()
+            self.assertEqual(run.call_args.args[0], ["compose", "restart", "caddy"])
+            self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))["generation"], 3)
+
+    def test_standby_does_not_drain_before_ttl_or_on_the_holder(self) -> None:
+        now = datetime.now(timezone.utc)
+        state = {
+            "holder_node_id": "node-a",
+            "generation": 3,
+            "routing_ready": True,
+            "transition": {"phase": "stable"},
+            "routing": {"ttl": 60},
+            "last_recovery": {
+                "kind": "planned_handoff",
+                "completed_at": (now - timedelta(seconds=30)).isoformat(),
+            },
+        }
+        with patch.object(lease_agent.subprocess, "run") as run:
+            self.assertFalse(lease_agent.drain_standby_client_connections({"HA_NODE_ID": "node-b"}, state))
+            state["last_recovery"]["completed_at"] = (now - timedelta(seconds=70)).isoformat()
+            self.assertFalse(lease_agent.drain_standby_client_connections({"HA_NODE_ID": "node-a"}, state))
+        run.assert_not_called()
 
     def test_control_state_requires_a_live_lease_and_exact_generation(self) -> None:
         now = datetime.now(timezone.utc)

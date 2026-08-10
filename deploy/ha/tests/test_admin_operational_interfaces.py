@@ -8,6 +8,9 @@ PUBLIC_LINK_API = (
     ROOT / "backend/app/api/v1/public_schedule_links.py"
 ).read_text(encoding="utf-8")
 ADMIN_UI = (ROOT / "web/src/app/admin/page.tsx").read_text(encoding="utf-8")
+ADMIN_NAV = (ROOT / "web/src/components/AdminNavigation.tsx").read_text(
+    encoding="utf-8"
+)
 CALENDAR_UI = (ROOT / "web/src/app/calendar/page.tsx").read_text(encoding="utf-8")
 UNAVAILABILITY_UI = (
     ROOT / "web/src/components/DailyUnavailabilityIndicator.tsx"
@@ -37,6 +40,10 @@ PROMOTE = (ROOT / "deploy/ha/promote_local.sh").read_text(encoding="utf-8")
 REPLICATION_SCHEDULER = (
     ROOT / "deploy/ha/replication_scheduler.py"
 ).read_text(encoding="utf-8")
+REPLICATE_NOW = (ROOT / "deploy/ha/replicate_now.sh").read_text(encoding="utf-8")
+RECEIVE_BUNDLE = (ROOT / "deploy/ha/receive_replication_bundle.sh").read_text(encoding="utf-8")
+MANAGEMENT_COMMON = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
+HA_REPLICATION_CORE = (ROOT / "backend/app/core/ha_replication.py").read_text(encoding="utf-8")
 HA_MANAGEMENT = (ROOT / "deploy/management/ha.sh").read_text(encoding="utf-8")
 HA_INSTALLER = (ROOT / "deploy/ha/install_services.sh").read_text(encoding="utf-8")
 CADDY = (ROOT / "infra/Caddyfile").read_text(encoding="utf-8")
@@ -49,7 +56,7 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
         self.assertIn('format="mp-opt-ha-dashboard-v1"', ADMIN_API)
         self.assertIn('replication["potential_data_loss_seconds"] = _ha_age_seconds', ADMIN_API)
         self.assertIn('| "ha"', ADMIN_UI)
-        self.assertIn('label: "High Availability"', ADMIN_UI)
+        self.assertIn('label: "High availability"', ADMIN_NAV)
         self.assertIn('window.setInterval(() => poll().catch(() => undefined), 2000)', ADMIN_UI)
         self.assertIn('For safety, enabling automatic failover', ADMIN_UI)
         self.assertNotIn('apiFetch("/api/v1/admin/ha/handoff"', ADMIN_UI)
@@ -112,6 +119,15 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
         ):
             self.assertIn(field, ADMIN_UI)
 
+    def test_promotion_reapplies_backend_secret_permissions_after_bootstrap_retirement(self) -> None:
+        retire = ': > "$MP_ROOT/secrets/root_bootstrap_token"'
+        prepare = 'chmod 0640 "$MP_ROOT/secrets/root_bootstrap_token"'
+        restart = '"${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend'
+        self.assertIn(retire, PROMOTE)
+        self.assertNotIn('chmod 600 "$MP_ROOT/secrets/root_bootstrap_token"', PROMOTE)
+        self.assertLess(PROMOTE.index(retire), PROMOTE.index(prepare))
+        self.assertLess(PROMOTE.index(prepare), PROMOTE.index(restart))
+
     def test_logout_is_single_flight_visible_and_does_not_change_admin_tabs(self) -> None:
         self.assertIn("logoutPromise = useRef<Promise<boolean> | null>(null)", AUTH_CONTEXT)
         self.assertIn("if (logoutPromise.current) return logoutPromise.current", AUTH_CONTEXT)
@@ -142,16 +158,20 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
         self.assertIn('role="table" aria-label="User accounts"', ADMIN_UI)
         self.assertIn('recentlyUpdated', ADMIN_UI)
 
-    def test_root_tabs_wrap_and_event_filter_uses_a_separate_context_row(self) -> None:
+    def test_management_navigation_is_calm_and_event_filter_is_separate(self) -> None:
         self.assertIn("const EVENT_SCOPED_TABS: AdminTab[]", ADMIN_UI)
-        self.assertIn('flex-wrap gap-1', ADMIN_UI)
+        self.assertIn('lg:grid-cols-[15rem_minmax(0,1fr)]', ADMIN_UI)
+        self.assertIn('aria-label={workspaceLabel}', ADMIN_NAV)
+        self.assertIn('sticky top-24 hidden overflow-hidden rounded-2xl', ADMIN_NAV)
+        self.assertIn('Administration page', ADMIN_NAV)
+        self.assertIn('Issuer administration', ADMIN_NAV)
         self.assertIn('htmlFor="admin-event-context"', ADMIN_UI)
         self.assertIn('Event context', ADMIN_UI)
-        tab_bar_start = ADMIN_UI.index("{/* Full-width tab bar */}")
-        context_start = ADMIN_UI.index("{/* Event context is separate", tab_bar_start)
-        tab_bar = ADMIN_UI[tab_bar_start:context_start]
-        self.assertNotIn("overflow-x-auto", tab_bar)
-        self.assertNotIn("admin-event-context", tab_bar)
+        navigation_start = ADMIN_UI.index("<AdminNavigation")
+        context_start = ADMIN_UI.index("{/* Event context is separate", navigation_start)
+        self.assertLess(navigation_start, context_start)
+        self.assertNotIn("overflow-x-auto", ADMIN_NAV)
+        self.assertNotIn("admin-event-context", ADMIN_NAV)
 
     def test_mobile_calendar_exposes_unavailability_and_every_programme_view(self) -> None:
         mobile_start = CALENDAR_UI.index("{/* Filters + view toggle */}")
@@ -236,6 +256,10 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
                 'header @serviceWorker Cache-Control "no-cache, no-store, must-revalidate"',
                 caddyfile,
             )
+            self.assertIn(
+                'header @authenticationShell Cache-Control "no-cache, no-store, must-revalidate"',
+                caddyfile,
+            )
         self.assertIn("View saved schedule", SERVICE_PANEL)
         self.assertIn("w-[calc(100%_-_2rem)]", SERVICE_PANEL)
         self.assertNotIn("w-[calc(100%-", SERVICE_PANEL)
@@ -254,8 +278,27 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
         self.assertNotIn("UPDATE public_schedule_links", PROMOTE)
         self.assertNotIn("publish_secret_hash =", PROMOTE)
         self.assertIn("UPDATE activation_links", PROMOTE)
-        self.assertIn("protect_current_state(\"publisher-secret-rotation\")", ADMIN_API)
-        self.assertIn("protect_current_state(\"public-link-create\")", PUBLIC_LINK_API)
+        self.assertIn('operation_type="publisher-secret-rotation"', ADMIN_API)
+        self.assertIn('operation_type="public-link-create"', PUBLIC_LINK_API)
+        self.assertIn("queue_protection_operation", ADMIN_API)
+        self.assertIn("queue_protection_operation", PUBLIC_LINK_API)
+        self.assertNotIn("publisher-secret-rotation-rollback", ADMIN_API)
+        self.assertNotIn("public-link-create-rollback", PUBLIC_LINK_API)
+
+    def test_critical_mutations_use_exact_durable_markers_and_non_listable_results(self) -> None:
+        self.assertIn("mp-opt-replication-request-v2", HA_REPLICATION_CORE)
+        self.assertIn("marker_sha256", HA_REPLICATION_CORE)
+        self.assertIn("ha_protection_operations", RECEIVE_BUNDLE)
+        self.assertIn("protection_operations", RECEIVE_BUNDLE)
+        self.assertIn("peer_confirms_bundle", REPLICATE_NOW)
+        self.assertIn("ha-operation-results", MANAGEMENT_COMMON)
+        self.assertIn('chmod 0711 "$operation_result_dir"', MANAGEMENT_COMMON)
+        self.assertIn("critical_operation_guard_count", WITNESS)
+        self.assertIn("critical_operation_incidents", WITNESS)
+        self.assertIn('action === "critical-begin"', WITNESS)
+        self.assertIn("this.activeCriticalOperations(cluster, now).length === 0", WITNESS)
+        self.assertNotIn("publisher-secret-rotation-rollback", ADMIN_API)
+        self.assertNotIn("public-link-create-rollback", PUBLIC_LINK_API)
 
     def test_smtp_replication_busy_state_is_retried_and_both_nodes_are_probed(self) -> None:
         self.assertIn("ha-deferred-requests", REPLICATION_SCHEDULER)
@@ -272,6 +315,17 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
         self.assertIn("<ServiceStatusPanel", SHARED_UI)
         self.assertIn("cachedMode", CALENDAR_UI)
         self.assertIn("<ServiceStatusBanner", CALENDAR_UI)
+
+    def test_tui_selftests_use_the_authoritative_exact_unsigned_source(self) -> None:
+        self.assertIn("mp_ha_selftest_root()", HA_MANAGEMENT)
+        self.assertIn("$HOME/.local/share/mp-opt-test-deploy/source", HA_MANAGEMENT)
+        self.assertIn("$MP_STATE/test-deployments/current.json", HA_MANAGEMENT)
+        self.assertIn("MP_TEST_COMMIT", HA_MANAGEMENT)
+        self.assertIn('git -C "$test_root" rev-parse HEAD', HA_MANAGEMENT)
+        self.assertIn('[ "$receipt_commit" = "$expected_commit" ]', HA_MANAGEMENT)
+        self.assertIn('[ "$source_commit" = "$expected_commit" ]', HA_MANAGEMENT)
+        self.assertIn('[ -z "$source_dirty" ]', HA_MANAGEMENT)
+        self.assertIn('cd "$MP_HA_SELFTEST_ROOT"', HA_MANAGEMENT)
 
 
 if __name__ == "__main__":

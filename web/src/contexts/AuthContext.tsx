@@ -16,6 +16,7 @@ import {
   type OfflineAccessMarker,
 } from "@/lib/offlineAccess";
 import { useServiceAvailability } from "@/contexts/ServiceAvailabilityContext";
+import { hardNavigate } from "@/lib/hardNavigation";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,6 +36,8 @@ export interface User {
   linked_person_id: number | null;
   event_id: number | null;
   offline_access_ttl_hours: number;
+  commissioning_required?: boolean;
+  commissioning_stage?: "recovery" | "controller" | "governance" | "complete";
 }
 
 /** High-level authentication state, including offline session uncertainty. */
@@ -100,12 +103,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const logoutPromise = useRef<Promise<boolean> | null>(null);
+  const userRequestSequence = useRef(0);
   const userIdRef = useRef<number | null>(null);
   const authenticatedUserRef = useRef<User | null>(null);
 
   const fetchUser = useCallback(async () => {
+    const sequence = ++userRequestSequence.current;
+    setIsLoading(true);
     if (!isReady) {
       const offlineState = await readOfflineAccessState();
+      if (sequence !== userRequestSequence.current) return;
       setOfflineAccess(offlineState.marker);
       setOfflineAccessExpired(offlineState.expired);
       setAuthStatus("offline");
@@ -120,18 +127,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setIsLoading(false);
       return;
     }
+    setAuthStatus("checking");
     try {
       const apiUrl = getApiUrl();
       const response = await fetch(`${apiUrl}/api/v1/auth/me`, {
         credentials: "include",
       });
+      if (sequence !== userRequestSequence.current) return;
 
       if (response.ok) {
         const userData = await response.json();
+        if (sequence !== userRequestSequence.current) return;
         authenticatedUserRef.current = userData;
         userIdRef.current = userData.id;
         setUser(userData);
-        setOfflineAccess(storeOfflineAccessForUser(userData));
+        if (userData.commissioning_required) {
+          setOfflineAccess(null);
+          const path = window.location.pathname;
+          if (path !== "/setup" && path !== "/login") {
+            hardNavigate("/setup");
+          }
+        } else {
+          setOfflineAccess(storeOfflineAccessForUser(userData));
+        }
         setOfflineAccessExpired(false);
         setAuthStatus("authenticated");
       } else if (response.status === 401 || response.status === 403) {
@@ -156,8 +174,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         throw new TypeError(`Session check unavailable (${response.status})`);
       }
     } catch (err) {
+      if (sequence !== userRequestSequence.current) return;
       console.error("Failed to fetch user:", err);
       const offlineState = await readOfflineAccessState();
+      if (sequence !== userRequestSequence.current) return;
       setOfflineAccess(offlineState.marker);
       setOfflineAccessExpired(offlineState.expired);
       setAuthStatus("offline");
@@ -165,7 +185,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       userIdRef.current = null;
       setUser(null);
     } finally {
-      setIsLoading(false);
+      if (sequence === userRequestSequence.current) setIsLoading(false);
     }
   }, [isReady]);
 
@@ -177,6 +197,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (logoutPromise.current) return logoutPromise.current;
 
     const operation = (async () => {
+      // A session check that started before logout must never restore the user
+      // after the server has revoked the session.
+      userRequestSequence.current += 1;
       setIsLoggingOut(true);
       setLogoutError(null);
       try {

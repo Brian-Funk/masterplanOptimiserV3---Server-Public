@@ -617,9 +617,36 @@ mp_ha_overview() {
     rm -f "$report"
 }
 
+mp_ha_selftest_root() {
+    local test_root="$MP_ROOT" expected_commit="" receipt_commit="" source_commit="" source_dirty=""
+    if [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)" = test ]; then
+        test_root="$HOME/.local/share/mp-opt-test-deploy/source"
+        expected_commit="$(sed -n 's/^MP_TEST_COMMIT=//p' "$MP_ROOT/.test-deployment.env" 2>/dev/null | head -1)"
+        receipt_commit="$(jq -r '.current_commit // empty' \
+            "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)"
+        source_commit="$(git -C "$test_root" rev-parse HEAD 2>/dev/null || true)"
+        source_dirty="$(git -C "$test_root" status --porcelain --untracked-files=all 2>/dev/null || printf unreadable)"
+        [[ "$expected_commit" =~ ^[0-9a-f]{40}$ ]] \
+            && [ "$receipt_commit" = "$expected_commit" ] \
+            && [ "$source_commit" = "$expected_commit" ] \
+            && [ -z "$source_dirty" ] \
+            || {
+                ui_error "The exact unsigned self-test source does not match the active deployment receipt. Reapply the qualified exact SHA before running HA self-tests."
+                return 1
+            }
+    fi
+    [ -d "$test_root/deploy/ha/tests" ] \
+        || { ui_error "The isolated HA self-test source is unavailable."; return 1; }
+    printf '%s\n' "$test_root"
+}
+
 mp_ha_run_selftests() {
+    local test_root
+    test_root="$(mp_ha_selftest_root)" || return 1
     ui_run_command "Replication self-tests" "Checking manifest, encryption boundaries and write fencing" \
-        python3 -m unittest discover -s "$MP_ROOT/deploy/ha/tests" -p 'test_*.py' || return 1
+        env MP_HA_SELFTEST_ROOT="$test_root" bash -c \
+        'cd "$MP_HA_SELFTEST_ROOT" && exec python3 -m unittest discover -s "$MP_HA_SELFTEST_ROOT/deploy/ha/tests" -p "test_*.py"' \
+        || return 1
 }
 
 mp_ha_refresh_witness_observations() {

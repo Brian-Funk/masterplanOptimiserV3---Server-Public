@@ -2,21 +2,29 @@
 
 import hashlib
 import json
-import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.core.audit import audit
-from app.core.ha_replication import protect_current_state, request_ha_replication
+from app.core.config import settings
+from app.core.ha_replication import (
+    cancel_uncommitted_protection,
+    create_protection_operation,
+    find_protection_operation,
+    queue_protection_operation,
+    sync_protection_operation,
+)
+from app.core.ha_witness import HAWritePermitError
 from app.core.rate_limit import limiter
 from app.core.schedule_days import event_schedule_day_range, working_date_for_clock
 from app.core.security import require_root_or_issuer
 from app.db.database import get_db
 from app.models.event import Event
+from app.models.ha import HAProtectionOperation
 from app.models.public_schedule_link import (
     PublicScheduleLink,
     PublicScheduleLinkView,
@@ -42,6 +50,8 @@ class PublicScheduleLinkCreate(BaseModel):
     description: str = Field(..., min_length=1, max_length=256)
     expires_at: datetime
     view_ids: list[int] = Field(..., min_length=1, max_length=100)
+    token: str = Field(..., min_length=32, max_length=256)
+    idempotency_key: Optional[str] = Field(None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
 
     @field_validator("description")
     @classmethod
@@ -69,6 +79,7 @@ class PublicScheduleLinkUpdate(BaseModel):
     description: Optional[str] = Field(None, min_length=1, max_length=256)
     expires_at: Optional[datetime] = None
     view_ids: Optional[list[int]] = Field(None, min_length=1, max_length=100)
+    idempotency_key: Optional[str] = Field(None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
 
     @field_validator("description")
     @classmethod
@@ -115,12 +126,15 @@ class PublicScheduleLinkOut(BaseModel):
     created_by_id: Optional[int] = None
     status: str
     views: list[PublicScheduleLinkViewOut]
+    protection_operation_id: Optional[str] = None
+    protection_state: Optional[str] = None
+    protection_stage: Optional[str] = None
 
 
 class PublicScheduleLinkCreatedOut(PublicScheduleLinkOut):
     """Creation response containing the sharing URL shown only once."""
 
-    share_url: str
+    share_url: Optional[str] = None
 
 
 class SharedScheduleViewOut(BaseModel):
@@ -244,6 +258,39 @@ def _link_view_rows(link_id: int, db: Session) -> list[PublicScheduleLinkView]:
     )
 
 
+def _link_operation(link_id: int, db: Session) -> HAProtectionOperation | None:
+    if settings.HA_MODE != "ha":
+        return None
+    operation = (
+        db.query(HAProtectionOperation)
+        .filter(
+            HAProtectionOperation.resource_type == "public_schedule_link",
+            HAProtectionOperation.resource_id == str(link_id),
+        )
+        .order_by(HAProtectionOperation.mutation_sequence.desc())
+        .first()
+    )
+    if operation is not None and operation.state in {"pending", "indeterminate"}:
+        sync_protection_operation(db, operation)
+    return operation
+
+
+def _queue_link_operation(
+    db: Session,
+    operation: HAProtectionOperation | None,
+    response: Response,
+) -> None:
+    if operation is None:
+        return
+    db.refresh(operation)
+    if not queue_protection_operation(operation):
+        operation.state = "indeterminate"
+        operation.stage = "attention_required"
+        operation.error_code = "replication_agent_unavailable"
+        db.commit()
+    response.status_code = status.HTTP_202_ACCEPTED
+
+
 def _link_status(
     link: PublicScheduleLink,
     view_rows: list[PublicScheduleLinkView],
@@ -268,6 +315,10 @@ def _serialise_link(
     """Build private link metadata without ever returning the token hash."""
     current_views = _current_views(link.event_id, db)
     view_rows = _link_view_rows(link.id, db)
+    operation = _link_operation(link.id, db)
+    link_status = _link_status(link, view_rows, set(current_views))
+    if operation is not None and operation.state in {"pending", "indeterminate"}:
+        link_status = "securing"
     values: dict[str, Any] = {
         "id": link.id,
         "event_id": link.event_id,
@@ -279,7 +330,10 @@ def _serialise_link(
         "created_at": _aware_utc(link.created_at),
         "updated_at": _aware_utc(link.updated_at) if link.updated_at else None,
         "created_by_id": link.created_by_id,
-        "status": _link_status(link, view_rows, set(current_views)),
+        "status": link_status,
+        "protection_operation_id": operation.id if operation else None,
+        "protection_state": operation.state if operation else None,
+        "protection_stage": operation.stage if operation else None,
         "views": [
             PublicScheduleLinkViewOut(
                 id=row.external_view_id,
@@ -407,7 +461,9 @@ def list_public_schedule_links(
         .order_by(PublicScheduleLink.created_at.desc(), PublicScheduleLink.id.desc())
         .all()
     )
-    return [_serialise_link(link, db) for link in links]
+    values = [_serialise_link(link, db) for link in links]
+    db.commit()
+    return values
 
 
 @admin_router.post(
@@ -420,6 +476,7 @@ def create_public_schedule_link(
     event_id: int,
     body: PublicScheduleLinkCreate,
     request: Request,
+    response: Response,
     user: User = Depends(require_root_or_issuer),
     db: Session = Depends(get_db),
 ):
@@ -427,10 +484,26 @@ def create_public_schedule_link(
     _require_event_access(event_id, user, db)
     expires_at = _validate_expiry(body.expires_at)
     _validate_new_view_permissions(event_id, body.view_ids, db)
-    raw_token = secrets.token_urlsafe(48)
+    token_hash = hashlib.sha256(body.token.encode()).hexdigest()
+    if settings.HA_MODE == "ha":
+        if body.idempotency_key is None:
+            raise HTTPException(status_code=422, detail="Idempotency key is required in HA mode")
+        existing_operation = find_protection_operation(db, body.idempotency_key)
+        if existing_operation is not None:
+            if existing_operation.operation_type != "public-link-create":
+                raise HTTPException(status_code=409, detail="Idempotency key is already in use")
+            link = db.query(PublicScheduleLink).filter(
+                PublicScheduleLink.id == int(existing_operation.resource_id or 0)
+            ).first()
+            if link is None or link.token_hash != token_hash:
+                raise HTTPException(status_code=409, detail="Idempotent link request does not match")
+            sync_protection_operation(db, existing_operation)
+            db.commit()
+            response.status_code = status.HTTP_202_ACCEPTED
+            return _serialise_link(link, db)
     link = PublicScheduleLink(
         event_id=event_id,
-        token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+        token_hash=token_hash,
         description=body.description,
         expires_at=expires_at,
         created_by_id=user.id,
@@ -454,24 +527,28 @@ def create_public_schedule_link(
         ),
         request=request,
     )
-    db.commit()
-    db.refresh(link)
-    protection = protect_current_state("public-link-create")
-    if not protection.protected:
-        db.delete(link)
-        db.commit()
-        request_ha_replication("public-link-create-rollback")
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "standby_protection_failed",
-                "message": "The public link was not created because the standby did not accept it.",
-            },
+    protection: HAProtectionOperation | None = None
+    try:
+        protection = create_protection_operation(
+            db, idempotency_key=body.idempotency_key,
+            operation_type="public-link-create", resource_type="public_schedule_link",
+            resource_id=str(link.id),
         )
+        db.commit()
+    except HAWritePermitError as exc:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise HTTPException(status_code=503, detail="The standby protection guard is unavailable") from exc
+    except Exception:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise
+    db.refresh(link)
+    _queue_link_operation(db, protection, response)
     return _serialise_link(
         link,
         db,
-        share_url=f"/shared-schedule#token={raw_token}",
+        share_url=f"/shared-schedule#token={body.token}" if protection is None else None,
     )
 
 
@@ -485,17 +562,29 @@ def update_public_schedule_link(
     link_id: int,
     body: PublicScheduleLinkUpdate,
     request: Request,
+    response: Response,
     user: User = Depends(require_root_or_issuer),
     db: Session = Depends(get_db),
 ):
     """Update an active link without changing its token."""
-    if not body.model_fields_set:
+    if not (body.model_fields_set - {"idempotency_key"}):
         raise HTTPException(status_code=422, detail="No changes supplied")
     link = _load_managed_link(event_id, link_id, user, db)
+    if settings.HA_MODE == "ha":
+        if body.idempotency_key is None:
+            raise HTTPException(status_code=422, detail="Idempotency key is required in HA mode")
+        existing_operation = find_protection_operation(db, body.idempotency_key)
+        if existing_operation is not None:
+            if existing_operation.operation_type != "public-link-update" or existing_operation.resource_id != str(link.id):
+                raise HTTPException(status_code=409, detail="Idempotency key is already in use")
+            sync_protection_operation(db, existing_operation)
+            db.commit()
+            response.status_code = status.HTTP_202_ACCEPTED
+            return _serialise_link(link, db)
+        pending = _link_operation(link.id, db)
+        if pending is not None and pending.state in {"pending", "indeterminate"}:
+            raise HTTPException(status_code=409, detail={"code": "protection_pending", "operation_id": pending.id})
     _require_active_link(link, db)
-    previous_description = link.description
-    previous_expires_at = link.expires_at
-    previous_view_ids = [view.external_view_id for view in _link_view_rows(link.id, db)]
 
     changed_fields: list[str] = []
     if "description" in body.model_fields_set:
@@ -528,19 +617,24 @@ def update_public_schedule_link(
         detail=json.dumps({"event_id": event_id, "changed_fields": changed_fields}),
         request=request,
     )
-    db.commit()
-    db.refresh(link)
-    protection = protect_current_state("public-link-update")
-    if not protection.protected:
-        link.description = previous_description
-        link.expires_at = previous_expires_at
-        _replace_view_permissions(link, previous_view_ids, db, allow_existing_unavailable=True)
-        db.commit()
-        request_ha_replication("public-link-update-rollback")
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "standby_protection_failed", "message": "The public link was not changed because the standby did not accept it."},
+    protection: HAProtectionOperation | None = None
+    try:
+        protection = create_protection_operation(
+            db, idempotency_key=body.idempotency_key,
+            operation_type="public-link-update", resource_type="public_schedule_link",
+            resource_id=str(link.id),
         )
+        db.commit()
+    except HAWritePermitError as exc:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise HTTPException(status_code=503, detail="The standby protection guard is unavailable") from exc
+    except Exception:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise
+    db.refresh(link)
+    _queue_link_operation(db, protection, response)
     return _serialise_link(link, db)
 
 
@@ -553,11 +647,27 @@ def invalidate_public_schedule_link(
     event_id: int,
     link_id: int,
     request: Request,
+    response: Response,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key", pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$"),
     user: User = Depends(require_root_or_issuer),
     db: Session = Depends(get_db),
 ):
     """Permanently invalidate an active Public Schedule sharing link."""
     link = _load_managed_link(event_id, link_id, user, db)
+    if settings.HA_MODE == "ha":
+        if idempotency_key is None:
+            raise HTTPException(status_code=422, detail="Idempotency key is required in HA mode")
+        existing_operation = find_protection_operation(db, idempotency_key)
+        if existing_operation is not None:
+            if existing_operation.operation_type != "public-link-invalidate" or existing_operation.resource_id != str(link.id):
+                raise HTTPException(status_code=409, detail="Idempotency key is already in use")
+            sync_protection_operation(db, existing_operation)
+            db.commit()
+            response.status_code = status.HTTP_202_ACCEPTED
+            return _serialise_link(link, db)
+        pending = _link_operation(link.id, db)
+        if pending is not None and pending.state in {"pending", "indeterminate"}:
+            raise HTTPException(status_code=409, detail={"code": "protection_pending", "operation_id": pending.id})
     _require_active_link(link, db)
     link.invalidated_at = datetime.now(timezone.utc)
     audit(
@@ -569,55 +679,61 @@ def invalidate_public_schedule_link(
         detail=json.dumps({"event_id": event_id}),
         request=request,
     )
-    db.commit()
-    db.refresh(link)
-    protection = protect_current_state("public-link-invalidate")
-    if not protection.protected:
-        link.invalidated_at = None
-        db.commit()
-        request_ha_replication("public-link-invalidate-rollback")
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "standby_protection_failed", "message": "The public link remains active because the standby did not accept its invalidation."},
+    protection: HAProtectionOperation | None = None
+    try:
+        protection = create_protection_operation(
+            db, idempotency_key=idempotency_key,
+            operation_type="public-link-invalidate", resource_type="public_schedule_link",
+            resource_id=str(link.id),
         )
+        db.commit()
+    except HAWritePermitError as exc:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise HTTPException(status_code=503, detail="The standby protection guard is unavailable") from exc
+    except Exception:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise
+    db.refresh(link)
+    _queue_link_operation(db, protection, response)
     return _serialise_link(link, db)
 
 
 @admin_router.delete(
     "/events/{event_id}/public-schedule-links/{link_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
 )
 @limiter.limit("30/minute")
 def delete_public_schedule_link(
     event_id: int,
     link_id: int,
     request: Request,
+    response: Response,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key", pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$"),
     user: User = Depends(require_root_or_issuer),
     db: Session = Depends(get_db),
 ):
     """Permanently delete a managed Public Schedule sharing link in any state."""
+    if settings.HA_MODE == "ha":
+        if idempotency_key is None:
+            raise HTTPException(status_code=422, detail="Idempotency key is required in HA mode")
+        existing_operation = find_protection_operation(db, idempotency_key)
+        if existing_operation is not None:
+            if existing_operation.operation_type != "public-link-delete" or existing_operation.resource_id != str(link_id):
+                raise HTTPException(status_code=409, detail="Idempotency key is already in use")
+            sync_protection_operation(db, existing_operation)
+            db.commit()
+            response.status_code = status.HTTP_202_ACCEPTED
+            return {
+                "protection_operation_id": existing_operation.id,
+                "protection_state": existing_operation.state,
+                "protection_stage": existing_operation.stage,
+            }
     link = _load_managed_link(event_id, link_id, user, db)
+    pending = _link_operation(link.id, db)
+    if pending is not None and pending.state in {"pending", "indeterminate"}:
+        raise HTTPException(status_code=409, detail={"code": "protection_pending", "operation_id": pending.id})
     previous_status = _serialise_link(link, db).status
-    previous_link = {
-        "id": link.id,
-        "event_id": link.event_id,
-        "token_hash": link.token_hash,
-        "description": link.description,
-        "expires_at": link.expires_at,
-        "invalidated_at": link.invalidated_at,
-        "created_by_id": link.created_by_id,
-        "created_at": link.created_at,
-        "updated_at": link.updated_at,
-    }
-    previous_views = [
-        {
-            "id": view.id,
-            "external_view_id": view.external_view_id,
-            "view_name_snapshot": view.view_name_snapshot,
-            "sort_order_snapshot": view.sort_order_snapshot,
-        }
-        for view in _link_view_rows(link.id, db)
-    ]
     audit(
         db,
         user=user,
@@ -630,21 +746,31 @@ def delete_public_schedule_link(
         request=request,
     )
     db.delete(link)
-    db.commit()
-    protection = protect_current_state("public-link-delete")
-    if not protection.protected:
-        restored = PublicScheduleLink(**previous_link)
-        db.add(restored)
-        db.flush()
-        for values in previous_views:
-            db.add(PublicScheduleLinkView(link_id=restored.id, **values))
-        db.commit()
-        request_ha_replication("public-link-delete-rollback")
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "standby_protection_failed", "message": "The public link was not deleted because the standby did not accept the change."},
+    protection: HAProtectionOperation | None = None
+    try:
+        protection = create_protection_operation(
+            db, idempotency_key=idempotency_key,
+            operation_type="public-link-delete", resource_type="public_schedule_link",
+            resource_id=str(link.id),
         )
-    return None
+        db.commit()
+    except HAWritePermitError as exc:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise HTTPException(status_code=503, detail="The standby protection guard is unavailable") from exc
+    except Exception:
+        db.rollback()
+        cancel_uncommitted_protection(protection)
+        raise
+    _queue_link_operation(db, protection, response)
+    if protection is None:
+        response.status_code = status.HTTP_204_NO_CONTENT
+        return None
+    return {
+        "protection_operation_id": protection.id,
+        "protection_state": protection.state,
+        "protection_stage": protection.stage,
+    }
 
 
 def _extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
@@ -725,6 +851,9 @@ def get_shared_public_schedule(
         .first()
     )
     if link is None:
+        raise HTTPException(status_code=404, detail=_UNAVAILABLE_DETAIL)
+    protection = _link_operation(link.id, db)
+    if protection is not None and protection.state != "accepted":
         raise HTTPException(status_code=404, detail=_UNAVAILABLE_DETAIL)
 
     view_rows = _link_view_rows(link.id, db)

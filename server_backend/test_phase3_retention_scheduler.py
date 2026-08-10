@@ -251,6 +251,8 @@ def test_admin_event_contract_exposes_materialised_deadline_and_inventory(
         json={
             "name": "Synthetic scheduled event",
             "end_date": "2026-08-01",
+            "publish_secret": "p" * 48,
+            "idempotency_key": "33333333-3333-4333-8333-333333333333",
         },
     )
     assert response.status_code == 200, response.json()
@@ -279,6 +281,8 @@ def test_imported_setup_materialises_and_returns_the_event_deadline(
                 "end_date": "2026-08-01",
             },
             "users": [],
+            "publish_secret": "q" * 48,
+            "idempotency_key": "44444444-4444-4444-8444-444444444444",
         },
     )
 
@@ -286,6 +290,26 @@ def test_imported_setup_materialises_and_returns_the_event_deadline(
     event = response.json()["event"]
     assert event["purge_grace_days"] == 90
     assert event["purge_due_at"].startswith("2026-10-31T00:00:00")
+
+
+def test_import_setup_rejects_an_invalid_event_date_range(db, reauth_admin_client):
+    response = reauth_admin_client.post(
+        "/api/v1/admin/import-setup",
+        json={
+            "event": {
+                "evidence_id": "11111111-1111-4111-8111-111111111113",
+                "name": "Invalid imported event",
+                "start_date": "2026-08-10",
+                "end_date": "2026-08-01",
+            },
+            "users": [],
+            "publish_secret": "r" * 48,
+            "idempotency_key": "55555555-5555-4555-8555-555555555555",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "End date must be on or after start date" in response.text
 
 
 def test_schedule_publish_is_blocked_after_event_purge_case_starts(db):
@@ -324,3 +348,26 @@ def test_general_schedule_publish_reschedules_an_event_deadline(db):
     assert event.purge_due_at.replace(tzinfo=timezone.utc) == datetime(
         2026, 11, 9, tzinfo=timezone.utc
     )
+
+
+def test_general_schedule_rejects_an_invalid_event_date_range(db):
+    event, secret = create_test_event(db, name="Synthetic invalid schedule")
+
+    response = _publish_client(secret).post(
+        "/api/v1/publish/general-schedule",
+        json={
+            "event": {
+                "start_date": "2026-08-10",
+                "end_date": "2026-08-01",
+            },
+            "fingerprint": "synthetic-invalid-retention-range",
+            "schedule_views": [],
+            "items": [],
+        },
+    )
+
+    assert response.status_code == 422
+    assert "End date must be on or after start date" in response.text
+    db.refresh(event)
+    assert event.start_date is None
+    assert event.end_date is None

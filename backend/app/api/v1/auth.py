@@ -10,7 +10,13 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core import runtime_settings
-from app.core.security import get_current_user
+from app.core.security import (
+    get_current_user,
+    get_current_user_for_commissioning,
+    require_root_admin,
+    require_root_recent_reauth,
+)
+from app.core.commissioning import commissioning_required, commissioning_stage
 from app.core.sessions import (
     _coarse_user_agent,
     create_session,
@@ -51,6 +57,8 @@ class UserMeResponse(BaseModel):
     linked_person_id: Optional[int] = None
     event_id: Optional[int] = None
     offline_access_ttl_hours: int = 24
+    commissioning_required: bool = False
+    commissioning_stage: str = "complete"
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -63,6 +71,8 @@ class ExchangeResponse(BaseModel):
     display_name: str
     is_root_admin: bool
     is_admin: bool
+    commissioning_required: bool = False
+    commissioning_stage: str = "complete"
 
 
 class SessionResponse(BaseModel):
@@ -167,7 +177,9 @@ def exchange_code_for_session(
         raise HTTPException(status_code=400, detail="Code expired")
 
     user = db.query(User).filter(User.id == exchange.user_id).first()
-    if not user or not user.is_active or not user.is_activated:
+    if not user or not user.is_active or (
+        not user.is_activated and not user.is_root_admin
+    ):
         raise HTTPException(status_code=400, detail="Authentication failed")
 
     consumed = (
@@ -192,6 +204,7 @@ def exchange_code_for_session(
         user_agent=request.headers.get("user-agent"),
         accept_language=request.headers.get("accept-language"),
         is_privileged=is_privileged,
+        reauthenticated=True,
     )
     _set_session_cookie(
         response,
@@ -212,6 +225,8 @@ def exchange_code_for_session(
         display_name=user.display_name,
         is_root_admin=user.is_root_admin,
         is_admin=user.is_admin,
+        commissioning_required=user.is_root_admin and commissioning_required(db),
+        commissioning_stage=commissioning_stage(db) if user.is_root_admin else "complete",
     )
 
 
@@ -247,7 +262,7 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
 
 @router.get("/me", response_model=UserMeResponse)
 def get_me(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_for_commissioning),
     db: Session = Depends(get_db),
 ):
     """Return the currently authenticated user."""
@@ -269,7 +284,25 @@ def get_me(
             "offline_access_ttl_hours",
             db,
         ),
+        commissioning_required=(current_user.is_root_admin and commissioning_required(db)),
+        commissioning_stage=(commissioning_stage(db) if current_user.is_root_admin else "complete"),
     )
+
+
+@router.get("/root-access")
+def root_access(current_user: User = Depends(require_root_admin)):
+    """Authorise HTTP delivery of a root-only frontend route."""
+
+    return {"status": "ok"}
+
+
+@router.get("/recovery-key-access")
+def recovery_key_access(
+    current_user: User = Depends(require_root_recent_reauth),
+):
+    """Unlock the browser-local recovery-key generator after root WebAuthn."""
+
+    return {"status": "ok"}
 
 
 @router.get("/sessions", response_model=List[SessionResponse])

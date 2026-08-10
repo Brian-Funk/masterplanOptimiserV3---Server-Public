@@ -1,341 +1,73 @@
-/**
- * Tests for BootstrapPage - initial passkey registration flow.
- */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 
-// Mock next/navigation
-const mockPush = vi.fn();
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: mockPush }),
+const { mockHardNavigate, mockStartRegistration } = vi.hoisted(() => ({
+  mockHardNavigate: vi.fn(), mockStartRegistration: vi.fn(),
 }));
+vi.mock("@/lib/hardNavigation", () => ({ hardNavigate: mockHardNavigate }));
+vi.mock("@/lib/environment", () => ({ getApiUrl: () => "https://api.test" }));
+vi.mock("@simplewebauthn/browser", () => ({ startRegistration: mockStartRegistration }));
+vi.mock("@/contexts/ThemeContext", () => ({ useTheme: () => ({ theme: "light", toggleTheme: vi.fn() }) }));
+vi.mock("@/lib/brand", () => ({ BRAND: { color1: "#2563eb", color2: "#7c3aed" } }));
+vi.mock("lucide-react", () => ({ Moon: (props: object) => React.createElement("svg", props), Sun: (props: object) => React.createElement("svg", props) }));
 
-// Mock environment
-vi.mock("@/lib/environment", () => ({
-  getApiUrl: () => "https://api.test",
-}));
-
-// Mock ThemeContext
-vi.mock("@/contexts/ThemeContext", () => ({
-  useTheme: () => ({ theme: "light", toggleTheme: vi.fn() }),
-}));
-
-// Mock brand
-vi.mock("@/lib/brand", () => ({
-  BRAND: { color1: "#2563eb", color2: "#7c3aed" },
-}));
-
-// Mock lucide-react
-vi.mock("lucide-react", () => ({
-  Moon: (props: Record<string, unknown>) =>
-    React.createElement("svg", { ...props }),
-  Sun: (props: Record<string, unknown>) =>
-    React.createElement("svg", { ...props }),
-}));
-
-// Mock @simplewebauthn/browser
-const mockStartRegistration = vi.fn();
-vi.mock("@simplewebauthn/browser", () => ({
-  startRegistration: (...args: unknown[]) => mockStartRegistration(...args),
-}));
-
-// Mock fetch
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
-
 import BootstrapPage from "@/app/bootstrap/page";
 
-beforeEach(() => {
-  mockPush.mockReset();
-  mockFetch.mockReset();
-  mockStartRegistration.mockReset();
+const status = (overrides: object = {}) => ({
+  needs_bootstrap: true, bootstrap_configured: true, stage: "passkey",
+  policy_version: "2026-07-30", policy_sha256: "a".repeat(64),
+  policy_text: "Synthetic permitted-data policy.", ...overrides,
 });
 
 describe("BootstrapPage", () => {
-  it("shows checking status initially", () => {
-    mockFetch.mockImplementation(() => new Promise(() => {}));
+  beforeEach(() => { mockFetch.mockReset(); mockHardNavigate.mockReset(); mockStartRegistration.mockReset(); });
+
+  it("shows the one-time root passkey gate", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => status() });
     render(<BootstrapPage />);
-    expect(screen.getByText("Checking setup status...")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /register root passkey/i })).toBeDisabled();
+    expect(screen.getByText(/bootstrap code is permanently retired/i)).toBeInTheDocument();
   });
 
-  it("shows register button when bootstrap is needed", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ needs_bootstrap: true }),
-    });
-
+  it("sends an already registered root to normal sign-in", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => status({ needs_bootstrap: false, bootstrap_configured: false, stage: "setup" }) });
     render(<BootstrapPage />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /register root passkey/i }),
-      ).toBeInTheDocument();
-    });
+    await userEvent.setup().click(await screen.findByRole("button", { name: /continue to sign in/i }));
+    expect(mockHardNavigate).toHaveBeenCalledWith("/login");
   });
 
-  it("shows already-done message when bootstrap not needed", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ needs_bootstrap: false }),
-    });
-
+  it("retires bootstrap through registration, exchanges the restricted session, and opens setup", async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => status() })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ options: JSON.stringify({ challenge: "abc" }), ceremony_id: "ceremony" }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ exchange_code: "exchange-code-for-setup" }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ commissioning_required: true, commissioning_stage: "recovery" }) });
+    mockStartRegistration.mockResolvedValueOnce({ id: "credential" });
     render(<BootstrapPage />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByText(/Root admin already has a passkey/),
-      ).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: /go to login/i }),
-      ).toBeInTheDocument();
-    });
-  });
-
-  it("shows error when bootstrap check fails", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-    });
-
-    render(<BootstrapPage />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByText(/Failed to check bootstrap status/),
-      ).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: /retry/i }),
-      ).toBeInTheDocument();
-    });
-  });
-
-  it("shows error on network failure", async () => {
-    mockFetch.mockRejectedValueOnce(new Error("Cannot reach server"));
-
-    render(<BootstrapPage />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Cannot reach server")).toBeInTheDocument();
-    });
-  });
-
-  it("handles successful passkey registration", async () => {
-    // bootstrap-status: needs bootstrap
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ needs_bootstrap: true }),
-    });
-
-    render(<BootstrapPage />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /register root passkey/i }),
-      ).toBeInTheDocument();
-    });
-
-    // begin returns options
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ options: JSON.stringify({ challenge: "abc" }), ceremony_id: 77 }),
-    });
-    mockStartRegistration.mockResolvedValueOnce({ id: "cred-1" });
-    // complete succeeds
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({}),
-    });
-
     const user = userEvent.setup();
-    await user.click(screen.getByRole("checkbox", { name: /permitted-data boundary/i }));
+    await user.click(await screen.findByRole("checkbox"));
     await user.type(screen.getByLabelText(/bootstrap code/i), "b".repeat(32));
-    await user.click(
-      screen.getByRole("button", { name: /register root passkey/i }),
-    );
-
-    await waitFor(() => {
-      expect(
-        screen.getByText(/Root passkey registered successfully/),
-      ).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: /go to login/i }),
-      ).toBeInTheDocument();
-    });
-
-    const completeBody = JSON.parse(mockFetch.mock.calls[2][1].body);
-    expect(completeBody.credential.id).toBe("cred-1");
-    expect(completeBody.ceremony_id).toBe(77);
-    expect(mockFetch.mock.calls[1][1].headers["X-Bootstrap-Token"]).toBe(
-      "b".repeat(32),
-    );
+    await user.click(screen.getByRole("button", { name: /register root passkey/i }));
+    await waitFor(() => expect(mockHardNavigate).toHaveBeenCalledWith("/setup"));
+    expect(JSON.parse(mockFetch.mock.calls[2][1].body)).toMatchObject({ ceremony_id: "ceremony", credential: { id: "credential" } });
+    expect(JSON.parse(mockFetch.mock.calls[3][1].body)).toEqual({ code: "exchange-code-for-setup" });
   });
 
-  it("navigates to login after successful registration", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ needs_bootstrap: true }),
-    });
-
-    render(<BootstrapPage />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /register root passkey/i }),
-      ).toBeInTheDocument();
-    });
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ options: JSON.stringify({ challenge: "abc" }) }),
-    });
-    mockStartRegistration.mockResolvedValueOnce({ id: "cred-1" });
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({}),
-    });
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("checkbox", { name: /permitted-data boundary/i }));
-    await user.type(screen.getByLabelText(/bootstrap code/i), "b".repeat(32));
-    await user.click(
-      screen.getByRole("button", { name: /register root passkey/i }),
-    );
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /go to login/i }),
-      ).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole("button", { name: /go to login/i }));
-    expect(mockPush).toHaveBeenCalledWith("/login");
+  it("returns to the gate when the passkey prompt is cancelled", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => status() }).mockResolvedValueOnce({ ok: true, json: async () => ({ options: "{}", ceremony_id: "ceremony" }) });
+    const cancelled = new Error("cancelled"); cancelled.name = "NotAllowedError"; mockStartRegistration.mockRejectedValueOnce(cancelled);
+    render(<BootstrapPage />); const user = userEvent.setup();
+    await user.click(await screen.findByRole("checkbox")); await user.type(screen.getByLabelText(/bootstrap code/i), "b".repeat(32)); await user.click(screen.getByRole("button", { name: /register root passkey/i }));
+    expect(await screen.findByRole("button", { name: /register root passkey/i })).toBeInTheDocument();
   });
 
-  it("shows error when registration begin fails", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ needs_bootstrap: true }),
-    });
-
-    render(<BootstrapPage />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /register root passkey/i }),
-      ).toBeInTheDocument();
-    });
-
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      json: async () => ({ detail: "Server error" }),
-    });
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("checkbox", { name: /permitted-data boundary/i }));
-    await user.type(screen.getByLabelText(/bootstrap code/i), "b".repeat(32));
-    await user.click(
-      screen.getByRole("button", { name: /register root passkey/i }),
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText("Server error")).toBeInTheDocument();
-    });
-  });
-
-  it("returns to ready state when user cancels passkey prompt", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ needs_bootstrap: true }),
-    });
-
-    render(<BootstrapPage />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /register root passkey/i }),
-      ).toBeInTheDocument();
-    });
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ options: JSON.stringify({ challenge: "abc" }) }),
-    });
-
-    const notAllowedError = new Error("User cancelled");
-    notAllowedError.name = "NotAllowedError";
-    mockStartRegistration.mockRejectedValueOnce(notAllowedError);
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("checkbox", { name: /permitted-data boundary/i }));
-    await user.type(screen.getByLabelText(/bootstrap code/i), "b".repeat(32));
-    await user.click(
-      screen.getByRole("button", { name: /register root passkey/i }),
-    );
-
-    await waitFor(() => {
-      // Should return to ready state, showing the register button again
-      expect(
-        screen.getByRole("button", { name: /register root passkey/i }),
-      ).toBeInTheDocument();
-    });
-  });
-
-  it("shows Welcome heading", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ needs_bootstrap: true }),
-    });
-
-    render(<BootstrapPage />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Welcome")).toBeInTheDocument();
-    });
-  });
-
-  it("retries on error", async () => {
-    // First check fails
-    mockFetch.mockRejectedValueOnce(new Error("Timeout"));
-
-    render(<BootstrapPage />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Timeout")).toBeInTheDocument();
-    });
-
-    // Second check succeeds
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ needs_bootstrap: true }),
-    });
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: /retry/i }));
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /register root passkey/i }),
-      ).toBeInTheDocument();
-    });
-  });
-
-  it("navigates to login from already-done state", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ needs_bootstrap: false }),
-    });
-
-    render(<BootstrapPage />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /go to login/i }),
-      ).toBeInTheDocument();
-    });
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: /go to login/i }));
-    expect(mockPush).toHaveBeenCalledWith("/login");
+  it("shows a calm retry when status is unavailable", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false }); render(<BootstrapPage />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/failed to check bootstrap status/i);
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
   });
 });

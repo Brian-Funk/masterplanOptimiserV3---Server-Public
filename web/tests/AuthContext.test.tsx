@@ -7,6 +7,13 @@ import React from "react";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { storeOfflineAccessForCalendar } from "@/lib/offlineAccess";
 
+const { mockHardNavigate } = vi.hoisted(() => ({
+  mockHardNavigate: vi.fn(),
+}));
+vi.mock("@/lib/hardNavigation", () => ({
+  hardNavigate: mockHardNavigate,
+}));
+
 vi.mock("@/contexts/ServiceAvailabilityContext", () => ({
   useServiceAvailability: () => ({
     state: "ready",
@@ -43,6 +50,14 @@ function renderWithAuth() {
   );
 }
 
+function deferredResponse() {
+  let resolve!: (response: Response) => void;
+  const promise = new Promise<Response>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
 const mockUser = {
   id: 1,
   username: "testadmin",
@@ -61,7 +76,9 @@ const mockUser = {
 
 beforeEach(() => {
   mockFetch.mockReset();
+  mockHardNavigate.mockReset();
   localStorage.clear();
+  window.history.replaceState({}, "", "/");
 });
 
 describe("AuthContext", () => {
@@ -93,6 +110,67 @@ describe("AuthContext", () => {
     await waitFor(() => {
       expect(screen.getByText("Not authenticated")).toBeInTheDocument();
     });
+  });
+
+  it("fences a recovery-pending root away from normal application pages", async () => {
+    window.history.replaceState({}, "", "/admin");
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        ...mockUser,
+        is_root_admin: true,
+        commissioning_required: true,
+        commissioning_stage: "recovery",
+      }),
+    });
+
+    renderWithAuth();
+
+    await waitFor(() => {
+      expect(mockHardNavigate).toHaveBeenCalledWith("/setup");
+    });
+    expect(localStorage.getItem("mp_opt_offline_access")).toBeNull();
+  });
+
+  it("ignores an older session response after a newer refresh succeeds", async () => {
+    const older = deferredResponse();
+    mockFetch
+      .mockReturnValueOnce(older.promise)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => mockUser,
+      });
+
+    function RefreshConsumer() {
+      const { user, refreshUser } = useAuth();
+      return (
+        <div>
+          <span data-testid="refreshed-user">{user?.username ?? "none"}</span>
+          <button type="button" onClick={() => void refreshUser()}>Refresh</button>
+        </div>
+      );
+    }
+
+    render(
+      <AuthProvider>
+        <RefreshConsumer />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      screen.getByRole("button", { name: "Refresh" }).click();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("refreshed-user")).toHaveTextContent("testadmin");
+    });
+
+    await act(async () => {
+      older.resolve({ ok: false, status: 401 } as Response);
+      await older.promise;
+    });
+    expect(screen.getByTestId("refreshed-user")).toHaveTextContent("testadmin");
   });
 
   it("handles fetch error gracefully", async () => {

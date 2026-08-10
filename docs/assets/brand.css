@@ -1,0 +1,8 @@
+@font-face{font-family:"Source Sans 3";font-style:normal;font-display:swap;font-weight:400;src:url("fonts/source-sans-3-latin-400-normal.woff2") format("woff2")}
+@font-face{font-family:"Source Sans 3";font-style:normal;font-display:swap;font-weight:600;src:url("fonts/source-sans-3-latin-600-normal.woff2") format("woff2")}
+@font-face{font-family:"Source Sans 3";font-style:normal;font-display:swap;font-weight:700;src:url("fonts/source-sans-3-latin-700-normal.woff2") format("woff2")}
+:root{--md-text-font:"Source Sans 3";--md-primary-fg-color:#2563eb;--md-accent-fg-color:#7c3aed}
+[data-md-color-scheme="slate"]{--md-primary-fg-color:#5f8cff;--md-accent-fg-color:#a77bff}
+.md-typeset h1,.md-typeset h2,.md-typeset h3{font-weight:600;letter-spacing:-.015em}
+.md-typeset table:not([class]){border-radius:.5rem;overflow:hidden}
+@media print{.md-header,.md-sidebar,.md-footer{display:none}.md-main__inner{margin:0}.md-content{max-width:none}}

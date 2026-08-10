@@ -11,6 +11,7 @@ __pycache__/
 *.pyc
 node_modules/
 web/out/
+web/public/fonts/
 runtime/
 .next/
 nul

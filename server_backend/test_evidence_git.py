@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import zipfile
 
 import pytest
 
@@ -248,6 +249,37 @@ def test_portable_bundle_is_deterministic_self_contained_and_offline_verifiable(
     assert Path(str(first) + ".sha256").read_text(encoding="ascii") == (
         f"{portable_bundle.sha256_file(first)}  first.bundle\n"
     )
+
+
+def test_complete_evidence_zip_is_deterministic_exact_and_fail_closed(tmp_path):
+    repository, _keys = _repository(tmp_path / "source")
+    bundle = tmp_path / "accountability.evidence"
+    first = tmp_path / "first.zip"
+    second = tmp_path / "second.zip"
+    portable_bundle.create_bundle(repository, INSTANCE_ID, bundle)
+
+    portable_bundle.create_evidence_zip(bundle, first)
+    portable_bundle.create_evidence_zip(bundle, second)
+
+    assert first.read_bytes() == second.read_bytes()
+    result = portable_bundle.verify_evidence_zip(first)
+    assert result["valid"] is True
+    assert result["valid_zip"] is True
+    assert result["chain_head_sha256"]
+    with zipfile.ZipFile(first) as archive:
+        assert tuple(archive.namelist()) == portable_bundle.ZIP_MEMBERS
+        assert archive.read("accountability.evidence") == bundle.read_bytes()
+        assert portable_bundle.PUBLIC_VERIFIER_URL.encode("ascii") in archive.read("VERIFYING.txt")
+
+    tampered = tmp_path / "tampered.zip"
+    with zipfile.ZipFile(first) as source, zipfile.ZipFile(tampered, "w") as target:
+        for name in source.namelist():
+            raw = source.read(name)
+            if name == "accountability.evidence.sha256":
+                raw = b"0" * 64 + b"  accountability.evidence\n"
+            target.writestr(portable_bundle._zip_info(name), raw)
+    with pytest.raises(portable_bundle.PortableBundleError, match="checksum"):
+        portable_bundle.verify_evidence_zip(tampered)
 
 
 def test_portable_bundle_tamper_binding_and_path_traversal_fail_closed(tmp_path):

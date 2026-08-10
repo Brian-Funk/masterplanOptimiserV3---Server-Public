@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import stat
@@ -39,6 +40,7 @@ class ReplicationBundleTests(unittest.TestCase):
         for relative, value in (
             ("database/masterplan.dump", b"database"),
             ("config/shared.env", b"DOMAIN=example.test\n"),
+            ("recovery/recovery-recipient", b"age1" + b"a" * 58 + b"\n"),
             ("config/secrets/secret_key", b"shared-secret"),
             ("config/secrets/ip_hmac_key", b"shared-ip-hmac-secret"),
             ("config/secrets/vapid_private_key", b"vapid-secret"),
@@ -87,6 +89,39 @@ class ReplicationBundleTests(unittest.TestCase):
             document = json.loads((root / "manifest.json").read_text())
             self.assertTrue(all(item["mode"] == "0600" for item in document["files"]))
 
+    def test_v2_manifest_binds_and_validates_operation_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = self.payload(root)
+            marker = {
+                "operation_id": "72a24e65-6f20-45bd-bf87-338f5fcf8f93",
+                "mutation_sequence": 9,
+                "operation_type": "publisher-secret-create",
+                "resource_type": "event",
+                "resource_id": "12",
+            }
+            marker["marker_sha256"] = hashlib.sha256(
+                json.dumps(marker, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            request = root / "batch.json"
+            request.write_text(json.dumps({
+                "format": "mp-opt-replication-batch-v2",
+                "operations": [{"marker": marker}],
+            }))
+            manifest = root / "manifest.json"
+            replication_bundle.create(argparse.Namespace(
+                payload=str(payload), cluster="cluster-test", source="node-a",
+                target="node-b", bundle="bundle-operations", generation=3,
+                release="a" * 40, output=str(manifest), request=str(request),
+            ))
+            replication_bundle.validate(self.validate_args(root))
+            document = json.loads(manifest.read_text())
+            self.assertEqual(document["protection_operations"][0]["marker"], marker)
+            document["protection_operations"][0]["marker"]["resource_id"] = "13"
+            manifest.write_text(json.dumps(document))
+            with self.assertRaisesRegex(ValueError, "marker digest"):
+                replication_bundle.validate(self.validate_args(root))
+
     def test_tamper_and_unsafe_mode_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -121,6 +156,21 @@ class ReplicationBundleTests(unittest.TestCase):
                 "DATABASE_URL=local\nPOSTGRES_PASSWORD=local-password\nHA_NODE_ID=node-b\nDOMAIN=new\nSMTP_HOST=mail.example\n",
             )
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+
+    def test_recovery_recipient_is_required_and_schema_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload, manifest = self.create_manifest(root)
+            recipient = payload / "recovery" / "recovery-recipient"
+            recipient.write_text("not-an-age-recipient\n", encoding="ascii")
+            recipient.chmod(0o600)
+            replication_bundle.create(argparse.Namespace(
+                payload=str(payload), cluster="cluster-test", source="node-a",
+                target="node-b", bundle="bundle-1", generation=1,
+                release="a" * 40, output=str(manifest),
+            ))
+            with self.assertRaisesRegex(ValueError, "recovery recipient is invalid"):
+                replication_bundle.validate(self.validate_args(root))
 
     def test_shared_environment_excludes_every_node_local_ha_value(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -244,12 +294,68 @@ class ReplicationBundleTests(unittest.TestCase):
         self.assertLess(restore_private, remove_public)
         self.assertLess(remove_public, regenerate_public)
 
+    def test_receiver_reapplies_runtime_secret_permissions_before_rollback_backend(self) -> None:
+        source = (HA_DIR / "receive_replication_bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        restore_private = source.index(
+            'install -m 0600 "$stage/secrets.previous/$secret" "$MP_ROOT/secrets/$secret"'
+        )
+        prepare_permissions = source.index(
+            "if mp_prepare_backend_secret_permissions; then", restore_private
+        )
+        restore_backend = source.index(
+            'restore_services+=(backend)', prepare_permissions
+        )
+        rollback_health = source.index(
+            "backend_rollback_healthy=false", restore_backend
+        )
+        cleanup_exit = source.index('exit "$result"', rollback_health)
+
+        self.assertLess(restore_private, prepare_permissions)
+        self.assertLess(prepare_permissions, restore_backend)
+        self.assertLess(restore_backend, rollback_health)
+        self.assertLess(rollback_health, cleanup_exit)
+        self.assertIn(
+            '"${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true',
+            source[rollback_health:cleanup_exit],
+        )
+
+    def test_receiver_defers_sender_transport_signals_during_swap_and_rollback(self) -> None:
+        source = (HA_DIR / "receive_replication_bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        cleanup_start = source.index("cleanup() {")
+        cleanup_signal_guard = source.index("trap '' HUP INT TERM", cleanup_start)
+        cleanup_restore = source.index(
+            'if [ "$result" -ne 0 ] && [ "$database_swap_started" = true ]; then',
+            cleanup_signal_guard,
+        )
+        cleanup_registration = source.index("trap cleanup EXIT", cleanup_restore)
+        active_signal_guard = source.index(
+            "trap '' HUP INT TERM", cleanup_registration
+        )
+        swap_started = source.index(
+            "database_swap_started=true", active_signal_guard
+        )
+        receiver_receipt = source.index(
+            'install -m 0600 "$stage/receiver.json" "$MP_ROOT/runtime/ha-receiver.json"',
+            swap_started,
+        )
+
+        self.assertLess(cleanup_signal_guard, cleanup_restore)
+        self.assertLess(active_signal_guard, swap_started)
+        self.assertLess(swap_started, receiver_receipt)
+
     def test_replication_carries_recovery_receipt_and_publishes_dashboard_state(self) -> None:
         sender = (HA_DIR / "replicate_now.sh").read_text(encoding="utf-8")
         receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(encoding="utf-8")
 
         self.assertIn("prepare-recovery-state", sender)
         self.assertIn('"$MP_MANUAL_EXPORT_STATE"', sender)
+        self.assertIn('"$stage/payload/recovery/recovery-recipient"', sender)
+        self.assertIn('"$stage/extracted/payload/recovery/recovery-recipient"', receiver)
+        self.assertIn('"$MP_RECIPIENT_FILE"', receiver)
         receipt_install = receiver.index(
             '"$stage/extracted/payload/recovery/manual-recovery-export.json"'
         )
@@ -265,6 +371,64 @@ class ReplicationBundleTests(unittest.TestCase):
             'install -m 0644 "$stage/snapshot-status.previous" "$MP_HA_SNAPSHOT_STATUS"',
             receiver,
         )
+
+    def test_sender_uses_the_shared_protected_secret_mode_contract(self) -> None:
+        sender = (HA_DIR / "replicate_now.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            'expected_mode="$(mp_expected_protected_file_mode "$source_secret")"',
+            sender,
+        )
+        self.assertIn(
+            '[ "$(stat -c \'%a\' "$source_secret")" = "$expected_mode" ]',
+            sender,
+        )
+        self.assertNotIn(
+            '[ "$(stat -c \'%a\' "$source_secret")" = 600 ]',
+            sender,
+        )
+
+    def test_receiver_waits_for_a_cold_database_before_staging(self) -> None:
+        receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        database_start = receiver.index('"${MP_COMPOSE[@]}" up -d db')
+        database_ready = receiver.index("mp_wait_for_database 30", database_start)
+        first_drop = receiver.index('exec -T db dropdb', database_start)
+        self.assertLess(database_start, database_ready)
+        self.assertLess(database_ready, first_drop)
+        self.assertIn("The replication peer database did not become ready.", receiver)
+
+    def test_receiver_expands_bound_marker_values_from_psql_stdin(self) -> None:
+        receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertGreaterEqual(receiver.count("printf '%s\\n'"), 4)
+        self.assertIn("id=:'operation_id'", receiver)
+        self.assertIn("request_id=:'workflow_id'", receiver)
+        self.assertNotIn('-c "SELECT EXISTS (SELECT 1 FROM ha_protection_operations', receiver)
+        self.assertNotIn('-c "UPDATE ha_protection_operations', receiver)
+
+    def test_fresh_receiver_prepares_evidence_parent_and_preserves_service_state(self) -> None:
+        receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        evidence_copy = receiver.index(
+            'cp -a "$stage/extracted/payload/evidence" "$stage/evidence.new"'
+        )
+        parent_install = receiver.index(
+            'install -d -o root -g root -m 0755 "$MP_ROOT/state"', evidence_copy
+        )
+        evidence_move = receiver.index(
+            'mv "$stage/evidence.new" "$MP_ROOT/state/evidence"', parent_install
+        )
+        self.assertLess(evidence_copy, parent_install)
+        self.assertLess(parent_install, evidence_move)
+        self.assertIn("The evidence parent directory is unsafe.", receiver)
+        self.assertIn('sudo -n rm -rf "$stage/evidence.new"', receiver)
+        self.assertIn("backend_service_active=false", receiver)
+        self.assertIn("caddy_service_active=false", receiver)
+        self.assertIn('restore_services+=(backend)', receiver)
+        self.assertIn('restore_services+=(caddy)', receiver)
 
 
 if __name__ == "__main__":

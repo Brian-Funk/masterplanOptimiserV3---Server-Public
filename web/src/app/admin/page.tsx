@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
 import { useServiceAvailability } from "@/contexts/ServiceAvailabilityContext";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, retryServiceTransition } from "@/lib/api";
 import { getApiUrl } from "@/lib/environment";
 import {
   deriveUsernameFromDisplayName,
@@ -16,17 +16,27 @@ import {
   type ActivationCampaignActionTarget,
 } from "@/lib/activationCampaign";
 import { withReauth } from "@/lib/reauth";
+import { responseMessage } from "@/lib/responseMessage";
+import { eventDateRangeError } from "@/lib/eventDates";
+import {
+  newIdempotencyKey,
+  pendingSecrets,
+  pollProtection,
+  protectionStageLabel,
+  randomSecret,
+  removePendingSecret,
+  retainPendingSecret,
+} from "@/lib/haProtection";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Logo } from "@/components/Logo";
-import { PasskeyManager } from "@/components/PasskeyManager";
 import { ActivationCampaignCard } from "@/components/ActivationCampaignCard";
 import { SnapshotComparisonModal } from "@/components/SnapshotComparisonModal";
 import { MobileActionSheet } from "@/components/MobileActionSheet";
-import { MobileBottomNavigation } from "@/components/MobileBottomNavigation";
 import { ComplianceEvidenceTab } from "@/components/ComplianceEvidenceTab";
+import { AdminNavigation, type AdminTab } from "@/components/AdminNavigation";
 import { PermittedDataInputNotice } from "@/components/PermittedDataInputNotice";
 import {
   canManagePublicScheduleLinks,
@@ -71,10 +81,7 @@ import {
   Unlock,
   Pencil,
   Check,
-  Share2,
-  CalendarDays,
   MoreHorizontal,
-  Activity,
   Server,
 } from "lucide-react";
 
@@ -155,6 +162,9 @@ interface Event {
   purge_due_at: string | null;
   purge_case_request_id: string | null;
   purge_started_at: string | null;
+  protection_operation_id?: string | null;
+  protection_state?: string | null;
+  protection_stage?: string | null;
 }
 
 interface AdminUser {
@@ -220,18 +230,6 @@ interface BatchActivationLinkSkipped {
   message: string;
 }
 
-function responseMessage(data: unknown, fallback: string): string {
-  if (!data || typeof data !== "object") return fallback;
-  const record = data as Record<string, unknown>;
-  if (typeof record.message === "string") return record.message;
-  if (typeof record.detail === "string") return record.detail;
-  if (record.detail && typeof record.detail === "object") {
-    const detail = record.detail as Record<string, unknown>;
-    if (typeof detail.message === "string") return detail.message;
-  }
-  return fallback;
-}
-
 interface PublishedPerson {
   id: number;
   external_person_id: number;
@@ -282,17 +280,6 @@ function createBulkUserDraft(): BulkUserDraft {
 // Page
 // ---------------------------------------------------------------------------
 
-type AdminTab =
-  | "events"
-  | "users"
-  | "announcements"
-  | "history"
-  | "public-links"
-  | "security"
-  | "privacy"
-  | "ha"
-  | "audit";
-
 const ADMIN_TABS: AdminTab[] = [
   "events",
   "users",
@@ -322,14 +309,18 @@ const ACTIVE_HA_SERVICE_STATES = new Set([
 
 export default function AdminPage() {
   const router = useRouter();
-  const { user, logout, isLoggingOut, isLoading: authLoading } = useAuth();
+  const {
+    user,
+    logout,
+    isLoggingOut,
+    isLoading: authLoading,
+    authStatus,
+  } = useAuth();
 
   const [events, setEvents] = useState<Event[]>([]);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [tab, setTabState] = useState<AdminTab>("events");
-  const [showMobileMore, setShowMobileMore] = useState(false);
-  const [showPasskeys, setShowPasskeys] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<number | "">("");
 
   const setTab = useCallback((nextTab: AdminTab) => {
@@ -342,13 +333,21 @@ export default function AdminPage() {
 
   // Auth guard  -  admin or issuer
   useEffect(() => {
+    if (!authLoading && authStatus === "unauthenticated") {
+      router.replace("/login");
+      return;
+    }
     if (
       !authLoading &&
-      (!user || (!user.is_admin && !user.is_root_admin && !user.is_issuer))
+      authStatus === "authenticated" &&
+      user &&
+      !user.is_admin &&
+      !user.is_root_admin &&
+      !user.is_issuer
     ) {
-      router.replace("/login");
+      router.replace(user.event_id ? `/calendar?event=${user.event_id}` : "/unassigned");
     }
-  }, [authLoading, user, router]);
+  }, [authLoading, authStatus, user, router]);
 
   const isIssuerOnly =
     user?.is_issuer && !user?.is_admin && !user?.is_root_admin;
@@ -395,13 +394,6 @@ export default function AdminPage() {
     }
   }, [user, fetchData]);
 
-  // Auto-select event when there's only one
-  useEffect(() => {
-    if (events.length === 1 && !selectedEvent) {
-      setSelectedEvent(events[0].id);
-    }
-  }, [events, selectedEvent]);
-
   useEffect(() => {
     if (typeof window === "undefined" || selectedEvent) return;
     const eventParam = Number(new URLSearchParams(window.location.search).get("event"));
@@ -432,6 +424,31 @@ export default function AdminPage() {
     if (await logout()) router.replace("/login");
   };
 
+  const hasManagementAccess = !!user &&
+    (user.is_admin || user.is_root_admin || user.is_issuer);
+
+  if (!authLoading && user && !hasManagementAccess) {
+    const returnHref = user.event_id
+      ? `/calendar?event=${user.event_id}`
+      : "/unassigned";
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-gray-50 px-4 dark:bg-gray-900">
+        <Card className="w-full max-w-md p-6 text-center sm:p-8">
+          <Shield className="mx-auto text-blue-600 dark:text-blue-400" size={32} aria-hidden="true" />
+          <h1 className="mt-4 text-xl font-semibold text-gray-900 dark:text-gray-100">
+            Administration is not available
+          </h1>
+          <p className="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-300">
+            This signed-in account does not have an administrative or issuer role.
+          </p>
+          <Button className="mt-5" onClick={() => router.replace(returnHref)}>
+            {user.event_id ? "Return to schedule" : "Return to account status"}
+          </Button>
+        </Card>
+      </main>
+    );
+  }
+
   if (authLoading || loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
@@ -441,15 +458,15 @@ export default function AdminPage() {
   }
 
   return (
-    <div className={`min-h-screen bg-gray-50 dark:bg-gray-900 ${user?.is_root_admin ? "" : "mobile-page-with-nav"}`}>
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
       {/* Header */}
-      <header className="sticky top-0 z-10 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 shadow-sm">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 py-2.5 sm:py-3 flex items-center justify-between">
+      <header className="sticky top-0 z-20 border-b border-gray-200 bg-white/95 backdrop-blur dark:border-gray-700 dark:bg-gray-800/95">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-2.5 sm:px-6 sm:py-3">
           <div className="flex min-w-0 items-center gap-3">
             <span className="hidden sm:inline-flex"><Logo height={32} href="https://info.mp-opt.net" /></span>
             <div className="min-w-0">
               <h1 className="truncate text-lg font-semibold text-gray-900 dark:text-gray-100 leading-tight">
-                {isIssuerOnly ? "Issuer Dashboard" : "Admin Dashboard"}
+                {isIssuerOnly ? "Issuer dashboard" : user?.is_root_admin ? "Root administration" : "Administration"}
               </h1>
               {user && (
                 <p className="text-xs text-gray-500 dark:text-gray-400">
@@ -458,10 +475,10 @@ export default function AdminPage() {
               )}
             </div>
           </div>
-          <div className={`items-center gap-1 ${user?.is_root_admin ? "flex" : "hidden md:flex"}`}>
-            {isIssuerOnly && user?.event_id && (
+          <div className="flex items-center gap-1">
+            {!user?.is_root_admin && (user?.event_id || selectedEvent) && (
               <button
-                onClick={() => router.push(`/calendar?event=${user.event_id}`)}
+                onClick={() => router.push(`/calendar?event=${user?.event_id || selectedEvent}`)}
                 className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700 transition-colors"
                 aria-label="Back to calendar"
                 title="Back to calendar"
@@ -472,37 +489,17 @@ export default function AdminPage() {
             <ThemeToggle />
             <button
               onClick={() => router.push("/account/security")}
-              className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700 transition-colors"
-              aria-label="Account security"
+              className="rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
+              aria-label="Open account security"
               title="Account security"
             >
               <Shield size={18} />
             </button>
-            {!isIssuerOnly && (
-              <button
-                onClick={() => setShowPasskeys(true)}
-                className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700 transition-colors"
-                aria-label="Manage passkeys"
-                title="Manage passkeys"
-              >
-                <Key size={18} />
-              </button>
-            )}
-            {user?.is_root_admin && (
-              <button
-                onClick={() => router.push("/admin/governance")}
-                className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700 transition-colors"
-                aria-label="Instance governance and legal notice"
-                title="Instance governance and legal notice"
-              >
-                <FileText size={18} />
-              </button>
-            )}
             <button
               onClick={handleLogout}
               disabled={isLoggingOut}
               aria-busy={isLoggingOut}
-              className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 disabled:cursor-wait disabled:opacity-60 dark:text-gray-400 dark:hover:bg-gray-700 transition-colors"
+              className="rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-100 disabled:cursor-wait disabled:opacity-60 dark:text-gray-400 dark:hover:bg-gray-700"
               aria-label={isLoggingOut ? "Logging out" : "Logout"}
               title={isLoggingOut ? "Logging out…" : "Logout"}
             >
@@ -512,96 +509,17 @@ export default function AdminPage() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-4 md:py-6 space-y-5 md:space-y-6">
-        {user?.is_root_admin && (
-          <Card className="flex flex-col gap-3 border-blue-200 bg-blue-50/60 p-4 dark:border-blue-800 dark:bg-blue-900/10 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="font-medium text-gray-900 dark:text-gray-100">
-                Instance governance and public legal notice
-              </p>
-              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                Configure and publish the real data controller before inviting
-                users. Publishing creates an immutable, signed policy version.
-              </p>
-            </div>
-            <Button
-              variant="outline"
-              onClick={() => router.push("/admin/governance")}
-            >
-              Review governance
-            </Button>
-          </Card>
-        )}
-        {/* Full-width tab bar */}
-        <div className={`${user?.is_root_admin ? "flex" : "hidden md:flex"} flex-wrap gap-1`}>
-          {(
-            [
-                { key: "events", icon: <Plus size={15} />, label: "Events" },
-                { key: "users", icon: <Users size={15} />, label: "Users" },
-                {
-                  key: "announcements",
-                  icon: <Megaphone size={15} />,
-                  label: "Announcements",
-                },
-                {
-                  key: "history",
-                  icon: <History size={15} />,
-                  label: "History",
-                },
-                {
-                  key: "public-links",
-                  icon: <Share2 size={15} />,
-                  label: "Public Links",
-                },
-                {
-                  key: "security",
-                  icon: <Shield size={15} />,
-                  label: "Security",
-                },
-                {
-                  key: "privacy",
-                  icon: <Shield size={15} />,
-                  label: "Deletion Evidence",
-                },
-                {
-                  key: "ha",
-                  icon: <Activity size={15} />,
-                  label: "High Availability",
-                },
-                {
-                  key: "audit",
-                  icon: <FileText size={15} />,
-                  label: "Audit Log",
-                },
-            ] as const
-          )
-            .filter((t) => {
-                if (isIssuerOnly) {
-                  return ["users", "announcements", "history", "public-links"].includes(t.key);
-                }
-                if (t.key === "public-links") {
-                  return canManagePublicScheduleLinks(user);
-                }
-                if (t.key === "security" || t.key === "privacy" || t.key === "ha") {
-                  return !!user?.is_root_admin;
-                }
-                return true;
-            })
-            .map((t) => (
-                <button
-                  key={t.key}
-                  onClick={() => setTab(t.key)}
-                  className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg whitespace-nowrap transition-colors ${
-                    tab === t.key
-                      ? "bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"
-                      : "text-gray-500 hover:text-gray-700 hover:bg-gray-100 dark:text-gray-400 dark:hover:text-gray-200 dark:hover:bg-gray-800"
-                  }`}
-                >
-                  {t.icon}
-                  {t.label}
-                </button>
-            ))}
-        </div>
+      <main className="mx-auto max-w-7xl px-4 py-4 sm:px-6 md:py-6">
+        <div className="grid items-start gap-6 lg:grid-cols-[15rem_minmax(0,1fr)] xl:gap-8">
+        <AdminNavigation
+          active={tab}
+          isRootAdmin={!!user?.is_root_admin}
+          isIssuerOnly={!!isIssuerOnly}
+          canManagePublicLinks={canManagePublicScheduleLinks(user)}
+          onSelect={setTab}
+        />
+
+        <div className="min-w-0 space-y-5 md:space-y-6">
 
         {/* Event context is separate so it never compresses the root tab bar. */}
         {!isIssuerOnly && EVENT_SCOPED_TABS.includes(tab) &&
@@ -643,7 +561,12 @@ export default function AdminPage() {
 
         {/* Tab content */}
         {tab === "events" && (
-          <EventsTab events={events} onRefresh={fetchData} />
+          <EventsTab
+            events={events}
+            onRefresh={fetchData}
+            isRootAdmin={!!user?.is_root_admin}
+            onOpenPrivacy={() => setTab("privacy")}
+          />
         )}
         {tab === "users" && (
           <UsersTab
@@ -653,6 +576,7 @@ export default function AdminPage() {
             selectedEventId={selectedEvent}
             isIssuerOnly={!!isIssuerOnly}
             isRootAdmin={!!user?.is_root_admin}
+            onOpenPrivacy={() => setTab("privacy")}
           />
         )}
         {tab === "announcements" && (
@@ -668,73 +592,10 @@ export default function AdminPage() {
         {tab === "privacy" && user?.is_root_admin && <ComplianceEvidenceTab events={events} />}
         {tab === "ha" && user?.is_root_admin && <HighAvailabilityTab />}
         {tab === "audit" && <AuditTab />}
+        </div>
+        </div>
       </main>
 
-      <PasskeyManager
-        open={showPasskeys}
-        onClose={() => setShowPasskeys(false)}
-      />
-
-      {!user?.is_root_admin && (
-        <MobileBottomNavigation
-          items={[
-            {
-              id: "schedule",
-              label: "Schedule",
-              icon: <CalendarDays size={19} />,
-              onSelect: () => {
-                const targetEvent = user?.event_id || selectedEvent;
-                router.push(targetEvent ? `/calendar?event=${targetEvent}` : "/calendar");
-              },
-            },
-            {
-              id: "people",
-              label: "People",
-              icon: <Users size={19} />,
-              active: tab === "users",
-              onSelect: () => setTab("users"),
-            },
-            {
-              id: "updates",
-              label: "Updates",
-              icon: <Megaphone size={19} />,
-              active: tab === "announcements",
-              onSelect: () => setTab("announcements"),
-            },
-            {
-              id: "more",
-              label: "More",
-              icon: <MoreHorizontal size={20} />,
-              active: showMobileMore || !["users", "announcements"].includes(tab),
-              onSelect: () => setShowMobileMore(true),
-            },
-          ]}
-        />
-      )}
-
-      <MobileActionSheet
-        open={showMobileMore}
-        onClose={() => setShowMobileMore(false)}
-        title="More"
-        description="Management sections and account settings."
-      >
-        <div className="space-y-1">
-          {!isIssuerOnly && (
-            <button type="button" onClick={() => { setTab("events"); setShowMobileMore(false); }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><Plus size={18} /> Events</button>
-          )}
-          <button type="button" onClick={() => { setTab("history"); setShowMobileMore(false); }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><History size={18} /> History</button>
-          {canManagePublicScheduleLinks(user) && (
-            <button type="button" onClick={() => { setTab("public-links"); setShowMobileMore(false); }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><Share2 size={18} /> Public links</button>
-          )}
-          {!isIssuerOnly && (
-            <button type="button" onClick={() => { setTab("audit"); setShowMobileMore(false); }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><FileText size={18} /> Audit log</button>
-          )}
-          <div className="my-2 border-t border-gray-200 dark:border-gray-700" />
-          <div className="flex min-h-11 items-center justify-between rounded-lg px-3"><span className="text-sm">Appearance</span><ThemeToggle /></div>
-          <button type="button" onClick={() => router.push("/account/security")} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><Shield size={18} /> Account security</button>
-          <button type="button" onClick={handleLogout} disabled={isLoggingOut} aria-busy={isLoggingOut} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-red-600 hover:bg-red-50 disabled:cursor-wait disabled:opacity-60 dark:text-red-400 dark:hover:bg-red-900/20">{isLoggingOut ? <RefreshCw size={18} className="animate-spin" /> : <LogOut size={18} />} {isLoggingOut ? "Logging out…" : "Log out"}</button>
-        </div>
-      </MobileActionSheet>
     </div>
   );
 }
@@ -745,9 +606,13 @@ export default function AdminPage() {
 function EventsTab({
   events,
   onRefresh,
+  isRootAdmin,
+  onOpenPrivacy,
 }: {
   events: Event[];
   onRefresh: () => void;
+  isRootAdmin: boolean;
+  onOpenPrivacy: () => void;
 }) {
   const [showCreate, setShowCreate] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -771,7 +636,13 @@ function EventsTab({
   const [regeneratedSecrets, setRegeneratedSecrets] = useState<
     Record<number, string>
   >({});
+  const [regeneratingSecretId, setRegeneratingSecretId] = useState<number | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const [startingDeletion, setStartingDeletion] = useState(false);
+  const [deletionCase, setDeletionCase] = useState<{
+    requestId: string;
+    eventName: string;
+  } | null>(null);
   const [importResult, setImportResult] = useState<{
     secret: string;
     users: { id: number; display_name: string; activation_url: string }[];
@@ -779,7 +650,51 @@ function EventsTab({
   const [importError, setImportError] = useState("");
   const [eventError, setEventError] = useState("");
   const [importLoading, setImportLoading] = useState(false);
+  const [protectionStages, setProtectionStages] = useState<Record<string, string>>({});
   const router = useRouter();
+  const dateRangeError = eventDateRangeError(
+    newEvent.start_date,
+    newEvent.end_date,
+  );
+
+  const monitorSecretProtection = useCallback((pending: ReturnType<typeof pendingSecrets>[number]) => {
+    setProtectionStages((current) => ({ ...current, [pending.operationId]: "queued" }));
+    void pollProtection(pending.operationId, (operation) => {
+      setProtectionStages((current) => ({
+        ...current,
+        [pending.operationId]: operation.stage,
+      }));
+    }).then((operation) => {
+      if (operation.state !== "accepted") {
+        setEventError(
+          operation.error_code
+            ? `Standby protection needs attention (${operation.error_code}). The mutation remains durable and locked.`
+            : "Standby protection needs attention. The mutation remains durable and locked.",
+        );
+        return;
+      }
+      if (pending.kind === "publisher-rotation" && pending.resourceId) {
+        setRegeneratedSecrets((current) => ({ ...current, [pending.resourceId!]: pending.secret }));
+      } else if (pending.kind === "event-import") {
+        setImportResult((current) => ({ secret: pending.secret, users: current?.users || [] }));
+      } else {
+        setCreatedSecret(pending.secret);
+      }
+      removePendingSecret(pending.operationId);
+      setProtectionStages((current) => {
+        const next = { ...current };
+        delete next[pending.operationId];
+        return next;
+      });
+      onRefresh();
+    }).catch((cause) => {
+      setEventError(cause instanceof Error ? cause.message : "Protection status is unavailable.");
+    });
+  }, [onRefresh]);
+
+  useEffect(() => {
+    pendingSecrets().forEach((pending) => monitorSecretProtection(pending));
+  }, [monitorSecretProtection]);
 
   useEffect(() => {
     apiFetch("/api/v1/governance/public")
@@ -801,20 +716,31 @@ function EventsTab({
 
   const handleCreate = async () => {
     if (!newEvent.name.trim()) return;
+    if (dateRangeError) {
+      setEventError(dateRangeError);
+      return;
+    }
     setEventError("");
     setCreating(true);
     try {
-      const res = await apiFetch("/api/v1/admin/events", {
-        method: "POST",
-        body: JSON.stringify({
-          name: newEvent.name,
-          location: newEvent.location || null,
-          start_date: newEvent.start_date || null,
-          end_date: newEvent.end_date || null,
-          policy_version: eventPolicyAcknowledged ? eventPolicy?.version : null,
-          policy_sha256: eventPolicyAcknowledged ? eventPolicy?.sha256 : null,
-        }),
+      const publishSecret = randomSecret();
+      const idempotencyKey = newIdempotencyKey();
+      const eventBody = JSON.stringify({
+        name: newEvent.name,
+        location: newEvent.location || null,
+        start_date: newEvent.start_date || null,
+        end_date: newEvent.end_date || null,
+        policy_version: eventPolicyAcknowledged ? eventPolicy?.version : null,
+        policy_sha256: eventPolicyAcknowledged ? eventPolicy?.sha256 : null,
+        publish_secret: publishSecret,
+        idempotency_key: idempotencyKey,
       });
+      const res = await retryServiceTransition(() =>
+        apiFetch("/api/v1/admin/events", {
+          method: "POST",
+          body: eventBody,
+        }),
+      );
       const data = await res.json().catch(() => null);
       if (!res.ok) {
         setEventError(
@@ -825,9 +751,23 @@ function EventsTab({
         );
         return;
       }
-      setCreatedSecret(data.publish_secret);
+      if (data.protection_operation_id) {
+        const pending = {
+          operationId: data.protection_operation_id,
+          idempotencyKey,
+          kind: "event-create" as const,
+          resourceId: data.event?.id,
+          secret: publishSecret,
+          createdAt: new Date().toISOString(),
+        };
+        retainPendingSecret(pending);
+        monitorSecretProtection(pending);
+      } else {
+        setCreatedSecret(data.publish_secret || publishSecret);
+      }
       setNewEvent({ name: "", location: "", start_date: "", end_date: "" });
       setEventPolicyAcknowledged(false);
+      setShowCreate(false);
       onRefresh();
     } catch {
       setEventError("The event could not be created. Please try again.");
@@ -838,15 +778,26 @@ function EventsTab({
 
   const handleRegenerate = async (eventId: number) => {
     setEventError("");
+    setRegeneratingSecretId(eventId);
     try {
+      const publishSecret = randomSecret();
+      const idempotencyKey = newIdempotencyKey();
       const res = await withReauth(() =>
         apiFetch(`/api/v1/admin/events/${eventId}/regenerate-secret`, {
           method: "POST",
-          body: JSON.stringify({}),
+          body: JSON.stringify({
+            publish_secret: publishSecret,
+            idempotency_key: idempotencyKey,
+          }),
         }),
       );
       const data = await res.json().catch(() => null);
       if (!res.ok) {
+        if (res.status === 404) {
+          onRefresh();
+          setEventError("This event no longer exists. The event list was refreshed.");
+          return;
+        }
         setEventError(
           responseMessage(
             data,
@@ -855,14 +806,29 @@ function EventsTab({
         );
         return;
       }
-      setRegeneratedSecrets((prev) => ({
-        ...prev,
-        [eventId]: data.publish_secret,
-      }));
+      if (data.protection_operation_id) {
+        const pending = {
+          operationId: data.protection_operation_id,
+          idempotencyKey,
+          kind: "publisher-rotation" as const,
+          resourceId: eventId,
+          secret: publishSecret,
+          createdAt: new Date().toISOString(),
+        };
+        retainPendingSecret(pending);
+        monitorSecretProtection(pending);
+      } else {
+        setRegeneratedSecrets((prev) => ({
+          ...prev,
+          [eventId]: data.publish_secret || publishSecret,
+        }));
+      }
     } catch {
       setEventError(
         "Publisher token rotation was cancelled or reauthentication failed.",
       );
+    } finally {
+      setRegeneratingSecretId(null);
     }
   };
 
@@ -870,17 +836,40 @@ function EventsTab({
     navigator.clipboard.writeText(text);
   };
 
-  const handleDeleteEvent = async (eventId: number) => {
+  const handleStartEventDeletion = async (eventId: number, eventName: string) => {
+    setEventError("");
+    setStartingDeletion(true);
     try {
       const res = await withReauth(() =>
-        apiFetch(`/api/v1/admin/events/${eventId}`, { method: "DELETE" }),
+        apiFetch(`/api/v1/admin/deletion-requests/events/${eventId}`, {
+          method: "POST",
+          body: "{}",
+        }),
       );
-      if (res.ok) {
-        setConfirmDeleteId(null);
-        onRefresh();
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        setEventError(
+          responseMessage(
+            data,
+            `The deletion case could not be started (${res.status}).`,
+          ),
+        );
+        return;
       }
-    } catch {
-      // User cancelled passkey prompt or re-auth failed
+      const requestId = data && typeof data.request_id === "string"
+        ? data.request_id
+        : "Case created (identifier unavailable)";
+      setDeletionCase({ requestId, eventName });
+      setConfirmDeleteId(null);
+      onRefresh();
+    } catch (cause) {
+      setEventError(
+        cause instanceof Error
+          ? cause.message
+          : "The deletion case was cancelled or reauthentication failed.",
+      );
+    } finally {
+      setStartingDeletion(false);
     }
   };
 
@@ -890,6 +879,10 @@ function EventsTab({
     try {
       const text = await file.text();
       const payload = JSON.parse(text);
+      const publishSecret = randomSecret();
+      const idempotencyKey = newIdempotencyKey();
+      payload.publish_secret = publishSecret;
+      payload.idempotency_key = idempotencyKey;
       const res = await withReauth(() =>
         apiFetch("/api/v1/admin/import-setup", {
           method: "POST",
@@ -898,9 +891,7 @@ function EventsTab({
       );
       if (res.ok) {
         const data = await res.json();
-        setImportResult({
-          secret: data.publish_secret,
-          users: data.users.map(
+        const importedUsers = data.users.map(
             (u: {
               user: { id: number; display_name: string };
               activation_url: string;
@@ -909,8 +900,23 @@ function EventsTab({
               display_name: u.user.display_name,
               activation_url: window.location.origin + u.activation_url,
             }),
-          ),
+          );
+        setImportResult({
+          secret: data.protection_operation_id ? "" : (data.publish_secret || publishSecret),
+          users: importedUsers,
         });
+        if (data.protection_operation_id) {
+          const pending = {
+            operationId: data.protection_operation_id,
+            idempotencyKey,
+            kind: "event-import" as const,
+            resourceId: data.event?.id,
+            secret: publishSecret,
+            createdAt: new Date().toISOString(),
+          };
+          retainPendingSecret(pending);
+          monitorSecretProtection(pending);
+        }
         setShowImport(false);
         onRefresh();
       } else {
@@ -972,6 +978,24 @@ function EventsTab({
         </div>
       )}
 
+      {deletionCase && (
+        <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-3 dark:border-blue-800 dark:bg-blue-900/30">
+          <p className="text-sm font-medium text-blue-900 dark:text-blue-100">
+            Deletion case started for {deletionCase.eventName}.
+          </p>
+          <p className="mt-1 break-all font-mono text-xs text-blue-800 dark:text-blue-200">
+            {deletionCase.requestId}
+          </p>
+          <p className="mt-2 text-xs text-blue-800 dark:text-blue-200">
+            Masterplan will advance the controlled deletion steps and show only
+            the decisions that need you.
+          </p>
+          <Button className="mt-3" size="sm" variant="outline" onClick={onOpenPrivacy}>
+            Open deletion progress
+          </Button>
+        </div>
+      )}
+
       {/* Import Setup */}
       {showImport && (
         <Card className="p-4 mb-4">
@@ -1005,9 +1029,11 @@ function EventsTab({
       {importResult && (
         <div className="bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-800 rounded-lg p-4 mb-4">
           <p className="text-sm font-medium text-green-800 dark:text-green-200 mb-1">
-            Import successful! Publish secret (shown once - save it now):
+            {importResult.secret
+              ? "Import protected. Publish secret (shown once - save it now):"
+              : "Import committed. Securing it on the standby before revealing the publisher token."}
           </p>
-          <div className="flex items-center gap-2 mb-3">
+          {importResult.secret && <div className="flex items-center gap-2 mb-3">
             <code className="flex-1 text-xs bg-green-100 dark:bg-green-900/50 px-2 py-1 rounded break-all text-green-900 dark:text-green-100">
               {importResult.secret}
             </code>
@@ -1017,7 +1043,7 @@ function EventsTab({
             >
               <Copy size={16} />
             </button>
-          </div>
+          </div>}
           {importResult.users.length > 0 && (
             <div>
               <p className="text-xs font-medium text-green-800 dark:text-green-200 mb-1">
@@ -1103,6 +1129,11 @@ function EventsTab({
               }
             />
           </div>
+          {dateRangeError && (
+            <p className="mb-3 text-sm font-medium text-red-700 dark:text-red-300" role="alert">
+              {dateRangeError}
+            </p>
+          )}
           {eventPolicy && <section className="mb-3 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
             <h3 className="font-semibold">Permitted data for this event</h3>
             <p className="mt-1"><strong>Controller:</strong> {eventPolicy.controller}</p>
@@ -1122,10 +1153,15 @@ function EventsTab({
             variant="primary"
             size="sm"
             onClick={handleCreate}
-            disabled={creating || !newEvent.name.trim() || (Boolean(eventPolicy) && !eventPolicyAcknowledged)}
+            disabled={creating || Boolean(dateRangeError) || !newEvent.name.trim() || (Boolean(eventPolicy) && !eventPolicyAcknowledged)}
           >
-            {creating ? "Creating..." : "Create Event"}
+            {creating ? "Creating and protecting on standby..." : "Create Event"}
           </Button>
+          {creating && (
+            <p className="mt-2 text-xs text-blue-700 dark:text-blue-300" role="status">
+              Keep this page open. In two-node HA, the one-time publisher token appears only after the peer accepts and verifies the protected event state.
+            </p>
+          )}
         </Card>
       )}
 
@@ -1175,6 +1211,14 @@ function EventsTab({
                       ? `${fmtDate(ev.start_date)} → ${fmtDate(ev.end_date)}`
                       : fmtDate(ev.start_date) || "No dates"}
                   </p>
+                  {ev.status === "securing" && (
+                    <p className="mt-1 text-xs font-medium text-blue-700 dark:text-blue-300" role="status">
+                      Securing on standby · {protectionStageLabel(
+                        (ev.protection_operation_id && protectionStages[ev.protection_operation_id])
+                        || ev.protection_stage,
+                      )}
+                    </p>
+                  )}
                   {ev.purge_case_request_id ? (
                     <p className="mt-1 text-xs font-medium text-amber-700 dark:text-amber-300">
                       Event deletion workflow queued {fmtDateTime(ev.purge_started_at)}.
@@ -1195,46 +1239,76 @@ function EventsTab({
                   <Button
                     variant="ghost"
                     size="sm"
+                    disabled={ev.status === "securing"}
                     onClick={() => router.push(`/calendar?event=${ev.id}`)}
                   >
                     View
                   </Button>
                   <button
                     onClick={() => handleRegenerate(ev.id)}
-                    className="p-1.5 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                    title="Regenerate publish secret"
+                    disabled={regeneratingSecretId !== null || ev.status === "securing" || pendingSecrets().some(
+                      (pending) => pending.kind === "publisher-rotation" && pending.resourceId === ev.id,
+                    )}
+                    className="p-1.5 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-100 disabled:cursor-wait disabled:opacity-50 dark:hover:bg-gray-700 transition-colors"
+                    title={regeneratingSecretId === ev.id ? "Protecting publisher token on standby" : "Regenerate publish secret"}
                   >
                     <Key size={16} />
                   </button>
-                  <button
-                    onClick={() => setConfirmDeleteId(ev.id)}
-                    className="p-1.5 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-                    title="Delete event"
-                  >
-                    <Trash2 size={16} />
-                  </button>
+                  {isRootAdmin && !ev.purge_case_request_id && ev.status !== "securing" && (
+                    <button
+                      onClick={() => {
+                        setEventError("");
+                        setConfirmDeleteId(ev.id);
+                      }}
+                      className="p-1.5 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                      title="Start accountable event deletion"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  )}
                 </div>
               </div>
-              {/* Delete confirmation */}
+              {regeneratingSecretId === ev.id && (
+                <p className="mt-2 text-xs text-blue-700 dark:text-blue-300" role="status">
+                  Rotating the publisher token and waiting for the standby to verify the protected state. Keep this page open.
+                </p>
+              )}
+              {pendingSecrets().filter(
+                (pending) => pending.kind === "publisher-rotation" && pending.resourceId === ev.id,
+              ).map((pending) => (
+                <p key={pending.operationId} className="mt-2 text-xs text-blue-700 dark:text-blue-300" role="status">
+                  Publisher token · {protectionStageLabel(protectionStages[pending.operationId])}
+                </p>
+              ))}
+              {/* Accountable deletion-case confirmation */}
               {confirmDeleteId === ev.id && (
                 <div className="mt-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded p-3">
                   <p className="text-sm text-red-800 dark:text-red-200 mb-2">
-                    Delete &quot;{ev.name}&quot; and <strong>all</strong>{" "}
-                    associated users, tasks, and edits? This cannot be undone.
+                    Start an accountable deletion case for &quot;{ev.name}&quot;?
+                  </p>
+                  <p className="mb-3 text-xs text-red-700 dark:text-red-300">
+                    This revokes access and creates the controlled Desktop work order.
+                    It does not immediately erase the event or claim deletion from
+                    systems outside this deployment. Each destructive step remains
+                    separately confirmed and evidenced.
                   </p>
                   <div className="flex gap-2">
                     <Button
                       variant="primary"
                       size="sm"
-                      onClick={() => handleDeleteEvent(ev.id)}
+                      onClick={() => handleStartEventDeletion(ev.id, ev.name)}
                       className="!bg-red-600 hover:!bg-red-700"
+                      disabled={startingDeletion}
                     >
-                      Delete
+                      {startingDeletion ? "Starting case..." : "Start deletion case"}
                     </Button>
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setConfirmDeleteId(null)}
+                      onClick={() => {
+                        setConfirmDeleteId(null);
+                      }}
+                      disabled={startingDeletion}
                     >
                       Cancel
                     </Button>
@@ -1278,6 +1352,7 @@ function UsersTab({
   selectedEventId,
   isIssuerOnly,
   isRootAdmin,
+  onOpenPrivacy,
 }: {
   users: AdminUser[];
   events: Event[];
@@ -1285,6 +1360,7 @@ function UsersTab({
   selectedEventId: number | "";
   isIssuerOnly: boolean;
   isRootAdmin: boolean;
+  onOpenPrivacy: () => void;
 }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newUser, setNewUser] = useState({
@@ -1297,14 +1373,19 @@ function UsersTab({
     usernameTouched: false,
   });
   const [createdLink, setCreatedLink] = useState("");
+  const [createdLinkExpiresAt, setCreatedLinkExpiresAt] = useState("");
   const [createdUserId, setCreatedUserId] = useState<number | null>(null);
   const [createdUserName, setCreatedUserName] = useState("");
   const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState("");
   const [activationLinks, setActivationLinks] = useState<
     Record<number, string>
   >({});
   const [activationLinkPurposes, setActivationLinkPurposes] = useState<
     Record<number, ActivationPurpose>
+  >({});
+  const [activationLinkExpiries, setActivationLinkExpiries] = useState<
+    Record<number, string>
   >({});
   const [linkInfo, setLinkInfo] = useState<
     Record<
@@ -1337,10 +1418,18 @@ function UsersTab({
   const [emailActionErrors, setEmailActionErrors] = useState<
     Record<number, string>
   >({});
+  const [issuerBusy, setIssuerBusy] = useState<Set<number>>(new Set());
+  const [issuerActionErrors, setIssuerActionErrors] = useState<Record<number, string>>({});
   const [deliverySettings, setDeliverySettings] =
     useState<ActivationDeliverySettings | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [removalError, setRemovalError] = useState<string | null>(null);
+  const [removalBusyId, setRemovalBusyId] = useState<number | null>(null);
+  const [accountDeletionCase, setAccountDeletionCase] = useState<{
+    requestId: string;
+    displayName: string;
+    message: string;
+  } | null>(null);
   const [tagInput, setTagInput] = useState<Record<number, string>>({});
   const [filterTag, setFilterTag] = useState<string>("");
   const [searchQuery, setSearchQuery] = useState<string>("");
@@ -1362,6 +1451,7 @@ function UsersTab({
       username: string;
       display_name: string;
       activation_url: string;
+      expires_at: string;
     }>
   >([]);
   const [batchLoading, setBatchLoading] = useState(false);
@@ -1468,10 +1558,11 @@ function UsersTab({
     if (
       !newUser.username.trim() ||
       !newUser.display_name.trim() ||
-      (!isIssuerOnly && !newUser.event_id)
+      (!isIssuerOnly && !isRootAdmin && !newUser.event_id)
     )
       return;
     setCreating(true);
+    setCreateError("");
     try {
       const payload: Record<string, unknown> = {
         username: newUser.username,
@@ -1482,15 +1573,16 @@ function UsersTab({
         tags: parseTagList(newUser.tags),
       };
       if (!isIssuerOnly) {
-        payload.event_id = Number(newUser.event_id);
+        payload.event_id = newUser.event_id ? Number(newUser.event_id) : null;
       }
       const res = await apiFetch("/api/v1/admin/users", {
         method: "POST",
         body: JSON.stringify(payload),
       });
+      const data = await res.json().catch(() => null);
       if (res.ok) {
-        const data = await res.json();
         setCreatedLink(window.location.origin + data.activation_url);
+        setCreatedLinkExpiresAt(data.expires_at || "");
         setCreatedUserId(data.user.id);
         setCreatedUserName(data.user.display_name || "New user");
         setNewUser({
@@ -1504,7 +1596,11 @@ function UsersTab({
         });
         setShowCreate(false);
         onRefresh();
+      } else {
+        setCreateError(responseMessage(data, `The user could not be created (${res.status}).`));
       }
+    } catch {
+      setCreateError("The user could not be created. Please try again.");
     } finally {
       setCreating(false);
     }
@@ -1536,6 +1632,10 @@ function UsersTab({
           ...current,
           [userId]: data.purpose || purpose || "initial_setup",
         }));
+        setActivationLinkExpiries((current) => ({
+          ...current,
+          [userId]: data.expires_at || "",
+        }));
         return true;
       }
     } catch {
@@ -1554,6 +1654,11 @@ function UsersTab({
     if (activationLinks[userId]) {
       // Collapse: remove the link from state
       setActivationLinks((prev) => {
+        const next = { ...prev };
+        delete next[userId];
+        return next;
+      });
+      setActivationLinkExpiries((prev) => {
         const next = { ...prev };
         delete next[userId];
         return next;
@@ -1643,20 +1748,43 @@ function UsersTab({
     }
   };
 
-  const handleDeleteUser = async (userId: number) => {
+  const handleDeleteUser = async (userId: number, displayName: string) => {
     setRemovalError(null);
+    setRemovalBusyId(userId);
     try {
-      const res = await withReauth(() =>
-        apiFetch(`/api/v1/admin/users/${userId}`, {
+      const res = await withReauth(async () => {
+        const directRemoval = await apiFetch(`/api/v1/admin/users/${userId}`, {
           method: "DELETE",
           body: JSON.stringify({}),
-        }),
-      );
+        });
+        if (directRemoval.status !== 409) return directRemoval;
+        const conflict = await directRemoval.json().catch(() => ({}));
+        if (conflict?.detail?.code !== "SIGNED_DELETION_REQUIRED") {
+          return new Response(JSON.stringify(conflict), {
+            status: directRemoval.status,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return apiFetch(`/api/v1/admin/users/${userId}/gdpr-delete`, {
+          method: "DELETE",
+          body: JSON.stringify({}),
+        });
+      });
+      const data = await res.json().catch(() => ({}));
       if (res.ok) {
         setConfirmDeleteId(null);
+        if (typeof data?.request_id === "string") {
+          setAccountDeletionCase({
+            requestId: data.request_id,
+            displayName,
+            message:
+              typeof data?.message === "string"
+                ? data.message
+                : "The accountable deletion case is ready for its verified steps.",
+          });
+        }
         onRefresh();
       } else {
-        const data = await res.json().catch(() => ({}));
         const detail = data?.detail;
         setRemovalError(
           typeof detail === "object" && typeof detail?.message === "string"
@@ -1664,8 +1792,14 @@ function UsersTab({
             : responseMessage(data, "The account could not be removed."),
         );
       }
-    } catch {
-      // User cancelled passkey prompt or re-auth failed
+    } catch (cause) {
+      setRemovalError(
+        cause instanceof Error
+          ? cause.message
+          : "Deletion was cancelled or authorization failed.",
+      );
+    } finally {
+      setRemovalBusyId(null);
     }
   };
 
@@ -1761,16 +1895,57 @@ function UsersTab({
   };
 
   const handleToggleIssuer = async (userId: number, isIssuer: boolean) => {
+    setIssuerBusy((current) => new Set(current).add(userId));
+    setIssuerActionErrors((current) => {
+      const next = { ...current };
+      delete next[userId];
+      return next;
+    });
     try {
       const res = await withReauth(() =>
+        retryServiceTransition(() =>
+          apiFetch(`/api/v1/admin/users/${userId}`, {
+            method: "PUT",
+            body: JSON.stringify({ is_issuer: isIssuer }),
+          }),
+        ),
+      );
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        onRefresh();
+      } else {
+        setIssuerActionErrors((current) => ({
+          ...current,
+          [userId]: responseMessage(data, "Issuer access could not be updated. Nothing was changed; try again."),
+        }));
+      }
+    } catch (error) {
+      setIssuerActionErrors((current) => ({
+        ...current,
+        [userId]: error instanceof Error
+          ? error.message
+          : "Issuer access could not be updated. Nothing was changed; try again.",
+      }));
+    } finally {
+      setIssuerBusy((current) => {
+        const next = new Set(current);
+        next.delete(userId);
+        return next;
+      });
+    }
+  };
+
+  const handleUpdateUserEvent = async (userId: number, eventId: number | null) => {
+    try {
+      const response = await withReauth(() =>
         apiFetch(`/api/v1/admin/users/${userId}`, {
           method: "PUT",
-          body: JSON.stringify({ is_issuer: isIssuer }),
+          body: JSON.stringify({ event_id: eventId }),
         }),
       );
-      if (res.ok) onRefresh();
+      if (response.ok) onRefresh();
     } catch {
-      // The passkey prompt was cancelled or re-authentication failed.
+      // User cancelled passkey re-authentication or the reassignment failed.
     }
   };
 
@@ -2385,6 +2560,24 @@ function UsersTab({
         </div>
       </div>
 
+      {accountDeletionCase && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-900/30">
+          <p className="text-sm font-medium text-blue-900 dark:text-blue-100">
+            Accountable deletion started for {accountDeletionCase.displayName}.
+          </p>
+          <p className="mt-1 break-all font-mono text-xs text-blue-800 dark:text-blue-200">
+            {accountDeletionCase.requestId}
+          </p>
+          <p className="mt-2 text-xs text-blue-800 dark:text-blue-200">
+            {accountDeletionCase.message} Masterplan will advance the controlled
+            deletion steps and show only the decisions that need you.
+          </p>
+          <Button className="mt-3" size="sm" variant="outline" onClick={onOpenPrivacy}>
+            Open deletion progress
+          </Button>
+        </div>
+      )}
+
       {/* Create form */}
       {showCreate && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center sm:p-4">
@@ -2433,7 +2626,9 @@ function UsersTab({
                   }
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-sm"
                 >
-                  <option value="">Select event...</option>
+                  <option value="">
+                    {isRootAdmin ? "No event yet (unassigned)" : "Select event..."}
+                  </option>
                   {events.map((ev) => (
                     <option key={ev.id} value={ev.id}>
                       {ev.name}
@@ -2449,6 +2644,11 @@ function UsersTab({
               placeholder="team, role, shift"
             />
           </div>
+          {createError && (
+            <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-800 dark:bg-red-900/20 dark:text-red-200">
+              {createError}
+            </div>
+          )}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
               <input
@@ -2469,7 +2669,7 @@ function UsersTab({
                 creating ||
                 !newUser.username.trim() ||
                 !newUser.display_name.trim() ||
-                (!isIssuerOnly && !newUser.event_id)
+                (!isIssuerOnly && !isRootAdmin && !newUser.event_id)
               }
             >
               {creating ? "Creating..." : "Create User"}
@@ -2481,22 +2681,46 @@ function UsersTab({
 
       {/* Created activation link banner */}
       {createdLink && (
-        <div className="bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-800 rounded-lg p-4">
-          <p className="text-sm font-medium text-green-800 dark:text-green-200 mb-2">
-            Activation link (send or show QR code):
-          </p>
-          <div className="flex items-center gap-2">
-            <code className="flex-1 text-xs bg-green-100 dark:bg-green-900/50 px-3 py-1.5 rounded-lg break-all text-green-900 dark:text-green-100">
-              {createdLink}
-            </code>
+        <div className="rounded-xl border border-green-200 bg-green-50/70 p-4 dark:border-green-800 dark:bg-green-900/20">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-semibold text-green-900 dark:text-green-100">
+                Activation link ready
+              </p>
+              <p className="mt-0.5 text-xs text-green-800/80 dark:text-green-200/80">
+                Copy the link or open its printable QR code. Treat either as a temporary account secret.
+              </p>
+            </div>
             <button
-              onClick={() => copyToClipboard(createdLink)}
-              className="p-2 rounded-lg hover:bg-green-200 dark:hover:bg-green-800 transition-colors"
-              title="Copy link"
+              type="button"
+              onClick={() => {
+                setCreatedLink("");
+                setCreatedLinkExpiresAt("");
+              }}
+              className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-green-800 hover:bg-green-100 dark:text-green-200 dark:hover:bg-green-900/50"
             >
-              <Copy size={16} />
+              Dismiss
             </button>
-            <button
+          </div>
+          <code className="mt-3 block max-h-24 overflow-y-auto rounded-lg border border-green-200 bg-white/80 px-3 py-2 text-xs break-all text-green-950 dark:border-green-800 dark:bg-gray-950/30 dark:text-green-100">
+              {createdLink}
+          </code>
+          {createdLinkExpiresAt && (
+            <p className="mt-2 text-xs font-medium text-green-800 dark:text-green-200">
+              Expires {fmtDateTime(createdLinkExpiresAt)} (your local time).
+            </p>
+          )}
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => copyToClipboard(createdLink)}
+            >
+              <Copy size={14} /> Copy link
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={() => {
                 window.open(
                   activationQrPath(
@@ -2507,29 +2731,20 @@ function UsersTab({
                   "_blank",
                 );
               }}
-              className="p-2 rounded-lg hover:bg-green-200 dark:hover:bg-green-800 transition-colors"
-              title="Show QR code"
             >
-              <QrCode size={16} />
-            </button>
-          </div>
-          <button
-            onClick={() => setCreatedLink("")}
-            className="text-xs text-green-600 dark:text-green-400 mt-2 underline"
-          >
-            Dismiss
-          </button>
-          {createdUserId &&
-            deliverySettings?.configured &&
-            users.find((user) => user.id === createdUserId)?.has_valid_email && (
+              <QrCode size={14} /> Show QR code
+            </Button>
+            {createdUserId &&
+              deliverySettings?.configured &&
+              users.find((user) => user.id === createdUserId)?.has_valid_email && (
               <Button
                 size="sm"
-                className="mt-3"
                 onClick={() => setEmailConfirmUserId(createdUserId)}
               >
                 <Send size={14} /> Email link and QR
               </Button>
-            )}
+              )}
+          </div>
         </div>
       )}
 
@@ -3059,6 +3274,9 @@ function UsersTab({
                     >
                       <span className="font-medium text-gray-900 dark:text-gray-100 truncate mr-3">
                         {l.display_name}
+                        <span className="block text-xs font-normal text-gray-500 dark:text-gray-400">
+                          Expires {fmtDateTime(l.expires_at)} (your local time)
+                        </span>
                       </span>
                       <div className="flex items-center gap-1 shrink-0">
                         <button
@@ -3443,9 +3661,9 @@ function UsersTab({
                   </div>
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
                     @{u.username}
-                    {u.email && ` · ${u.email}`}
+                    {expandedDetailsUser !== u.id && u.email && ` · ${u.email}`}
                   </p>
-                  {(u.tags || []).length > 0 && (
+                  {expandedDetailsUser !== u.id && (u.tags || []).length > 0 && (
                     <div className="mt-1 flex flex-wrap gap-1">
                       {(u.tags || []).map((tag) => (
                         <button key={tag} type="button" onClick={() => setFilterTag(tag)} className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${tagColour(tag)}`} title={`Show people tagged ${tag}`}>{tag}</button>
@@ -3592,37 +3810,24 @@ function UsersTab({
                   >
                     <MoreHorizontal size={16} />
                   </button>
-                  {expandedDetailsUser === u.id && (
-                    <>
-                  {!isIssuerOnly && (
-                    <button
-                      onClick={() => handleGdprExport(u.id, u.display_name)}
-                      disabled={gdprBusy[u.id]}
-                      className="p-2 rounded-lg text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors disabled:opacity-50"
-                      title="Export user data (GDPR)"
-                    >
-                      <Download size={16} />
-                    </button>
-                  )}
-                  <button
-                    onClick={() => {
-                      setRemovalError(null);
-                      setConfirmDeleteId(u.id);
-                    }}
-                    className="p-2 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-                    title="Remove unused invitation or start evidence deletion"
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                    </>
-                  )}
                 </div>
               </div>
 
+              {expandedDetailsUser === u.id && (
+                <div className="mt-3">
+                  <h4 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                    Account settings
+                  </h4>
+                  <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                    Edit contact, assignment, permissions, and tags in one place.
+                  </p>
+                </div>
+              )}
+
               {/* Settings row: person link + can-edit */}
               {expandedDetailsUser === u.id && u.is_active && (
-                <div className="mt-3 border-t border-gray-100 pt-3 dark:border-gray-700">
-                  <label className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                <div className="mt-3">
+                  <label className="text-xs font-medium text-gray-600 dark:text-gray-300">
                     Email address
                   </label>
                   <div className="mt-1.5 flex flex-col gap-2 sm:flex-row">
@@ -3652,9 +3857,34 @@ function UsersTab({
                   </div>
                 </div>
               )}
+              {expandedDetailsUser === u.id && u.is_active && isRootAdmin && !u.is_root_admin && (
+                <div className="mt-3">
+                  <label className="text-xs font-medium text-gray-600 dark:text-gray-300">
+                    Event assignment
+                  </label>
+                  <select
+                    value={u.event_id ?? ""}
+                    onChange={(event) => void handleUpdateUserEvent(
+                      u.id,
+                      event.target.value ? Number(event.target.value) : null,
+                    )}
+                    className="mt-1.5 min-h-11 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 sm:min-h-0"
+                  >
+                    <option value="">No event yet (unassigned)</option>
+                    {events.map((event) => (
+                      <option key={event.id} value={event.id}>{event.name}</option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    Changing the event requires your passkey again and revokes this user&apos;s active sessions.
+                  </p>
+                </div>
+              )}
               {expandedDetailsUser === u.id && u.event_id && u.is_active && (
-                <div className="mt-3 pt-3 border-t border-gray-100 dark:border-gray-700 flex flex-wrap items-center gap-x-6 gap-y-2">
-                  <div className="flex items-center gap-2">
+                <div className="mt-3 flex flex-wrap items-end gap-x-6 gap-y-3">
+                  <div>
+                    <p className="mb-1.5 text-xs font-medium text-gray-600 dark:text-gray-300">Schedule person</p>
+                    <div className="flex items-center gap-2">
                     <Users size={14} className="text-gray-400 shrink-0" />
                     <select
                       value={u.linked_person_id ?? ""}
@@ -3676,8 +3906,9 @@ function UsersTab({
                         </option>
                       ))}
                     </select>
+                    </div>
                   </div>
-                  <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 cursor-pointer select-none">
+                  <label className="flex items-center gap-2 pb-1.5 text-sm text-gray-600 dark:text-gray-400 cursor-pointer select-none">
                     <input
                       type="checkbox"
                       checked={u.can_edit}
@@ -3686,27 +3917,34 @@ function UsersTab({
                       }
                       className="rounded"
                     />
-                    Can edit
+                    Can edit schedules
                   </label>
                   {isRootAdmin && !u.is_root_admin && (
-                    <label className="flex items-center gap-2 text-sm text-purple-600 dark:text-purple-400 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={u.is_issuer}
-                        onChange={(e) =>
-                          handleToggleIssuer(u.id, e.target.checked)
-                        }
-                        className="rounded"
-                      />
-                      Issuer
-                    </label>
+                    <div className="pb-1.5">
+                      <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={u.is_issuer}
+                          disabled={issuerBusy.has(u.id)}
+                          onChange={(e) => void handleToggleIssuer(u.id, e.target.checked)}
+                          className="rounded disabled:cursor-wait disabled:opacity-60"
+                        />
+                        {issuerBusy.has(u.id) ? "Saving issuer access..." : "Issuer access"}
+                      </label>
+                      {issuerActionErrors[u.id] && (
+                        <p className="mt-1 text-xs text-red-700 dark:text-red-300" role="alert">
+                          {issuerActionErrors[u.id]}
+                        </p>
+                      )}
+                    </div>
                   )}
                 </div>
               )}
 
               {/* Tags */}
               {expandedDetailsUser === u.id && u.is_active && (
-                <div className="mt-3 pt-3 border-t border-gray-100 dark:border-gray-700 flex flex-wrap items-center gap-2">
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <span className="mr-1 text-xs font-medium text-gray-600 dark:text-gray-300">Tags</span>
                   {(u.tags || []).map((tag) => (
                     <span
                       key={tag}
@@ -3742,7 +3980,8 @@ function UsersTab({
                 </div>
               )}
               {expandedDetailsUser === u.id && !u.is_active && (u.tags || []).length > 0 && (
-                <div className="mt-3 pt-3 border-t border-gray-100 dark:border-gray-700 flex flex-wrap items-center gap-2">
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <span className="mr-1 text-xs font-medium text-gray-600 dark:text-gray-300">Tags</span>
                   {u.tags.map((tag) => (
                     <span
                       key={tag}
@@ -3754,28 +3993,58 @@ function UsersTab({
                 </div>
               )}
 
+              {expandedDetailsUser === u.id && (
+                <div className="mt-4 flex flex-wrap gap-2 border-t border-gray-100 pt-3 dark:border-gray-700">
+                  {!isIssuerOnly && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleGdprExport(u.id, u.display_name)}
+                      disabled={gdprBusy[u.id]}
+                    >
+                      <Download size={14} /> Export user data
+                    </Button>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setRemovalError(null);
+                      setConfirmDeleteId(u.id);
+                    }}
+                    className="text-red-600 hover:text-red-700 dark:text-red-400"
+                  >
+                    <Trash2 size={14} /> Remove or delete account
+                  </Button>
+                </div>
+              )}
+
               {/* Expandable panels */}
               {confirmDeleteId === u.id && (
                 <div className="mt-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg p-4">
                   <p className="text-sm text-red-800 dark:text-red-200 mb-3">
-                    Remove <strong>{u.display_name}</strong>? Only an account
-                    that was never activated, linked, or used can be removed
-                    immediately. Accounts with history must use the signed
-                    deletion-evidence workflow.
+                    Delete <strong>{u.display_name}</strong>&apos;s account? An
+                    unused invitation will be removed immediately. If the
+                    account has identity or operational history, Masterplan
+                    will start the accountable deletion case automatically.
+                  </p>
+                  <p className="mb-3 text-xs text-red-700 dark:text-red-300">
+                    Confirm the action to start the guided deletion workflow.
                   </p>
                   {removalError && (
                     <p className="mb-3 text-sm text-red-700 dark:text-red-300">
                       {removalError}
                     </p>
                   )}
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <Button
                       variant="primary"
                       size="sm"
-                      onClick={() => handleDeleteUser(u.id)}
+                      onClick={() => handleDeleteUser(u.id, u.display_name)}
+                      disabled={removalBusyId === u.id}
                       className="!bg-red-600 hover:!bg-red-700"
                     >
-                      Remove unused account
+                      {removalBusyId === u.id ? "Authorizing..." : "Continue with deletion"}
                     </Button>
                     <Button
                       variant="outline"
@@ -3967,6 +4236,11 @@ function UsersTab({
                       <RefreshCw size={14} />
                     </button>
                   </div>
+                  {activationLinkExpiries[u.id] && (
+                    <p className="mt-2 text-xs text-blue-700 dark:text-blue-300">
+                      Expires {fmtDateTime(activationLinkExpiries[u.id])} (your local time).
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -5645,6 +5919,8 @@ interface SettingMeta {
   unit: string;
   min: number;
   max: number;
+  governance_managed?: boolean;
+  governance_field?: string | null;
 }
 
 const SETTING_DESCRIPTIONS: Record<string, string> = {
@@ -5682,6 +5958,12 @@ const SETTING_DESCRIPTIONS: Record<string, string> = {
     "How long a re-authentication passkey challenge remains valid for sensitive admin operations.",
   passkey_requests_per_minute:
     "Maximum passkey requests accepted per minute. Public sign-in is limited per client address, while registration and re-authentication are limited per activation or account session.",
+  self_service_additional_passkeys_enabled:
+    "Allow non-management users to request a one-time additional-passkey link at their own administrator-recorded email address. Root, admin, and issuer accounts are not affected by this switch.",
+  self_service_passkey_emails_per_minute:
+    "Maximum self-service additional-passkey emails one non-management account may request in one minute. Administrator-triggered emails are not counted.",
+  self_service_passkey_emails_per_day:
+    "Maximum self-service additional-passkey emails one non-management account may request in one rolling day. Administrator-triggered emails are not counted.",
   announcements_per_event_limit:
     "Maximum number of announcements returned per event. Older announcements beyond this limit are not shown.",
   masterplan_pushes_per_minute:
@@ -5700,7 +5982,7 @@ const SECTION_DESCRIPTIONS: Record<string, string> = {
   Authentication:
     "Configure account verification windows and activation link behaviour.",
   Passkeys:
-    "Configure passkey ceremony lifetimes and throughput for sign-in, registration, and re-authentication.",
+    "Configure passkey ceremonies and the optional email-based enrollment available to non-management users.",
   "Data Retention":
     "Set how long expired or revoked records are kept before automatic cleanup removes them.",
   "Desktop Publishing":
@@ -5721,6 +6003,7 @@ function SecurityTab() {
     message: string;
   } | null>(null);
   const [expandedInfo, setExpandedInfo] = useState<Record<string, boolean>>({});
+  const [governanceReviewRequired, setGovernanceReviewRequired] = useState(false);
   const [mailSettings, setMailSettings] =
     useState<ActivationDeliverySettings | null>(null);
   const [testRecipient, setTestRecipient] = useState("");
@@ -5757,6 +6040,9 @@ function SecurityTab() {
 
   const hasChanges =
     settings && Object.keys(draft).some((k) => draft[k] !== settings[k]?.value);
+  const governanceChanges = settings ? Object.keys(draft).filter(
+    (key) => draft[key] !== settings[key]?.value && settings[key]?.governance_managed,
+  ) : [];
 
   const handleSave = async () => {
     if (!settings) return;
@@ -5778,7 +6064,15 @@ function SecurityTab() {
         }),
       );
       if (res.ok) {
-        setStatus({ type: "success", message: "Settings saved." });
+        const data = await res.json().catch(() => ({}));
+        const reviewRequired = Boolean(data.governance_impact?.draft_updated);
+        setGovernanceReviewRequired(reviewRequired);
+        setStatus({
+          type: "success",
+          message: reviewRequired
+            ? "Settings saved and the private Governance draft was updated. Review the exact legal-notice diff before publishing a new version."
+            : "Settings saved.",
+        });
         await fetchSettings();
       } else {
         const err = await res.json().catch(() => ({}));
@@ -5885,6 +6179,9 @@ function SecurityTab() {
         "exchange_code_ttl_seconds",
         "reauth_challenge_ttl_minutes",
         "passkey_requests_per_minute",
+        "self_service_additional_passkeys_enabled",
+        "self_service_passkey_emails_per_minute",
+        "self_service_passkey_emails_per_day",
       ],
     },
     {
@@ -5922,6 +6219,8 @@ function SecurityTab() {
         Configure runtime security parameters. Passkey re-authentication is
         required to save changes.
       </p>
+
+      {governanceChanges.length > 0 && <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100"><strong>This change affects published Governance wording.</strong><p className="mt-1">Saving will update the private Governance draft for {governanceChanges.map((key) => settings[key].label).join(", ")}. Your root passkey authorises the settings change; public notices remain unchanged until you review the exact diff and publish a new immutable version.</p></div>}
 
       <Card className="p-5">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -6030,12 +6329,24 @@ function SecurityTab() {
                         )}
                       </div>
                       <span className="text-xs text-gray-400 dark:text-gray-500 mt-0.5 block">
-                        Default: {meta.default} {meta.unit} &middot; Range:{" "}
-                        {meta.min} - {meta.max}
+                        {key === "self_service_additional_passkeys_enabled"
+                          ? `Default: ${meta.default ? "Allowed" : "Not allowed"}`
+                          : <>Default: {meta.default} {meta.unit} &middot; Range: {meta.min} - {meta.max}</>}
                       </span>
                     </div>
                     <div className="flex items-center gap-2.5 shrink-0">
-                      <input
+                      {key === "self_service_additional_passkeys_enabled" ? (
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={(draft[key] ?? meta.value) === 1}
+                          onClick={() => setDraft((prev) => ({ ...prev, [key]: (prev[key] ?? meta.value) === 1 ? 0 : 1 }))}
+                          className={`relative h-7 w-12 rounded-full transition-colors ${(draft[key] ?? meta.value) === 1 ? "bg-blue-600" : "bg-gray-300 dark:bg-gray-600"}`}
+                        >
+                          <span className={`absolute left-1 top-1 h-5 w-5 rounded-full bg-white shadow transition-transform ${(draft[key] ?? meta.value) === 1 ? "translate-x-5" : "translate-x-0"}`} />
+                          <span className="sr-only">{(draft[key] ?? meta.value) === 1 ? "Allowed" : "Not allowed"}</span>
+                        </button>
+                      ) : <input
                         type="number"
                         min={meta.min}
                         max={meta.max}
@@ -6051,9 +6362,9 @@ function SecurityTab() {
                             ? "border-blue-400 dark:border-blue-500 ring-1 ring-blue-200 dark:ring-blue-800"
                             : "border-gray-300 dark:border-gray-600"
                         }`}
-                      />
+                      />}
                       <span className="text-xs text-gray-500 dark:text-gray-400 w-16">
-                        {meta.unit}
+                        {key === "self_service_additional_passkeys_enabled" ? ((draft[key] ?? meta.value) === 1 ? "Allowed" : "Off") : meta.unit}
                       </span>
                       <button
                         onClick={() => handleReset(key)}
@@ -6085,7 +6396,7 @@ function SecurityTab() {
       <div className="flex items-center gap-3 pt-1">
         <Button onClick={handleSave} disabled={saving || !hasChanges}>
           <Shield size={15} />
-          {saving ? "Saving..." : "Save Security Settings"}
+          {saving ? "Saving..." : governanceChanges.length ? "Authorise settings and update Governance draft" : "Save Security Settings"}
         </Button>
         {status && (
           <span
@@ -6098,6 +6409,7 @@ function SecurityTab() {
             {status.message}
           </span>
         )}
+        {governanceReviewRequired && <a className="text-sm font-medium text-blue-700 underline dark:text-blue-300" href="/admin/governance">Review Governance draft</a>}
       </div>
     </div>
   );

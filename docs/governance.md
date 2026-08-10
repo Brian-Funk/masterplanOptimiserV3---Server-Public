@@ -6,7 +6,7 @@ Each self-hosted organisation normally determines why and how its instance proce
 
 ## Publish the local legal centre
 
-After registering the root passkey, complete the external controller-key ceremony and import its signed initial trust declaration. Then open `/admin/governance`. Enter the actual controller identity, privacy contact, supervisory authority, provider summary, retention policy, rights procedure and local terms. Saving creates a private draft. Publishing is blocked until controller trust is active, then creates an immutable numbered JSON snapshot and SHA-256 digest. Only the latest published version appears on the public legal-centre routes.
+After registering the root passkey, the restricted `/setup` wizard guides the root through recovery-key verification, controller-key generation or import, and the first governance publication. Controller possession proof and exact root-passkey authorisation establish controller trust directly; there is no separate trust-declaration import. Enter the actual controller identity, privacy contact, supervisory authority, provider summary, retention policy, rights procedure and local terms. Saving creates a private draft without another passkey prompt. Publishing requires root-passkey reauthentication and creates an immutable numbered JSON snapshot and SHA-256 digest. Normal administration remains fenced until the first publication and the automatic final checks succeed. Only the latest published version appears on the public legal-centre routes.
 
 The routes are `/privacy`, `/legal`, `/data-policy`, `/retention`, `/rights`, `/processors` and `/licence`. An unconfigured instance displays a clear warning rather than a generic notice attributed to the software author.
 

@@ -252,6 +252,29 @@ def safe_members(archive: tarfile.TarFile, package_size: int) -> dict[str, tarfi
     return members
 
 
+def validate_canonical_tar_envelope(
+    package: Path,
+    members: dict[str, tarfile.TarInfo],
+    package_size: int,
+) -> None:
+    """Reject changed TAR framing even when every declared member is intact."""
+    content_end = max(
+        member.offset_data
+        + ((member.size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE) * tarfile.BLOCKSIZE
+        for member in members.values()
+    )
+    logical_end = content_end + (2 * tarfile.BLOCKSIZE)
+    expected_size = (
+        (logical_end + tarfile.RECORDSIZE - 1) // tarfile.RECORDSIZE
+    ) * tarfile.RECORDSIZE
+    if package_size != expected_size:
+        raise PackageError("portable package has a non-canonical TAR length")
+    with package.open("rb") as handle:
+        handle.seek(content_end)
+        if any(handle.read()):
+            raise PackageError("portable package has non-zero trailing TAR padding")
+
+
 def read_member(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bytes:
     handle = archive.extractfile(member)
     if handle is None:
@@ -316,6 +339,7 @@ def validate_package(package: Path) -> dict:
         raise PackageError("portable package exceeds the 10 GiB limit")
     with tarfile.open(package, "r:") as archive:
         members = safe_members(archive, metadata.st_size)
+        validate_canonical_tar_envelope(package, members, metadata.st_size)
         document = read_json_bytes(read_member(archive, members["portable.json"]), "portable metadata")
         validate_portable_document(document, members)
         rows = {row["path"]: row for row in document["files"]}

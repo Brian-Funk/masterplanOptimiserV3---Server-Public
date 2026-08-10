@@ -6,7 +6,9 @@ static values in ``config.py`` / hard-coded defaults.  Every public getter
 accepts an **optional** ``db`` session so callers that already have one can
 avoid opening a second connection.
 """
-from typing import Dict, Optional
+from datetime import datetime, timezone
+import json
+from typing import Any, Dict, Optional
 
 from sqlalchemy.orm import Session
 
@@ -33,10 +35,19 @@ TUNEABLE_SETTINGS: Dict[str, dict] = {
     "exchange_code_ttl_seconds":            {"default": 30,                                             "type": int, "label": "Exchange code lifetime",      "unit": "seconds", "min": 10, "max": 300},
     "reauth_challenge_ttl_minutes":         {"default": 5,                                              "type": int, "label": "Re-auth challenge lifetime",  "unit": "minutes", "min": 1, "max": 30},
     "passkey_requests_per_minute":           {"default": 60,                                             "type": int, "label": "Passkey requests per minute", "unit": "requests/minute", "min": 5, "max": 600},
+    "self_service_additional_passkeys_enabled": {"default": 0, "type": int, "label": "Participant self-service passkeys", "unit": "enabled", "min": 0, "max": 1},
+    "self_service_passkey_emails_per_minute": {"default": 1, "type": int, "label": "Self-service emails per user per minute", "unit": "emails/minute", "min": 1, "max": 10},
+    "self_service_passkey_emails_per_day": {"default": 3, "type": int, "label": "Self-service emails per user per day", "unit": "emails/day", "min": 1, "max": 50},
     "announcements_per_event_limit":        {"default": 50,                                             "type": int, "label": "Announcements per event",     "unit": "announcements", "min": 10, "max": 500},
     "masterplan_pushes_per_minute":         {"default": 5,                                              "type": int, "label": "Masterplan pushes per minute", "unit": "pushes/minute", "min": 1, "max": 120},
     "public_schedule_pushes_per_minute":    {"default": 5,                                              "type": int, "label": "Public Schedule pushes per minute", "unit": "pushes/minute", "min": 1, "max": 120},
     "ha_replication_interval_minutes": {"default": 5, "type": int, "label": "Replication frequency", "unit": "minutes", "min": 5, "max": 1440},
+}
+
+GOVERNANCE_RUNTIME_FIELDS: dict[str, tuple[str, str]] = {
+    "event_purge_grace_days": ("event_grace_days", "Event purge grace"),
+    "audit_log_retention_days": ("audit_retention_days", "Audit-log retention"),
+    "offline_access_ttl_hours": ("browser_cache_expiry_hours", "Offline/browser access lifetime"),
 }
 
 
@@ -66,7 +77,7 @@ def get_all(db: Session) -> Dict[str, dict]:
                 value = meta["default"]
         else:
             value = meta["default"]
-        result[key] = {
+        item = {
             "value": value,
             "default": meta["default"],
             "label": meta["label"],
@@ -74,6 +85,10 @@ def get_all(db: Session) -> Dict[str, dict]:
             "min": meta["min"],
             "max": meta["max"],
         }
+        if key in GOVERNANCE_RUNTIME_FIELDS:
+            item["governance_managed"] = True
+            item["governance_field"] = GOVERNANCE_RUNTIME_FIELDS[key][0]
+        result[key] = item
     return result
 
 
@@ -94,7 +109,125 @@ def get_int(key: str, db: Session) -> int:
     return meta["default"]
 
 
-def set_value(key: str, value: int, db: Session) -> None:
+def _set_internal(db: Session, key: str, value: str) -> None:
+    from app.models.server_setting import ServerSetting
+    row = db.query(ServerSetting).filter(ServerSetting.key == key).first()
+    if row:
+        row.value = value
+    else:
+        db.add(ServerSetting(key=key, value=value))
+
+
+def apply_governance_runtime_values(structured: dict[str, Any], db: Session) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Overlay only settings the Server actually enforces onto a draft."""
+    result = json.loads(json.dumps(structured))
+    retention = result.setdefault("retention", {})
+    features = result.setdefault("optional_features", {})
+    changes: list[dict[str, Any]] = []
+    for setting_key, (field, label) in GOVERNANCE_RUNTIME_FIELDS.items():
+        effective = get_int(setting_key, db)
+        previous = retention.get(field)
+        retention[field] = effective
+        if previous != effective:
+            changes.append({
+                "setting": setting_key,
+                "governance_field": f"retention.{field}",
+                "label": label,
+                "previous": previous,
+                "current": effective,
+            })
+    # Deployment features are runtime facts, not controller-editable claims.
+    # Importing or resaving an older draft must therefore refresh them just as
+    # it refreshes the Server-enforced retention periods.
+    from app.core.governance_rendering import runtime_feature_state
+
+    for field, effective in runtime_feature_state().items():
+        previous = features.get(field)
+        features[field] = effective
+        if previous != effective:
+            changes.append({
+                "setting": f"deployment.{field}",
+                "governance_field": f"optional_features.{field}",
+                "label": field.replace("_", " ").title(),
+                "previous": previous,
+                "current": effective,
+            })
+    return result, changes
+
+
+def _sync_governance_draft(db: Session) -> dict[str, Any]:
+    from app.models.governance import GovernancePublication, InstanceGovernanceProfile
+
+    profile = db.get(InstanceGovernanceProfile, 1)
+    if profile is None:
+        return {"draft_updated": False, "publication_required": False, "changes": []}
+    try:
+        structured = json.loads(profile.structured_json or "{}")
+    except json.JSONDecodeError:
+        structured = {}
+    updated, changes = apply_governance_runtime_values(structured, db)
+    if not changes:
+        return governance_impact(db) | {"draft_updated": False, "changes": []}
+    profile.structured_json = json.dumps(updated, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    existing_raw = _get_overrides(db).get("governance_runtime_changed_fields", "[]")
+    try:
+        existing = json.loads(existing_raw)
+    except json.JSONDecodeError:
+        existing = []
+    by_field = {
+        item.get("governance_field"): item
+        for item in existing
+        if isinstance(item, dict) and item.get("current") != item.get("previous")
+    }
+    for change in changes:
+        original = by_field.get(change["governance_field"])
+        if original and "previous" in original:
+            change["previous"] = original["previous"]
+        if change["current"] == change["previous"]:
+            by_field.pop(change["governance_field"], None)
+        else:
+            by_field[change["governance_field"]] = change
+    outstanding = list(by_field.values())
+    changed_at = (
+        datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        if outstanding else None
+    )
+    publication_required = bool(outstanding) and db.query(GovernancePublication.id).first() is not None
+    _set_internal(db, "governance_runtime_draft_changed_at", changed_at or "")
+    _set_internal(db, "governance_runtime_changed_fields", json.dumps(outstanding, separators=(",", ":"), sort_keys=True))
+    _set_internal(db, "governance_runtime_publication_required", "true" if publication_required else "false")
+    return {
+        "draft_updated": bool(outstanding),
+        "publication_required": publication_required,
+        "changed_at": changed_at,
+        "changes": outstanding,
+    }
+
+
+def governance_impact(db: Session) -> dict[str, Any]:
+    values = _get_overrides(db)
+    try:
+        changes = json.loads(values.get("governance_runtime_changed_fields", "[]"))
+    except json.JSONDecodeError:
+        changes = []
+    changes = [
+        item for item in changes
+        if isinstance(item, dict) and item.get("current") != item.get("previous")
+    ]
+    return {
+        "draft_updated": bool(changes),
+        "publication_required": bool(changes) and values.get("governance_runtime_publication_required") == "true",
+        "changed_at": values.get("governance_runtime_draft_changed_at") or None if changes else None,
+        "changes": changes,
+    }
+
+
+def clear_governance_impact(db: Session) -> None:
+    _set_internal(db, "governance_runtime_changed_fields", "[]")
+    _set_internal(db, "governance_runtime_publication_required", "false")
+
+
+def set_value(key: str, value: int, db: Session) -> dict[str, Any]:
     """Persist a runtime override (upsert)."""
     meta = TUNEABLE_SETTINGS.get(key)
     if meta is None:
@@ -107,4 +240,9 @@ def set_value(key: str, value: int, db: Session) -> None:
         row.value = str(value)
     else:
         db.add(ServerSetting(key=key, value=str(value)))
+    # The governance overlay must see this exact value even when the caller's
+    # session has not otherwise issued a flushing query yet.
+    db.flush()
+    impact = _sync_governance_draft(db) if key in GOVERNANCE_RUNTIME_FIELDS else governance_impact(db)
     db.commit()
+    return impact

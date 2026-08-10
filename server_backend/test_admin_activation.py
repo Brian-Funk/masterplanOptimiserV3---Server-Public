@@ -41,6 +41,7 @@ def test_create_activation_link(db, admin_client):
     assert r.status_code == 200
     assert "/activate#token=" in r.json()["activation_url"]
     assert r.json()["purpose"] == "initial_setup"
+    assert datetime.fromisoformat(r.json()["expires_at"]) > datetime.now(timezone.utc)
 
 
 def test_active_user_can_receive_non_destructive_additional_passkey_link(db):
@@ -173,6 +174,10 @@ def test_batch_activation_links(db, admin_client):
     assert r.status_code == 200
     data = r.json()
     assert data["count"] >= 2
+    assert all(
+        datetime.fromisoformat(link["expires_at"]) > datetime.now(timezone.utc)
+        for link in data["links"]
+    )
 
 
 def test_batch_activation_links_issuer_scoped(db):

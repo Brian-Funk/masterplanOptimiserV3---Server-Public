@@ -6,6 +6,7 @@ import hashlib
 import json
 import secrets
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -16,14 +17,15 @@ from app.core.governance import stable_instance_id
 from app.models.deletion import (
     DeletionChecklistApproval,
     DeletionCase,
+    DeletionRequiredProcessor,
     DeletionSubjectScope,
     DesktopDeletionWorkOrder,
 )
-from app.models.evidence import BackupInventoryRecord
+from app.models.evidence import BackupInventoryRecord, EvidenceKey, ProcessorIdentity
 from app.models.event import Event
 
 
-CHECKLIST_VERSION = 1
+CHECKLIST_VERSION = 3
 CLAIM_TTL_MINUTES = 30
 STATUS_CAPABILITY_TTL_DAYS = 90
 _REPORT_COUNTERS = {
@@ -45,7 +47,6 @@ def create_event_erasure_case(
     db: Session,
     event: Event,
     *,
-    processor_approval_required: bool,
     initiation_reason: str,
     now: datetime | None = None,
 ) -> DeletionCase:
@@ -67,10 +68,10 @@ def create_event_erasure_case(
         event_purge_key=event.evidence_id,
         instance_id=stable_instance_id(db),
         event_evidence_id=event.evidence_id,
+        event_display_name=event.name,
         subject_evidence_id=event.evidence_id,
         user_id=None,
         state="submitted",
-        processor_approval_required=processor_approval_required,
         normal_response_due_at=now + timedelta(days=30),
     )
     db.add(job)
@@ -177,44 +178,85 @@ def ensure_desktop_work_order(
     *,
     event: Event,
     subject_ref: str | None,
-) -> DesktopDeletionWorkOrder:
-    """Create or return the event-scoped desktop work order for a case."""
+) -> list[DesktopDeletionWorkOrder]:
+    """Snapshot active event processors and create one work order per entity.
+
+    A Desktop receipt is inapplicable only when this event has never had a
+    processor identity.  Historical or pending identities prove that Desktop
+    linking occurred, so an unavailable active key must block instead of being
+    mistaken for proof that no Desktop copy exists.
+    """
 
     ensure_case_scope(db, case, event=event, subject_ref=subject_ref)
-    existing = db.query(DesktopDeletionWorkOrder).filter(
-        DesktopDeletionWorkOrder.case_id == case.id,
-        DesktopDeletionWorkOrder.event_ref == event.evidence_id,
-        DesktopDeletionWorkOrder.subject_ref == subject_ref,
-    ).first()
-    if existing:
-        return existing
-    work_order = DesktopDeletionWorkOrder(
-        case_id=case.id,
-        event_id=event.id,
-        event_ref=event.evidence_id,
-        subject_ref=subject_ref,
-        operation="delete_event" if case.case_type == "event_erasure" else "delete_subject",
-    )
-    db.add(work_order)
-    db.flush()
-    evidence_payload = {
-        "case_id": case.request_id,
-        "work_order_id": work_order.work_order_id,
-        "event_ref": work_order.event_ref,
-        "operation": work_order.operation,
-        "status": "open",
-    }
-    if work_order.subject_ref is not None:
-        evidence_payload["subject_ref"] = work_order.subject_ref
-    append_record(
-        db,
-        workflow_type="deletion_case",
-        workflow_id=case.request_id,
-        operation_type=f"desktop_work_order_created_{work_order.work_order_id}",
-        record_type="deletion.desktop_work_order_created",
-        payload=evidence_payload,
-    )
-    return work_order
+    known_identities = db.query(ProcessorIdentity).filter(
+        ProcessorIdentity.event_evidence_id == event.evidence_id,
+    ).order_by(ProcessorIdentity.entity_id).all()
+    identities = [identity for identity in known_identities if (
+        identity.status == "active" and identity.active_key_id is not None
+    )]
+    if not known_identities:
+        case.desktop_deletion_required = False
+        return []
+    if not identities:
+        case.desktop_deletion_required = True
+        raise ValueError(
+            "This event was linked to Desktop, but no active processor key is "
+            "available to complete its deletion receipt"
+        )
+    case.desktop_deletion_required = True
+    result: list[DesktopDeletionWorkOrder] = []
+    for identity in identities:
+        active_key = db.query(EvidenceKey).filter(
+            EvidenceKey.key_id == identity.active_key_id,
+            EvidenceKey.entity_id == identity.entity_id,
+            EvidenceKey.role == "processor",
+            EvidenceKey.activated_at.isnot(None),
+            EvidenceKey.revoked_at.is_(None),
+        ).first()
+        if active_key is None:
+            raise ValueError("An active processor assignment has no verifiable public key")
+        requirement = db.query(DeletionRequiredProcessor).filter(
+            DeletionRequiredProcessor.case_id == case.id,
+            DeletionRequiredProcessor.event_ref == event.evidence_id,
+            DeletionRequiredProcessor.processor_entity_id == identity.entity_id,
+        ).first()
+        if requirement is None:
+            requirement = DeletionRequiredProcessor(
+                case_id=case.id, event_ref=event.evidence_id,
+                processor_entity_id=identity.entity_id,
+                snapshotted_key_id=str(identity.active_key_id),
+                snapshotted_public_key_sha256=active_key.public_key_sha256,
+            )
+            db.add(requirement)
+        work_order = db.query(DesktopDeletionWorkOrder).filter(
+            DesktopDeletionWorkOrder.case_id == case.id,
+            DesktopDeletionWorkOrder.event_ref == event.evidence_id,
+            DesktopDeletionWorkOrder.subject_ref == subject_ref,
+            DesktopDeletionWorkOrder.processor_entity_id == identity.entity_id,
+        ).first()
+        if work_order is None:
+            work_order = DesktopDeletionWorkOrder(
+                case_id=case.id, event_id=event.id, event_ref=event.evidence_id,
+                subject_ref=subject_ref, processor_entity_id=identity.entity_id,
+                processor_key_id=identity.active_key_id,
+                operation="delete_event" if case.case_type == "event_erasure" else "delete_subject",
+            )
+            db.add(work_order)
+            db.flush()
+            payload = {
+                "case_id": case.request_id, "work_order_id": work_order.work_order_id,
+                "event_ref": work_order.event_ref, "processor_entity_id": identity.entity_id,
+                "processor_key_id": identity.active_key_id,
+                "operation": work_order.operation, "status": "open",
+            }
+            if work_order.subject_ref is not None: payload["subject_ref"] = work_order.subject_ref
+            append_record(
+                db, workflow_type="deletion_case", workflow_id=case.request_id,
+                operation_type=f"desktop_work_order_created_{work_order.work_order_id}",
+                record_type="deletion.desktop_work_order_created", payload=payload,
+            )
+        result.append(work_order)
+    return result
 
 
 def claim_work_order(work_order: DesktopDeletionWorkOrder) -> str:
@@ -240,7 +282,8 @@ def validate_report_payload(work_order: DesktopDeletionWorkOrder, report: dict[s
     """Validate a privacy-safe desktop deletion report."""
 
     if set(report) != {
-        "version",
+        "format", "instance_id", "entity_id", "key_id", "role", "algorithm",
+        "public_key_sha256",
         "work_order_id",
         "event_ref",
         "subject_ref",
@@ -251,8 +294,8 @@ def validate_report_payload(work_order: DesktopDeletionWorkOrder, report: dict[s
         "completed_at",
     }:
         raise ValueError("The desktop report contains missing or unknown fields")
-    if report["version"] != 1:
-        raise ValueError("Unsupported desktop deletion report version")
+    if report["format"] != "mp-opt-desktop-deletion-receipt-v2":
+        raise ValueError("Unsupported Desktop deletion receipt version")
     for key, expected in (
         ("work_order_id", work_order.work_order_id),
         ("event_ref", work_order.event_ref),
@@ -289,13 +332,21 @@ def apply_desktop_report(
     *,
     claim_capability: str,
     report: dict[str, Any],
+    signature_sha256: str,
+    evidence_package_json: str,
+    evidence_package_sha256: str,
+    completed_key_id: str,
+    completed_public_key_sha256: str,
 ) -> str:
     """Apply an idempotent, capability-authorised desktop deletion report."""
 
     canonical = canonical_json(report)
     digest = sha256_text(canonical)
     if work_order.report_sha256:
-        if work_order.report_sha256 != digest:
+        if (
+            work_order.report_sha256 != digest
+            or work_order.report_evidence_package_sha256 != evidence_package_sha256
+        ):
             raise ValueError("A different report is already recorded for this work order")
         return digest
     expires = work_order.claim_expires_at
@@ -313,6 +364,10 @@ def apply_desktop_report(
     now = utc_now()
     work_order.report_json = canonical
     work_order.report_sha256 = digest
+    work_order.report_signature_sha256 = signature_sha256
+    work_order.report_evidence_package_json = evidence_package_json
+    work_order.report_evidence_package_sha256 = evidence_package_sha256
+    work_order.processor_key_id = completed_key_id
     work_order.reported_at = now
     work_order.claim_capability_sha256 = None
     work_order.claim_expires_at = None
@@ -324,8 +379,24 @@ def apply_desktop_report(
     ).one()
     scope.state = "desktop_deleted"
     case.desktop_report_sha256 = digest
-    case.outstanding_actions_json = canonical_json(report["outstanding_actions"])
-    case.state = "ready_for_live_purge"
+    requirement = db.query(DeletionRequiredProcessor).filter(
+        DeletionRequiredProcessor.case_id == case.id,
+        DeletionRequiredProcessor.event_ref == work_order.event_ref,
+        DeletionRequiredProcessor.processor_entity_id == work_order.processor_entity_id,
+    ).one()
+    requirement.deletion_receipt_sha256 = digest
+    requirement.completed_key_id = completed_key_id
+    requirement.completed_public_key_sha256 = completed_public_key_sha256
+    requirement.state = "deletion_received"
+    existing_actions = set(json.loads(case.outstanding_actions_json or "[]"))
+    existing_actions.update(report["outstanding_actions"])
+    case.outstanding_actions_json = canonical_json(sorted(existing_actions))
+    db.flush()
+    pending_deletions = db.query(DeletionRequiredProcessor).filter(
+        DeletionRequiredProcessor.case_id == case.id,
+        DeletionRequiredProcessor.deletion_receipt_sha256.is_(None),
+    ).count()
+    case.state = "awaiting_desktop_report" if pending_deletions else "ready_for_live_purge"
     if report["outstanding_actions"]:
         case.retention_reason_code = "external_desktop_copy_unresolved"
         case.retention_review_at = now + timedelta(days=30)
@@ -334,6 +405,11 @@ def apply_desktop_report(
         "work_order_id": work_order.work_order_id,
         "event_ref": work_order.event_ref,
         "report_sha256": digest,
+        "signature_sha256": signature_sha256,
+        "evidence_package_sha256": evidence_package_sha256,
+        "processor_entity_id": work_order.processor_entity_id,
+        "processor_key_id": completed_key_id,
+        "completed_public_key_sha256": completed_public_key_sha256,
         "outstanding_actions": report["outstanding_actions"],
         "status": case.state,
     }
@@ -387,6 +463,131 @@ def resolve_outstanding_actions(
     return digest
 
 
+def apply_desktop_copy_resolution(
+    db: Session,
+    case: DeletionCase,
+    work_order: DesktopDeletionWorkOrder,
+    *,
+    document: dict[str, Any],
+    signature_sha256: str,
+    evidence_package_json: str,
+    evidence_package_sha256: str,
+    completed_key_id: str,
+    completed_public_key_sha256: str,
+) -> str:
+    """Record a typed processor statement about Desktop-local copies."""
+
+    if not work_order.report_sha256:
+        raise ValueError("Desktop data deletion must be recorded before local-copy resolution")
+    canonical = canonical_json(document)
+    digest = sha256_text(canonical)
+    if work_order.copy_resolution_sha256:
+        if (
+            work_order.copy_resolution_sha256 != digest
+            or work_order.copy_resolution_evidence_package_sha256 != evidence_package_sha256
+        ):
+            raise ValueError("a different local-copy resolution is already recorded")
+        return digest
+    work_order.copy_resolution_sha256 = digest
+    work_order.copy_resolution_signature_sha256 = signature_sha256
+    work_order.copy_resolution_evidence_package_json = evidence_package_json
+    work_order.copy_resolution_evidence_package_sha256 = evidence_package_sha256
+    requirement = db.query(DeletionRequiredProcessor).filter(
+        DeletionRequiredProcessor.case_id == case.id,
+        DeletionRequiredProcessor.event_ref == work_order.event_ref,
+        DeletionRequiredProcessor.processor_entity_id == work_order.processor_entity_id,
+    ).one()
+    requirement.copy_resolution_sha256 = digest
+    requirement.completed_key_id = completed_key_id
+    requirement.completed_public_key_sha256 = completed_public_key_sha256
+    requirement.state = "complete"
+    requirement.completed_at = utc_now()
+    append_record(
+        db, workflow_type="deletion_case", workflow_id=case.request_id,
+        operation_type=f"desktop_copy_resolution_{work_order.work_order_id}",
+        record_type="deletion.desktop_copy_resolution",
+        payload={
+            "case_id": case.request_id, "work_order_id": work_order.work_order_id,
+            "event_ref": work_order.event_ref,
+            "processor_entity_id": work_order.processor_entity_id,
+            "processor_key_id": completed_key_id,
+            "copy_resolution_sha256": digest,
+            "signature_sha256": signature_sha256,
+            "evidence_package_sha256": evidence_package_sha256,
+            "completed_public_key_sha256": completed_public_key_sha256,
+            "disposition": document["disposition"], "status": "verified",
+        },
+    )
+    return digest
+
+
+def confirm_desktop_already_absent(db: Session, case: DeletionCase) -> str:
+    """Reject controller substitution for event-scoped processor evidence."""
+
+    del db, case
+    raise ValueError("Root confirmation cannot replace required processor receipts")
+
+
+def confirm_no_controlled_backups(db: Session, case: DeletionCase) -> str:
+    """Record an explicit no-backup assertion; never infer it from the empty inventory."""
+
+    if case.replacement_package_sha256:
+        raise ValueError("A clean recovery snapshot is already recorded")
+    if case.backup_not_applicable_sha256:
+        return case.backup_not_applicable_sha256
+    if not case.live_purge_receipt_sha256:
+        raise ValueError("Live data must be purged first")
+    if settings.HA_MODE == "ha" and not case.peer_confirmation_sha256:
+        raise ValueError("Peer replication must be verified first")
+    if db.query(BackupInventoryRecord).count() > 0:
+        raise ValueError("Recovery packages are recorded; create a clean snapshot instead")
+    snapshot_count = controlled_snapshot_count()
+    if snapshot_count is not None and snapshot_count > 0:
+        raise ValueError("Controlled recovery snapshots are recorded; create a clean snapshot instead")
+    evidence_payload = {
+        "case_id": case.request_id,
+        "event_ref": case.event_evidence_id,
+        "verification_method": "controller_confirmation",
+        "reason_code": "no_controlled_backups",
+        "outcome": "not_applicable",
+        "status": "awaiting_checklist",
+    }
+    if case.case_type != "event_erasure":
+        evidence_payload["subject_ref"] = case.subject_evidence_id
+    case.backup_not_applicable_sha256 = append_record(
+        db,
+        workflow_type="deletion_case",
+        workflow_id=case.request_id,
+        operation_type="backup_not_applicable",
+        record_type="deletion.backup_not_applicable",
+        payload=evidence_payload,
+    )
+    case.state = "awaiting_checklist"
+    case.retention_reason_code = None
+    case.retention_review_at = None
+    return case.backup_not_applicable_sha256
+
+
+def controlled_snapshot_count() -> int | None:
+    """Return the bounded host snapshot count, or unknown when no status exists."""
+
+    path = Path(settings.HA_SNAPSHOT_STATUS_PATH)
+    try:
+        if not path.exists():
+            return None
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024:
+            return None
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    count = document.get("local_snapshot_count")
+    if document.get("format") != "mp-opt-ha-snapshot-status-v1" or type(count) is not int or count < 0:
+        return None
+    return count
+
+
 def _backup_inventory_resolved(db: Session) -> bool:
     return db.query(BackupInventoryRecord).filter(
         BackupInventoryRecord.status == "superseded_pending_deletion",
@@ -397,13 +598,23 @@ def checklist_prerequisites(case: DeletionCase, db: Session) -> list[str]:
     """Return machine-verifiable prerequisites still missing from a case."""
 
     missing: list[str] = []
-    if case.desktop_deletion_required and not case.desktop_report_sha256:
-        missing.append("desktop_report")
+    required_processors = db.query(DeletionRequiredProcessor).filter(
+        DeletionRequiredProcessor.case_id == case.id,
+    ).all()
+    if case.desktop_deletion_required and (
+        not required_processors or any(row.state != "complete" for row in required_processors)
+    ):
+        missing.append("desktop_processor_receipts")
     if not case.live_purge_receipt_sha256:
         missing.append("live_purge_receipt")
     if settings.HA_MODE == "ha" and not case.peer_confirmation_sha256:
         missing.append("peer_replication_receipt")
-    if not case.replacement_package_sha256:
+    if (
+        settings.HA_MODE == "ha" and case.replacement_package_sha256
+        and not case.peer_backup_resolution_sha256
+    ):
+        missing.append("peer_snapshot_resolution_receipt")
+    if not (case.replacement_package_sha256 or case.backup_not_applicable_sha256):
         missing.append("clean_backup_receipt")
     if not _backup_inventory_resolved(db):
         missing.append("backup_inventory_resolution")
@@ -439,13 +650,25 @@ def build_checklist(case: DeletionCase, db: Session) -> dict[str, Any]:
             for scope in scopes
         ],
         "receipts": {
-            "desktop_report_sha256": case.desktop_report_sha256,
             "live_purge_receipt_sha256": case.live_purge_receipt_sha256,
             "peer_confirmation_sha256": case.peer_confirmation_sha256,
             "clean_backup_sha256": case.replacement_package_sha256,
+            "peer_snapshot_resolution_sha256": case.peer_backup_resolution_sha256,
+            "backup_not_applicable_sha256": case.backup_not_applicable_sha256,
         },
         "desktop_deletion_required": bool(case.desktop_deletion_required),
-        "processor_approval_required": bool(case.processor_approval_required),
+        "desktop_processors": [{
+            "event_ref": row.event_ref,
+            "entity_id": row.processor_entity_id,
+            "snapshotted_key_id": row.snapshotted_key_id,
+            "snapshotted_public_key_sha256": row.snapshotted_public_key_sha256,
+            "completed_key_id": row.completed_key_id,
+            "completed_public_key_sha256": row.completed_public_key_sha256,
+            "deletion_receipt_sha256": row.deletion_receipt_sha256,
+            "copy_resolution_sha256": row.copy_resolution_sha256,
+        } for row in db.query(DeletionRequiredProcessor).filter(
+            DeletionRequiredProcessor.case_id == case.id,
+        ).order_by(DeletionRequiredProcessor.event_ref, DeletionRequiredProcessor.processor_entity_id)],
         "outstanding_actions": [],
     }
     canonical = canonical_json(checklist)
@@ -480,10 +703,8 @@ def record_checklist_approval(
 ) -> DeletionChecklistApproval:
     """Record one verified WebAuthn approval for the current checklist."""
 
-    if role not in {"executor", "controller", "processor"}:
-        raise ValueError("Unknown deletion checklist approval role")
-    if role == "processor" and not case.processor_approval_required:
-        raise ValueError("A processor approval is not required for this case")
+    if role != "executor":
+        raise ValueError("Only the root executor may approve Server completion")
     if not case.checklist_sha256 or case.state not in {"awaiting_approvals", "ready_for_completion"}:
         raise ValueError("The case has no checklist awaiting approval")
     existing = db.query(DeletionChecklistApproval).filter(
@@ -514,15 +735,8 @@ def record_checklist_approval(
     )
     db.add(approval)
     db.flush()
-    if role == "executor":
-        case.executor_approval_sha256 = approval_sha256
-    elif role == "controller":
-        case.controller_approval_sha256 = approval_sha256
-    else:
-        case.processor_approval_sha256 = approval_sha256
-    required = {"executor", "controller"}
-    if case.processor_approval_required:
-        required.add("processor")
+    case.executor_approval_sha256 = approval_sha256
+    required = {"executor"}
     present = {
         row.role
         for row in db.query(DeletionChecklistApproval).filter(
@@ -585,13 +799,25 @@ def complete_case(case: DeletionCase, db: Session) -> str:
             for scope in scopes
         ],
         "receipts": {
-            "desktop_report_sha256": case.desktop_report_sha256,
             "live_purge_receipt_sha256": case.live_purge_receipt_sha256,
             "peer_confirmation_sha256": case.peer_confirmation_sha256,
             "clean_backup_sha256": case.replacement_package_sha256,
+            "peer_snapshot_resolution_sha256": case.peer_backup_resolution_sha256,
+            "backup_not_applicable_sha256": case.backup_not_applicable_sha256,
         },
         "desktop_deletion_required": bool(case.desktop_deletion_required),
-        "processor_approval_required": bool(case.processor_approval_required),
+        "desktop_processors": [{
+            "event_ref": row.event_ref,
+            "entity_id": row.processor_entity_id,
+            "snapshotted_key_id": row.snapshotted_key_id,
+            "snapshotted_public_key_sha256": row.snapshotted_public_key_sha256,
+            "completed_key_id": row.completed_key_id,
+            "completed_public_key_sha256": row.completed_public_key_sha256,
+            "deletion_receipt_sha256": row.deletion_receipt_sha256,
+            "copy_resolution_sha256": row.copy_resolution_sha256,
+        } for row in db.query(DeletionRequiredProcessor).filter(
+            DeletionRequiredProcessor.case_id == case.id,
+        ).order_by(DeletionRequiredProcessor.event_ref, DeletionRequiredProcessor.processor_entity_id)],
         "outstanding_actions": [],
     }
     if checklist != expected_checklist:
@@ -603,13 +829,9 @@ def complete_case(case: DeletionCase, db: Session) -> str:
             DeletionChecklistApproval.checklist_sha256 == case.checklist_sha256,
         )
     }
-    required_roles = {"executor", "controller"}
-    if case.processor_approval_required:
-        required_roles.add("processor")
+    required_roles = {"executor"}
     stored_hashes = {
         "executor": case.executor_approval_sha256,
-        "controller": case.controller_approval_sha256,
-        "processor": case.processor_approval_sha256,
     }
     if any(
         role not in approval_rows
@@ -624,13 +846,14 @@ def complete_case(case: DeletionCase, db: Session) -> str:
         "case_type": case.case_type,
         "checklist_sha256": case.checklist_sha256,
         "executor_approval_sha256": case.executor_approval_sha256,
-        "controller_approval_sha256": case.controller_approval_sha256,
+        "server_receipts": {
+            key: value for key, value in checklist["receipts"].items() if value is not None
+        },
+        "desktop_processor_receipts": checklist["desktop_processors"],
         "completed_at": now.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "outcome": "verified",
         "status": "complete",
     }
-    if case.processor_approval_sha256 is not None:
-        evidence_payload["processor_approval_sha256"] = case.processor_approval_sha256
     case.final_receipt_sha256 = append_record(
         db,
         workflow_type="deletion_case",
@@ -646,4 +869,6 @@ def complete_case(case: DeletionCase, db: Session) -> str:
         scope.completed_at = now
     case.completed_at = now
     case.state = "complete"
+    case.event_display_name = None
+    case.subject_display_name = None
     return case.state

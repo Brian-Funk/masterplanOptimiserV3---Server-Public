@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.sessions import validate_session
 from app.core import runtime_settings
+from app.core.commissioning import commissioning_required, commissioning_stage
 from app.db.database import get_db
 from app.models.event import Event
 from app.models.user import User
@@ -30,6 +31,7 @@ def _get_current_user(
     db: Session,
     *,
     update_last_seen: bool,
+    allow_commissioning: bool = False,
 ) -> User:
     """Resolve an authenticated user with optional session activity tracking."""
     session_token = _get_session_token_from_request(request)
@@ -53,7 +55,14 @@ def _get_current_user(
         )
 
     user = db.query(User).filter(User.id == auth_session.user_id).first()
-    if user is None or not user.is_active or not user.is_activated:
+    if (
+        user is None
+        or not user.is_active
+        or (
+            not user.is_activated
+            and not (allow_commissioning and user.is_root_admin)
+        )
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found, inactive, or not activated",
@@ -62,6 +71,16 @@ def _get_current_user(
     # The access log uses the random evidence reference rather than a database
     # identifier or username. It remains pseudonymous and follows log retention.
     request.state.subject_ref = user.evidence_subject_id
+    if user.is_root_admin and not allow_commissioning and commissioning_required(db):
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail={
+                "code": "ROOT_COMMISSIONING_REQUIRED",
+                "commissioning_stage": commissioning_stage(db),
+                "setup_url": "/setup",
+                "message": "Complete root commissioning before using administration.",
+            },
+        )
     return user
 
 
@@ -81,6 +100,37 @@ def get_current_user_read_only(
     """Authenticate without writing session activity to a fenced database."""
 
     return _get_current_user(request, db, update_last_seen=False)
+
+
+def get_current_user_for_commissioning(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> User:
+    """Authenticate a root session without lifting the commissioning fence."""
+
+    return _get_current_user(
+        request,
+        db,
+        update_last_seen=True,
+        allow_commissioning=True,
+    )
+
+
+def require_commissioning_root(
+    current_user: User = Depends(get_current_user_for_commissioning),
+) -> User:
+    """Require the authenticated root while the setup wizard is active."""
+    if not current_user.is_root_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Root administrator access required")
+    return current_user
+
+
+def require_commissioning_root_recent_reauth(
+    current_user: User = Depends(require_commissioning_root),
+    db: Session = Depends(get_db),
+) -> User:
+    """Require a setup root whose current session has a recent passkey proof."""
+    return ensure_recent_reauth(current_user, db)
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:

@@ -1,13 +1,42 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { generateAgeRecoveryIdentity } from "@/lib/ageIdentity";
+import { apiFetch } from "@/lib/api";
+import { withReauth } from "@/lib/reauth";
 
 export default function RecoveryKeyPage() {
   const [recipient, setRecipient] = useState("");
   const [identity, setIdentity] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [access, setAccess] = useState<"checking" | "ready" | "denied">("checking");
+
+  const unlock = useCallback(async () => {
+    setAccess("checking");
+    setError("");
+    try {
+      const response = await withReauth(() =>
+        apiFetch("/api/v1/auth/recovery-key-access"),
+      );
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.detail || "Root passkey access is required");
+      }
+      setAccess("ready");
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Root passkey verification failed",
+      );
+      setAccess("denied");
+    }
+  }, []);
+
+  useEffect(() => {
+    void unlock();
+  }, [unlock]);
 
   async function generate() {
     setBusy(true);
@@ -46,6 +75,21 @@ export default function RecoveryKeyPage() {
         <p className="mt-3 text-sm leading-6 text-gray-600 dark:text-gray-300">
           The key is generated entirely in this browser. The private identity is never sent to the server. Only paste the public <code>age1…</code> recipient into the server TUI.
         </p>
+        {access === "checking" && (
+          <p className="mt-6 text-sm text-gray-600 dark:text-gray-300">
+            Verifying the root passkey session...
+          </p>
+        )}
+        {access === "denied" && (
+          <section className="mt-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200">
+            <p>{error}</p>
+            <button type="button" onClick={unlock}
+              className="mt-3 font-medium text-blue-700 hover:underline dark:text-blue-300">
+              Verify with root passkey
+            </button>
+          </section>
+        )}
+        {access === "ready" && <>
         <div className="mt-6 flex flex-wrap gap-3">
           <button type="button" onClick={generate} disabled={busy}
             className="rounded-lg bg-blue-600 px-4 py-2 font-medium text-white disabled:opacity-60">
@@ -73,6 +117,7 @@ export default function RecoveryKeyPage() {
             </div>
           </section>
         )}
+        </>}
       </div>
     </main>
   );

@@ -84,6 +84,25 @@ def test_me_returns_user_with_valid_session(db, root_client):
     assert data["offline_access_ttl_hours"] == 24
 
 
+def test_recovery_key_access_requires_root_and_recent_passkey(db, admin_client):
+    """The recovery generator is root-only and requires fresh WebAuthn."""
+    root = create_test_user(
+        db,
+        username="recovery.root",
+        is_root_admin=True,
+        is_admin=True,
+    )
+    root_without_reauth = _make_client(db, root)
+    root_with_reauth = _make_client(db, root, reauth=True)
+
+    assert admin_client.get("/api/v1/auth/root-access").status_code == 403
+    assert root_without_reauth.get("/api/v1/auth/root-access").status_code == 200
+    blocked = root_without_reauth.get("/api/v1/auth/recovery-key-access")
+    assert blocked.status_code == 403
+    assert blocked.json()["detail"] == "Re-authentication required"
+    assert root_with_reauth.get("/api/v1/auth/recovery-key-access").status_code == 200
+
+
 def test_me_returns_configured_offline_access_window(db, root_client):
     """GET /me returns the runtime offline calendar access window."""
     from app.core import runtime_settings
@@ -449,7 +468,8 @@ def test_exchange_code_is_hashed_and_single_use(db):
     assert first.status_code == 200
     assert "session_id=" in first.headers.get("set-cookie", "")
     assert second.status_code == 400
-    assert db.query(AuthSession).filter(AuthSession.user_id == user.id).count() == 1
+    session = db.query(AuthSession).filter(AuthSession.user_id == user.id).one()
+    assert session.reauth_at is not None
 
 
 def test_exchange_stores_only_coarse_user_agent(db):

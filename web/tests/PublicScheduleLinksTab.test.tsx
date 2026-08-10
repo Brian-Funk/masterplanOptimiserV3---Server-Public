@@ -100,6 +100,8 @@ describe("PublicScheduleLinksTab", () => {
     expect(JSON.parse(createCall?.[1]?.body as string)).toMatchObject({
       description: "Shared with chairs",
       view_ids: [10, 11],
+      token: expect.any(String),
+      idempotency_key: expect.any(String),
     });
     expect(await screen.findByText("Public link created")).toBeInTheDocument();
     expect(screen.getByLabelText("Generated public schedule URL")).toHaveValue(
@@ -129,7 +131,11 @@ describe("PublicScheduleLinksTab", () => {
     await waitFor(() =>
       expect(mockApiFetch).toHaveBeenCalledWith(
         "/api/v1/admin/events/7/public-schedule-links/5/invalidate",
-        { method: "POST", body: "{}" },
+        expect.objectContaining({
+          method: "POST",
+          body: "{}",
+          headers: { "Idempotency-Key": expect.any(String) },
+        }),
       ),
     );
   });
@@ -153,7 +159,10 @@ describe("PublicScheduleLinksTab", () => {
     await waitFor(() =>
       expect(mockApiFetch).toHaveBeenCalledWith(
         "/api/v1/admin/events/7/public-schedule-links/5",
-        { method: "DELETE" },
+        expect.objectContaining({
+          method: "DELETE",
+          headers: { "Idempotency-Key": expect.any(String) },
+        }),
       ),
     );
   });

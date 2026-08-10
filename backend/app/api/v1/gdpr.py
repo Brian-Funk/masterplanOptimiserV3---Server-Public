@@ -21,8 +21,10 @@ from app.core.audit import audit
 from app.core.config import settings
 from app.core.evidence import EvidenceUnavailable, append_record as append_evidence_record
 from app.core.compliance_receipts import (
+    cancel_pending_clean_backup_request,
     queue_clean_backup_request,
     verified_clean_backup_receipt,
+    verified_peer_snapshot_resolution_receipt,
 )
 from app.core.deletion_workflow import (
     accept_event_request,
@@ -34,6 +36,8 @@ from app.core.deletion_workflow import (
 )
 from app.core.deletion_cases import (
     build_checklist,
+    confirm_no_controlled_backups,
+    controlled_snapshot_count,
     complete_case,
     create_event_erasure_case,
     ensure_desktop_work_order,
@@ -48,7 +52,14 @@ from app.core.passkey_ceremonies import (
     create_ceremony,
 )
 from app.core.governance import stable_instance_id
-from app.core.ha_replication import observe_ha_replication, protect_current_state
+from app.core.ha_replication import (
+    HAProtectionResult,
+    cancel_uncommitted_protection,
+    create_protection_operation,
+    queue_protection_operation,
+    sync_protection_operation,
+)
+from app.core.ha_witness import HAWritePermitError
 from app.core.security import (
     ensure_recent_reauth,
     get_current_user,
@@ -62,11 +73,13 @@ from app.models.deletion import (
     DeletionApprovalChallenge,
     DeletionChecklistApproval,
     DeletionCase,
+    DeletionRequiredProcessor,
     DeletionSubjectScope,
     DesktopDeletionWorkOrder,
 )
-from app.models.evidence import BackupInventoryRecord
+from app.models.evidence import BackupInventoryRecord, ProcessorIdentity
 from app.models.event import Event
+from app.models.ha import HAProtectionOperation
 from app.models.notification import PushSubscription
 from app.models.published import (
     PublishedPerson,
@@ -141,7 +154,7 @@ class ChecklistApprovalBeginIn(BaseModel):
 class EventErasureRequestIn(BaseModel):
     """Root-authorised request to erase one complete event scope."""
 
-    processor_approval_required: bool = False
+    model_config = ConfigDict(extra="forbid")
 
 
 _OPEN_DELETION_STATES = {
@@ -214,6 +227,8 @@ def _job_detail(job: DeletionCase, db: Session | None = None) -> dict:
         "live_data_purged_at": job.live_data_purged_at,
         "completed_at": job.completed_at,
         "event_ref": job.event_evidence_id,
+        "event_name": job.event_display_name,
+        "subject_name": job.subject_display_name,
         "subject_ref": job.subject_evidence_id,
         "desktop_deletion_required": bool(job.desktop_deletion_required),
         "topology": "two_node_ha" if settings.HA_MODE == "ha" else "single_node",
@@ -227,19 +242,31 @@ def _job_detail(job: DeletionCase, db: Session | None = None) -> dict:
         "clean_backup_bridge": {
             "job_id": job.clean_backup_job_id,
             "receipt_id": job.clean_backup_receipt_id,
+            "local_snapshot_count": controlled_snapshot_count(),
+            "local_resolution_status": (
+                "verified" if job.clean_backup_receipt_id
+                else "pending" if job.clean_backup_job_id
+                else None
+            ),
+            "peer_resolution_status": (
+                "verified" if job.peer_backup_resolution_sha256
+                else "pending" if settings.HA_MODE == "ha" and job.clean_backup_job_id
+                else None
+            ),
         },
         "evidence": {
             "request": job.request_manifest_sha256,
             "acceptance": job.acceptance_receipt_sha256,
             "access_revocation": job.access_revocation_receipt_sha256,
             "desktop_report": job.desktop_report_sha256,
+            "desktop_absence": job.desktop_absence_receipt_sha256,
             "live_purge": job.live_purge_receipt_sha256,
             "peer": job.peer_confirmation_sha256,
             "clean_backup": job.replacement_package_sha256,
+            "peer_backup_resolution": job.peer_backup_resolution_sha256,
+            "backup_not_applicable": job.backup_not_applicable_sha256,
             "backup_resolution": job.backup_resolution_sha256,
             "executor_approval": job.executor_approval_sha256,
-            "controller_approval": job.controller_approval_sha256,
-            "processor_approval": job.processor_approval_sha256,
             "checklist": job.checklist_sha256,
             "final": job.final_receipt_sha256,
         },
@@ -253,7 +280,6 @@ def _job_detail(job: DeletionCase, db: Session | None = None) -> dict:
             "version": job.checklist_version,
             "sha256": job.checklist_sha256,
             "created_at": job.checklist_created_at,
-            "processor_approval_required": job.processor_approval_required,
         },
     }
     if db is not None:
@@ -276,6 +302,10 @@ def _job_detail(job: DeletionCase, db: Session | None = None) -> dict:
                 "operation": work_order.operation,
                 "state": work_order.state,
                 "report_sha256": work_order.report_sha256,
+                "processor_entity_id": work_order.processor_entity_id,
+                "processor_key_id": work_order.processor_key_id,
+                "report_signature_sha256": work_order.report_signature_sha256,
+                "copy_resolution_sha256": work_order.copy_resolution_sha256,
             }
             for work_order in db.query(DesktopDeletionWorkOrder).filter(
                 DesktopDeletionWorkOrder.case_id == job.id,
@@ -291,18 +321,45 @@ def _job_detail(job: DeletionCase, db: Session | None = None) -> dict:
                 DeletionChecklistApproval.case_id == job.id,
             ).order_by(DeletionChecklistApproval.id).all()
         ]
+        required_processors = db.query(DeletionRequiredProcessor).filter(
+            DeletionRequiredProcessor.case_id == job.id,
+        ).order_by(DeletionRequiredProcessor.event_ref, DeletionRequiredProcessor.processor_entity_id).all()
+        processor_identities = {
+            (row.event_evidence_id, row.entity_id): row
+            for row in db.query(ProcessorIdentity).filter(
+                ProcessorIdentity.entity_id.in_([item.processor_entity_id for item in required_processors]),
+            ).all()
+        } if required_processors else {}
+        detail["required_processors"] = [{
+            "event_ref": row.event_ref,
+            "event_name": processor_identities.get((row.event_ref, row.processor_entity_id)).event_display_name
+            if processor_identities.get((row.event_ref, row.processor_entity_id)) else None,
+            "processor_entity_id": row.processor_entity_id,
+            "display_label": processor_identities.get((row.event_ref, row.processor_entity_id)).display_label
+            if processor_identities.get((row.event_ref, row.processor_entity_id)) else None,
+            "processor_key_id": row.completed_key_id or row.snapshotted_key_id,
+            "processor_public_key_sha256": row.completed_public_key_sha256 or row.snapshotted_public_key_sha256,
+            "deletion_receipt_sha256": row.deletion_receipt_sha256,
+            "copy_resolution_sha256": row.copy_resolution_sha256,
+            "state": row.state,
+        } for row in required_processors]
     return detail
 
 
 def _new_deletion_job(db: Session, user: User, *, state: str = "submitted") -> DeletionCase:
-    if user.event_id is None:
+    instance_id = stable_instance_id(db)
+    event = (
+        db.query(Event).filter(Event.id == user.event_id).first()
+        if user.event_id is not None
+        else None
+    )
+    if user.event_id is not None and event is None:
+        raise HTTPException(status_code=409, detail="The account's event data scope no longer exists")
+    if event is None and user.linked_person_id is not None:
         raise HTTPException(
             status_code=409,
-            detail="The account has no event data scope. Contact the instance controller.",
+            detail="The account has a stale desktop person link. Clear it before deletion.",
         )
-    event = db.query(Event).filter(Event.id == user.event_id).first()
-    if event is None:
-        raise HTTPException(status_code=409, detail="The account's event data scope no longer exists")
     published_person = None
     if user.linked_person_id is not None:
         published_person = db.query(PublishedPerson).filter(
@@ -316,9 +373,23 @@ def _new_deletion_job(db: Session, user: User, *, state: str = "submitted") -> D
             )
         user.evidence_subject_id = published_person.evidence_subject_id
     now = datetime.now(timezone.utc)
+    # Activated accounts can legitimately exist before an event assignment.
+    # Give those server-only identities a stable, pseudonymous instance scope
+    # so they can use the same signed evidence workflow without inventing an
+    # event or creating an inapplicable Desktop work order.
+    event_ref = (
+        event.evidence_id
+        if event is not None
+        else str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"urn:masterplan:{instance_id}:server-only-accounts",
+        ))
+    )
     job = DeletionCase(
-        instance_id=stable_instance_id(db),
-        event_evidence_id=event.evidence_id,
+        instance_id=instance_id,
+        event_evidence_id=event_ref,
+        event_display_name=event.name if event is not None else None,
+        subject_display_name=user.display_name or user.username,
         subject_evidence_id=user.evidence_subject_id,
         desktop_deletion_required=published_person is not None,
         user_id=user.id,
@@ -467,8 +538,8 @@ def gdpr_delete_user(
         deletion_job = _new_deletion_job(db, user)
     try:
         accept_subject_request(db, deletion_job, user)
-        event = db.query(Event).filter(Event.id == user.event_id).one()
         if deletion_job.desktop_deletion_required:
+            event = db.query(Event).filter(Event.id == user.event_id).one()
             ensure_desktop_work_order(
                 db,
                 deletion_job,
@@ -546,13 +617,12 @@ def create_event_erasure_request(
         job = create_event_erasure_case(
             db,
             event,
-            processor_approval_required=body.processor_approval_required,
             initiation_reason="manual_root",
         )
         event.purge_case_request_id = job.request_id
         event.purge_started_at = job.submitted_at or datetime.now(timezone.utc)
-        accept_event_request(db, job, event)
         ensure_desktop_work_order(db, job, event=event, subject_ref=None)
+        accept_event_request(db, job, event)
     except (EvidenceUnavailable, ValueError) as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -601,8 +671,8 @@ def accept_deletion_request(
                 detail="The event erasure target no longer exists",
             )
         try:
-            accept_event_request(db, job, event)
             ensure_desktop_work_order(db, job, event=event, subject_ref=None)
+            accept_event_request(db, job, event)
         except (EvidenceUnavailable, ValueError) as exc:
             db.rollback()
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -624,8 +694,8 @@ def accept_deletion_request(
     require_user_management_access(user, admin)
     try:
         accept_subject_request(db, job, user)
-        event = db.query(Event).filter(Event.id == user.event_id).one()
         if job.desktop_deletion_required:
+            event = db.query(Event).filter(Event.id == user.event_id).one()
             ensure_desktop_work_order(
                 db,
                 job,
@@ -696,6 +766,296 @@ def purge_deletion_request_live_data(
     return _job_detail(job, db)
 
 
+@admin_router.post("/deletion-requests/{request_id}/no-controlled-backups")
+def confirm_deletion_has_no_controlled_backups(
+    request_id: str,
+    request: Request,
+    admin: User = Depends(require_admin_recent_reauth),
+    db: Session = Depends(get_db),
+):
+    """Confirm that this deployment uses no controlled recovery backups."""
+
+    if not admin.is_root_admin:
+        raise HTTPException(status_code=403, detail="Root admin access required")
+    if settings.HA_MODE == "ha":
+        raise HTTPException(
+            status_code=409,
+            detail="Two-node HA requires a clean replacement snapshot so both nodes can prove local snapshot resolution.",
+        )
+    job = _admin_deletion_job(db, request_id)
+    try:
+        if job.clean_backup_job_id:
+            cancel_pending_clean_backup_request(job_id=job.clean_backup_job_id)
+            job.clean_backup_job_id = None
+        confirm_no_controlled_backups(db, job)
+    except (EvidenceUnavailable, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    audit(db, user=admin, action="gdpr.no_controlled_backups_confirmed",
+          resource_type="deletion_request",
+          detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
+    db.commit()
+    return _job_detail(job, db)
+
+
+def _advance_peer_protection(
+    db: Session, job: DeletionCase, admin: User, request: Request,
+) -> str | None:
+    """Queue or observe the exact HA privacy barrier without another click."""
+
+    if settings.HA_MODE != "ha" or job.peer_confirmation_sha256:
+        return None
+    if not job.live_purge_receipt_sha256 or not job.privacy_action_id or not job.privacy_action_sequence:
+        return None
+    assertion = {
+        "workflow_type": "deletion_case",
+        "workflow_id": job.request_id,
+        "privacy_action_id": job.privacy_action_id,
+        "privacy_action_sequence": job.privacy_action_sequence,
+        "live_purge_receipt_sha256": job.live_purge_receipt_sha256,
+    }
+    operation = (
+        db.query(HAProtectionOperation)
+        .filter(HAProtectionOperation.id == job.peer_replication_job_id)
+        .first()
+        if job.peer_replication_job_id else None
+    )
+    result: str | None = None
+    if operation is None and job.peer_replication_job_id is None:
+        try:
+            operation = create_protection_operation(
+                db,
+                idempotency_key=f"deletion-peer:{job.request_id}:{job.privacy_action_sequence}",
+                operation_type="privacy-case-purge",
+                resource_type="deletion_case",
+                resource_id=job.request_id,
+            )
+            if operation is not None:
+                job.peer_replication_job_id = operation.id
+            audit(db, user=admin, action="gdpr.peer_replication_requested",
+                  resource_type="deletion_request",
+                  detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
+            db.commit()
+            result = "peer_replication_requested"
+        except HAWritePermitError as exc:
+            db.rollback()
+            cancel_uncommitted_protection(operation)
+            raise EvidenceUnavailable("The standby protection guard is unavailable") from exc
+        except Exception:
+            db.rollback()
+            cancel_uncommitted_protection(operation)
+            raise
+        if operation is not None and not queue_protection_operation(
+            operation, privacy_assertion=assertion,
+        ):
+            operation.state = "indeterminate"
+            operation.stage = "attention_required"
+            operation.error_code = "replication_agent_unavailable"
+            db.commit()
+            raise EvidenceUnavailable(
+                "Standby protection could not be queued. The deletion remains durable and will be retried automatically."
+            )
+    elif (
+        operation is not None
+        and operation.state == "indeterminate"
+        and operation.error_code == "replication_agent_unavailable"
+    ):
+        if not queue_protection_operation(operation, privacy_assertion=assertion):
+            raise EvidenceUnavailable(
+                "Standby protection is still unavailable. The deletion remains durable and locked."
+            )
+        operation.state = "pending"
+        operation.stage = "queued"
+        operation.error_code = None
+        db.commit()
+        result = "peer_replication_requested"
+    if operation is not None:
+        sync_protection_operation(db, operation)
+        if operation.state == "accepted":
+            protection = HAProtectionResult(
+                protected=True,
+                job_id=operation.id,
+                bundle_id=operation.accepted_bundle_id,
+                bundle_sha256=operation.accepted_bundle_sha256,
+                generation=operation.accepted_generation,
+                accepted_at=operation.accepted_at,
+            )
+            confirm_case_peer(db, job, protection)
+            audit(db, user=admin, action="gdpr.peer_replication_confirmed",
+                  resource_type="deletion_request",
+                  detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
+            db.commit()
+            return "peer_replication_confirmed"
+    db.commit()
+    return result
+
+
+def _queue_clean_backup(
+    db: Session, job: DeletionCase, admin: User, request: Request,
+) -> bool:
+    """Idempotently expose one guided host recovery job for this case."""
+
+    if not job.live_data_purged_at or not job.live_purge_receipt_sha256 or not job.privacy_action_id or not job.privacy_action_sequence:
+        raise ValueError("Live data must be purged before creating a clean baseline")
+    if settings.HA_MODE == "ha" and not job.peer_confirmation_sha256:
+        raise ValueError("The peer must accept the privacy action first")
+    created = not bool(job.clean_backup_job_id)
+    job.clean_backup_job_id = job.clean_backup_job_id or str(uuid.uuid4())
+    queue_clean_backup_request(
+        job_id=job.clean_backup_job_id,
+        instance_id=job.instance_id,
+        workflow_type="deletion_case",
+        workflow_id=job.request_id,
+        event_ref=job.event_evidence_id,
+        subject_ref=(None if job.case_type == "event_erasure" else job.subject_evidence_id),
+        privacy_action_id=job.privacy_action_id,
+        privacy_action_sequence=job.privacy_action_sequence,
+        live_purge_receipt_sha256=job.live_purge_receipt_sha256,
+        live_data_purged_at=job.live_data_purged_at,
+    )
+    if created:
+        audit(db, user=admin, action="gdpr.clean_backup_requested",
+              resource_type="deletion_request",
+              detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
+    db.commit()
+    return created
+
+
+def _advance_deletion_case(db: Session, job: DeletionCase, admin: User) -> list[str]:
+    """Apply deterministic machine-side transitions and return those performed."""
+
+    steps: list[str] = []
+    # Repair the former ordering defect for an already-open, never-linked event
+    # without inventing a Desktop receipt. New cases enter ready_for_live_purge
+    # directly because processor applicability is now established pre-acceptance.
+    if job.state == "awaiting_desktop_report" and not job.desktop_deletion_required:
+        job.state = "ready_for_live_purge"
+        steps.append("desktop_not_applicable")
+    if job.state == "ready_for_live_purge":
+        if job.case_type == "event_erasure":
+            event = db.query(Event).filter(Event.evidence_id == job.event_evidence_id).first()
+            if event is None:
+                raise ValueError("The event erasure target no longer exists")
+            purge_event_live_data(db, job, event)
+        else:
+            if job.user_id is None:
+                raise ValueError("The account target no longer exists")
+            user = db.query(User).filter(User.id == job.user_id).first()
+            if user is None:
+                raise ValueError("The account target no longer exists")
+            require_user_management_access(user, admin)
+            purge_subject_live_data(db, job, user)
+        steps.append("live_data_purged")
+
+    if (
+        job.clean_backup_job_id
+        and not job.clean_backup_receipt_id
+        and job.live_data_purged_at
+        and (settings.HA_MODE != "ha" or job.peer_confirmation_sha256)
+    ):
+        expected = {
+            "job_id": job.clean_backup_job_id,
+            "instance_id": job.instance_id,
+            "workflow_type": "deletion_case",
+            "workflow_id": job.request_id,
+            "event_ref": job.event_evidence_id,
+            "subject_ref": None if job.case_type == "event_erasure" else job.subject_evidence_id,
+            "privacy_action_id": job.privacy_action_id,
+            "privacy_action_sequence": job.privacy_action_sequence,
+            "live_purge_receipt_sha256": job.live_purge_receipt_sha256,
+            "live_data_purged_at": job.live_data_purged_at.astimezone(timezone.utc).isoformat(),
+        }
+        try:
+            receipt = verified_clean_backup_receipt(
+                db, job_id=job.clean_backup_job_id, expected=expected,
+            )
+        except EvidenceUnavailable as exc:
+            if "not available yet" not in str(exc):
+                raise
+        else:
+            peer_receipt = None
+            if settings.HA_MODE == "ha":
+                peer_receipt = verified_peer_snapshot_resolution_receipt(
+                    db,
+                    job_id=job.clean_backup_job_id,
+                    expected={
+                        **expected,
+                        "clean_receipt_sha256": receipt["receipt_sha256"],
+                        "replacement_package_id": receipt["package_id"],
+                        "replacement_package_sha256": receipt["package_sha256"],
+                    },
+                )
+            confirm_case_clean_backup(db, job, receipt=receipt, peer_receipt=peer_receipt)
+            steps.append("recovery_snapshot_verified")
+
+    if (
+        (job.replacement_package_sha256 or job.backup_not_applicable_sha256)
+        and not job.checklist_sha256
+        and not job.retention_reason_code
+    ):
+        unresolved = db.query(BackupInventoryRecord).filter(
+            BackupInventoryRecord.status == "superseded_pending_deletion",
+        ).first()
+        if unresolved is None:
+            build_checklist(job, db)
+            steps.append("completion_review_prepared")
+
+    if job.state == "ready_for_completion":
+        complete_case(job, db)
+        steps.append("case_completed")
+    return steps
+
+
+@admin_router.post("/deletion-requests/{request_id}/advance")
+def advance_deletion_request(
+    request_id: str,
+    request: Request,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Advance all currently provable machine-side deletion steps."""
+
+    if not admin.is_root_admin:
+        raise HTTPException(status_code=403, detail="Root admin access required")
+    job = _admin_deletion_job(db, request_id)
+    try:
+        steps = _advance_deletion_case(db, job, admin)
+    except (EvidenceUnavailable, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if steps:
+        audit(db, user=admin, action="gdpr.advance_deletion",
+              resource_type="deletion_request",
+              detail=json.dumps({"deletion_request_id": job.request_id, "steps": steps}),
+              request=request)
+    db.commit()
+    job = _admin_deletion_job(db, request_id)
+    try:
+        peer_step = _advance_peer_protection(db, job, admin, request)
+        if peer_step:
+            steps.append(peer_step)
+        if job.peer_confirmation_sha256:
+            follow_up = _advance_deletion_case(db, job, admin)
+            if follow_up:
+                steps.extend(follow_up)
+                audit(db, user=admin, action="gdpr.advance_deletion",
+                      resource_type="deletion_request",
+                      detail=json.dumps({"deletion_request_id": job.request_id, "steps": follow_up}),
+                      request=request)
+                db.commit()
+            if (
+                settings.HA_MODE == "ha"
+                and not job.clean_backup_job_id
+                and not job.clean_backup_receipt_id
+            ):
+                if _queue_clean_backup(db, job, admin, request):
+                    steps.append("recovery_snapshot_requested")
+    except (EvidenceUnavailable, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"advanced": steps, **_job_detail(job, db)}
+
+
 @admin_router.post("/deletion-requests/{request_id}/peer-replication")
 def confirm_deletion_peer(
     request_id: str,
@@ -707,43 +1067,11 @@ def confirm_deletion_peer(
     job = _admin_deletion_job(db, request_id)
     if settings.HA_MODE != "ha":
         raise HTTPException(status_code=409, detail="Peer replication is not applicable")
-    if not job.live_purge_receipt_sha256 or not job.privacy_action_id or not job.privacy_action_sequence:
-        raise HTTPException(status_code=409, detail="Live data must be purged before peer replication")
-    assertion = {
-        "workflow_type": "deletion_case",
-        "workflow_id": job.request_id,
-        "privacy_action_id": job.privacy_action_id,
-        "privacy_action_sequence": job.privacy_action_sequence,
-        "live_purge_receipt_sha256": job.live_purge_receipt_sha256,
-    }
-    protection = (
-        observe_ha_replication(
-            job.peer_replication_job_id,
-            privacy_assertion=assertion,
-        )
-        if job.peer_replication_job_id
-        else None
-    )
-    if protection is None and job.peer_replication_job_id is None:
-        protection = protect_current_state(
-            "privacy-case-purge",
-            critical=False,
-            privacy_assertion=assertion,
-        )
-        job.peer_replication_job_id = protection.job_id
     try:
-        if protection is not None and protection.protected:
-            confirm_case_peer(db, job, protection)
+        _advance_peer_protection(db, job, admin, request)
     except (EvidenceUnavailable, ValueError) as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    audit(db, user=admin, action=(
-        "gdpr.peer_replication_confirmed"
-        if job.peer_confirmation_sha256
-        else "gdpr.peer_replication_requested"
-    ), resource_type="deletion_request",
-          detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
-    db.commit()
     if not job.peer_confirmation_sha256:
         response.status_code = 202
     return _job_detail(job, db)
@@ -757,32 +1085,11 @@ def request_deletion_clean_backup(
     db: Session = Depends(get_db),
 ):
     job = _admin_deletion_job(db, request_id)
-    if not job.live_data_purged_at or not job.live_purge_receipt_sha256 or not job.privacy_action_id or not job.privacy_action_sequence:
-        raise HTTPException(status_code=409, detail="Live data must be purged before creating a clean baseline")
-    if settings.HA_MODE == "ha" and not job.peer_confirmation_sha256:
-        raise HTTPException(status_code=409, detail="The peer must accept the privacy action first")
-    job.clean_backup_job_id = job.clean_backup_job_id or str(uuid.uuid4())
     try:
-        queue_clean_backup_request(
-            job_id=job.clean_backup_job_id,
-            instance_id=job.instance_id,
-            workflow_type="deletion_case",
-            workflow_id=job.request_id,
-            event_ref=job.event_evidence_id,
-            subject_ref=(
-                None if job.case_type == "event_erasure" else job.subject_evidence_id
-            ),
-            privacy_action_id=job.privacy_action_id,
-            privacy_action_sequence=job.privacy_action_sequence,
-            live_purge_receipt_sha256=job.live_purge_receipt_sha256,
-            live_data_purged_at=job.live_data_purged_at,
-        )
+        _queue_clean_backup(db, job, admin, request)
     except (EvidenceUnavailable, ValueError) as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    audit(db, user=admin, action="gdpr.clean_backup_requested", resource_type="deletion_request",
-          detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
-    db.commit()
     return _job_detail(job, db)
 
 
@@ -816,7 +1123,19 @@ def apply_deletion_clean_backup_receipt(
         receipt = verified_clean_backup_receipt(
             db, job_id=job.clean_backup_job_id, expected=expected,
         )
-        confirm_case_clean_backup(db, job, receipt=receipt)
+        peer_receipt = None
+        if settings.HA_MODE == "ha":
+            peer_receipt = verified_peer_snapshot_resolution_receipt(
+                db,
+                job_id=job.clean_backup_job_id,
+                expected={
+                    **expected,
+                    "clean_receipt_sha256": receipt["receipt_sha256"],
+                    "replacement_package_id": receipt["package_id"],
+                    "replacement_package_sha256": receipt["package_sha256"],
+                },
+            )
+        confirm_case_clean_backup(db, job, receipt=receipt, peer_receipt=peer_receipt)
     except (EvidenceUnavailable, ValueError) as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -978,10 +1297,8 @@ def begin_deletion_checklist_approval(
     job = _admin_deletion_job(db, request_id)
     if not job.checklist_sha256 or job.state not in {"awaiting_approvals", "ready_for_completion"}:
         raise HTTPException(status_code=409, detail="The case has no checklist awaiting approval")
-    if body.role in {"controller", "processor"} and not admin.is_root_admin:
-        raise HTTPException(status_code=403, detail="Root admin access required for this approval role")
-    if body.role == "processor" and not job.processor_approval_required:
-        raise HTTPException(status_code=409, detail="This case does not require processor approval")
+    if body.role != "executor" or not admin.is_root_admin:
+        raise HTTPException(status_code=403, detail="Only root may authorise Server completion")
     auth_session = getattr(admin, "_auth_session", None)
     if auth_session is None:
         raise HTTPException(status_code=401, detail="Session expired or invalid")
@@ -1023,6 +1340,118 @@ def begin_deletion_checklist_approval(
         "checklist_sha256": job.checklist_sha256,
         "role": body.role,
     }
+
+
+@admin_router.post("/deletion-requests/{request_id}/completion-confirmation/begin")
+def begin_deletion_completion_confirmation(
+    request_id: str,
+    request: Request,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Begin one confirmation that covers the single-maintainer final review."""
+
+    if not admin.is_root_admin:
+        raise HTTPException(status_code=403, detail="Root admin access required")
+    job = _admin_deletion_job(db, request_id)
+    if not job.checklist_sha256 or job.state not in {"awaiting_approvals", "ready_for_completion"}:
+        raise HTTPException(status_code=409, detail="The case is not ready for completion review")
+    auth_session = getattr(admin, "_auth_session", None)
+    if auth_session is None:
+        raise HTTPException(status_code=401, detail="Session expired or invalid")
+    nonce = secrets.token_bytes(32)
+    challenge = hashlib.sha256(
+        b"mp-opt-deletion-completion-v1\0"
+        + job.request_id.encode("ascii")
+        + b"\0"
+        + job.checklist_sha256.encode("ascii")
+        + b"\0"
+        + nonce
+    ).digest()
+    options = generate_authentication_options(
+        rp_id=settings.WEBAUTHN_RP_ID,
+        challenge=challenge,
+        user_verification=UserVerificationRequirement.REQUIRED,
+    )
+    ceremony = create_ceremony(
+        challenge, DELETION_APPROVAL, db,
+        user_id=admin.id, session_id=auth_session.id,
+    )
+    db.add(DeletionApprovalChallenge(
+        ceremony_id=ceremony.id,
+        case_id=job.id,
+        checklist_sha256=job.checklist_sha256,
+        role="executor",
+        user_id=admin.id,
+    ))
+    db.commit()
+    return {"options": options_to_json(options), "ceremony_id": ceremony.id}
+
+
+@admin_router.post("/deletion-requests/{request_id}/completion-confirmation/complete")
+def complete_deletion_completion_confirmation(
+    request_id: str,
+    body: CeremonyCompletion,
+    request: Request,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Verify one human confirmation, record both single-maintainer roles, and finish."""
+
+    if not admin.is_root_admin:
+        raise HTTPException(status_code=403, detail="Root admin access required")
+    job = _admin_deletion_job(db, request_id)
+    auth_session = getattr(admin, "_auth_session", None)
+    if auth_session is None:
+        raise HTTPException(status_code=401, detail="Session expired or invalid")
+    ceremony = consume_ceremony(
+        body.ceremony_id, DELETION_APPROVAL, db,
+        user_id=admin.id, session_id=auth_session.id,
+    )
+    context = db.query(DeletionApprovalChallenge).filter(
+        DeletionApprovalChallenge.ceremony_id == ceremony.id,
+        DeletionApprovalChallenge.case_id == job.id,
+        DeletionApprovalChallenge.checklist_sha256 == job.checklist_sha256,
+        DeletionApprovalChallenge.role == "executor",
+        DeletionApprovalChallenge.user_id == admin.id,
+        DeletionApprovalChallenge.consumed_at.is_(None),
+    ).first()
+    if context is None:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Completion confirmation is no longer valid")
+    try:
+        credential_id = _credential_id(body.credential)
+        stored = db.query(WebAuthnCredential).filter(
+            WebAuthnCredential.credential_id == credential_id,
+            WebAuthnCredential.user_id == admin.id,
+        ).with_for_update().one()
+        _verify_user_handle(body.credential, admin.id)
+        verification = verify_authentication_response(
+            credential=body.credential,
+            expected_challenge=base64url_to_bytes(ceremony.challenge),
+            expected_rp_id=settings.WEBAUTHN_RP_ID,
+            expected_origin=settings.WEBAUTHN_ORIGIN,
+            credential_public_key=stored.public_key,
+            credential_current_sign_count=stored.sign_count,
+            require_user_verification=True,
+        )
+        stored.sign_count = verification.new_sign_count
+        stored.last_used_at = datetime.now(timezone.utc)
+        context.consumed_at = datetime.now(timezone.utc)
+        credential_sha256 = hashlib.sha256(credential_id).hexdigest()
+        record_checklist_approval(
+            db, job, role="executor", user_id=admin.id,
+            credential_sha256=credential_sha256,
+        )
+        complete_case(job, db)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Completion confirmation failed") from exc
+    audit(db, user=admin, action="gdpr.confirm_deletion_completion",
+          resource_type="deletion_request",
+          detail=json.dumps({"deletion_request_id": job.request_id}), request=request)
+    db.commit()
+    return _job_detail(job, db)
 
 
 @admin_router.post("/deletion-requests/{request_id}/approvals/{role}/complete")
@@ -1084,6 +1513,8 @@ def complete_deletion_checklist_approval(
             user_id=admin.id,
             credential_sha256=hashlib.sha256(credential_id).hexdigest(),
         )
+        if job.state == "ready_for_completion":
+            complete_case(job, db)
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail="Checklist approval failed") from exc

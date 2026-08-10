@@ -8,6 +8,8 @@ const mockApiFetch = vi.hoisted(() => vi.fn());
 const mockPush = vi.hoisted(() => vi.fn());
 const mockReplace = vi.hoisted(() => vi.fn());
 const mockUseAuth = vi.hoisted(() => vi.fn());
+const mockLogout = vi.hoisted(() => vi.fn());
+const mockHardNavigate = vi.hoisted(() => vi.fn());
 const mockRouter = vi.hoisted(() => ({
   push: mockPush,
   replace: mockReplace,
@@ -15,11 +17,16 @@ const mockRouter = vi.hoisted(() => ({
 
 vi.mock("@/lib/api", () => ({ apiFetch: mockApiFetch }));
 vi.mock("@/contexts/AuthContext", () => ({ useAuth: mockUseAuth }));
+vi.mock("@/lib/hardNavigation", () => ({ hardNavigate: mockHardNavigate }));
 vi.mock("next/navigation", () => ({
   useRouter: () => mockRouter,
 }));
 vi.mock("@/components/Logo", () => ({ Logo: () => <div>Logo</div> }));
 vi.mock("@/components/ThemeToggle", () => ({ ThemeToggle: () => null }));
+vi.mock("@/components/PasskeyManager", () => ({
+  PasskeyManager: ({ open }: { open: boolean }) =>
+    open ? <div role="dialog">Passkey manager</div> : null,
+}));
 
 const account = {
   id: 7,
@@ -69,7 +76,10 @@ describe("Account security page", () => {
     mockApiFetch.mockReset();
     mockPush.mockReset();
     mockReplace.mockReset();
-    mockUseAuth.mockReturnValue({ user: account, isLoading: false });
+    mockLogout.mockReset();
+    mockLogout.mockResolvedValue(true);
+    mockHardNavigate.mockReset();
+    mockUseAuth.mockReturnValue({ user: account, isLoading: false, logout: mockLogout });
     mockApiFetch.mockResolvedValue(jsonResponse(sessions));
   });
 
@@ -81,6 +91,16 @@ describe("Account security page", () => {
     expect(screen.getByText("Current")).toBeInTheDocument();
     expect(screen.getByText(/raw IP details are not shown/i)).toBeInTheDocument();
     expect(mockApiFetch).toHaveBeenCalledWith("/api/v1/auth/sessions");
+  });
+
+  it("exposes passkey management for every authenticated account", async () => {
+    const user = userEvent.setup();
+    render(<AccountSecurityPage />);
+
+    await screen.findByText("Chrome on Windows");
+    await user.click(screen.getByRole("button", { name: "Manage passkeys" }));
+
+    expect(screen.getByRole("dialog")).toHaveTextContent("Passkey manager");
   });
 
   it("revokes another session and removes it from the list", async () => {
@@ -112,6 +132,7 @@ describe("Account security page", () => {
     await screen.findByText("Chrome on Windows");
     await user.click(screen.getByRole("button", { name: "Revoke and log out" }));
 
-    await waitFor(() => expect(mockReplace).toHaveBeenCalledWith("/login"));
+    await waitFor(() => expect(mockHardNavigate).toHaveBeenCalledWith("/login"));
+    expect(mockLogout).toHaveBeenCalledOnce();
   });
 });

@@ -19,6 +19,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+      - name: Install pinned verifier dependency
+        run: python -m pip install cryptography==45.0.6
       - name: Verify every portable bundle, digest, identity and complete chain
         run: python tools/verify_evidence_repo.py .
   ingestion-path-validation:
@@ -32,6 +34,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+      - name: Install pinned verifier dependency
+        run: python -m pip install cryptography==45.0.6
       - name: Require exactly one new bundle and digest directory
         run: >-
           python tools/validate_ingestion_paths.py .

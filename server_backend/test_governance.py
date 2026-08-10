@@ -1,8 +1,11 @@
 """Contracts for locally controlled, immutable governance publications."""
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
+from app.core import governance_rendering
+from app.core.config import settings
 from server_backend.conftest import _make_client, create_test_event, create_test_user
 
 
@@ -168,6 +171,209 @@ def test_draft_is_private_and_publication_is_immutable(db):
     assert retry.json()["version"] == 1
 
 
+def test_optional_controller_details_do_not_block_a_truthful_minimum_notice(db):
+    client, _root = _root_with_reauth(db)
+    profile = deepcopy(PROFILE)
+    for key in (
+        "controller_postal_address", "controller_country",
+        "supervisory_authority_name", "supervisory_authority_url",
+        "processor_summary", "retention_summary", "rights_summary", "terms_summary",
+    ):
+        profile[key] = ""
+    profile["structured"]["instance_name"] = ""
+    profile["structured"]["jurisdiction_scope"] = ""
+    profile["structured"]["incident_contact_email"] = None
+    profile["structured"]["hosting_countries"] = []
+    for purpose in profile["structured"]["processing_purposes"]:
+        purpose["gdpr_legal_basis"] = None
+        purpose["swiss_justification_or_basis"] = None
+
+    saved = client.put("/api/v1/admin/governance", json=profile)
+    assert saved.status_code == 200, saved.json()
+    preflight = saved.json()["preflight"]
+    assert preflight["ready"] is True
+    statuses = {item["code"]: item["status"] for item in preflight["checks"]}
+    assert statuses["controller_address"] == "optional"
+    assert statuses["supervisory_authority"] == "optional"
+    assert statuses["rights_summary"] == "optional"
+    assert statuses["controller_basis_decisions"] == "externally_unverifiable"
+
+    published = client.post("/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION)
+    assert published.status_code == 200, published.json()
+    rights = client.get("/api/v1/governance/public/rights.html")
+    assert rights.status_code == 200
+    assert "competent data-protection supervisory authority" in rights.text
+    assert "mailto:privacy@synthetic-controller.ch" in rights.text
+
+
+def test_retention_needs_periods_or_clear_controller_criteria(db):
+    client, _root = _root_with_reauth(db)
+    profile = deepcopy(PROFILE)
+    profile["retention_summary"] = ""
+    profile["structured"]["retention"]["live_retention_days"] = None
+    profile["structured"]["retention"]["backup_retention_days"] = None
+    profile["structured"]["retention"]["receipt_retention_days"] = None
+
+    saved = client.put("/api/v1/admin/governance", json=profile)
+    assert saved.status_code == 200, saved.json()
+    check = next(item for item in saved.json()["preflight"]["checks"] if item["code"] == "retention_configuration")
+    assert check["status"] == "missing"
+    assert saved.json()["preflight"]["ready"] is False
+
+
+def test_runtime_feature_declarations_are_authoritative_on_draft_save(db, monkeypatch):
+    client, _root = _root_with_reauth(db)
+    imported = deepcopy(PROFILE)
+    imported["structured"]["optional_features"]["ha_enabled"] = False
+    monkeypatch.setattr(
+        governance_rendering,
+        "runtime_feature_state",
+        lambda: {
+            "smtp_enabled": False,
+            "push_enabled": False,
+            "ha_enabled": True,
+            "dns_mode": "dns_only",
+        },
+    )
+
+    saved = client.put("/api/v1/admin/governance", json=imported)
+
+    assert saved.status_code == 200, saved.json()
+    assert saved.json()["draft"]["structured"]["optional_features"]["ha_enabled"] is True
+    assert any(
+        item["governance_field"] == "optional_features.ha_enabled"
+        and item["previous"] is False
+        and item["current"] is True
+        for item in saved.json()["runtime_enforced_changes"]
+    )
+    ha_check = next(
+        item for item in saved.json()["preflight"]["checks"] if item["code"] == "ha_enabled"
+    )
+    assert ha_check["status"] == "ready"
+
+
+def test_runtime_retention_settings_are_authoritative_and_require_republication(db):
+    client, _root = _root_with_reauth(db)
+    imported = deepcopy(PROFILE)
+    imported["structured"]["retention"]["event_grace_days"] = 2
+    imported["structured"]["retention"]["audit_retention_days"] = 31
+    imported["structured"]["retention"]["browser_cache_expiry_hours"] = 3
+
+    saved = client.put("/api/v1/admin/governance", json=imported)
+    assert saved.status_code == 200, saved.json()
+    retained = saved.json()["draft"]["structured"]["retention"]
+    assert retained["event_grace_days"] == settings.EVENT_PURGE_GRACE_DAYS
+    assert retained["audit_retention_days"] == 90
+    assert retained["browser_cache_expiry_hours"] == 24
+    assert {item["governance_field"] for item in saved.json()["runtime_enforced_changes"]} == {
+        "retention.event_grace_days", "retention.audit_retention_days",
+        "retention.browser_cache_expiry_hours",
+    }
+
+    published = client.post("/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION)
+    assert published.status_code == 200, published.json()
+    original_public = client.get("/api/v1/governance/public").json()
+    assert original_public["retention"]["audit_retention_days"] == 90
+
+    changed = client.put("/api/v1/admin/settings", json={"settings": {"audit_log_retention_days": 120}})
+    assert changed.status_code == 200, changed.json()
+    assert changed.json()["governance_impact"]["draft_updated"] is True
+    assert changed.json()["governance_impact"]["publication_required"] is True
+    draft = client.get("/api/v1/admin/governance").json()
+    assert draft["draft"]["structured"]["retention"]["audit_retention_days"] == 120
+    assert draft["runtime_impact"]["publication_required"] is True
+    assert client.get("/api/v1/governance/public").json()["retention"]["audit_retention_days"] == 90
+    assert any(
+        item["path"] == "retention.audit_retention_days"
+        for item in client.get("/api/v1/admin/governance/preview").json()["diff"]["changes"]
+    )
+
+    republished = client.post("/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION)
+    assert republished.status_code == 200, republished.json()
+    assert republished.json()["version"] == 2
+    assert client.get("/api/v1/governance/public").json()["retention"]["audit_retention_days"] == 120
+    assert client.get("/api/v1/admin/governance").json()["runtime_impact"]["publication_required"] is False
+
+
+def test_runtime_retention_reversion_clears_stale_governance_impact(db):
+    from app.models.server_setting import ServerSetting
+
+    client, _root = _root_with_reauth(db)
+    saved = client.put("/api/v1/admin/governance", json=PROFILE)
+    assert saved.status_code == 200, saved.json()
+    published = client.post("/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION)
+    assert published.status_code == 200, published.json()
+
+    changed = client.put(
+        "/api/v1/admin/settings",
+        json={"settings": {"event_purge_grace_days": settings.EVENT_PURGE_GRACE_DAYS + 1}},
+    )
+    assert changed.status_code == 200, changed.json()
+    assert changed.json()["governance_impact"]["publication_required"] is True
+
+    restored = client.put(
+        "/api/v1/admin/settings",
+        json={"settings": {"event_purge_grace_days": settings.EVENT_PURGE_GRACE_DAYS}},
+    )
+    assert restored.status_code == 200, restored.json()
+    assert restored.json()["governance_impact"] == {
+        "draft_updated": False,
+        "publication_required": False,
+        "changed_at": None,
+        "changes": [],
+    }
+    draft = client.get("/api/v1/admin/governance").json()
+    assert draft["runtime_impact"]["publication_required"] is False
+    assert draft["runtime_impact"]["changes"] == []
+    preview = client.get("/api/v1/admin/governance/preview").json()
+    assert preview["diff"]["changes"] == []
+    assert (
+        client.get("/api/v1/governance/public").json()["retention"]["event_grace_days"]
+        == settings.EVENT_PURGE_GRACE_DAYS
+    )
+
+    # Deploying the fix must also hide a no-op marker already persisted by the
+    # previous implementation; operators should not have to repeat the change.
+    changed_fields = db.query(ServerSetting).filter(
+        ServerSetting.key == "governance_runtime_changed_fields"
+    ).one()
+    changed_fields.value = json.dumps([{
+        "setting": "event_purge_grace_days",
+        "governance_field": "retention.event_grace_days",
+        "label": "Event purge grace",
+        "previous": settings.EVENT_PURGE_GRACE_DAYS,
+        "current": settings.EVENT_PURGE_GRACE_DAYS,
+    }])
+    publication_required = db.query(ServerSetting).filter(
+        ServerSetting.key == "governance_runtime_publication_required"
+    ).one()
+    publication_required.value = "true"
+    db.commit()
+
+    reconciled = client.get("/api/v1/admin/governance").json()["runtime_impact"]
+    assert reconciled["draft_updated"] is False
+    assert reconciled["publication_required"] is False
+    assert reconciled["changed_at"] is None
+    assert reconciled["changes"] == []
+
+
+def test_preflight_reports_required_controller_trust_before_publication(monkeypatch, db):
+    monkeypatch.setattr(settings, "KEY_SEPARATION_ENFORCED", True)
+    client, _root = _root_with_reauth(db)
+
+    saved = client.put("/api/v1/admin/governance", json=PROFILE)
+
+    assert saved.status_code == 200
+    trust_check = next(item for item in saved.json()["preflight"]["checks"] if item["code"] == "controller_trust")
+    assert trust_check["status"] == "missing"
+    assert saved.json()["preflight"]["ready"] is False
+    preview = client.get("/api/v1/admin/governance/preview").json()
+    assert preview["preflight"]["ready"] is False
+    blocked = client.post("/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION)
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "controller_trust_required"
+
+
 def test_public_legal_notice_is_readable_without_javascript_and_escapes_controller_text(db):
     client, _root = _root_with_reauth(db)
     client.put("/api/v1/admin/governance", json=PROFILE)
@@ -188,6 +394,100 @@ def test_public_legal_notice_is_readable_without_javascript_and_escapes_controll
     assert "IndexedDB offline calendar response" in response.text
     assert "linked identity" in response.text
     assert "sessionStorage" in response.text
+
+
+def test_immutable_privacy_and_rights_pages_are_styled_human_readable_notices(db):
+    client, _root = _root_with_reauth(db)
+    profile = {
+        **PROFILE,
+        "privacy_contact_phone": "+41 44 555 01 23",
+        "dpo_contact": "dpo@synthetic-controller.ch",
+    }
+    assert client.put("/api/v1/admin/governance", json=profile).status_code == 200
+    published = client.post(
+        "/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION
+    ).json()
+
+    privacy = client.get("/api/v1/governance/public/versions/1/privacy.html")
+    rights = client.get("/api/v1/governance/public/versions/1/rights.html")
+
+    for response in (privacy, rights):
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
+        assert '<article class="notice-shell">' in response.text
+        assert 'font-family:"Source Sans 3"' in response.text
+        assert 'src="/logo_normal.png"' in response.text
+        assert 'alt="Masterplan Optimiser"' in response.text
+        assert f"SHA-256 {published['content_sha256']}" in response.text
+        assert 'href="/api/v1/governance/public/versions/1/privacy.html"' in response.text
+        assert 'href="/api/v1/governance/public/versions/1/rights.html"' in response.text
+        assert '"controller_legal_name"' not in response.text
+        assert "<pre>" not in response.text
+        assert "<script>" not in response.text
+
+    assert "Purpose and permitted information" in privacy.text
+    assert "Cookies and browser storage" in privacy.text
+    assert "Processors and service providers" in privacy.text
+    assert 'href="tel:+41445550123">+41 44 555 01 23</a>' in privacy.text
+    assert 'href="mailto:dpo@synthetic-controller.ch">dpo@synthetic-controller.ch</a>' in privacy.text
+    assert 'href="rights.html">Read how to exercise your rights</a>' in privacy.text
+    terms = client.get("/api/v1/governance/public/versions/1/terms.html")
+    assert terms.status_code == 200
+    assert 'href="data-policy.html">permitted-data boundary</a>' in terms.text
+    assert "How to make a request" in rights.text
+    assert "What happens next" in rights.text
+    assert "Email the privacy contact" in rights.text
+    assert "Access" in rights.text
+    assert "Correction" in rights.text
+    assert "Erasure" in rights.text
+    assert "Restriction" in rights.text
+    assert "Objection" in rights.text
+    assert "Portability" in rights.text
+    assert "Automated decisions" in rights.text
+    assert "You can ask in ordinary language" in rights.text
+    assert "GDPR Art. 15" in rights.text
+    assert "FADP Art. 25" in rights.text
+    assert "GDPR Articles 77 and 79" in rights.text
+    assert "FADP Articles 32 and 49 onward" in rights.text
+
+
+def test_every_public_governance_section_uses_the_shared_masterplan_shell(db):
+    client, _root = _root_with_reauth(db)
+    assert client.put("/api/v1/admin/governance", json=PROFILE).status_code == 200
+    assert client.post(
+        "/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION
+    ).status_code == 200
+
+    for section in ("privacy", "legal", "terms", "data-policy", "retention", "rights", "processors"):
+        response = client.get(f"/api/v1/governance/public/versions/1/{section}.html")
+        assert response.status_code == 200
+        assert '<article class="notice-shell">' in response.text
+        assert '<nav class="notice-nav"' in response.text
+        assert '<footer class="notice-footer">' in response.text
+        assert 'src="/logo_normal.png"' in response.text
+        assert "Masterplan Optimiser self-hosted instance" in response.text
+
+
+def test_root_can_review_saved_draft_as_private_html_before_publication(db):
+    client, _root = _root_with_reauth(db)
+    profile = {**PROFILE, "controller_legal_name": "Draft <script>alert(1)</script> Controller"}
+    assert client.put("/api/v1/admin/governance", json=profile).status_code == 200
+
+    response = client.get("/api/v1/admin/governance/preview/privacy.html")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-robots-tag"] == "noindex, nofollow"
+    assert "Private draft preview" in response.text
+    assert "Draft &lt;script&gt;alert(1)&lt;/script&gt; Controller" in response.text
+    assert "<script>" not in response.text
+    assert "/api/v1/admin/governance/preview/rights.html" in response.text
+    assert "Published policy version" not in response.text
+    assert client.get("/api/v1/governance/public").json()["configured"] is False
+
+    participant = create_test_user(db, username="governance.preview.denied")
+    denied = _make_client(db, participant).get("/api/v1/admin/governance/preview/privacy.html")
+    assert denied.status_code == 403
 
 
 def test_preview_classifies_material_changes_and_export_contains_only_published_snapshot(db):
@@ -272,7 +572,10 @@ def test_frontend_legal_artifacts_are_self_contained_and_exact():
     }
     for name, page in pages.items():
         source = page.read_text(encoding="utf-8")
-        assert 'path.join(process.cwd(), "legal-artifacts"' in source
+        assert (
+            'path.join(process.cwd(), "legal-artifacts"' in source
+            or "path.join(process.cwd(), 'legal-artifacts'" in source
+        )
         assert name in source
         assert "SECURITY_REPORT.md" not in source
 

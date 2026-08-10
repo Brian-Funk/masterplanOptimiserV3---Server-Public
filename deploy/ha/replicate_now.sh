@@ -8,8 +8,56 @@ MP_HA_HOME="${MP_HA_HOME:-/etc/mp-opt-ha}"
 MP_HA_STATE="${MP_HA_STATE:-$HOME/.local/state/mp-opt-ha-replication}"
 job_id="${1:-$(cat /proc/sys/kernel/random/uuid)}"
 request_file="${2:-}"
+sender_started_ms="$(date +%s%3N)"
 [[ "$job_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || exit 1
 [ -z "$request_file" ] || { [ -f "$request_file" ] && [ ! -L "$request_file" ]; } || exit 1
+
+update_operation_stage() {
+    local stage_name="$1" state_name="${2:-pending}" operation_id="" operation_sequence=""
+    [ -n "$request_file" ] || return 0
+    [ "$(jq -r '.format // empty' "$request_file" 2>/dev/null)" = "mp-opt-replication-batch-v2" ] || return 0
+    install -d -m 0711 "$MP_ROOT/runtime/ha-operation-results"
+    while IFS=$'\t' read -r operation_id operation_sequence; do
+        [ -n "$operation_id" ] || continue
+        jq -n --arg operation "$operation_id" --arg state "$state_name" \
+            --arg stage "$stage_name" --arg bundle "$job_id" \
+            --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson sequence "$operation_sequence" \
+            '{format:"mp-opt-ha-operation-result-v1",operation_id:$operation,state:$state,stage:$stage,mutation_sequence:$sequence,bundle_id:$bundle,bundle_sha256:null,generation:null,error_code:null,updated_at:$updated,accepted_at:null}' \
+            > "$MP_ROOT/runtime/ha-operation-results/.${operation_id}.tmp"
+        chmod 0644 "$MP_ROOT/runtime/ha-operation-results/.${operation_id}.tmp"
+        mv "$MP_ROOT/runtime/ha-operation-results/.${operation_id}.tmp" \
+            "$MP_ROOT/runtime/ha-operation-results/${operation_id}.json"
+    done < <(jq -r '.operations[]? | [.marker.operation_id,.marker.mutation_sequence] | @tsv' "$request_file")
+}
+
+peer_confirms_bundle() {
+    local receiver="" expected_operations="" confirmed_operations=""
+    receiver="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$HA_PEER_SSH" \
+        "cat /opt/masterplan/runtime/ha-receiver.json" 2>/dev/null || true)"
+    [ "$(jq -r '.last_bundle_id // empty' <<< "$receiver" 2>/dev/null)" = "$job_id" ] || return 1
+    [ "$(jq -r '.last_bundle_sha256 // empty' <<< "$receiver" 2>/dev/null)" = "$archive_hash" ] || return 1
+    if [ -n "$request_file" ] && [ "$(jq -r '.format // empty' "$request_file")" = "mp-opt-replication-batch-v2" ]; then
+        expected_operations="$(jq -c '[.operations[]?.marker | {operation_id,mutation_sequence}] | sort_by(.mutation_sequence)' "$request_file")"
+        confirmed_operations="$(jq -c '[.protection_operations[]?] | sort_by(.mutation_sequence)' <<< "$receiver" 2>/dev/null)"
+        [ "$expected_operations" = "$confirmed_operations" ] || return 1
+    fi
+    return 0
+}
+
+assert_current_holder() {
+    local control holder current_generation routing_ready
+    control="$(cat "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
+    holder="$(jq -r '.holder_node_id // empty' <<< "$control" 2>/dev/null || true)"
+    current_generation="$(jq -r '.generation // 0' <<< "$control" 2>/dev/null || true)"
+    routing_ready="$(jq -r '.routing_ready // false' <<< "$control" 2>/dev/null || true)"
+    if [ "$holder" != "$HA_NODE_ID" ] \
+        || [ "$current_generation" != "$generation" ] \
+        || [ "$routing_ready" != true ]; then
+        echo "Replication stopped because this node no longer holds the original writer lease." >&2
+        exit 24
+    fi
+}
 
 # shellcheck source=../management/common.sh
 source "$MP_ROOT/deploy/management/common.sh"
@@ -19,13 +67,16 @@ mp_load_ha_config
 generation="$(jq -r '.generation // 0' "$MP_ROOT/runtime/ha-control.json")"
 [[ "$generation" =~ ^[1-9][0-9]*$ ]] || exit 1
 [ -n "${HA_PEER_SSH:-}" ] && [ -n "${HA_PEER_NODE_ID:-}" ] || exit 1
+assert_current_holder
 
 # Capture database and shared files while no CLI recovery/configuration action
 # can change their relationship.
 mkdir -p "$MP_STATE"
 chmod 700 "$MP_STATE"
-exec 8>"$MP_LOCK_FILE"
-flock -n 8 || { echo "A management operation is running; replication was deferred." >&2; exit 74; }
+if [ "${MP_MANAGEMENT_LOCK_HELD:-0}" != 1 ]; then
+    exec 8>"$MP_LOCK_FILE"
+    flock -n 8 || { echo "A management operation is running; replication was deferred." >&2; exit 74; }
+fi
 
 mkdir -p "$MP_HA_STATE/outgoing"
 chmod 700 "$MP_HA_STATE" "$MP_HA_STATE/outgoing"
@@ -65,14 +116,21 @@ snapshot_input="${SNAPSHOT_SESSION[1]}"
 snapshot_output="${SNAPSHOT_SESSION[0]}"
 snapshot_pid="$SNAPSHOT_SESSION_PID"
 printf '%s\n' \
+    "SET lock_timeout TO '30s';" \
     'SELECT pg_advisory_lock(5571046919607735876);' \
     'BEGIN ISOLATION LEVEL REPEATABLE READ;' \
     "SELECT 'SNAPSHOT:' || pg_export_snapshot();" >&"$snapshot_input"
 snapshot_id=""
-while IFS= read -r line <&"$snapshot_output"; do
-    case "$line" in
-        SNAPSHOT:*) snapshot_id="${line#SNAPSHOT:}"; break ;;
-    esac
+snapshot_deadline=$((SECONDS + 30))
+while [ "$SECONDS" -lt "$snapshot_deadline" ]; do
+    snapshot_wait_seconds=$((snapshot_deadline - SECONDS))
+    if IFS= read -r -t "$snapshot_wait_seconds" line <&"$snapshot_output"; then
+        case "$line" in
+            SNAPSHOT:*) snapshot_id="${line#SNAPSHOT:}"; break ;;
+        esac
+    else
+        break
+    fi
 done
 [[ "$snapshot_id" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{8}-[0-9]+$ ]] \
     || { echo "A consistent database snapshot could not be exported." >&2; exit 1; }
@@ -91,10 +149,18 @@ python3 "$MP_ROOT/deploy/ha/replication_bundle.py" filter-env \
 python3 "$MP_ROOT/deploy/ha/replication_bundle.py" prepare-recovery-state \
     --source "$MP_MANUAL_EXPORT_STATE" \
     --output "$stage/payload/recovery/manual-recovery-export.json"
+[ -f "$MP_RECIPIENT_FILE" ] && [ ! -L "$MP_RECIPIENT_FILE" ] \
+    && [ "$(stat -c '%a' "$MP_RECIPIENT_FILE")" = 600 ] \
+    || { echo "The snapshot recovery recipient is missing or unsafe." >&2; exit 1; }
+recovery_recipient="$(tr -d '\r\n' < "$MP_RECIPIENT_FILE")"
+[[ "$recovery_recipient" =~ ^age1[0-9a-z]{58}$ ]] \
+    || { echo "The snapshot recovery recipient is invalid." >&2; exit 1; }
+install -m 0600 "$MP_RECIPIENT_FILE" "$stage/payload/recovery/recovery-recipient"
 for secret in secret_key ip_hmac_key vapid_private_key root_bootstrap_token smtp_token evidence_signing_key; do
     source_secret="$MP_ROOT/secrets/$secret"
+    expected_mode="$(mp_expected_protected_file_mode "$source_secret")"
     [ -f "$source_secret" ] && [ ! -L "$source_secret" ] \
-        && [ "$(stat -c '%a' "$source_secret")" = 600 ] \
+        && [ "$(stat -c '%a' "$source_secret")" = "$expected_mode" ] \
         || { echo "Shared secret is missing or unsafe: $secret" >&2; exit 1; }
     install -m 0600 "$source_secret" "$stage/payload/config/secrets/$secret"
 done
@@ -104,8 +170,11 @@ done
 # database view, and the receiver independently verifies the pair again.
 [ -d "$MP_ROOT/state/evidence" ] && [ ! -L "$MP_ROOT/state/evidence" ] \
     || { echo "The evidence store is missing or unsafe." >&2; exit 1; }
-sudo -n cp -a "$MP_ROOT/state/evidence/." "$stage/payload/evidence/"
-sudo -n chown -R "$(id -u):$(id -g)" "$stage/payload/evidence"
+# The backend already owns the mode-0700 evidence store. Stream a read-only
+# archive through that unprivileged container so the hardened replication
+# service does not need sudo or broader host filesystem permissions.
+"${MP_COMPOSE[@]}" exec -T backend tar -C /evidence -cf - . \
+    | tar --no-same-owner -C "$stage/payload/evidence" -xf -
 find "$stage/payload/evidence" -type d -exec chmod 700 {} +
 find "$stage/payload/evidence" -type f -exec chmod 600 {} +
 [ -s "$stage/payload/evidence/ledger/chain-head.json" ] \
@@ -123,6 +192,11 @@ snapshot_input=""
 wait "$snapshot_pid"
 snapshot_pid=""
 
+# Capture can overlap a witness decision. Never construct or send a bundle
+# after the source has lost the exact generation it started with. The receiver
+# independently enforces the same holder relationship at acceptance time.
+assert_current_holder
+
 release="$(mp_release_hash)"
 manifest_args=(create \
     --payload "$stage/payload" --cluster "$HA_CLUSTER_ID" \
@@ -131,18 +205,28 @@ manifest_args=(create \
     --output "$stage/manifest.json")
 [ -z "$request_file" ] || manifest_args+=(--request "$request_file")
 python3 "$MP_ROOT/deploy/ha/replication_bundle.py" "${manifest_args[@]}"
+update_operation_stage transferring
 
 recipient="$(tr -d '\r\n' < "$MP_HA_HOME/peer-age-recipient")"
 [[ "$recipient" =~ ^age1[0-9a-z]{58}$ ]] || { echo "Peer age recipient is invalid." >&2; exit 1; }
 tar -C "$stage" -cf - manifest.json payload \
     | age -r "$recipient" -o "$stage/bundle.age"
 archive_hash="$(sha256sum "$stage/bundle.age" | awk '{print $1}')"
+capture_completed_ms="$(date +%s%3N)"
+assert_current_holder
 set +e
 response="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$HA_PEER_SSH" \
     "/opt/masterplan/deploy/ha/receive_replication_bundle.sh '$job_id' '$archive_hash'" \
     < "$stage/bundle.age")"
 ssh_status="$?"
+transfer_completed_ms="$(date +%s%3N)"
 set -e
+if [ "$ssh_status" -ne 0 ] || [ "$response" != "ACCEPTED:$job_id:$archive_hash" ]; then
+    if peer_confirms_bundle; then
+        response="ACCEPTED:$job_id:$archive_hash"
+        ssh_status=0
+    fi
+fi
 if [ "$ssh_status" -eq 255 ]; then
     echo "The replication peer is unreachable." >&2
     exit 20
@@ -157,4 +241,8 @@ if [ "$ssh_status" -ne 0 ]; then
 fi
 [ "$response" = "ACCEPTED:$job_id:$archive_hash" ] \
     || { echo "The replication acknowledgement was invalid." >&2; exit 22; }
+update_operation_stage verifying
+printf 'MP_SENDER_TIMING capture_ms=%s transfer_round_trip_ms=%s\n' \
+    "$((capture_completed_ms - sender_started_ms))" \
+    "$((transfer_completed_ms - capture_completed_ms))" >&2
 printf '%s\n' "$response"

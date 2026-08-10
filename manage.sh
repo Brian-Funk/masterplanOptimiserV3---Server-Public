@@ -30,6 +30,11 @@ mp_initialise_paths
 # Remove any transient private recovery identity when the menu exits unexpectedly.
 mp_cleanup() {
     mp_remove_identity_file "${MP_GUARD_IDENTITY:-}"
+    # Leave no full-screen menu or command output behind in the operator's
+    # terminal after any normal, failed or interrupted management session.
+    if mp_has_terminal; then
+        clear </dev/tty >/dev/tty 2>/dev/null || true
+    fi
 }
 trap mp_cleanup EXIT TERM
 trap ':' INT
@@ -223,7 +228,7 @@ menu_accountability() {
             "instance-key" "Inspect and verify the instance signing fingerprint" \
             "trust-keys" "Show controller and processor registration boundaries" \
             "verify" "Verify the complete local signed chain" \
-            "export" "Create a self-contained portable bundle and show copy commands" \
+            "export" "Download-ready ZIP with evidence, checksum and verification guide" \
             "git-status" "Show non-secret automatic archive status" \
             "git-configure" "Configure or rotate a Fine-grained GitHub personal access token" \
             "git-test" "Test private repository access and readiness" \

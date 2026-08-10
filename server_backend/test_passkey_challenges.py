@@ -1,4 +1,5 @@
 """Security regressions for scoped, single-use WebAuthn ceremonies."""
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -104,6 +105,170 @@ def _add_credential(db, user, credential_name: str) -> WebAuthnCredential:
 
 def _ceremony(db, ceremony_id: str) -> PasskeyCeremony:
     return db.query(PasskeyCeremony).filter(PasskeyCeremony.id == ceremony_id).one()
+
+
+def test_root_bootstrap_commits_credential_and_audit_with_production_ip_hash(
+    db,
+    monkeypatch,
+):
+    """A valid first passkey must not roll back while writing its audit row."""
+    from app.core.config import settings
+    from app.core.commissioning import commissioning_required
+    import app.core.security as security_module
+    from app.core.governance import BOOTSTRAP_POLICY_SHA256, BOOTSTRAP_POLICY_VERSION
+    from app.models.server_setting import ServerSetting
+
+    monkeypatch.setattr(security_module, "commissioning_required", commissioning_required)
+
+    token = "root-bootstrap-regression-token-with-enough-entropy"
+    root = create_test_user(
+        db,
+        username="bootstrap.root",
+        is_root_admin=True,
+        is_admin=True,
+        is_activated=False,
+    )
+    monkeypatch.setattr(settings, "ROOT_BOOTSTRAP_TOKEN", token)
+    monkeypatch.setattr(
+        settings,
+        "IP_HMAC_KEY",
+        "bootstrap-audit-ip-key-with-sufficient-entropy",
+    )
+    _install_registration_success(monkeypatch, b"root-bootstrap-credential")
+    client = _raw_client()
+
+    begin = client.post(
+        "/api/v1/passkey/bootstrap/begin",
+        headers={"X-Bootstrap-Token": token},
+    )
+    assert begin.status_code == 200
+    complete = client.post(
+        "/api/v1/passkey/bootstrap/complete",
+        headers={"X-Bootstrap-Token": token},
+        json={
+            **_registration_body(begin.json()["ceremony_id"]),
+            "policy_version": BOOTSTRAP_POLICY_VERSION,
+            "policy_sha256": BOOTSTRAP_POLICY_SHA256,
+        },
+    )
+
+    assert complete.status_code == 200, complete.text
+    assert db.query(WebAuthnCredential).filter_by(user_id=root.id).count() == 1
+    assert db.query(AuditLog).filter_by(action="passkey.bootstrap").count() == 1
+    db.refresh(root)
+    assert root.is_activated is True
+    assert db.query(ServerSetting).filter_by(
+        key="root_bootstrap_disabled",
+        value="true",
+    ).count() == 1
+    status = client.get("/api/v1/passkey/bootstrap-status")
+    assert status.json()["stage"] == "setup"
+    assert status.json()["needs_bootstrap"] is False
+    _install_auth_success(monkeypatch)
+    restricted_begin = client.post("/api/v1/passkey/auth/begin").json()
+    restricted_login = client.post(
+        "/api/v1/passkey/auth/complete",
+        json=_auth_body(
+            "root-bootstrap-credential", root.id,
+            restricted_begin["ceremony_id"],
+        ),
+    )
+    assert restricted_login.status_code == 200
+    exchange = client.post(
+        "/api/v1/auth/exchange",
+        json={"code": restricted_login.json()["exchange_code"]},
+    )
+    assert exchange.status_code == 200, exchange.text
+    assert exchange.json()["commissioning_required"] is True
+    assert exchange.json()["commissioning_stage"] == "recovery"
+    me = client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json()["commissioning_required"] is True
+    assert me.json()["commissioning_stage"] == "recovery"
+    assert client.get("/api/v1/auth/root-access").status_code == 423
+
+    bootstrap_token_only = _raw_client().post(
+        "/api/v1/setup/recovery/complete",
+        headers={"X-Bootstrap-Token": token},
+        json={
+            "recipient": "age1" + "q" * 58,
+            "download_acknowledged": True,
+            "local_reimport_verified": True,
+        },
+    )
+    assert bootstrap_token_only.status_code == 401
+
+    recipient = "age1" + "q" * 58
+    csrf = client.cookies.get(settings.CSRF_COOKIE_NAME)
+    assert csrf
+    final = client.post(
+        "/api/v1/setup/recovery/complete",
+        headers={"X-CSRF-Token": csrf},
+        json={"recipient": recipient, "download_acknowledged": True, "local_reimport_verified": True},
+    )
+    assert final.status_code == 200, final.text
+    db.refresh(root)
+    assert root.is_activated is True
+    assert db.query(ServerSetting).filter_by(
+        key="root_bootstrap_disabled", value="true",
+    ).count() == 1
+    assert db.query(ServerSetting).filter_by(
+        key="root_recovery_recipient_sha256",
+        value=hashlib.sha256(recipient.encode("ascii")).hexdigest(),
+    ).count() == 1
+    assert db.query(AuditLog).filter_by(action="commissioning.recovery_completed").count() == 1
+    assert client.get("/api/v1/auth/root-access").status_code == 423
+    allowed_begin = client.post("/api/v1/passkey/auth/begin").json()
+    allowed_login = client.post(
+        "/api/v1/passkey/auth/complete",
+        json=_auth_body(
+            "root-bootstrap-credential", root.id,
+            allowed_begin["ceremony_id"],
+        ),
+    )
+    assert allowed_login.status_code == 200
+    allowed_exchange = client.post(
+        "/api/v1/auth/exchange",
+        json={"code": allowed_login.json()["exchange_code"]},
+    )
+    assert allowed_exchange.json()["commissioning_required"] is True
+    assert allowed_exchange.json()["commissioning_stage"] == "controller"
+
+
+def test_root_recovery_completion_rejects_missing_download_acknowledgement(db, monkeypatch):
+    from app.core.config import settings
+
+    root = create_test_user(
+        db, username="recovery.pending", is_root_admin=True,
+        is_admin=True, is_activated=True,
+    )
+    _add_credential(db, root, "pending-recovery-credential")
+    _install_auth_success(monkeypatch)
+    client = _raw_client()
+    begin = client.post("/api/v1/passkey/auth/begin").json()
+    login = client.post(
+        "/api/v1/passkey/auth/complete",
+        json=_auth_body(
+            "pending-recovery-credential", root.id, begin["ceremony_id"],
+        ),
+    )
+    exchange = client.post(
+        "/api/v1/auth/exchange",
+        json={"code": login.json()["exchange_code"]},
+    )
+    assert exchange.status_code == 200
+    csrf = client.cookies.get(settings.CSRF_COOKIE_NAME)
+    assert csrf
+
+    response = client.post(
+        "/api/v1/setup/recovery/complete",
+        headers={"X-CSRF-Token": csrf},
+        json={"recipient": "age1" + "q" * 58, "download_acknowledged": False, "local_reimport_verified": True},
+    )
+
+    assert response.status_code == 422
+    db.refresh(root)
+    assert root.is_activated is True
 
 
 def test_verified_reset_replaces_all_previous_passkeys(db):

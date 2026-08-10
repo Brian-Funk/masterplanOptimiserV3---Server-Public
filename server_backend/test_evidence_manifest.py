@@ -164,6 +164,95 @@ def test_current_deletion_records_are_signed_and_attestation_cli_is_absent(tmp_p
     assert "invalid choice" in result.stderr
 
 
+def test_clean_backup_evidence_accepts_v3_and_deletion_scoped_v4_inventory(tmp_path):
+    private, public = _keypair(tmp_path)
+    ledger = tmp_path / "ledger"
+    instance_id = str(uuid.uuid4())
+    chain_id = str(uuid.uuid4())
+    case_id = str(uuid.uuid4())
+    event_ref = str(uuid.uuid4())
+    replacement_package_id = str(uuid.uuid4())
+    superseded_package_id = str(uuid.uuid4())
+    payload = {
+        "case_id": case_id,
+        "event_ref": event_ref,
+        "replacement_package_id": replacement_package_id,
+        "replacement_package_sha256": "a" * 64,
+        "receipt_sha256": "b" * 64,
+        "local_snapshot_count": 1,
+        "superseded_portable_package_ids": [superseded_package_id],
+        "verified_at": "2026-08-05T15:00:00Z",
+        "outcome": "verified",
+        "status": "clean_backup_verified",
+    }
+
+    record = append_record(
+        ledger,
+        instance_id=instance_id,
+        chain_id=chain_id,
+        record_type="deletion.clean_backup_verified",
+        payload=payload,
+        private_key=private,
+        public_key=public,
+    )
+
+    assert record.is_file()
+    assert verify_chain(ledger, public)["records"] == 1
+
+    resolution_id = str(uuid.uuid4())
+    v4_payload = {
+        key: value for key, value in payload.items() if key != "local_snapshot_count"
+    } | {
+        "retained_local_snapshot_count": 2,
+        "local_resolution_id": resolution_id,
+        "local_resolution_sha256": "c" * 64,
+        "superseded_local_snapshot_receipt_sha256s": ["d" * 64],
+    }
+    append_record(
+        ledger,
+        instance_id=instance_id,
+        chain_id=chain_id,
+        record_type="deletion.clean_backup_verified",
+        payload=v4_payload,
+        private_key=private,
+        public_key=public,
+    )
+    assert verify_chain(ledger, public)["records"] == 2
+
+    with pytest.raises(EvidenceError, match="exactly one"):
+        append_record(
+            ledger,
+            instance_id=instance_id,
+            chain_id=chain_id,
+            record_type="deletion.clean_backup_verified",
+            payload={**payload, "local_snapshot_count": 2},
+            private_key=private,
+            public_key=public,
+        )
+
+    with pytest.raises(EvidenceError, match="UUID"):
+        append_record(
+            ledger,
+            instance_id=instance_id,
+            chain_id=chain_id,
+            record_type="deletion.clean_backup_verified",
+            payload={**payload, "superseded_portable_package_ids": ["not-a-package-id"]},
+            private_key=private,
+            public_key=public,
+        )
+
+    with pytest.raises(EvidenceError, match="positive snapshot count"):
+        append_record(
+            ledger,
+            instance_id=instance_id,
+            chain_id=chain_id,
+            record_type="deletion.clean_backup_verified",
+            payload={**v4_payload, "retained_local_snapshot_count": 0},
+            private_key=private,
+            public_key=public,
+        )
+
+
 def test_archive_completion_receipt_is_bounded_and_signed(tmp_path):
     private, public = _keypair(tmp_path)
     ledger = tmp_path / "ledger"

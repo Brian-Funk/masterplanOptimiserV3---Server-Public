@@ -29,8 +29,9 @@ accountability-record retention period.
 ## Strict erasure flow
 
 1. A user submits a personal-data request, or root starts a whole-event case.
-2. An authorised administrator accepts it. For a personal request the account
-   is immediately disabled and all sessions and activation links are revoked.
+2. The accountable workflow records the request. For a personal request the
+   account is disabled and all sessions and activation links are revoked as the
+   controlled erasure begins.
 3. When the account is linked to a desktop person, the server issues an
    event-bound work order. The desktop claims it with a short-lived bearer
    capability, deletes the matching local person or event and commits a
@@ -44,17 +45,20 @@ accountability-record retention period.
    task-reference and event-scoped data.
 6. In HA, the current privacy action must be included in a bundle accepted by
    the peer at the expected generation.
-7. The management workflow creates and deeply verifies a clean encrypted
-   replacement snapshot. The browser accepts only its locally verified receipt,
-   never a package ID or digest typed by an operator.
-8. Every superseded package in the inventory must be resolved. Exact external
+7. The management workflow creates, deeply verifies and exports a clean
+   encrypted replacement snapshot. The browser accepts only its locally
+   verified receipt, never a package ID or digest typed by an operator. The
+   host then removes only local snapshots proven to predate the covered purge;
+   later clean recovery points do not re-block the case.
+8. Every known pre-deletion external package in the inventory must be resolved. Exact external
    actions reported by the desktop, such as a calendar-provider copy or an
    untracked export, must also be confirmed exactly.
-9. The server freezes an immutable checklist containing the pseudonymous scope
-   and machine receipts. Executor and controller approve that exact checklist
-   with passkeys. Processor approval is additionally required when the case was
-   configured for it.
-10. Final completion is allowed only while every prerequisite remains true.
+9. The server freezes an immutable checklist containing the pseudonymous scope,
+   Server receipt, every required event-processor receipt, peer confirmation and
+   recovery resolution. Root reviews and authorises that exact checklist with a
+   passkey; root cannot substitute for a missing processor.
+10. The instance evidence key seals the final record only while every
+    prerequisite remains true.
 
 There is no `complete_with_exceptions`. An unresolved copy produces restricted
 retention with a review date and keeps the case open.

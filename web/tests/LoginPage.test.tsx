@@ -8,9 +8,13 @@ import React from "react";
 
 // Mock next/navigation
 const mockPush = vi.fn();
+const mockHardNavigate = vi.fn();
 const mockUseServiceAvailability = vi.fn();
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockPush }),
+}));
+vi.mock("@/lib/hardNavigation", () => ({
+  hardNavigate: mockHardNavigate,
 }));
 
 vi.mock("@/contexts/ServiceAvailabilityContext", () => ({
@@ -61,6 +65,7 @@ function authBeginCalls() {
 
 beforeEach(() => {
   mockPush.mockReset();
+  mockHardNavigate.mockReset();
   mockFetch.mockReset();
   mockRefreshUser.mockReset();
   vi.mocked(startAuthentication).mockReset();
@@ -110,15 +115,78 @@ describe("LoginPage", () => {
   it("redirects to bootstrap when needed", async () => {
     mockFetch.mockResolvedValue({
       ok: true,
-      json: async () => ({ needs_bootstrap: true }),
+      json: async () => ({ needs_bootstrap: true, stage: "passkey" }),
     });
 
     const { default: LoginPage } = await import("@/app/login/page");
     render(<LoginPage />);
 
     await waitFor(() => {
-      expect(mockPush).toHaveBeenCalledWith("/bootstrap");
+      expect(mockHardNavigate).toHaveBeenCalledWith("/bootstrap");
     });
+    expect(mockFetch.mock.calls[0][1]).toMatchObject({ cache: "no-store" });
+  });
+
+  it("allows root passkey login while recovery setup is pending", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ needs_bootstrap: true, stage: "recovery" }),
+    });
+
+    const { default: LoginPage } = await import("@/app/login/page");
+    render(<LoginPage />);
+
+    await waitFor(() => expect(mockFetch).toHaveBeenCalled());
+    expect(mockHardNavigate).not.toHaveBeenCalledWith("/bootstrap");
+    expect(screen.getByRole("button", { name: /sign in with passkey/i })).toBeInTheDocument();
+  });
+
+  it("sends a restricted root session only to recovery after passkey login", async () => {
+    mockFetch.mockImplementation((url) => {
+      const value = String(url);
+      if (value.includes("/api/v1/passkey/bootstrap-status")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ needs_bootstrap: true, stage: "recovery" }),
+        });
+      }
+      if (value.includes("/api/v1/passkey/auth/begin")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+          options: JSON.stringify({ challenge: "auth-challenge" }),
+          ceremony_id: 19,
+        }),
+        });
+      }
+      if (value.includes("/api/v1/passkey/auth/complete")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ exchange_code: "restricted-code" }),
+        });
+      }
+      if (value.includes("/api/v1/auth/exchange")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ commissioning_required: true, commissioning_stage: "recovery" }),
+        });
+      }
+      throw new Error(`Unexpected request: ${value}`);
+    });
+    vi.mocked(startAuthentication).mockResolvedValueOnce({
+      id: "root-recovery-passkey",
+      rawId: "root-recovery-passkey",
+      response: {},
+      type: "public-key",
+    } as never);
+
+    const { default: LoginPage } = await import("@/app/login/page");
+    render(<LoginPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /sign in with passkey/i }));
+
+    await waitFor(() => expect(mockHardNavigate).toHaveBeenCalledWith("/setup"));
+    expect(mockRefreshUser).not.toHaveBeenCalled();
   });
 
   it("redirects authenticated admin to /admin", async () => {
@@ -162,6 +230,46 @@ describe("LoginPage", () => {
     await waitFor(() => {
       expect(mockPush).toHaveBeenCalledWith("/admin");
     });
+  });
+
+  it("does not redirect a retained admin while the session is being rechecked", async () => {
+    vi.mocked(useAuth).mockReturnValue({
+      user: {
+        id: 1,
+        username: "admin",
+        display_name: "Admin",
+        email: null,
+        is_root_admin: true,
+        is_admin: true,
+        is_issuer: false,
+        can_edit: false,
+        is_active: true,
+        is_activated: true,
+        linked_person_id: null,
+        event_id: null,
+        offline_access_ttl_hours: 24,
+      },
+      isAuthenticated: true,
+      isLoading: true,
+      authStatus: "checking",
+      offlineAccess: null,
+      offlineAccessExpired: false,
+      isLoggingOut: false,
+      logoutError: null,
+      logout: vi.fn(),
+      dismissLogoutError: vi.fn(),
+      refreshUser: vi.fn(),
+    });
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ needs_bootstrap: false }),
+    });
+
+    const { default: LoginPage } = await import("@/app/login/page");
+    render(<LoginPage />);
+
+    await waitFor(() => expect(mockFetch).toHaveBeenCalled());
+    expect(mockPush).not.toHaveBeenCalledWith("/admin");
   });
 
   it("redirects issuer with event to /calendar", async () => {
@@ -291,7 +399,7 @@ describe("LoginPage", () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("redirects user without event to /admin", async () => {
+  it("redirects an ordinary user without an event to the waiting room", async () => {
     const { useAuth } = await import("@/contexts/AuthContext");
     vi.mocked(useAuth).mockReturnValue({
       user: {
@@ -330,7 +438,7 @@ describe("LoginPage", () => {
     render(<LoginPage />);
 
     await waitFor(() => {
-      expect(mockPush).toHaveBeenCalledWith("/admin");
+      expect(mockPush).toHaveBeenCalledWith("/unassigned");
     });
   });
 

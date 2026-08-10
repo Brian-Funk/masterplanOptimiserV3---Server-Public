@@ -91,7 +91,7 @@ mp_guided_initial_configuration() {
     local configure_smtp smtp_host smtp_port smtp_username smtp_token smtp_repeat
     local smtp_security smtp_from_email smtp_from_name smtp_reply_to staging
 
-    domain="$(ui_input "Site identity" "Public application domain" "mp-opt.net")" || return 1
+    domain="$(ui_input "Site identity" "Public application domain (for example schedule.example.org)" "")" || return 1
     mp_validate_hostname "$domain" || { ui_error "Enter a valid DNS hostname."; return 1; }
     app_name="$(ui_input "Site identity" "Passkey application name" "Masterplan Access")" || return 1
     mp_validate_env_value "$app_name" || { ui_error "The application name contains unsupported configuration characters."; return 1; }
@@ -107,7 +107,7 @@ mp_guided_initial_configuration() {
             || { ui_error "The database password does not meet the required format."; return 1; }
     fi
 
-    claims_email="$(ui_input "Web push" "VAPID contact email" "access@${domain}")" || return 1
+    claims_email="$(ui_input "Web push" "VAPID contact email (for example admin@example.org)" "")" || return 1
     mp_validate_email_address "$claims_email" || { ui_error "Enter a valid VAPID contact email."; return 1; }
     vapid="$(mp_generate_vapid_private_key)"
     root_token="$(mp_random_secret)"
@@ -118,22 +118,22 @@ mp_guided_initial_configuration() {
     smtp_security="starttls"; smtp_from_email=""; smtp_from_name="Masterplan Access"; smtp_reply_to=""
     if ui_confirm "Optional activation email" "Configure SMTP activation email now? You can safely skip this and configure it later."; then
         configure_smtp="yes"
-        smtp_host="$(ui_input "SMTP" "SMTP hostname" "smtp.protonmail.ch")" || return 1
+        smtp_host="$(ui_input "SMTP" "SMTP hostname (for example smtp.example.org)" "")" || return 1
         mp_validate_hostname "$smtp_host" || { ui_error "Enter a valid SMTP hostname."; return 1; }
         smtp_port="$(ui_input "SMTP" "SMTP port" "587")" || return 1
         [[ "$smtp_port" =~ ^[0-9]+$ ]] && [ "$smtp_port" -ge 1 ] && [ "$smtp_port" -le 65535 ] \
             || { ui_error "SMTP port must be between 1 and 65535."; return 1; }
         smtp_security="$(ui_menu "SMTP" "Connection security" "starttls" "STARTTLS, usually port 587" "tls" "Implicit TLS, usually port 465")" || return 1
-        smtp_username="$(ui_input "SMTP" "SMTP username")" || return 1
+        smtp_username="$(ui_input "SMTP" "SMTP username (for example notifications@example.org)")" || return 1
         mp_validate_env_value "$smtp_username" || { ui_error "The SMTP username contains unsupported configuration characters."; return 1; }
         smtp_token="$(ui_password "SMTP" "Provider-issued SMTP token")" || return 1
         smtp_repeat="$(ui_password "SMTP" "Repeat the SMTP token")" || return 1
         [ -n "$smtp_token" ] && [ "$smtp_token" = "$smtp_repeat" ] || { ui_error "The SMTP tokens do not match."; return 1; }
-        smtp_from_email="$(ui_input "SMTP" "Sender email" "access@${domain}")" || return 1
+        smtp_from_email="$(ui_input "SMTP" "Sender email (for example notifications@example.org)" "")" || return 1
         mp_validate_email_address "$smtp_from_email" || { ui_error "Enter a valid sender email."; return 1; }
         smtp_from_name="$(ui_input "SMTP" "Sender display name" "Masterplan Access")" || return 1
         mp_validate_env_value "$smtp_from_name" || { ui_error "The sender name contains unsupported configuration characters."; return 1; }
-        smtp_reply_to="$(ui_input "SMTP" "Optional reply-to email")" || return 1
+        smtp_reply_to="$(ui_input "SMTP" "Optional reply-to email (for example support@example.org)")" || return 1
         if [ -n "$smtp_reply_to" ] && ! mp_validate_email_address "$smtp_reply_to"; then
             ui_error "Enter a valid reply-to email or leave it blank."
             return 1
@@ -191,6 +191,9 @@ mp_guided_initial_configuration() {
     printf '%s' "$vapid" > "$staging/secrets/vapid_private_key"
     printf '%s' "$root_token" > "$staging/secrets/root_bootstrap_token"
     printf '%s' "$smtp_token" > "$staging/secrets/smtp_token"
+    # Evidence Git archival is optional. Compose still requires a protected
+    # bind source even when no repository token has been configured.
+    : > "$staging/secrets/evidence_github_fine_grained_token"
     python3 "$MP_ROOT/deploy/management/instance_key.py" commission \
         --secret-dir "$staging/secrets" --instance-id "$instance_id" >/dev/null \
         || { rm -rf "$staging"; return 1; }
@@ -207,6 +210,7 @@ mp_guided_initial_configuration() {
             "$MP_ROOT/secrets/vapid_private_key" \
             "$MP_ROOT/secrets/root_bootstrap_token" \
             "$MP_ROOT/secrets/smtp_token" \
+            "$MP_ROOT/secrets/evidence_github_fine_grained_token" \
             "$MP_ROOT/secrets/evidence_signing_key" \
             "$MP_ROOT/secrets/evidence_signing_key.pub"
         rm -rf "$staging"
@@ -222,6 +226,7 @@ mp_guided_initial_configuration() {
             "$MP_ROOT/secrets/vapid_private_key" \
             "$MP_ROOT/secrets/root_bootstrap_token" \
             "$MP_ROOT/secrets/smtp_token" \
+            "$MP_ROOT/secrets/evidence_github_fine_grained_token" \
             "$MP_ROOT/secrets/evidence_signing_key" \
             "$MP_ROOT/secrets/evidence_signing_key.pub"
         ui_error "Compose rejected the generated configuration. Generated files were removed without changing an existing installation."
@@ -260,6 +265,7 @@ mp_guided_initial_configuration() {
 # Recreate only the backend and confirm public health after a static setting change.
 mp_recreate_backend() {
     mp_require_active_or_standalone || return 1
+    mp_prepare_backend_secret_permissions || return 1
     mp_compose_validate || return 1
     mp_compose_init
     "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend >/dev/null || return 1
@@ -271,18 +277,18 @@ mp_configure_smtp() {
     local host port username security from_email from_name reply_to token token_repeat
     local staging old_env old_token status
     mp_require_active_or_standalone || return 1
-    host="$(ui_input "SMTP" "SMTP hostname" "$(mp_env_get SMTP_HOST 2>/dev/null || printf smtp.protonmail.ch)")" || return 1
+    host="$(ui_input "SMTP" "SMTP hostname (for example smtp.example.org)" "$(mp_env_get SMTP_HOST 2>/dev/null || true)")" || return 1
     mp_validate_hostname "$host" || { ui_error "Enter a valid SMTP hostname."; return 1; }
     port="$(ui_input "SMTP" "SMTP port" "$(mp_env_get SMTP_PORT 2>/dev/null || printf 587)")" || return 1
     [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { ui_error "Invalid SMTP port."; return 1; }
     security="$(ui_menu "SMTP" "Connection security" "starttls" "STARTTLS" "tls" "Implicit TLS")" || return 1
-    username="$(ui_input "SMTP" "SMTP username" "$(mp_env_get SMTP_USERNAME 2>/dev/null || true)")" || return 1
+    username="$(ui_input "SMTP" "SMTP username (for example notifications@example.org)" "$(mp_env_get SMTP_USERNAME 2>/dev/null || true)")" || return 1
     mp_validate_env_value "$username" || { ui_error "The SMTP username contains unsupported configuration characters."; return 1; }
-    from_email="$(ui_input "SMTP" "Sender email" "$(mp_env_get SMTP_FROM_EMAIL 2>/dev/null || true)")" || return 1
+    from_email="$(ui_input "SMTP" "Sender email (for example notifications@example.org)" "$(mp_env_get SMTP_FROM_EMAIL 2>/dev/null || true)")" || return 1
     mp_validate_email_address "$from_email" || { ui_error "Enter a valid sender email."; return 1; }
     from_name="$(ui_input "SMTP" "Sender display name" "$(mp_env_get SMTP_FROM_NAME 2>/dev/null || printf 'Masterplan Access')")" || return 1
     mp_validate_env_value "$from_name" || { ui_error "The sender name contains unsupported configuration characters."; return 1; }
-    reply_to="$(ui_input "SMTP" "Optional reply-to email" "$(mp_env_get SMTP_REPLY_TO 2>/dev/null || true)")" || return 1
+    reply_to="$(ui_input "SMTP" "Optional reply-to email (for example support@example.org)" "$(mp_env_get SMTP_REPLY_TO 2>/dev/null || true)")" || return 1
     [ -z "$reply_to" ] || mp_validate_email_address "$reply_to" || { ui_error "Invalid reply-to email."; return 1; }
     token="$(ui_password "SMTP" "Provider-issued SMTP token")" || return 1
     token_repeat="$(ui_password "SMTP" "Repeat the SMTP token")" || return 1
@@ -348,7 +354,7 @@ mp_configure_smtp() {
             >/dev/null 2>&1 || true
     fi
     mp_queue_ha_replication "smtp-configuration" || true
-    ui_message "SMTP ready" "Provider authentication and public health passed. No email was sent. In HA mode, the protected configuration is queued for the peer; verify both origins under High availability before relying on failover delivery."
+    ui_message "SMTP ready" "Provider authentication and public health passed. No email was sent. In HA mode, the protected configuration is queued for the peer; verify both origins under High availability before relying on failover delivery. Review Policies & notices at https://$(mp_env_get DOMAIN)/admin/governance. If a policy is already published, save the updated runtime facts, review the exact diff and publish a new version."
 }
 
 # Disable SMTP without retaining an unencrypted token rollback file on disk.
@@ -394,23 +400,36 @@ mp_disable_smtp() {
     mp_audit "smtp.disable" "success" "disabled"
     rm -f "$MP_ROOT/runtime/ha-smtp-status.json"
     mp_queue_ha_replication "smtp-disabled" || true
-    ui_message "SMTP disabled" "Activation email is disabled. Existing users, links and passkeys were not changed."
+    ui_message "SMTP disabled" "Activation email is disabled. Existing users, links and passkeys were not changed. Review Policies & notices at https://$(mp_env_get DOMAIN)/admin/governance. If a policy is already published, save the updated runtime facts, review the exact diff and publish a new version."
 }
 
 # Send one token-free SMTP test message from the running backend.
 mp_send_smtp_test() {
-    local recipient
+    local recipient result reason
     mp_require_active_or_standalone || return 1
     recipient="$(ui_input "SMTP test" "Test recipient email")" || return 1
     mp_validate_email_address "$recipient" || { ui_error "Enter a valid recipient email."; return 1; }
     mp_compose_init
-    if "${MP_COMPOSE[@]}" exec -T -e MP_TEST_RECIPIENT="$recipient" backend python -c \
-        'import os; from app.core.activation_email import ActivationMailer, build_test_message; m=ActivationMailer(); m.__enter__(); m.send(build_test_message(os.environ["MP_TEST_RECIPIENT"])); m.__exit__(None,None,None)' >/dev/null; then
+    if result="$("${MP_COMPOSE[@]}" exec -T -e MP_TEST_RECIPIENT="$recipient" backend python -c '
+import os
+import sys
+from app.core.activation_email import ActivationMailError, ActivationMailer, build_test_message
+
+try:
+    with ActivationMailer() as mailer:
+        mailer.send(build_test_message(os.environ["MP_TEST_RECIPIENT"]))
+except ActivationMailError as exc:
+    print(f"MP_SMTP_ERROR:{exc.code}:{exc}", file=sys.stderr)
+    raise SystemExit(1)
+' 2>&1)"; then
         mp_audit "smtp.test" "success" "recipient-supplied"
         ui_message "Test accepted" "The mail server accepted the token-free test message."
     else
         mp_audit "smtp.test" "failed" "provider-error"
-        ui_error "The mail server did not accept the test message. Review backend logs."
+        reason="$(printf '%s\n' "$result" | sed -n 's/^MP_SMTP_ERROR:[a-z_]*://p' | tail -n 1)"
+        [ -n "$reason" ] \
+            || reason="The SMTP test process failed before returning a safe diagnostic."
+        ui_error "The mail server did not accept the test message.\n\n${reason}\n\nReview Configuration > SMTP and retry the guarded test."
         return 1
     fi
 }
@@ -822,6 +841,7 @@ mp_rotate_database_password() {
         return 1
     fi
     rm -f "$staged"; unset password repeat escaped
+    mp_prepare_backend_secret_permissions || { mp_guard_rollback "Database secret permissions could not be prepared."; return 1; }
     if ! mp_compose_validate; then mp_guard_rollback "Database configuration validation failed."; return 1; fi
     mp_compose_init
     if ! "${MP_COMPOSE[@]}" up -d --force-recreate db backend >/dev/null; then
@@ -1279,8 +1299,7 @@ mp_rebuild_frontend() {
     fi
     if ! ui_run_command "Rebuild frontend" \
         "Installing pinned packages and building the static frontend" \
-        docker run --rm -v "$MP_ROOT/web:/app" -w /app node:22-alpine \
-        sh -c 'npm ci --no-audit && npm audit --omit=dev --audit-level=high && npm run lint && npm run build'; then
+        mp_build_frontend_container "$MP_ROOT"; then
         mp_audit "frontend.rebuild" "failed" "build"
         return 1
     fi
@@ -1512,7 +1531,7 @@ mp_diagnostics() {
         printf 'Host: %s\nDomain: %s\n' "$(hostname -f 2>/dev/null || hostname)" "$domain"
         printf 'HA role: %s\n' "$(mp_ha_role 2>/dev/null || printf invalid)"
         printf 'Commit: %s\n\n' "$(git -C "$MP_ROOT" rev-parse HEAD 2>/dev/null || printf unknown)"
-        mp_permissions_report
+        mp_permissions_report diagnostics
         printf '\nCompose validation: '
         if mp_compose_validate; then printf 'valid\n'; else printf 'invalid\n'; fi
         printf '\nContainers\n'
@@ -1725,7 +1744,7 @@ mp_collect_recovery_evidence_interactive() {
 
 # Validate Compose, Caddy, health and protected file permissions.
 mp_validate_installation() {
-    local report failed=0 mode
+    local report failed=0
     report="$(mktemp "${MP_STATE}/validation.XXXXXX")"
     {
         printf 'MP-OPT_SERVER installation validation\n\n'
@@ -1737,10 +1756,7 @@ mp_validate_installation() {
         if curl -fsS --max-time 5 "https://$(mp_env_get DOMAIN)/health" >/dev/null; then printf 'healthy\n'; else printf 'UNAVAILABLE\n'; failed=1; fi
         printf '\nProtected files\n'
         mp_permissions_report
-        while IFS= read -r file; do
-            mode="$(stat -c '%a' "$file")"
-            if [ "$mode" != "600" ]; then printf 'UNSAFE MODE: %s is %s\n' "$file" "$mode"; failed=1; fi
-        done < <(find "$MP_ROOT/secrets" -maxdepth 1 -type f -print; printf '%s\n' "$MP_ROOT/.env")
+        mp_validate_protected_file_modes || failed=1
     } > "$report"
     ui_text_file "Installation validation" "$report"
     rm -f "$report"
