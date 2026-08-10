@@ -1,4 +1,4 @@
-FROM node:25-alpine
+FROM node:26-alpine
 
 COPY infra/cloudflare-ha-witness/package.json /opt/wrangler/package.json
 COPY infra/cloudflare-ha-witness/package-lock.json /opt/wrangler/package-lock.json
