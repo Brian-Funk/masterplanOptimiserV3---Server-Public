@@ -630,6 +630,17 @@ def test_email_purposes_share_branded_dark_accessible_shell(
     ) < plain_body.index("The inline QR code") < plain_body.index("Privacy and contact")
     assert '<img src="http' not in html_body
     assert len(html_body.encode()) < 80_000
+    confirmation_notice = (
+        "The activation page explains the processing and asks for your confirmation "
+        "before a passkey is registered."
+    )
+    if purpose == INITIAL_SETUP:
+        assert confirmation_notice in html_body
+        assert confirmation_notice in plain_body
+        assert security_position < html_body.index(confirmation_notice) < qr_position
+    else:
+        assert confirmation_notice not in html_body
+        assert confirmation_notice not in plain_body
 
 
 def test_operational_mail_uses_only_escaped_deployment_variables(

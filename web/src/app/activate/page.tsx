@@ -20,6 +20,22 @@ type ActivationPurpose =
   | "additional_passkey"
   | "credential_reset";
 
+type ProcessingConsent = {
+  format: string;
+  statement_sha256: string;
+  policy_version: number;
+  policy_sha256: string;
+  controller_identity: string;
+  privacy_contact: string;
+  processing_purposes: string[];
+  data_categories: string[];
+  authenticated_audience: string;
+  privacy_url: string;
+  rights_url: string;
+  event_privacy_url?: string | null;
+  statement: string;
+};
+
 /** Return the public heading for a purpose-bound passkey invitation. */
 function activationHeading(purpose?: ActivationPurpose): string {
   if (purpose === "additional_passkey") return "Add another passkey";
@@ -40,7 +56,9 @@ function ActivateContent() {
     username: string;
     display_name: string;
     purpose: ActivationPurpose;
+    processing_consent?: ProcessingConsent;
   } | null>(null);
+  const [consentConfirmed, setConsentConfirmed] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -82,7 +100,9 @@ function ActivateContent() {
         username: data.username,
         display_name: data.display_name,
         purpose: data.purpose as ActivationPurpose,
+        processing_consent: data.processing_consent || undefined,
       });
+      setConsentConfirmed(false);
       setStatus("ready");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Validation failed");
@@ -98,13 +118,32 @@ function ActivateContent() {
       const apiUrl = getApiUrl();
 
       // 1. Begin passkey registration with activation token
+      const consent = info?.processing_consent;
+      const beginHeaders: Record<string, string> = {
+        "X-Activation-Token": token,
+      };
+      let beginBody: string | undefined;
+      if (info?.purpose === "initial_setup") {
+        if (!consent || !consentConfirmed) {
+          throw new Error("Review and confirm the processing information before registering a passkey.");
+        }
+        beginHeaders["Content-Type"] = "application/json";
+        beginBody = JSON.stringify({
+          confirmed: true,
+          statement_version: consent.format,
+          statement_sha256: consent.statement_sha256,
+          policy_version: consent.policy_version,
+          policy_sha256: consent.policy_sha256,
+        });
+      }
       const beginRes = await fetch(
         `${apiUrl}/api/v1/passkey/register/begin`,
         {
           method: "POST",
-          headers: { "X-Activation-Token": token },
+          headers: beginHeaders,
           credentials: "include",
           referrerPolicy: "no-referrer",
+          body: beginBody,
         },
       );
       if (!beginRes.ok) {
@@ -186,11 +225,62 @@ function ActivateContent() {
                     ? "Register one more passkey for this account. Your existing passkeys and signed-in sessions will remain valid."
                     : "Register a passkey to activate your account. You'll be prompted by your browser or password manager."}
               </p>
+              {info.purpose === "initial_setup" && info.processing_consent && (
+                <section className="mb-6 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-800/60 dark:text-gray-200">
+                  <h2 className="mb-2 text-base font-semibold text-gray-900 dark:text-gray-100">
+                    Processing for your account
+                  </h2>
+                  <dl className="space-y-2">
+                    <div>
+                      <dt className="font-medium">Controller</dt>
+                      <dd>{info.processing_consent.controller_identity}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-medium">Purpose</dt>
+                      <dd>{info.processing_consent.processing_purposes.join(" ")}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-medium">Operational information</dt>
+                      <dd>{info.processing_consent.data_categories.join(", ")}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-medium">Who can access it</dt>
+                      <dd>{info.processing_consent.authenticated_audience}</dd>
+                    </div>
+                  </dl>
+                  <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1">
+                    <a className="font-medium text-blue-700 underline underline-offset-2 dark:text-blue-300" href={info.processing_consent.privacy_url} target="_blank" rel="noreferrer">
+                      Privacy notice
+                    </a>
+                    <a className="font-medium text-blue-700 underline underline-offset-2 dark:text-blue-300" href={info.processing_consent.rights_url} target="_blank" rel="noreferrer">
+                      Your rights
+                    </a>
+                    {info.processing_consent.event_privacy_url && (
+                      <a className="font-medium text-blue-700 underline underline-offset-2 dark:text-blue-300" href={info.processing_consent.event_privacy_url} target="_blank" rel="noreferrer">
+                        Event privacy details
+                      </a>
+                    )}
+                  </div>
+                  <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-lg border border-gray-300 bg-white p-3 dark:border-gray-600 dark:bg-gray-900">
+                    <input
+                      type="checkbox"
+                      className="mt-1 h-4 w-4 shrink-0 accent-blue-600"
+                      checked={consentConfirmed}
+                      onChange={(event) => setConsentConfirmed(event.target.checked)}
+                    />
+                    <span>{info.processing_consent.statement}</span>
+                  </label>
+                </section>
+              )}
               <Button
                 type="button"
                 variant="primary"
                 fullWidth
                 onClick={handleRegister}
+                disabled={
+                  info.purpose === "initial_setup" &&
+                  (!info.processing_consent || !consentConfirmed)
+                }
               >
                 {info.purpose === "additional_passkey"
                   ? "Add passkey"
