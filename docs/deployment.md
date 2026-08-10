@@ -80,13 +80,13 @@ Signed deployments can also be run non-interactively by a trusted deployment
 workstation:
 
 ```bash
-/opt/masterplan/deploy/signed-deployment.sh v3.9.1
+/opt/masterplan/deploy/signed-deployment.sh v3.9.2
 ```
 
 The tag spelling is canonical and case-sensitive: `vMAJOR.MINOR.PATCH`. Release
 names use the identical value. Tags and release names are never overwritten;
 `v3.4.0` is permanently retired and the release prepared by this source tree is
-`v3.9.1`.
+`v3.9.2`.
 
 Production installation, standalone-to-HA migration, node replacement, and
 full-loss recovery all start in the same resumable commissioning interface.
@@ -151,6 +151,12 @@ Keep `.env` and non-runtime secret material mode `0600`. Runtime-mounted
 backend secrets are owner-writable and backend-group-readable (`0640`) inside
 the mode-`0700` canonical secret directory; the fixed group ID `10001` has no
 host directory traversal and exists solely for the unprivileged container.
+
+The optional Evidence Git token is deliberately node-local and is never
+replicated or included in a snapshot. Before Compose activation, management
+code creates a missing token mount as an empty regular file, preserves an
+existing configured token byte-for-byte, and rejects symlinks or unsafe file
+types. This invariant also applies to a fresh HA peer receiving its first copy.
 
 The first-run wizard selects the final topology explicitly. HA node names,
 peer identities, direct TLS, DNS routing and replication settings are generated

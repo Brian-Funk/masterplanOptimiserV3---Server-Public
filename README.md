@@ -86,9 +86,9 @@ while verifying legitimate delivery, then move to quarantine or reject.
 The recommended rollout is:
 
 1. Configure and verify the custom sending domain with the SMTP provider.
-2. Pull this release before running the older deployment script for the first
-   time, then create `secrets/smtp_token` and set mode `0600`. Compose requires
-   the file even while activation email is disabled.
+2. Pull this release before running an older deployment script. The management
+   tooling creates safe empty mount targets for optional node-local credentials;
+   enter the SMTP provider token only through the guarded setup flow.
 3. Configure the SMTP host, port, username, sender and TLS mode in `.env`.
 4. Deploy and confirm that Activation email shows **Ready** in Security
    Settings.
@@ -98,6 +98,15 @@ Activation URLs are generated from `WEBAUTHN_ORIGIN`. Keep this as the exact
 public HTTPS origin. Email failures never expose the token in logs or API
 responses. Failed and uncertain deliveries invalidate their link immediately;
 retrying creates a new one.
+
+For an account's first activation, the email explains that the activation page
+will show the applicable processing information. The page derives its
+controller, purpose, operational categories, authenticated audience and notice
+links from the current published governance, then requires an unchecked
+confirmation before WebAuthn starts. The exact statement and policy digest are
+recorded atomically with successful activation. This record proves what was
+confirmed; it does not replace the controller's assessment of the appropriate
+legal basis. Additional-passkey and reset links do not ask again.
 
 For an active account, administrators and event issuers manage both recovery
 operations through the user's **Passkeys** action. **Add another passkey** keeps

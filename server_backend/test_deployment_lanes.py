@@ -72,11 +72,11 @@ def test_release_version_is_synchronised_with_current_deployment_docs() -> None:
     backend = tomllib.loads(text("pyproject.toml"))["project"]["version"]
     frontend = json.loads(text("web/package.json"))["version"]
     lock_document = json.loads(text("web/package-lock.json"))
-    assert backend == frontend == lock_document["version"] == "3.9.1"
-    assert lock_document["packages"][""]["version"] == "3.9.1"
-    assert "## 3.9.1" in text("changes.md")
-    assert "signed-deployment.sh v3.9.1" in text("docs/deployment.md")
-    assert "current prepared stable release is `v3.9.1`" in text("docs/publication-runbook.md")
+    assert backend == frontend == lock_document["version"] == "3.9.2"
+    assert lock_document["packages"][""]["version"] == "3.9.2"
+    assert "## 3.9.2" in text("changes.md")
+    assert "signed-deployment.sh v3.9.2" in text("docs/deployment.md")
+    assert "current prepared stable release is `v3.9.2`" in text("docs/publication-runbook.md")
 
 
 def test_signed_release_preflight_binds_exact_latest_green_main() -> None:
