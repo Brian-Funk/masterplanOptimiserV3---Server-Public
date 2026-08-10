@@ -30,7 +30,7 @@ jobs:
       operations: ${{ steps.detect.outputs.operations }}
       any: ${{ steps.detect.outputs.any }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -72,10 +72,10 @@ jobs:
     if: needs.changes.outputs.any == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
           cache: pip
@@ -83,7 +83,7 @@ jobs:
             backend/requirements.txt
             backend/requirements.lock.txt
             backend/requirements-test.txt
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.witness == 'true'
         with:
           node-version: "22"
@@ -192,10 +192,10 @@ jobs:
           --health-cmd "pg_isready -U masterplan_test -d masterplan_test"
           --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.database == 'true' || needs.changes.outputs.operations == 'true'
         with:
           python-version: "3.14"
@@ -204,7 +204,7 @@ jobs:
             backend/requirements.txt
             backend/requirements.lock.txt
             backend/requirements-test.txt
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         if: needs.changes.outputs.frontend == 'true'
         with:
           node-version: "22"
