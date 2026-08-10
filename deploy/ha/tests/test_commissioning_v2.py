@@ -578,6 +578,12 @@ class PairingCodeTests(unittest.TestCase):
             primary.index('install_services.sh"'),
         )
 
+    def test_fresh_join_prepares_node_local_optional_mount_before_services(self) -> None:
+        join = shell_function(SETUP, "mp_setup_join_node")
+        prepare = join.index("mp_prepare_node_local_optional_secret_mounts")
+        install_services = join.index('install_services.sh"', prepare)
+        self.assertLess(prepare, install_services)
+
     def test_standalone_dns_wait_retries_at_thirty_second_intervals(self) -> None:
         script = r'''
             TEST_ROOT="$(mktemp -d)"

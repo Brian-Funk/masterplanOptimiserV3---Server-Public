@@ -870,6 +870,15 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(f'MP_SNAPSHOT_APPLY_STAGE="{stage}"', body)
 
+    def test_optional_node_secret_mount_is_created_safely_and_preserved(self) -> None:
+        body = function_body(COMMON_SOURCE, "mp_prepare_node_local_optional_secret_mounts")
+        self.assertIn("evidence_github_fine_grained_token", body)
+        self.assertIn('[ -f "$file" ] && [ ! -L "$file" ]', body)
+        self.assertIn('mktemp "$directory/.evidence-git-token.XXXXXX"', body)
+        self.assertIn('mv -n -- "$staging" "$file"', body)
+        self.assertNotIn(': > "$file"', body)
+        self.assertIn('chmod 0640 -- "$file"', body)
+
     def test_database_snapshot_pauses_writes_and_records_evidence_anchor(self) -> None:
         body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_create")
         self.assertLess(body.index('stop backend'), body.index('mp_snapshot_dump_database'))

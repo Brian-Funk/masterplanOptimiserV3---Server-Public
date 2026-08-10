@@ -17,6 +17,10 @@ source "$MP_ROOT/deploy/management/common.sh"
 source "$MP_ROOT/deploy/management/snapshots.sh"
 mp_load_ha_config
 [ "$HA_MODE" = "ha" ] || exit 1
+mp_prepare_node_local_optional_secret_mounts || {
+    echo "The replication peer could not prepare its node-local optional secret mounts." >&2
+    exit 1
+}
 source_holder="$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json")"
 [ "$source_holder" = "$HA_PEER_NODE_ID" ] || { echo "Peer is not the current lease holder." >&2; exit 1; }
 
@@ -398,6 +402,7 @@ sudo -n install -d -o root -g root -m 0755 "$MP_ROOT/state"
 sudo -n rm -rf "$MP_ROOT/state/evidence"
 sudo -n mv "$stage/evidence.new" "$MP_ROOT/state/evidence"
 mp_snapshot_publish_status
+mp_prepare_node_local_optional_secret_mounts
 mp_prepare_backend_secret_permissions
 services_to_recreate=(backend)
 [ "$caddy_configuration_changed" = false ] || services_to_recreate+=(caddy)
