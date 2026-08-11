@@ -1,5 +1,32 @@
 # Changes
 
+## 3.9.6 — 12 August 2026
+
+This patch release makes the host, container and service permission boundaries
+used by HA, recovery and evidence explicit and self-validating.
+
+### Runtime permission contracts
+
+- Replace the frontend-only runtime preparation step with one idempotent
+  contract for HA requests and results, compliance requests and receipts,
+  private scheduler state and the generated Caddy policy.
+- Reapply the contract around commissioning, deployment, container recreation,
+  replication, restore, failover, secret rotation and frontend rebuilds.
+- Validate the real Backend UID, Compose mount direction, Caddy and PostgreSQL
+  access, host-private state and HA systemd sandboxes without reading secrets.
+- Require every TUI-dispatched action to declare and pass an appropriate
+  permission profile before and after a change.
+
+### Safe HA protection failure and retry
+
+- Prove that the Backend can perform an atomic queue write before opening a
+  witness guard or committing a standby-protected mutation.
+- Return bounded `HA_PROTECTION_UNAVAILABLE` reasons when the queue is missing,
+  unsafe, not writable or fails an atomic write.
+- Keep an indeterminate non-privacy mutation durable and locked, with a
+  root-authorised **Retry standby protection** action that reuses the original
+  operation and cannot duplicate its event, link or credential.
+
 ## 3.9.5 — 11 August 2026
 
 This patch release accepts the stable evidence identities produced by the
