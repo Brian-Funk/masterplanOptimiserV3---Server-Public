@@ -302,6 +302,138 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn("pending-ha-join.json", SETUP)
         self.assertIn("expiresAt: now + 15 * 60 * 1000", WORKER)
 
+
+class SignedJoinReconciliationTests(unittest.TestCase):
+    def run_reconciliation(
+        self,
+        services: tuple[str, ...],
+        *,
+        receiver: dict[str, object] | None,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_dir = root / "state"
+            runtime = root / "runtime"
+            bin_dir = root / "bin"
+            for path in (state_dir, runtime, bin_dir, root / "infra", root / "ha"):
+                path.mkdir(parents=True, exist_ok=True)
+            (root / ".env").write_text("DOMAIN=example.test\n", encoding="utf-8")
+            (state_dir / "setup-state-v2.json").write_text(
+                json.dumps(
+                    {
+                        "format": "mp-opt-setup-state-v2",
+                        "mode": "ha-join",
+                        "state": "in_progress",
+                        "deployment_lane": "signed",
+                        "completed": ["joined", "signed_baseline_verified"],
+                        "current_action": "Waiting for first verified copy from Node A",
+                        "last_failure": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            if receiver is not None:
+                (runtime / "ha-receiver.json").write_text(
+                    json.dumps(receiver), encoding="utf-8"
+                )
+            services_file = root / "services.txt"
+            services_file.write_text("\n".join(services) + "\n", encoding="utf-8")
+            docker = bin_dir / "docker"
+            docker.write_text(
+                """#!/usr/bin/env bash
+set -eu
+case " $* " in
+    *" config --services "*) printf 'db\\nbackend\\ncaddy\\n' ;;
+    *" ps --status running --services "*) cat "$FAKE_SERVICES" ;;
+    *" exec -T "*) exit 0 ;;
+    *) printf 'unexpected fake docker invocation: %s\\n' "$*" >&2; exit 97 ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            environment = {
+                **os.environ,
+                "COMMON_PATH": str(ROOT / "deploy" / "management" / "common.sh"),
+                "MP_ROOT": str(root),
+                "MP_STATE": str(state_dir),
+                "MP_HA_HOME": str(root / "ha"),
+                "MP_DEPLOYMENT_POLICY_FILE": str(root / "deployment-policy"),
+                "FAKE_SERVICES": str(services_file),
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            }
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$COMMON_PATH"; mp_reconcile_signed_join_setup',
+                ],
+                check=False,
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            state = json.loads((state_dir / "setup-state-v2.json").read_text())
+            return result, state
+
+    @staticmethod
+    def receiver() -> dict[str, object]:
+        return {
+            "format": "mp-opt-receiver-state-v2",
+            "last_bundle_id": "bundle-first-copy",
+            "last_bundle_sha256": "a" * 64,
+            "last_received_at": "2026-08-11T18:00:00Z",
+            "source_node_id": "node-a",
+            "generation": 1,
+            "protection_operations": [],
+        }
+
+    @unittest.skipIf(os.name == "nt", "the executable shell contract runs in Linux CI")
+    def test_healthy_first_copy_completes_the_signed_join(self) -> None:
+        result, state = self.run_reconciliation(
+            ("db", "backend", "caddy"), receiver=self.receiver()
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["state"], "complete")
+        self.assertEqual(
+            set(state["completed"]),
+            {"joined", "signed_baseline_verified", "application_deployed", "replicated"},
+        )
+        self.assertEqual(
+            state["first_verified_bundle"],
+            {
+                "bundle_id": "bundle-first-copy",
+                "sha256": "a" * 64,
+                "generation": 1,
+                "accepted_at": "2026-08-11T18:00:00Z",
+            },
+        )
+
+    @unittest.skipIf(os.name == "nt", "the executable shell contract runs in Linux CI")
+    def test_missing_receipt_or_service_keeps_the_join_waiting(self) -> None:
+        for services, receiver in (
+            (("db", "backend", "caddy"), None),
+            (("db", "backend"), self.receiver()),
+        ):
+            result, state = self.run_reconciliation(services, receiver=receiver)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(state["state"], "in_progress")
+            self.assertNotIn("first_verified_bundle", state)
+
+    @unittest.skipIf(os.name == "nt", "the executable shell contract runs in Linux CI")
+    def test_invalid_receiver_receipt_fails_closed(self) -> None:
+        invalid = self.receiver()
+        invalid["last_bundle_sha256"] = "invalid"
+        result, state = self.run_reconciliation(
+            ("db", "backend", "caddy"), receiver=invalid
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("first-copy receiver receipt is invalid", result.stderr)
+        self.assertEqual(state["state"], "in_progress")
+
+
+class PairingSetupContractTests(unittest.TestCase):
+
     def test_fresh_modes_cannot_overwrite_an_existing_installation(self) -> None:
         self.assertIn("A live standalone configuration already exists", SETUP)
         self.assertIn("Join codes are accepted only on a fresh", SETUP)
@@ -595,6 +727,12 @@ class PairingCodeTests(unittest.TestCase):
         prepare = join.index("mp_prepare_node_local_optional_secret_mounts")
         install_services = join.index('install_services.sh"', prepare)
         self.assertLess(prepare, install_services)
+        self.assertIn(
+            'mp_setup_state_action "Waiting for first verified copy from Node A"',
+            join,
+        )
+        self.assertNotIn("mp_setup_state_complete", join)
+        self.assertIn("mp_reconcile_signed_join_setup", SETUP)
 
     def test_standalone_dns_wait_retries_at_thirty_second_intervals(self) -> None:
         script = r'''

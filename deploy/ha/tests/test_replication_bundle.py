@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -12,12 +14,47 @@ import unittest
 
 
 HA_DIR = Path(__file__).resolve().parents[1]
+ROOT = HA_DIR.parents[1]
+COMMON_PATH = ROOT / "deploy" / "management" / "common.sh"
 sys.path.insert(0, str(HA_DIR))
 
 import replication_bundle  # noqa: E402
 
 
 class ReplicationBundleTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "the executable shell contract runs in Linux CI")
+    def test_caddy_activation_decision_covers_the_service_state_matrix(self) -> None:
+        script = 'source "$COMMON_PATH"; mp_replication_caddy_requires_activation "$1" "$2"'
+        cases = (
+            ("false", "false", True),
+            ("false", "true", True),
+            ("true", "true", True),
+            ("true", "false", False),
+        )
+        for active, changed, expected in cases:
+            result = subprocess.run(
+                ["bash", "-c", script, "receiver-state-test", active, changed],
+                check=False,
+                env={**os.environ, "COMMON_PATH": str(COMMON_PATH)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                result.returncode == 0,
+                expected,
+                f"active={active}, changed={changed}: {result.stderr}",
+            )
+
+        invalid = subprocess.run(
+            ["bash", "-c", script, "receiver-state-test", "unknown", "false"],
+            check=False,
+            env={**os.environ, "COMMON_PATH": str(COMMON_PATH)},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(invalid.returncode, 2)
+        self.assertIn("Invalid replication Caddy activation state", invalid.stderr)
+
     def test_directly_invoked_ha_scripts_are_executable(self) -> None:
         for name in (
             "promote_local.sh",
@@ -447,6 +484,37 @@ class ReplicationBundleTests(unittest.TestCase):
         self.assertIn("caddy_service_active=false", receiver)
         self.assertIn('restore_services+=(backend)', receiver)
         self.assertIn('restore_services+=(caddy)', receiver)
+
+    def test_receiver_verifies_every_service_before_accepting_the_bundle(self) -> None:
+        receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        backend_activation = receiver.index("HA_RECEIVER_BACKEND_ACTIVATION_FAILED")
+        caddy_activation = receiver.index("HA_RECEIVER_CADDY_ACTIVATION_FAILED")
+        database_health = receiver.index("HA_RECEIVER_DATABASE_HEALTH_FAILED")
+        caddy_running = receiver.index("HA_RECEIVER_CADDY_NOT_RUNNING")
+        caddy_validation = receiver.index("HA_RECEIVER_CADDY_VALIDATION_FAILED")
+        backend_health = receiver.index("HA_RECEIVER_BACKEND_HEALTH_FAILED")
+        receiver_receipt = receiver.index(
+            'install -m 0600 "$stage/receiver.json" "$MP_ROOT/runtime/ha-receiver.json"'
+        )
+        accepted = receiver.index("printf 'ACCEPTED:%s:%s")
+
+        for boundary in (
+            backend_activation,
+            caddy_activation,
+            database_health,
+            caddy_running,
+            caddy_validation,
+            backend_health,
+        ):
+            self.assertLess(boundary, receiver_receipt)
+        self.assertLess(receiver_receipt, accepted)
+        self.assertIn("mp_replication_caddy_requires_activation", receiver)
+        self.assertIn(
+            '"$caddy_service_active" "$caddy_configuration_changed"', receiver
+        )
+        self.assertNotIn("services_to_recreate=(backend)", receiver)
 
 
 if __name__ == "__main__":

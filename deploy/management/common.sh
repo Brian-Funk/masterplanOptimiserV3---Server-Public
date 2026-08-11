@@ -1062,6 +1062,18 @@ mp_caddy_validate() {
     esac
 }
 
+# Return success when a replication receiver must activate Caddy. An unchanged
+# configuration may keep an already-running proxy, but a fresh or unexpectedly
+# stopped peer always requires activation.
+mp_replication_caddy_requires_activation() {
+    local service_active="${1:-}" configuration_changed="${2:-}"
+    case "$service_active:$configuration_changed" in
+        true:true|true:false|false:true|false:false) ;;
+        *) printf 'Invalid replication Caddy activation state.\n' >&2; return 2 ;;
+    esac
+    [ "$service_active" != true ] || [ "$configuration_changed" = true ]
+}
+
 # Reload or recreate Caddy according to the active topology.
 mp_caddy_reload() {
     local mode

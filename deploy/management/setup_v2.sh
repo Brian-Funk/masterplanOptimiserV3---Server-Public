@@ -1009,7 +1009,7 @@ mp_setup_join_node() {
         ui_message "HA node joined" "The one-time code is consumed for ${node_id}. This node is pinned to $(jq -r .campaign_commit "$MP_SETUP_V2_STATE") and is waiting for Node A to transfer and activate those exact images."
     else
         mp_setup_state_action "Waiting for first verified copy from Node A"
-        ui_message "HA node joined" "The one-time code is consumed for ${node_id}. Peer trust and replication-encryption material were installed. Keep this VPS available; Node A will send and verify the first protected application copy before setup is complete."
+        ui_message "HA node joined" "The one-time code is consumed for ${node_id}. Peer trust and replication-encryption material were installed. Keep this VPS available. The current holder will verify reciprocal SSH before sending the first protected application copy, and setup completes only after that copy is verified here."
     fi
 }
 

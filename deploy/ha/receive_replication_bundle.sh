@@ -350,7 +350,8 @@ cp -a "$MP_ROOT/.env" "$stage/.env.previous"
 previous_domain="$(sed -n 's/^DOMAIN=//p' "$stage/.env.previous" | tail -n 1)"
 next_domain="$(sed -n 's/^DOMAIN=//p' "$stage/.env" | tail -n 1)"
 [ "$previous_domain" = "$next_domain" ] || caddy_configuration_changed=true
-if [ "$caddy_service_active" != true ] || [ "$caddy_configuration_changed" = true ]; then
+if mp_replication_caddy_requires_activation \
+    "$caddy_service_active" "$caddy_configuration_changed"; then
     caddy_requires_activation=true
 fi
 mkdir "$stage/secrets.previous"
