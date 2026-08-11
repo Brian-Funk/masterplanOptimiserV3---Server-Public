@@ -96,6 +96,7 @@ def test_setup_import_endpoint_persists_uuid5_evidence_identities(
                 {
                     "username": "converted.import",
                     "display_name": "Converted Import",
+                    "email": "converted.import@example.org",
                     "person_id": 7,
                     "evidence_subject_id": UUID5_SUBJECT,
                 }
@@ -109,6 +110,50 @@ def test_setup_import_endpoint_persists_uuid5_evidence_identities(
     assert response.json()["event"]["evidence_id"] == UUID5_EVENT
     assert event.evidence_id == UUID5_EVENT
     assert user.evidence_subject_id == UUID5_SUBJECT
+    assert user.email == "converted.import@example.org"
+    assert response.json()["users"][0]["user"]["email"] == "converted.import@example.org"
+
+
+def test_setup_import_allows_missing_email():
+    parsed = ImportSetupIn.model_validate(
+        {
+            "event": {"evidence_id": UUID5_EVENT, "name": "Optional email"},
+            "publish_secret": "p" * 48,
+            "idempotency_key": UUID4,
+            "users": [
+                {
+                    "username": "without.email",
+                    "display_name": "Without Email",
+                    "evidence_subject_id": UUID5_SUBJECT,
+                }
+            ],
+        }
+    )
+
+    assert parsed.users[0].email is None
+
+
+def test_setup_import_rejects_invalid_email_before_writes(db, reauth_admin_client):
+    response = reauth_admin_client.post(
+        "/api/v1/admin/import-setup",
+        json={
+            "event": {"evidence_id": UUID5_EVENT, "name": "Invalid email"},
+            "publish_secret": "p" * 48,
+            "idempotency_key": UUID4,
+            "users": [
+                {
+                    "username": "invalid.email",
+                    "display_name": "Invalid Email",
+                    "email": "not-an-email",
+                    "evidence_subject_id": UUID5_SUBJECT,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert db.query(Event).filter(Event.evidence_id == UUID5_EVENT).count() == 0
+    assert db.query(User).filter(User.username == "invalid.email").count() == 0
 
 
 def test_uuid5_identities_flow_unchanged_into_deletion_evidence(db, monkeypatch):
