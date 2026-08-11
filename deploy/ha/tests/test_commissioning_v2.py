@@ -578,6 +578,18 @@ class PairingCodeTests(unittest.TestCase):
             primary.index('install_services.sh"'),
         )
 
+    def test_fresh_ha_database_ownership_precedes_public_services(self) -> None:
+        initialise = shell_function(COMMON, "mp_initialise_fresh_commissioning_state")
+        deploy = (ROOT / "deploy/deploy.sh").read_text(encoding="utf-8")
+        self.assertIn('MP_FRESH_DEPLOYMENT_MODE=$setup_mode', initialise)
+        self.assertIn('MP_FRESH_HA_CLUSTER_ID=$HA_CLUSTER_ID', initialise)
+        self.assertIn('[ "$HA_NODE_ID" = node-a ]', initialise)
+        bootstrap = deploy.index("mp_initialise_fresh_commissioning_state")
+        public_services = deploy.index(
+            'up -d --build --force-recreate --remove-orphans', bootstrap
+        )
+        self.assertLess(bootstrap, public_services)
+
     def test_fresh_join_prepares_node_local_optional_mount_before_services(self) -> None:
         join = shell_function(SETUP, "mp_setup_join_node")
         prepare = join.index("mp_prepare_node_local_optional_secret_mounts")
