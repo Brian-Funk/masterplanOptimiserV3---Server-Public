@@ -1008,8 +1008,8 @@ mp_setup_join_node() {
         mp_setup_state_action "Waiting for pinned images from Node A"
         ui_message "HA node joined" "The one-time code is consumed for ${node_id}. This node is pinned to $(jq -r .campaign_commit "$MP_SETUP_V2_STATE") and is waiting for Node A to transfer and activate those exact images."
     else
-        mp_setup_state_complete
-        ui_message "HA node joined" "The one-time code is consumed for ${node_id}. Peer trust and replication-encryption material were installed. The current holder will verify reciprocal SSH before sending the complete protected shared application state."
+        mp_setup_state_action "Waiting for first verified copy from Node A"
+        ui_message "HA node joined" "The one-time code is consumed for ${node_id}. Peer trust and replication-encryption material were installed. Keep this VPS available. The current holder will verify reciprocal SSH before sending the first protected application copy, and setup completes only after that copy is verified here."
     fi
 }
 
@@ -1519,10 +1519,22 @@ mp_setup_v2() {
         ha-primary-new|convert-ha) 
             if mp_setup_state_has witness_bootstrap 2>/dev/null; then mp_setup_primary_resume || status=$?; else mp_setup_primary_create "$mode" || status=$?; fi ;;
         ha-join)
-            if mp_setup_state_has joined 2>/dev/null \
-                && [ "$(jq -r '.deployment_lane // empty' "$MP_SETUP_V2_STATE")" = unsigned ]; then
-                ui_message "Waiting for pinned deployment" \
-                    "Node B is paired and pinned to $(jq -r .campaign_commit "$MP_SETUP_V2_STATE"). Resume on Node A; it will transfer, verify and activate the exact images here."
+            if mp_setup_state_has joined 2>/dev/null; then
+                if [ "$(jq -r '.deployment_lane // empty' "$MP_SETUP_V2_STATE")" = unsigned ]; then
+                    ui_message "Waiting for pinned deployment" \
+                        "Node B is paired and pinned to $(jq -r .campaign_commit "$MP_SETUP_V2_STATE"). Resume on Node A; it will transfer, verify and activate the exact images here."
+                else
+                    mp_reconcile_signed_join_setup || {
+                        ui_error "Node B could not reconcile its first verified copy. The protected waiting state was retained."
+                        status=1
+                    }
+                    if [ "$(jq -r '.state // empty' "$MP_SETUP_V2_STATE")" = complete ]; then
+                        ui_message "HA node ready" "Node B accepted and verified its first protected application copy. Continue commissioning on Node A."
+                    elif [ "$status" -eq 0 ]; then
+                        ui_message "Waiting for first verified copy" \
+                            "Node B is paired and ready. Resume on Node A; this setup will complete only after the first protected application copy and local services are verified."
+                    fi
+                fi
             else
                 mp_setup_join_node ha-join || status=$?
             fi

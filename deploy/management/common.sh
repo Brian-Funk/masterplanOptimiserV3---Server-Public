@@ -1062,6 +1062,18 @@ mp_caddy_validate() {
     esac
 }
 
+# Return success when a replication receiver must activate Caddy. An unchanged
+# configuration may keep an already-running proxy, but a fresh or unexpectedly
+# stopped peer always requires activation.
+mp_replication_caddy_requires_activation() {
+    local service_active="${1:-}" configuration_changed="${2:-}"
+    case "$service_active:$configuration_changed" in
+        true:true|true:false|false:true|false:false) ;;
+        *) printf 'Invalid replication Caddy activation state.\n' >&2; return 2 ;;
+    esac
+    [ "$service_active" != true ] || [ "$configuration_changed" = true ]
+}
+
 # Reload or recreate Caddy according to the active topology.
 mp_caddy_reload() {
     local mode
@@ -1122,6 +1134,66 @@ mp_wait_for_database() {
         sleep 2
     done
     return 1
+}
+
+# Complete a signed joining peer only after its first accepted receiver receipt
+# and the replicated application services are locally healthy. Before that
+# point the setup state remains resumable and truthfully reports that Node A
+# still owns the next action.
+mp_reconcile_signed_join_setup() {
+    local setup_state="${MP_STATE}/setup-state-v2.json"
+    local receiver_state="${MP_ROOT}/runtime/ha-receiver.json"
+    local temporary bundle hash received generation
+    [ -s "$setup_state" ] || return 0
+    jq -e '
+        .format == "mp-opt-setup-state-v2"
+        and .mode == "ha-join"
+        and .deployment_lane == "signed"
+        and .state == "in_progress"
+        and ((.completed // []) | index("joined") != null)
+    ' "$setup_state" >/dev/null 2>&1 || return 0
+    [ -s "$receiver_state" ] || return 0
+    jq -e '
+        .format == "mp-opt-receiver-state-v2"
+        and (.last_bundle_id | type == "string" and length > 0)
+        and (.last_bundle_sha256 | test("^[0-9a-f]{64}$"))
+        and (.last_received_at | type == "string" and length > 0)
+        and (.generation | type == "number" and . >= 1)
+    ' "$receiver_state" >/dev/null 2>&1 || {
+        printf 'The first-copy receiver receipt is invalid; Node B remains in the waiting state.\n' >&2
+        return 1
+    }
+    mp_compose_init
+    for service in db backend caddy; do
+        "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx "$service" \
+            || return 0
+    done
+    "${MP_COMPOSE[@]}" exec -T backend python -c \
+        'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3).read()' \
+        >/dev/null 2>&1 || return 0
+    mp_caddy_validate >/dev/null 2>&1 || return 0
+    bundle="$(jq -r .last_bundle_id "$receiver_state")"
+    hash="$(jq -r .last_bundle_sha256 "$receiver_state")"
+    received="$(jq -r .last_received_at "$receiver_state")"
+    generation="$(jq -r .generation "$receiver_state")"
+    temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")" || return 1
+    jq --arg bundle "$bundle" --arg hash "$hash" --arg received "$received" \
+        --argjson generation "$generation" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        .completed=((.completed + ["application_deployed", "replicated"]) | unique)
+        | .state="complete"
+        | .completed_at=$now
+        | .updated_at=$now
+        | .current_action="Waiting for root administration on Node A"
+        | .last_failure=null
+        | .first_verified_bundle={
+            bundle_id:$bundle,
+            sha256:$hash,
+            generation:$generation,
+            accepted_at:$received
+          }
+    ' "$setup_state" > "$temporary" || { rm -f "$temporary"; return 1; }
+    chmod 600 "$temporary"
+    mv "$temporary" "$setup_state"
 }
 
 # Return whether SQLAlchemy's base schema is already present.
