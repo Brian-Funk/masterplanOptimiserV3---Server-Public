@@ -115,11 +115,14 @@ class CeremonyCompletion(BaseModel):
 class ProcessingConsentConfirmation(BaseModel):
     """Exact unchecked confirmation submitted before first WebAuthn activation."""
 
-    confirmed: Literal[True]
-    statement_version: str = Field(..., min_length=1, max_length=64)
-    statement_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
-    policy_version: int = Field(..., ge=1)
-    policy_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    # Optional at request parsing so existing authenticated and non-initial
+    # activation clients may continue sending an empty object. Initial setup
+    # validates every value below before a ceremony can be created.
+    confirmed: Literal[True] | None = None
+    statement_version: str | None = Field(None, min_length=1, max_length=64)
+    statement_sha256: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
+    policy_version: int | None = Field(None, ge=1)
+    policy_sha256: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
 
 
 class CredentialRename(BaseModel):
@@ -331,11 +334,13 @@ def _consent_action(
     if (
         confirmation.statement_version != STATEMENT_VERSION
         or not secrets.compare_digest(
-            confirmation.statement_sha256.lower(), disclosure.statement_sha256
+            str(confirmation.statement_sha256 or "").lower(),
+            disclosure.statement_sha256,
         )
         or confirmation.policy_version != expected["policy_version"]
         or not secrets.compare_digest(
-            confirmation.policy_sha256.lower(), str(expected["policy_sha256"])
+            str(confirmation.policy_sha256 or "").lower(),
+            str(expected["policy_sha256"]),
         )
     ):
         raise HTTPException(

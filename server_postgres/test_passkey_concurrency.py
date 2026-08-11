@@ -15,6 +15,7 @@ from app.core.activation import create_activation_link
 from app.core.sessions import _hash_token
 from app.main import app
 from app.models.user import AuthSession, User, WebAuthnCredential
+from server_backend.conftest import create_test_governance_publication
 
 
 def _client(
@@ -143,13 +144,25 @@ def _mock_registration(
         )
 
     monkeypatch.setattr(passkey_api, "verify_registration_response", verify)
+    monkeypatch.setattr(passkey_api, "append_record", lambda *args, **kwargs: "a" * 64)
 
 
 def _activation_begin(token: str) -> str:
     """Start an activation registration and return its ceremony ID."""
-    response = _client().post(
+    client = _client()
+    validated = client.post("/api/v1/activation/validate", json={"token": token})
+    assert validated.status_code == 200, validated.text
+    disclosure = validated.json()["processing_consent"]
+    response = client.post(
         "/api/v1/passkey/register/begin",
         headers={"X-Activation-Token": token},
+        json={
+            "confirmed": True,
+            "statement_version": disclosure["format"],
+            "statement_sha256": disclosure["statement_sha256"],
+            "policy_version": disclosure["policy_version"],
+            "policy_sha256": disclosure["policy_sha256"],
+        },
     )
     assert response.status_code == 200, response.text
     return response.json()["ceremony_id"]
@@ -230,6 +243,7 @@ def test_different_activation_links_register_simultaneously(db, monkeypatch):
     user_b = _user(db, "parallel.activation.b", activated=False)
     token_a, _ = create_activation_link(user_a.id, issuer.id, db)
     token_b, _ = create_activation_link(user_b.id, issuer.id, db)
+    create_test_governance_publication(db)
     db.commit()
     ceremony_a, ceremony_b = _run_together(
         lambda: _activation_begin(token_a),
@@ -315,6 +329,7 @@ def test_one_activation_link_can_only_register_once(db, monkeypatch):
     issuer = _user(db, "parallel.single.issuer", admin=True)
     user = _user(db, "parallel.single.user", activated=False)
     token, _ = create_activation_link(user.id, issuer.id, db)
+    create_test_governance_publication(db)
     db.commit()
     ceremony_a, ceremony_b = _run_together(
         lambda: _activation_begin(token),
@@ -347,6 +362,7 @@ def test_duplicate_credential_registration_is_atomic(db, monkeypatch):
     user_b = _user(db, "parallel.duplicate.b", activated=False)
     token_a, _ = create_activation_link(user_a.id, issuer.id, db)
     token_b, _ = create_activation_link(user_b.id, issuer.id, db)
+    create_test_governance_publication(db)
     db.commit()
     ceremony_a, ceremony_b = _run_together(
         lambda: _activation_begin(token_a),
