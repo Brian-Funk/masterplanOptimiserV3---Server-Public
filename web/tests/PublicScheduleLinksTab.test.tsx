@@ -9,9 +9,14 @@ import {
 } from "@/components/PublicScheduleLinksTab";
 
 const mockApiFetch = vi.hoisted(() => vi.fn());
+const mockWithReauth = vi.hoisted(() => vi.fn(async (action: () => Promise<Response>) => action()));
 
 vi.mock("@/lib/api", () => ({
   apiFetch: mockApiFetch,
+}));
+
+vi.mock("@/lib/reauth", () => ({
+  withReauth: mockWithReauth,
 }));
 
 const activeLink = {
@@ -37,6 +42,20 @@ function jsonResponse(data: unknown, ok = true): Response {
 
 function installApi(links: unknown[] = []) {
   mockApiFetch.mockImplementation(async (path: string, options?: RequestInit) => {
+    if (path.includes("/ha-protection-operations/") && options?.method === "POST") {
+      return jsonResponse({
+        id: "11111111-1111-4111-8111-111111111111",
+        state: "pending",
+        stage: "queued",
+      });
+    }
+    if (path.includes("/ha-protection-operations/")) {
+      return jsonResponse({
+        id: "11111111-1111-4111-8111-111111111111",
+        state: "accepted",
+        stage: "accepted",
+      });
+    }
     if (path.endsWith("/general-schedule")) {
       return jsonResponse({
         schedule_views: [
@@ -61,6 +80,7 @@ function installApi(links: unknown[] = []) {
 describe("PublicScheduleLinksTab", () => {
   beforeEach(() => {
     mockApiFetch.mockReset();
+    mockWithReauth.mockClear();
   });
 
   it("shows the tab only for root administrators and issuers", () => {
@@ -179,5 +199,29 @@ describe("PublicScheduleLinksTab", () => {
 
     expect(await screen.findByText("unavailable")).toBeInTheDocument();
     expect(screen.getByText("Removed View")).toHaveClass("line-through");
+  });
+
+  it("lets a root retry only the affected public-link protection operation", async () => {
+    const operationId = "11111111-1111-4111-8111-111111111111";
+    installApi([{
+      ...activeLink,
+      status: "securing",
+      protection_operation_id: operationId,
+      protection_state: "indeterminate",
+      protection_stage: "attention_required",
+      protection_error_code: "replication_queue_not_writable",
+    }]);
+    const user = userEvent.setup();
+    render(<PublicScheduleLinksTab eventId={7} isRootAdmin />);
+
+    await user.click(await screen.findByRole("button", { name: "Retry standby protection" }));
+
+    await waitFor(() => {
+      expect(mockWithReauth).toHaveBeenCalledTimes(1);
+      expect(mockApiFetch).toHaveBeenCalledWith(
+        `/api/v1/admin/ha-protection-operations/${operationId}/retry`,
+        expect.objectContaining({ method: "POST", body: "{}" }),
+      );
+    });
   });
 });

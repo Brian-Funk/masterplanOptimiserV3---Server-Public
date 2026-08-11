@@ -70,6 +70,7 @@ def test_ha_event_creation_is_durable_idempotent_and_returns_only_after_polling(
     from app.core import ha_replication
 
     request_dir = tmp_path / "ha-requests"
+    request_dir.mkdir()
     monkeypatch.setattr(settings, "HA_MODE", "ha")
     monkeypatch.setattr(settings, "HA_CLUSTER_ID", "cluster-test")
     monkeypatch.setattr(settings, "HA_NODE_ID", "node-a")
@@ -97,6 +98,89 @@ def test_ha_event_creation_is_durable_idempotent_and_returns_only_after_polling(
     assert repeated.status_code == 202
     assert repeated.json()["protection_operation_id"] == operation_id
     assert db.query(Event).filter(Event.name == "Standby protected event").count() == 1
+
+
+def test_ha_queue_failure_rejects_event_before_commit(
+    db, root_client, monkeypatch, tmp_path,
+):
+    import app.main as main_module
+
+    request_dir = tmp_path / "missing-ha-requests"
+    monkeypatch.setattr(settings, "HA_MODE", "ha")
+    monkeypatch.setattr(settings, "HA_CLUSTER_ID", "cluster-test")
+    monkeypatch.setattr(settings, "HA_NODE_ID", "node-a")
+    monkeypatch.setattr(settings, "HA_REPLICATION_REQUEST_DIR", str(request_dir))
+    monkeypatch.setattr(main_module, "control_witness_ready", lambda: True)
+    monkeypatch.setattr(main_module, "assess_readiness", lambda _db: SimpleNamespace(ready=True))
+    monkeypatch.setattr(main_module, "require_write_permit", lambda **_kwargs: None)
+
+    response = root_client.post(
+        "/api/v1/admin/events",
+        json=protected_event_body(
+            name="Must not commit",
+            idempotency_key="88888888-8888-4888-8888-888888888888",
+        ),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "HA_PROTECTION_UNAVAILABLE"
+    assert response.json()["reason"] == "replication_queue_missing"
+    assert db.query(Event).filter(Event.name == "Must not commit").count() == 0
+    assert (
+        db.query(HAProtectionOperation)
+        .filter(HAProtectionOperation.idempotency_key == "88888888-8888-4888-8888-888888888888")
+        .count()
+        == 0
+    )
+
+
+def test_root_retry_reuses_the_indeterminate_operation_without_duplicates(
+    db, monkeypatch, tmp_path,
+):
+    import app.main as main_module
+    from app.core import ha_replication
+
+    request_dir = tmp_path / "ha-requests"
+    request_dir.mkdir()
+    monkeypatch.setattr(settings, "HA_MODE", "ha")
+    monkeypatch.setattr(settings, "HA_CLUSTER_ID", "cluster-test")
+    monkeypatch.setattr(settings, "HA_NODE_ID", "node-a")
+    monkeypatch.setattr(settings, "HA_REPLICATION_REQUEST_DIR", str(request_dir))
+    monkeypatch.setattr(main_module, "control_witness_ready", lambda: True)
+    monkeypatch.setattr(main_module, "assess_readiness", lambda _db: SimpleNamespace(ready=True))
+    monkeypatch.setattr(main_module, "require_write_permit", lambda **_kwargs: None)
+    monkeypatch.setattr(ha_replication, "witness_post", lambda *_args, **_kwargs: {})
+    event, _secret = create_test_event(db, name="Retry protected event")
+    operation = ha_replication.create_protection_operation(
+        db,
+        idempotency_key="retry-operation-00000001",
+        operation_type="publisher-secret-create",
+        resource_type="event",
+        resource_id=str(event.id),
+    )
+    operation.state = "indeterminate"
+    operation.stage = "attention_required"
+    operation.error_code = "replication_queue_not_writable"
+    db.commit()
+    root = create_test_user(
+        db,
+        username="retry.root",
+        is_root_admin=True,
+        is_admin=True,
+    )
+    client = _make_client(db, root, reauth=True)
+
+    response = client.post(
+        f"/api/v1/admin/ha-protection-operations/{operation.id}/retry",
+        json={},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["state"] == "pending"
+    assert response.json()["stage"] == "queued"
+    assert (request_dir / f"{operation.id}.json").is_file()
+    assert db.query(Event).filter(Event.name == "Retry protected event").count() == 1
+    assert db.query(HAProtectionOperation).filter_by(id=operation.id).count() == 1
 
 
 # ── GET /admin/events ──

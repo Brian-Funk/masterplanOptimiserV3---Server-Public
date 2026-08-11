@@ -145,6 +145,7 @@ def test_ha_link_is_locked_until_exact_standby_protection_and_retry_is_idempoten
     event = db.query(Event).filter(Event.name == "Root Event").one()
     _seed_schedule(db, event.id)
     request_dir = tmp_path / "ha-requests"
+    request_dir.mkdir()
     monkeypatch.setattr(settings, "HA_MODE", "ha")
     monkeypatch.setattr(settings, "HA_CLUSTER_ID", "cluster-test")
     monkeypatch.setattr(settings, "HA_NODE_ID", "node-a")
