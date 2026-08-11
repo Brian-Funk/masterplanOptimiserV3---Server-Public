@@ -18,7 +18,6 @@ type Governance = {
   controller_postal_address?: string;
   controller_country?: string;
   privacy_contact_email?: string;
-  privacy_contact_phone?: string | null;
   dpo_contact?: string | null;
   supervisory_authority_name?: string;
   supervisory_authority_url?: string;
@@ -183,7 +182,6 @@ function ControllerSection({ notice }: { notice: Governance }) {
     {notice.controller_postal_address && <p className="whitespace-pre-line">{notice.controller_postal_address}</p>}
     {notice.controller_country && <p>Country: {notice.controller_country}</p>}
     <p><a className={PUBLIC_TEXT_LINK_CLASS} href={`mailto:${notice.privacy_contact_email}`}>{notice.privacy_contact_email}</a></p>
-    {notice.privacy_contact_phone && <p><a className={PUBLIC_TEXT_LINK_CLASS} href={`tel:${notice.privacy_contact_phone.replace(/[^\d+]/g, "")}`}>{notice.privacy_contact_phone}</a></p>}
     {notice.dpo_contact && <p>Data-protection contact: <ContactValue value={notice.dpo_contact} /></p>}
   </Section>;
 }

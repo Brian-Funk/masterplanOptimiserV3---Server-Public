@@ -35,7 +35,6 @@ const importedForm: GovernanceFormState = {
   controller_postal_address: "2 Fixture Street",
   controller_country: "CH",
   privacy_contact_email: "privacy@example.com",
-  privacy_contact_phone: "",
   dpo_contact: "",
   supervisory_authority_name: "Synthetic Authority",
   supervisory_authority_url: "https://authority.example",

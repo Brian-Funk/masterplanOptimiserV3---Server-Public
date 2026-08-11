@@ -23,6 +23,7 @@ from app.core.config import settings
 from app.core.retention import materialise_event_purge_deadline
 from app.core.audit import audit
 from app.core.evidence import EvidenceUnavailable, append_record, initialise
+from app.core.evidence_identity import CanonicalEvidenceIdentity
 from app.core.governance import current_policy_identity
 from app.core.operator_evidence import (
     DESKTOP_EVIDENCE_NAMESPACE,
@@ -170,10 +171,7 @@ class PersonIn(BaseModel):
     first_name: str = Field(..., max_length=256)
     last_name: str = Field(..., max_length=256)
     email: Optional[str] = Field(None, max_length=512)
-    evidence_subject_id: str = Field(
-        ...,
-        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-    )
+    evidence_subject_id: CanonicalEvidenceIdentity
 
 
 class EventMetaIn(BaseModel):

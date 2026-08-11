@@ -57,6 +57,7 @@ from app.core.activation_mail_governance import (
 from app.core.audit import audit
 from app.core.config import settings
 from app.core.event_dates import require_valid_event_date_range
+from app.core.evidence_identity import CanonicalEvidenceIdentity
 from app.core.ha_replication import (
     cancel_uncommitted_protection,
     create_protection_operation,
@@ -270,9 +271,8 @@ class EventCreateIn(BaseModel):
     """Admin payload for creating a server event."""
 
     name: str = Field(..., min_length=1, max_length=128)
-    evidence_id: str = Field(
+    evidence_id: CanonicalEvidenceIdentity = Field(
         default_factory=lambda: str(uuid.uuid4()),
-        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     )
     location: Optional[str] = Field(None, max_length=256)
     start_date: Optional[date] = None
@@ -2983,9 +2983,7 @@ class ImportUserIn(BaseModel):
     email: Optional[EmailStr] = None
     can_edit: bool = False
     person_id: Optional[int] = Field(None, gt=0)  # Desktop Person.id for auto-linking
-    evidence_subject_id: str = Field(
-        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-    )
+    evidence_subject_id: CanonicalEvidenceIdentity
 
     model_config = ConfigDict(extra="forbid")
 
@@ -2993,9 +2991,7 @@ class ImportUserIn(BaseModel):
 class ImportEventIn(BaseModel):
     """Imported event metadata from a desktop setup export."""
 
-    evidence_id: str = Field(
-        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-    )
+    evidence_id: CanonicalEvidenceIdentity
     name: str = Field(..., max_length=128)
     location: Optional[str] = Field(None, max_length=256)
     start_date: Optional[date] = None

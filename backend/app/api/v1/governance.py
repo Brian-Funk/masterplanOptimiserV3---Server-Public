@@ -9,7 +9,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
-from pydantic import BaseModel, EmailStr, Field, HttpUrl, field_validator
+from pydantic import BaseModel, EmailStr, Field, HttpUrl, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from app.core.audit import audit
@@ -185,7 +185,6 @@ class GovernanceDraft(BaseModel):
     controller_postal_address: str = Field(default="", max_length=500)
     controller_country: str = Field(default="", max_length=2)
     privacy_contact_email: EmailStr
-    privacy_contact_phone: str | None = Field(default=None, max_length=64)
     dpo_contact: str | None = Field(default=None, max_length=320)
     supervisory_authority_name: str = Field(default="", max_length=200)
     supervisory_authority_url: HttpUrl | Literal[""] = ""
@@ -195,6 +194,15 @@ class GovernanceDraft(BaseModel):
     rights_summary: str = Field(default="", max_length=4000)
     terms_summary: str = Field(default="", max_length=4000)
     structured: GovernanceStructuredIn
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_retired_phone_contact(cls, value):
+        if isinstance(value, dict) and "privacy_contact_phone" in value:
+            raise ValueError(
+                "privacy_contact_phone is retired; use privacy_contact_email"
+            )
+        return value
 
     @field_validator("controller_country")
     @classmethod
@@ -331,10 +339,6 @@ def _render_governance_html(
                 body.append(_paragraphs(notice.get("controller_postal_address")))
             if notice.get("controller_country"):
                 body.append(f"<p>Country: {_text(notice.get('controller_country'))}</p>")
-            if notice.get("privacy_contact_phone"):
-                phone = _text(notice["privacy_contact_phone"])
-                phone_href = "".join(char for char in str(notice["privacy_contact_phone"]) if char.isdigit() or char == "+")
-                body.append(f'<p>Telephone: <a href="tel:{phone_href}">{phone}</a></p>')
             if notice.get("dpo_contact"):
                 body.append(f"<p>Data-protection contact: {_contact_html(notice['dpo_contact'])}</p>")
         if section in {"privacy", "data-policy"}:
@@ -603,7 +607,6 @@ def _draft_payload(profile: InstanceGovernanceProfile) -> dict[str, object]:
         "controller_postal_address": profile.controller_postal_address,
         "controller_country": profile.controller_country,
         "privacy_contact_email": profile.privacy_contact_email,
-        "privacy_contact_phone": profile.privacy_contact_phone,
         "dpo_contact": profile.dpo_contact,
         "supervisory_authority_name": profile.supervisory_authority_name,
         "supervisory_authority_url": profile.supervisory_authority_url,
