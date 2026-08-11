@@ -750,6 +750,40 @@ mp_validate_snapshot_name() {
 # secrets mounted by Compose. The operator remains the owner so guarded TUI
 # rotations can replace them; the mode-0700 parent directory prevents the
 # runtime group from traversing the canonical host secret store.
+mp_prepare_node_local_optional_secret_mounts() {
+    local directory="$MP_ROOT/secrets"
+    local file="$directory/evidence_github_fine_grained_token"
+    local staging=""
+
+    if [ -e "$directory" ] || [ -L "$directory" ]; then
+        [ -d "$directory" ] && [ ! -L "$directory" ] || {
+            printf 'Refusing unsafe backend secret directory: %s\n' "$directory" >&2
+            return 1
+        }
+    else
+        install -d -m 0700 "$directory" || return 1
+    fi
+
+    if [ -e "$file" ] || [ -L "$file" ]; then
+        [ -f "$file" ] && [ ! -L "$file" ] || {
+            printf 'Refusing unsafe backend secret path: %s\n' "$file" >&2
+            return 1
+        }
+    else
+        staging="$(mktemp "$directory/.evidence-git-token.XXXXXX")" || return 1
+        chmod 0600 "$staging" || { rm -f -- "$staging"; return 1; }
+        mv -n -- "$staging" "$file" || { rm -f -- "$staging"; return 1; }
+        rm -f -- "$staging"
+        [ -f "$file" ] && [ ! -L "$file" ] || {
+            printf 'The optional Evidence Git token mount could not be created safely.\n' >&2
+            return 1
+        }
+    fi
+
+    sudo -n chown ":10001" -- "$file" || return 1
+    chmod 0640 -- "$file" || return 1
+}
+
 mp_prepare_backend_secret_permissions() {
     local file
     local -a files=(

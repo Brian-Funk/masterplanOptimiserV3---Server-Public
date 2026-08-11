@@ -62,7 +62,7 @@ sudo bash /tmp/mp-opt-setup.sh \
 Do not substitute `main`, `master`, or a moving branch name. The bootstrap
 rejects them.
 
-The explicit public repository URL also keeps the immutable `v3.9.1`
+The explicit public repository URL also keeps the immutable `v3.9.2`
 bootstrap asset usable after the source repository transition. Later bootstrap
 assets use the same public URL by default.
 
@@ -142,6 +142,27 @@ When those gates pass, automatic failover is enabled with a two-minute primary
 loss threshold and a five-minute verified-copy target. No provider power API,
 load balancer, origin certificate, manually copied peer identity, or custom
 node name is required.
+
+The first encrypted peer copy establishes safe empty mount targets for optional
+node-local credentials before starting the standby backend. Those credentials
+are not copied from Node A. An unsafe or substituted path stops the receiver
+with a resumable error instead of leaving an unexplained partial activation.
+
+## First participant activation
+
+An initial activation email opens a page containing the effective published
+controller, processing purpose, operational data categories, authenticated
+audience and immutable privacy/rights links. The user must actively confirm the
+exact statement before the browser is asked to register a passkey. Successful
+registration consumes the one-time link, activates the account and records the
+statement and policy digests as one transaction; a failed passkey or evidence
+append records none of them.
+
+This confirmation is requested only for first activation. Additional-passkey
+and credential-reset links retain the existing account record and do not ask
+again. No age declaration is presented. The in-product **Delete my data**
+action remains available after activation, with accountable erasure handled by
+the deletion-evidence workflow.
 
 ## Other lifecycle choices
 

@@ -107,12 +107,9 @@ ensure_secret_files() {
         echo "       Created empty optional Docker secret: secrets/smtp_token"
     fi
 
-    # Automatic evidence archival is optional and disabled by default. Keep an
-    # empty mount target so Compose remains valid without creating a token.
-    if [ ! -e "secrets/evidence_github_fine_grained_token" ]; then
-        : > secrets/evidence_github_fine_grained_token
-        echo "       Created empty optional evidence Git token secret"
-    fi
+    # Automatic evidence archival is optional and node-local. Keep a safe
+    # empty mount target when it is disabled without replacing configured data.
+    mp_prepare_node_local_optional_secret_mounts
 
     if [ ! -s "secrets/evidence_signing_key" ]; then
         command -v ssh-keygen >/dev/null 2>&1 || {

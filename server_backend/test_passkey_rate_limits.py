@@ -3,13 +3,30 @@ from starlette.requests import Request
 
 from app.core import runtime_settings
 from app.core.activation import create_activation_link
+from app.core.activation_consent import resolve_activation_consent
 from app.core.rate_limit import (
     PASSKEY_COARSE_IP_LIMIT,
     passkey_registration_rate_key,
     passkey_session_rate_key,
     runtime_limit,
 )
-from server_backend.conftest import _make_client, _raw_client, create_test_user
+from server_backend.conftest import (
+    _make_client,
+    _raw_client,
+    create_test_governance_publication,
+    create_test_user,
+)
+
+
+def _consent_body(user, db) -> dict:
+    disclosure = resolve_activation_consent(user, db)
+    return {
+        "confirmed": True,
+        "statement_version": disclosure.document["format"],
+        "statement_sha256": disclosure.statement_sha256,
+        "policy_version": disclosure.document["policy_version"],
+        "policy_sha256": disclosure.document["policy_sha256"],
+    }
 
 
 def _request(
@@ -148,22 +165,28 @@ def test_activation_registrations_on_one_ip_have_independent_limits(db):
     )
     token_a, _ = create_activation_link(user_a.id, issuer.id, db)
     token_b, _ = create_activation_link(user_b.id, issuer.id, db)
+    create_test_governance_publication(db)
     db.commit()
     client = _raw_client()
+    consent_a = _consent_body(user_a, db)
+    consent_b = _consent_body(user_b, db)
 
     for _ in range(5):
         assert client.post(
             "/api/v1/passkey/register/begin",
             headers={"X-Activation-Token": token_a},
+            json=consent_a,
         ).status_code == 200
         assert client.post(
             "/api/v1/passkey/register/begin",
             headers={"X-Activation-Token": token_b},
+            json=consent_b,
         ).status_code == 200
 
     limited = client.post(
         "/api/v1/passkey/register/begin",
         headers={"X-Activation-Token": token_a},
+        json=consent_a,
     )
     assert limited.status_code == 429
 

@@ -518,6 +518,7 @@ def _email_html(
     qr_alt: str | None = None,
     request_explanation: str | None = None,
     security_notice: str | None = None,
+    activation_confirmation_notice: str | None = None,
     governance: ActivationMailGovernance | None = None,
 ) -> str:
     """Render the reusable fixed-dark transactional email shell."""
@@ -589,6 +590,13 @@ def _email_html(
         security_section = (
             '<p style="margin:14px 0 0;color:#d1d5db;font-size:13px;line-height:19px;">'
             f'{html.escape(security_notice)}</p>'
+        )
+
+    consent_section = ""
+    if activation_confirmation_notice:
+        consent_section = (
+            '<p style="margin:16px 0 0;color:#d1d5db;font-size:14px;line-height:21px;">'
+            f'{html.escape(activation_confirmation_notice)}</p>'
         )
 
     privacy_section = ""
@@ -666,6 +674,7 @@ def _email_html(
                   {security_section}
                 </td></tr>
               </table>
+              {consent_section}
               {qr_section}
               {privacy_section}
             </td>
@@ -737,6 +746,12 @@ def build_activation_message(
         "If you did not request or expect this message, do not use the link. "
         "No new passkey has been added yet. Contact the controller below."
     )
+    activation_confirmation_notice = (
+        "The activation page explains the processing and asks for your confirmation "
+        "before a passkey is registered."
+        if purpose == "initial_setup"
+        else None
+    )
     message.set_content(
         f"Hello {display_name},\n\n"
         f"{presentation.headline}\n\n"
@@ -747,6 +762,11 @@ def build_activation_message(
         f"Valid until: {expiry_label}\n\n"
         f"{presentation.notice_label}: {presentation.outcome_note}\n\n"
         f"{security_notice}\n\n"
+        + (
+            f"{activation_confirmation_notice}\n\n"
+            if activation_confirmation_notice else ""
+        )
+        +
         "The inline QR code opens the same secure action on another device.\n"
         "Do not forward this one-time link or QR code.\n"
         "\nPrivacy and contact\n"
@@ -785,6 +805,7 @@ def build_activation_message(
             qr_alt=presentation.qr_alt,
             request_explanation=request_explanation,
             security_notice=security_notice,
+            activation_confirmation_notice=activation_confirmation_notice,
             governance=governance,
         ),
         subtype="html",

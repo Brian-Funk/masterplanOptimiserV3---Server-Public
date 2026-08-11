@@ -13,8 +13,15 @@ from app.core.passkey_ceremonies import (
     AUTHENTICATION,
 )
 from app.models.audit import AuditLog
+from app.models.governance import AccountProcessingConsent
 from app.models.user import PasskeyCeremony, WebAuthnCredential
-from server_backend.conftest import _make_client, _raw_client, create_test_user
+from app.core.evidence import EvidenceUnavailable
+from server_backend.conftest import (
+    _make_client,
+    _raw_client,
+    create_test_governance_publication,
+    create_test_user,
+)
 
 
 def _credential_id(value: str) -> bytes:
@@ -60,6 +67,19 @@ def _registration_body(ceremony_id: str) -> dict:
     }
 
 
+def _processing_consent(client, token: str) -> dict:
+    response = client.post("/api/v1/activation/validate", json={"token": token})
+    assert response.status_code == 200, response.text
+    disclosure = response.json()["processing_consent"]
+    return {
+        "confirmed": True,
+        "statement_version": disclosure["format"],
+        "statement_sha256": disclosure["statement_sha256"],
+        "policy_version": disclosure["policy_version"],
+        "policy_sha256": disclosure["policy_sha256"],
+    }
+
+
 def _install_auth_success(monkeypatch):
     def fake_verify_authentication_response(**kwargs):
         assert kwargs["require_user_verification"] is True
@@ -89,6 +109,7 @@ def _install_registration_success(monkeypatch, credential_id: bytes):
         "verify_registration_response",
         fake_verify_registration_response,
     )
+    monkeypatch.setattr(passkey_api, "append_record", lambda *args, **kwargs: "a" * 64)
 
 
 def _add_credential(db, user, credential_name: str) -> WebAuthnCredential:
@@ -353,7 +374,7 @@ def test_concurrent_login_ceremonies_verify_independently(db, monkeypatch):
         "/api/v1/passkey/auth/complete",
         json=_auth_body("cred-a", user_a.id, begin_a["ceremony_id"]),
     )
-    assert first.status_code == 200
+    assert first.status_code == 200, first.text
     assert _ceremony(db, begin_a["ceremony_id"]).consumed_at is not None
     assert _ceremony(db, begin_b["ceremony_id"]).consumed_at is None
 
@@ -545,17 +566,26 @@ def test_two_activation_devices_complete_independently(db, monkeypatch):
     user_b = create_test_user(db, username="activation.b", is_activated=False)
     token_a, _ = create_activation_link(user_a.id, issuer.id, db)
     token_b, _ = create_activation_link(user_b.id, issuer.id, db)
+    create_test_governance_publication(db)
     db.commit()
     client = _raw_client()
+    consent_a = _processing_consent(client, token_a)
+    consent_b = _processing_consent(client, token_b)
 
-    begin_a = client.post(
+    begin_a_response = client.post(
         "/api/v1/passkey/register/begin",
         headers={"X-Activation-Token": token_a},
-    ).json()
-    begin_b = client.post(
+        json=consent_a,
+    )
+    begin_b_response = client.post(
         "/api/v1/passkey/register/begin",
         headers={"X-Activation-Token": token_b},
-    ).json()
+        json=consent_b,
+    )
+    assert begin_a_response.status_code == 200, begin_a_response.text
+    assert begin_b_response.status_code == 200, begin_b_response.text
+    begin_a = begin_a_response.json()
+    begin_b = begin_b_response.json()
     assert begin_a["ceremony_id"] != begin_b["ceremony_id"]
 
     _install_registration_success(monkeypatch, b"activation-cred-a")
@@ -564,7 +594,7 @@ def test_two_activation_devices_complete_independently(db, monkeypatch):
         headers={"X-Activation-Token": token_a},
         json=_registration_body(begin_a["ceremony_id"]),
     )
-    assert first.status_code == 200
+    assert first.status_code == 200, first.text
     assert _ceremony(db, begin_b["ceremony_id"]).consumed_at is None
 
     _install_registration_success(monkeypatch, b"activation-cred-b")
@@ -580,16 +610,24 @@ def test_activation_token_is_single_use(db, monkeypatch):
     issuer = create_test_user(db, username="single.issuer", is_admin=True)
     user = create_test_user(db, username="single.activation", is_activated=False)
     token, _ = create_activation_link(user.id, issuer.id, db)
+    create_test_governance_publication(db)
     db.commit()
     client = _raw_client()
-    first_begin = client.post(
+    consent = _processing_consent(client, token)
+    first_begin_response = client.post(
         "/api/v1/passkey/register/begin",
         headers={"X-Activation-Token": token},
-    ).json()
-    second_begin = client.post(
+        json=consent,
+    )
+    second_begin_response = client.post(
         "/api/v1/passkey/register/begin",
         headers={"X-Activation-Token": token},
-    ).json()
+        json=consent,
+    )
+    assert first_begin_response.status_code == 200, first_begin_response.text
+    assert second_begin_response.status_code == 200, second_begin_response.text
+    first_begin = first_begin_response.json()
+    second_begin = second_begin_response.json()
     _install_registration_success(monkeypatch, b"single-activation-cred")
 
     first = client.post(
@@ -613,12 +651,17 @@ def test_duplicate_credential_id_is_rejected_across_users(db, monkeypatch):
     target = create_test_user(db, username="duplicate.target", is_activated=False)
     _add_credential(db, owner, "shared-credential")
     token, _ = create_activation_link(target.id, issuer.id, db)
+    create_test_governance_publication(db)
     db.commit()
     client = _raw_client()
-    begin = client.post(
+    consent = _processing_consent(client, token)
+    begin_response = client.post(
         "/api/v1/passkey/register/begin",
         headers={"X-Activation-Token": token},
-    ).json()
+        json=consent,
+    )
+    assert begin_response.status_code == 200, begin_response.text
+    begin = begin_response.json()
     _install_registration_success(monkeypatch, b"shared-credential")
 
     response = client.post(
@@ -629,6 +672,116 @@ def test_duplicate_credential_id_is_rejected_across_users(db, monkeypatch):
 
     assert response.status_code == 409
     assert _ceremony(db, begin["ceremony_id"]).consumed_at is not None
+
+
+def test_initial_activation_requires_exact_processing_consent(db):
+    issuer = create_test_user(db, username="consent.issuer", is_admin=True)
+    user = create_test_user(db, username="consent.subject", is_activated=False)
+    token, _ = create_activation_link(user.id, issuer.id, db)
+    create_test_governance_publication(db)
+    db.commit()
+    client = _raw_client()
+    consent = _processing_consent(client, token)
+
+    absent = client.post(
+        "/api/v1/passkey/register/begin",
+        headers={"X-Activation-Token": token},
+    )
+    unchecked = client.post(
+        "/api/v1/passkey/register/begin",
+        headers={"X-Activation-Token": token},
+        json={**consent, "confirmed": False},
+    )
+    stale = client.post(
+        "/api/v1/passkey/register/begin",
+        headers={"X-Activation-Token": token},
+        json={**consent, "policy_sha256": "f" * 64},
+    )
+
+    assert absent.status_code == 428
+    assert absent.json()["detail"]["code"] == "processing_consent_required"
+    assert unchecked.status_code == 422
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "processing_consent_identity_mismatch"
+
+
+def test_initial_activation_records_one_atomic_consent(db, monkeypatch):
+    issuer = create_test_user(db, username="atomic.issuer", is_admin=True)
+    user = create_test_user(db, username="atomic.subject", is_activated=False)
+    token, link = create_activation_link(user.id, issuer.id, db)
+    publication = create_test_governance_publication(db)
+    db.commit()
+    client = _raw_client()
+    consent = _processing_consent(client, token)
+    captured = {}
+
+    _install_registration_success(monkeypatch, b"atomic-consent-credential")
+
+    def record_consent(*args, **kwargs):
+        captured.update(kwargs)
+        return "b" * 64
+
+    monkeypatch.setattr(passkey_api, "append_record", record_consent)
+    begin = client.post(
+        "/api/v1/passkey/register/begin",
+        headers={"X-Activation-Token": token},
+        json=consent,
+    )
+    assert begin.status_code == 200, begin.text
+
+    complete = client.post(
+        "/api/v1/passkey/register/complete",
+        headers={"X-Activation-Token": token},
+        json=_registration_body(begin.json()["ceremony_id"]),
+    )
+
+    assert complete.status_code == 200, complete.text
+    db.expire_all()
+    stored = db.query(AccountProcessingConsent).one()
+    assert stored.user_subject_id == user.evidence_subject_id
+    assert stored.activation_link_id == link.id
+    assert stored.policy_version == publication.version
+    assert stored.policy_sha256 == publication.content_sha256
+    assert stored.statement_sha256 == consent["statement_sha256"]
+    assert stored.instance_record_sha256 == "b" * 64
+    assert captured["record_type"] == "account.processing_consent_recorded"
+    assert db.query(WebAuthnCredential).filter_by(user_id=user.id).count() == 1
+    assert db.get(type(link), link.id).used_at is not None
+    assert db.get(type(user), user.id).is_activated is True
+
+
+def test_evidence_failure_rolls_back_activation_and_consent(db, monkeypatch):
+    issuer = create_test_user(db, username="evidence.issuer", is_admin=True)
+    user = create_test_user(db, username="evidence.subject", is_activated=False)
+    token, link = create_activation_link(user.id, issuer.id, db)
+    create_test_governance_publication(db)
+    db.commit()
+    client = _raw_client()
+    consent = _processing_consent(client, token)
+    _install_registration_success(monkeypatch, b"unsealed-consent-credential")
+
+    def unavailable(*args, **kwargs):
+        raise EvidenceUnavailable("synthetic unavailable evidence")
+
+    monkeypatch.setattr(passkey_api, "append_record", unavailable)
+    begin = client.post(
+        "/api/v1/passkey/register/begin",
+        headers={"X-Activation-Token": token},
+        json=consent,
+    )
+    response = client.post(
+        "/api/v1/passkey/register/complete",
+        headers={"X-Activation-Token": token},
+        json=_registration_body(begin.json()["ceremony_id"]),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "processing_consent_evidence_unavailable"
+    db.expire_all()
+    assert db.query(AccountProcessingConsent).count() == 0
+    assert db.query(WebAuthnCredential).filter_by(user_id=user.id).count() == 0
+    assert db.get(type(link), link.id).used_at is None
+    assert db.get(type(user), user.id).is_activated is False
 
 
 def test_bootstrap_requires_operator_secret_and_discoverable_passkey(db, monkeypatch):

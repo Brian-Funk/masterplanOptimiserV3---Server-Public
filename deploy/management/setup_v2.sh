@@ -998,6 +998,9 @@ mp_setup_join_node() {
         chmod 600 "$MP_ROOT/secrets/"*
         unset db_password
     fi
+    # This node-local optional credential is deliberately excluded from the
+    # first shared bundle, but Compose still requires a safe mount source.
+    mp_prepare_node_local_optional_secret_mounts || return 1
     "$MP_ROOT/deploy/ha/install_services.sh" || return 1
     rm -f "$body" "$pair_body" "$MP_SETUP_V2_PENDING_LOCAL_JOIN"; unset pair node_token
     mp_setup_state_mark joined

@@ -1,5 +1,41 @@
 # Changes
 
+## 3.9.2 — 11 August 2026
+
+This patch release makes clean two-node commissioning self-contained and binds
+first account activation to the exact processing information shown to the
+invitee.
+
+### Fresh HA peer activation
+
+- Added one idempotent, fail-closed host helper for the optional node-local
+  Evidence Git credential mount. A fresh peer now creates the required empty
+  mount target before Compose activation while preserving any configured token
+  byte-for-byte.
+- Kept the credential outside replication, snapshots, diagnostics and public
+  evidence. Unsafe paths, symlinks and non-regular files stop activation with a
+  bounded error.
+- Applied the invariant during peer preparation and immediately before an
+  accepted copy recreates the backend, so interrupted first copies can resume
+  without leaving a database-only standby.
+
+### Consent-bound first activation
+
+- Added a concise published-governance disclosure to initial activation and an
+  unchecked confirmation before WebAuthn registration begins.
+- Bound the exact policy, controller, purpose, categories, audience and
+  statement digests to the ceremony. The passkey, activation-link consumption,
+  account activation, immutable consent row and pseudonymous evidence record
+  now commit or roll back together.
+- Kept additional-passkey and credential-reset ceremonies unchanged. Existing
+  accounts are not backfilled and no age declaration is requested.
+- Updated initial activation email to say that the activation page explains
+  the processing and requests confirmation before a passkey is registered.
+
+The stored proof identifies the exact published statement confirmed by the
+account holder. It does not by itself determine whether consent is the correct
+or legally valid basis for every controller relationship.
+
 ## 3.9.1 — 10 August 2026
 
 This maintenance release corrects fresh signed commissioning discovered during

@@ -9,7 +9,8 @@ from starlette.requests import Request
 import app.api.v1.admin as admin_module
 from app.models.user import ActivationEmailDelivery, ActivationLink
 from server_backend.conftest import (
-    create_test_event, create_test_user, _make_client, inject_session,
+    create_test_event, create_test_governance_publication, create_test_user,
+    _make_client, inject_session,
 )
 
 
@@ -301,6 +302,7 @@ def test_invalidate_activation_link(db, admin_client):
 
 def test_activation_validate_token(db, admin_client):
     """Activation token can be validated via the activation endpoint."""
+    create_test_governance_publication(db)
     event, _ = create_test_event(db, name="Evt")
     user = create_test_user(
         db, username="activate_me", event_id=event.id, is_activated=False,

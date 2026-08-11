@@ -1,10 +1,11 @@
 """Activation-token validation for passkey registration."""
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from typing import Literal, Optional
 
-from app.core.activation import validate_activation_token
+from app.core.activation import INITIAL_SETUP, validate_activation_token
+from app.core.activation_consent import ActivationConsentError, resolve_activation_consent
 from app.core.rate_limit import client_ip_rate_key, limiter, runtime_limit
 from app.db.database import get_db
 from app.models.user import User
@@ -23,6 +24,7 @@ class ActivationValidateResponse(BaseModel):
     ] = None
     logo_color_1: Optional[str] = None
     logo_color_2: Optional[str] = None
+    processing_consent: Optional[dict] = None
 
 
 class ActivationTokenRequest(BaseModel):
@@ -50,9 +52,20 @@ def validate_token(
     if not user or not user.is_active:
         return ActivationValidateResponse(valid=False)
 
+    processing_consent = None
+    if link.purpose == INITIAL_SETUP:
+        try:
+            processing_consent = resolve_activation_consent(user, db).public_payload()
+        except ActivationConsentError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": exc.safe_message},
+            ) from exc
+
     return ActivationValidateResponse(
         valid=True,
         username=user.username,
         display_name=user.display_name,
         purpose=link.purpose,
+        processing_consent=processing_consent,
     )

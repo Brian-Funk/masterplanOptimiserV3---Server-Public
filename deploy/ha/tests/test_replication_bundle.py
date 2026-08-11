@@ -279,6 +279,24 @@ class ReplicationBundleTests(unittest.TestCase):
             source,
         )
 
+    def test_receiver_prepares_node_local_optional_mount_before_compose(self) -> None:
+        source = (HA_DIR / "receive_replication_bundle.sh").read_text(encoding="utf-8")
+        prepare = source.index("mp_prepare_node_local_optional_secret_mounts")
+        compose = source.index("mp_compose_init")
+        activation_prepare = source.index(
+            "mp_prepare_node_local_optional_secret_mounts", prepare + 1
+        )
+        backend_permissions = source.index(
+            "mp_prepare_backend_secret_permissions", activation_prepare
+        )
+
+        self.assertLess(prepare, compose)
+        self.assertLess(activation_prepare, backend_permissions)
+        self.assertIn(
+            "The replication peer could not prepare its node-local optional secret mounts.",
+            source,
+        )
+
     def test_receiver_rebuilds_evidence_public_key_after_rollback(self) -> None:
         source = (HA_DIR / "receive_replication_bundle.sh").read_text(encoding="utf-8")
         restore_private = source.index(
