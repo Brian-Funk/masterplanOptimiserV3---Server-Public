@@ -17,7 +17,6 @@ const form: GovernanceFormState = {
   controller_postal_address: "1 Example Way\n8000 Example City",
   controller_country: "CH",
   privacy_contact_email: "privacy@example.com",
-  privacy_contact_phone: "",
   dpo_contact: "",
   supervisory_authority_name: "Synthetic Supervisory Authority",
   supervisory_authority_url: "https://authority.example",
@@ -79,17 +78,27 @@ describe("governance configuration files", () => {
     expect(() => parseGovernanceConfiguration(JSON.stringify(malformed), current)).toThrow("sensitive_data_supported must remain false");
   });
 
-  it("normalises nullable optional contact fields for the editor", () => {
+  it("normalises the nullable optional DPO contact for the editor", () => {
     const current = createInitialStructured(runtime, {});
     const file = createGovernanceConfiguration(form, current) as unknown as {
       draft: Record<string, unknown>;
     };
-    file.draft.privacy_contact_phone = null;
     file.draft.dpo_contact = null;
 
     const imported = parseGovernanceConfiguration(JSON.stringify(file), current);
-    expect(imported.form.privacy_contact_phone).toBe("");
     expect(imported.form.dpo_contact).toBe("");
+  });
+
+  it("rejects the retired governance phone field with an actionable message", () => {
+    const current = createInitialStructured(runtime, {});
+    const file = createGovernanceConfiguration(form, current) as unknown as {
+      draft: Record<string, unknown>;
+    };
+    file.draft.privacy_contact_phone = "+41 00 000 00 00";
+
+    expect(() => parseGovernanceConfiguration(JSON.stringify(file), current)).toThrow(
+      "privacy_contact_phone is retired",
+    );
   });
 
   it("creates a predictable safe filename", () => {

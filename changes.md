@@ -16,6 +16,17 @@ separate one-time Desktop conversion tool without rewriting them.
 - Keep the database schema unchanged; the correction is confined to the API
   validation boundary.
 
+### Email-only operational contacts
+
+- Preserve optional person email addresses from Desktop setup exports and make
+  them immediately available to activation and passkey-email workflows,
+  without requiring an administrator to re-enter them.
+- Continue accepting people without an email address while rejecting malformed
+  addresses before any setup records are written.
+- Retire the governance telephone field from the editable profile, imports,
+  administration UI and newly generated notices. Privacy contact remains
+  email-only.
+
 ## 3.9.4 — 11 August 2026
 
 This patch release completes the first protected copy to a fresh HA peer and

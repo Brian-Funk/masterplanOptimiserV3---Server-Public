@@ -16,7 +16,6 @@ const notice = {
   controller_postal_address: "Controller Street 1",
   controller_country: "CH",
   privacy_contact_email: "privacy@synthetic-controller.ch",
-  privacy_contact_phone: "+41 44 555 01 23",
   dpo_contact: "dpo@synthetic-controller.ch",
   supervisory_authority_name: "Synthetic Authority",
   supervisory_authority_url: "https://authority.invalid/",
@@ -96,10 +95,7 @@ describe("GovernanceNotice", () => {
       "href",
       "mailto:privacy@synthetic-controller.ch",
     );
-    expect(screen.getByRole("link", { name: "+41 44 555 01 23" })).toHaveAttribute(
-      "href",
-      "tel:+41445550123",
-    );
+    expect(document.querySelector('a[href^="tel:"]')).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "dpo@synthetic-controller.ch" })).toHaveClass("underline");
     expect(screen.getByRole("link", { name: "permitted-data boundary" })).toHaveAttribute(
       "href",

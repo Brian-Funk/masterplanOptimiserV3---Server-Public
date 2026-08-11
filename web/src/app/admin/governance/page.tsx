@@ -45,7 +45,6 @@ const empty: GovernanceFormState = {
   controller_postal_address: "",
   controller_country: "",
   privacy_contact_email: "",
-  privacy_contact_phone: "",
   dpo_contact: "",
   supervisory_authority_name: "",
   supervisory_authority_url: "",
@@ -118,7 +117,7 @@ export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupM
       const runtimeSettings = (data.runtime_settings || {}) as RuntimeSettings;
       if (data.draft) {
         const { structured: savedStructured, ...scalar } = data.draft;
-        setForm({ ...empty, ...scalar, privacy_contact_phone: scalar.privacy_contact_phone || "", dpo_contact: scalar.dpo_contact || "" });
+        setForm({ ...empty, ...scalar, dpo_contact: scalar.dpo_contact || "" });
         setStructured(savedStructured as GovernanceStructured);
         const declared = (savedStructured as GovernanceStructured).optional_features;
         const changed = [
@@ -209,7 +208,7 @@ export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupM
     setStatus("Saving private draft..."); setStatusKind("info");
     const saveRequest = () => apiFetch(governancePath, {
       method: "PUT",
-      body: JSON.stringify({ ...form, privacy_contact_phone: form.privacy_contact_phone || null, dpo_contact: form.dpo_contact || null, structured }),
+      body: JSON.stringify({ ...form, dpo_contact: form.dpo_contact || null, structured }),
     });
     const response = setupMode ? await saveRequest() : await withReauth(saveRequest);
     const data = await response.json().catch(() => ({}));
@@ -284,7 +283,6 @@ export function GovernanceWorkspace({ setupMode = false, onPublished }: { setupM
             <Field label="Service or correspondence address" placeholder="Optional public service address" helper="Optional in Masterplan. Add it only when the controller chooses or is required to publish one; avoid a private home address when another reachable address exists." value={form.controller_postal_address} onChange={(value) => update("controller_postal_address", value)} multiline required={false} />
             <Field label="Controller country code" placeholder="For example CH or DE" helper="Optional controller fact; it does not declare hosting location or determine applicable law." value={form.controller_country} onChange={(value) => update("controller_country", value.toUpperCase())} required={false} />
             <Field label="Privacy contact email" value={form.privacy_contact_email} onChange={(value) => update("privacy_contact_email", value)} type="email" />
-            <Field label="Privacy contact phone" value={form.privacy_contact_phone} onChange={(value) => update("privacy_contact_phone", value)} required={false} />
             <Field label="DPO contact" helper="Add only when a DPO is appointed or applicable law requires one." value={form.dpo_contact} onChange={(value) => update("dpo_contact", value)} required={false} requirement="conditional" />
             <Field label="Default notice locale" helper="For example en or de-CH." value={form.default_locale} onChange={(value) => update("default_locale", value)} />
             <Field label="Named supervisory authority" placeholder="Optional controller-confirmed authority" helper="Optional. If omitted, the notice still states the general complaint right without guessing the competent authority." value={form.supervisory_authority_name} onChange={(value) => update("supervisory_authority_name", value)} required={false} />

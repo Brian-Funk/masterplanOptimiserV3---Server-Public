@@ -16,7 +16,6 @@ export type GovernanceFormState = {
   controller_postal_address: string;
   controller_country: string;
   privacy_contact_email: string;
-  privacy_contact_phone: string;
   dpo_contact: string;
   supervisory_authority_name: string;
   supervisory_authority_url: string;
@@ -51,7 +50,6 @@ const FORM_STRING_FIELDS: Array<Exclude<keyof GovernanceFormState, "controller_t
   "controller_postal_address",
   "controller_country",
   "privacy_contact_email",
-  "privacy_contact_phone",
   "dpo_contact",
   "supervisory_authority_name",
   "supervisory_authority_url",
@@ -262,11 +260,16 @@ export function parseGovernanceConfiguration(
   }
   stringValue(envelope.exported_at, "exported_at");
   const draft = record(envelope.draft, "draft");
+  if (Object.prototype.hasOwnProperty.call(draft, "privacy_contact_phone")) {
+    throw new Error(
+      "draft.privacy_contact_phone is retired. Use draft.privacy_contact_email instead.",
+    );
+  }
   const controllerType = enumValue(draft.controller_type, ["organisation", "individual"], "draft.controller_type");
   const form = { controller_type: controllerType } as GovernanceFormState;
   for (const field of FORM_STRING_FIELDS) {
     const value = draft[field];
-    if ((field === "privacy_contact_phone" || field === "dpo_contact") && value === null) form[field] = "";
+    if (field === "dpo_contact" && value === null) form[field] = "";
     else form[field] = stringValue(value, `draft.${field}`);
   }
 
