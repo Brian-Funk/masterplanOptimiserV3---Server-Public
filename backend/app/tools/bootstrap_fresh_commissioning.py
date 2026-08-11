@@ -9,6 +9,7 @@ checks below independently refuse an existing application installation.
 from __future__ import annotations
 
 import os
+import re
 
 from sqlalchemy import text
 
@@ -33,6 +34,8 @@ _MUST_BE_EMPTY = (
     "public_schedule_links",
     "ha_protection_operations",
 )
+
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
 
 
 def _count(db, table: str) -> int:
@@ -64,6 +67,54 @@ def _assert_narrow_fresh_state(db) -> None:
         raise RuntimeError("Fresh commissioning found non-genesis evidence state")
 
 
+def _initialise_ha_bootstrap_state(db) -> None:
+    """Persist the initial writer generation before the public backend starts."""
+
+    mode = os.getenv("MP_FRESH_DEPLOYMENT_MODE", "")
+    if mode == "standalone-new":
+        existing = db.execute(
+            text(
+                "SELECT cluster_id, generation, active_node_id, maintenance "
+                "FROM ha_cluster_state WHERE id = 1"
+            )
+        ).one_or_none()
+        if existing is not None:
+            raise RuntimeError("Fresh standalone commissioning found HA ownership state")
+        return
+    if mode != "ha-primary-new":
+        raise RuntimeError("Fresh commissioning deployment mode is invalid")
+
+    cluster_id = os.getenv("MP_FRESH_HA_CLUSTER_ID", "")
+    node_id = os.getenv("MP_FRESH_HA_NODE_ID", "")
+    generation_text = os.getenv("MP_FRESH_HA_GENERATION", "")
+    if not _IDENTIFIER.fullmatch(cluster_id):
+        raise RuntimeError("Fresh HA commissioning cluster identity is invalid")
+    if node_id != "node-a":
+        raise RuntimeError("Fresh HA commissioning must initialise Node A")
+    if generation_text != "1":
+        raise RuntimeError("Fresh HA commissioning must initialise generation 1")
+
+    expected = (cluster_id, 1, node_id, False)
+    existing = db.execute(
+        text(
+            "SELECT cluster_id, generation, active_node_id, maintenance "
+            "FROM ha_cluster_state WHERE id = 1 FOR UPDATE"
+        )
+    ).one_or_none()
+    if existing is None:
+        db.execute(
+            text(
+                "INSERT INTO ha_cluster_state "
+                "(id, cluster_id, generation, active_node_id, maintenance) "
+                "VALUES (1, :cluster_id, 1, :node_id, FALSE)"
+            ),
+            {"cluster_id": cluster_id, "node_id": node_id},
+        )
+        return
+    if tuple(existing) != expected:
+        raise RuntimeError("Fresh HA commissioning found conflicting ownership state")
+
+
 def main() -> int:
     if os.getenv("MP_FRESH_COMMISSIONING") != "1":
         raise RuntimeError("Fresh commissioning acknowledgement is missing")
@@ -76,6 +127,7 @@ def main() -> int:
         _assert_narrow_fresh_state(db)
         create_default_admin(db)
         initialise_evidence(db)
+        _initialise_ha_bootstrap_state(db)
         db.commit()
         verify_existing(db)
     except Exception:

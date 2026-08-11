@@ -1,5 +1,24 @@
 # Changes
 
+## 3.9.3 — 11 August 2026
+
+This patch release makes the first root commissioning write available on a
+fresh two-node HA deployment without weakening normal writer fencing.
+
+### Fresh HA ownership
+
+- Persisted the generation-1 Node A ownership record in the same guarded
+  transaction that creates the fresh root and evidence genesis, before public
+  backend services start.
+- Bound the narrow bootstrap to the active setup-v2 HA-primary checkpoint and
+  validated the exact cluster, node and generation supplied by protected host
+  configuration.
+- Made retries idempotent only for an exact ownership match. Standalone setups,
+  conflicting generations and unexpected cluster identities continue to fail
+  closed.
+- Added regression coverage for initialization order, valid retries, invalid
+  identities and the standalone/HA boundary.
+
 ## 3.9.2 — 11 August 2026
 
 This patch release makes clean two-node commissioning self-contained and binds

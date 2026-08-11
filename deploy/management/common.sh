@@ -1269,6 +1269,7 @@ mp_ensure_base_schema() {
 # host-side guard additionally binds the exception to an active v2 setup.
 mp_initialise_fresh_commissioning_state() {
     local setup_state="${MP_STATE}/setup-state-v2.json"
+    local setup_mode
     jq -e '
         .format == "mp-opt-setup-state-v2"
         and .state == "in_progress"
@@ -1278,9 +1279,28 @@ mp_initialise_fresh_commissioning_state() {
         printf 'Fresh application initialisation requires an active setup-v2 checkpoint.\n' >&2
         return 1
     }
+    setup_mode="$(jq -r '.mode' "$setup_state")" || return 1
+    local -a fresh_ha_environment=(
+        -e "MP_FRESH_DEPLOYMENT_MODE=$setup_mode"
+    )
+    if [ "$setup_mode" = "ha-primary-new" ]; then
+        mp_load_ha_config >/dev/null || return 1
+        [ "$HA_MODE" = ha ] && [ "$HA_ROLE" = dynamic ] \
+            && [ "$HA_NODE_ID" = node-a ] && [ "$HA_GENERATION" = 1 ] \
+            && [[ "$HA_CLUSTER_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$ ]] || {
+            printf 'Fresh HA application initialisation found invalid ownership configuration.\n' >&2
+            return 1
+        }
+        fresh_ha_environment+=(
+            -e "MP_FRESH_HA_CLUSTER_ID=$HA_CLUSTER_ID"
+            -e "MP_FRESH_HA_NODE_ID=$HA_NODE_ID"
+            -e "MP_FRESH_HA_GENERATION=$HA_GENERATION"
+        )
+    fi
     mp_compose_init
     "${MP_COMPOSE[@]}" run -T --rm --no-deps \
         -e MP_FRESH_COMMISSIONING=1 \
+        "${fresh_ha_environment[@]}" \
         -e HA_MODE=standalone -e HA_ROLE=standalone \
         -e HA_NODE_ID=standalone -e HA_CONTROL_WITNESS_REQUIRED=false \
         backend python -m app.tools.bootstrap_fresh_commissioning
