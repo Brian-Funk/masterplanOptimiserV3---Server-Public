@@ -48,6 +48,7 @@ lease_service_active=false
 backend_service_active=false
 caddy_service_active=false
 caddy_configuration_changed=false
+caddy_requires_activation=false
 receiver_started_ms="$(date +%s%3N)"
 mp_compose_init
 if "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx backend; then
@@ -349,6 +350,9 @@ cp -a "$MP_ROOT/.env" "$stage/.env.previous"
 previous_domain="$(sed -n 's/^DOMAIN=//p' "$stage/.env.previous" | tail -n 1)"
 next_domain="$(sed -n 's/^DOMAIN=//p' "$stage/.env" | tail -n 1)"
 [ "$previous_domain" = "$next_domain" ] || caddy_configuration_changed=true
+if [ "$caddy_service_active" != true ] || [ "$caddy_configuration_changed" = true ]; then
+    caddy_requires_activation=true
+fi
 mkdir "$stage/secrets.previous"
 cp -a "$MP_ROOT/secrets/." "$stage/secrets.previous/"
 
@@ -404,21 +408,40 @@ sudo -n mv "$stage/evidence.new" "$MP_ROOT/state/evidence"
 mp_snapshot_publish_status
 mp_prepare_node_local_optional_secret_mounts
 mp_prepare_backend_secret_permissions
-services_to_recreate=(backend)
-[ "$caddy_configuration_changed" = false ] || services_to_recreate+=(caddy)
-"${MP_COMPOSE[@]}" up -d --no-deps --force-recreate "${services_to_recreate[@]}" >/dev/null
-"${MP_COMPOSE[@]}" exec -T db pg_isready -U masterplan -d masterplan >/dev/null
-"${MP_COMPOSE[@]}" exec -T caddy \
-    caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
+if ! "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend >/dev/null; then
+    echo "HA_RECEIVER_BACKEND_ACTIVATION_FAILED: the replicated backend could not be started." >&2
+    exit 1
+fi
+if [ "$caddy_requires_activation" = true ] \
+    && ! "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate caddy >/dev/null; then
+    echo "HA_RECEIVER_CADDY_ACTIVATION_FAILED: the replication peer could not start its reverse proxy." >&2
+    exit 1
+fi
+if ! "${MP_COMPOSE[@]}" exec -T db pg_isready -U masterplan -d masterplan >/dev/null; then
+    echo "HA_RECEIVER_DATABASE_HEALTH_FAILED: the replicated database is unavailable after activation." >&2
+    exit 1
+fi
+if ! "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx caddy; then
+    echo "HA_RECEIVER_CADDY_NOT_RUNNING: the reverse proxy is not running after activation." >&2
+    exit 1
+fi
+if ! "${MP_COMPOSE[@]}" exec -T caddy \
+    caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null; then
+    echo "HA_RECEIVER_CADDY_VALIDATION_FAILED: the active reverse-proxy configuration was rejected." >&2
+    exit 1
+fi
 for _ in $(seq 1 30); do
     "${MP_COMPOSE[@]}" exec -T backend python -c \
         'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3).read()' \
         >/dev/null 2>&1 && break
     sleep 2
 done
-"${MP_COMPOSE[@]}" exec -T backend python -c \
+if ! "${MP_COMPOSE[@]}" exec -T backend python -c \
     'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3).read()' \
-    >/dev/null
+    >/dev/null; then
+    echo "HA_RECEIVER_BACKEND_HEALTH_FAILED: the replicated backend did not become healthy." >&2
+    exit 1
+fi
 python3 "$MP_ROOT/deploy/ha/smtp_probe.py" --root "$MP_ROOT" --node-id "$HA_NODE_ID" \
     --output "$MP_ROOT/runtime/ha-smtp-status.json" >/dev/null 2>&1 || true
 
