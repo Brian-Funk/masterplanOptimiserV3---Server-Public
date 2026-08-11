@@ -474,6 +474,9 @@ database_swap_started=false
 # failover delay and the fully applied, hash-verified copy remains valid.
 python3 "$MP_ROOT/deploy/ha/witness_control.py" complete-transfer \
     "$bundle_id" "$expected_hash" >/dev/null 2>&1 || true
+if ! mp_reconcile_signed_join_setup; then
+    echo "HA_RECEIVER_SETUP_STATE_FINALISATION_FAILED: the verified copy remains accepted, but Node B retained its resumable waiting state." >&2
+fi
 receiver_completed_ms="$(date +%s%3N)"
 printf 'MP_RECEIVER_TIMING restore_ms=%s verification_activation_ms=%s total_ms=%s\n' \
     "$((restore_completed_ms - restore_started_ms))" \
