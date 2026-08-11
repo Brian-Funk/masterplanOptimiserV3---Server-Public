@@ -1558,14 +1558,167 @@ mp_require_commands() {
     fi
 }
 
+# Assign every public management action to the permission boundary it needs.
+# This explicit list is kept in step with manage.sh by an executable test.
+mp_action_permission_profile() {
+    case "${1:-}" in
+        mp_service_status|mp_test_deployment_status|mp_show_configuration|mp_cryptographic_inventory|\
+        mp_snapshot_list_interactive|mp_database_status|mp_diagnostics|mp_snapshot_verify_outer_all|\
+        mp_instance_key_status|mp_trust_key_guidance|mp_evidence_verify|mp_evidence_git_status|\
+        mp_evidence_git_guidance|mp_ha_overview|mp_ha_active_verification_readiness|\
+        mp_ha_run_selftests|mp_system_overview|mp_logs|mp_show_report|ui_text_file|\
+        mp_validate_installation)
+            printf 'observe\n'
+            ;;
+        mp_deploy_latest|mp_test_deployment_apply|mp_test_deployment_rollback|\
+        mp_test_deployment_restore_signed|mp_service_action|mp_rebuild_frontend|mp_prune_build_cache)
+            printf 'deployment\n'
+            ;;
+        mp_storage_security_checklist|mp_manage_deployment_policy|mp_migrate_legacy_env_secrets|\
+        mp_configure_smtp|mp_send_smtp_test|mp_disable_smtp|mp_change_application_name|\
+        mp_manage_runtime_settings|mp_configure_recovery_recipient|mp_rotation_resume_pending|\
+        mp_rotate_database_password|mp_rotate_application_secret|mp_rotate_ip_hmac_key|\
+        mp_rotate_vapid|mp_change_domain|mp_configure_interface_size)
+            printf 'configuration\n'
+            ;;
+        mp_snapshot_create_interactive|mp_snapshot_verify_interactive|\
+        mp_snapshot_export_portable_interactive|mp_snapshot_import_portable_interactive|\
+        mp_snapshot_restore_interactive|mp_snapshot_delete_interactive|\
+        mp_collect_recovery_evidence_interactive)
+            printf 'snapshot\n'
+            ;;
+        mp_reset_root_admin|mp_disable_root_bootstrap|mp_wipe_database)
+            printf 'root-database\n'
+            ;;
+        mp_evidence_export_bundle|mp_evidence_git_configure|mp_evidence_git_test_saved|\
+        mp_evidence_git_disable|mp_evidence_git_retry)
+            printf 'evidence\n'
+            ;;
+        mp_ha_replicate_now|mp_ha_configure_peer_recipient|mp_setup_replace_standby|\
+        mp_setup_migrate_legacy_load_balancer|mp_setup_cleanup_legacy_load_balancer|\
+        mp_setup_decommission_cloudflare|mp_ha_configure_archive_target|\
+        mp_ha_configure_alert_recipient|mp_ha_verify_smtp_both_nodes|\
+        mp_ha_planned_switchover|mp_ha_automatic_failover)
+            printf 'ha\n'
+            ;;
+        mp_offer_dependency_install|mp_setup_v2)
+            printf 'commissioning\n'
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+mp_validate_private_directory_metadata() {
+    local path="$1" expected_owner="${2:-$(id -u):$(id -g)}" expected_mode="${3:-700}"
+    [ -d "$path" ] && [ ! -L "$path" ] \
+        && [ "$(stat -c '%u:%g' "$path" 2>/dev/null)" = "$expected_owner" ] \
+        && [ "$(stat -c '%a' "$path" 2>/dev/null)" = "$expected_mode" ]
+}
+
+mp_validate_action_profile_permissions() {
+    local profile="$1" owner
+    owner="$(id -u):$(id -g)"
+    mp_validate_runtime_permissions || return 1
+    case "$profile" in
+        deployment)
+            [ -d "$MP_ROOT" ] && [ ! -L "$MP_ROOT" ] || return 1
+            if [ -e "$MP_ROOT/secrets" ]; then
+                mp_validate_private_directory_metadata "$MP_ROOT/secrets" "$owner" 700 || return 1
+                mp_validate_protected_file_modes >/dev/null || return 1
+            fi
+            ;;
+        configuration|root-database)
+            mp_validate_private_directory_metadata "$MP_STATE" "$owner" 700 || return 1
+            mp_validate_private_directory_metadata "$MP_ROOT/secrets" "$owner" 700 || return 1
+            mp_validate_protected_file_modes >/dev/null || return 1
+            ;;
+        snapshot)
+            mp_validate_private_directory_metadata "$MP_STATE" "$owner" 700 || return 1
+            mp_validate_private_directory_metadata "$MP_SNAPSHOTS" "$owner" 700 || return 1
+            mp_validate_private_directory_metadata "$MP_ROOT/secrets" "$owner" 700 || return 1
+            mp_validate_protected_file_modes >/dev/null || return 1
+            ;;
+        evidence)
+            mp_validate_private_directory_metadata "$MP_STATE" "$owner" 700 || return 1
+            mp_validate_private_directory_metadata "$MP_ROOT/state/evidence" "10001:10001" 700 || return 1
+            mp_validate_protected_file_modes >/dev/null || return 1
+            ;;
+        ha)
+            mp_validate_private_directory_metadata "$MP_STATE" "$owner" 700 || return 1
+            mp_validate_private_directory_metadata "$MP_HA_HOME" "$owner" 700 || return 1
+            mp_validate_private_directory_metadata "$MP_HA_HOME/secrets" "$owner" 700 || return 1
+            mp_validate_protected_file_modes >/dev/null || return 1
+            ;;
+        commissioning)
+            # Commissioning legitimately creates the remaining protected paths.
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+mp_action_permission_preflight() {
+    local profile="$1"
+    case "$profile" in
+        observe) return 0 ;;
+        deployment|configuration|snapshot|root-database|evidence|ha)
+            [ -d "$MP_ROOT" ] || {
+                ui_error "The application root is unavailable; permission preflight could not run."
+                return 1
+            }
+            mp_prepare_runtime_permissions || {
+                ui_error "The runtime permission contract is unsafe. No management change was started."
+                return 1
+            }
+            [ ! -d "$MP_ROOT/secrets" ] || mp_prepare_backend_secret_permissions || {
+                ui_error "Application secret permissions are unsafe. No management change was started."
+                return 1
+            }
+            mp_validate_action_profile_permissions "$profile" || {
+                ui_error "The ${profile} permission profile is unsafe. No management change was started."
+                return 1
+            }
+            ;;
+        commissioning)
+            if [ -d "$MP_ROOT" ]; then
+                mp_prepare_runtime_permissions || {
+                    ui_error "The commissioning permission contract is unsafe. Setup was not started."
+                    return 1
+                }
+            fi
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+mp_action_permission_postflight() {
+    local profile="$1"
+    case "$profile" in
+        observe) return 0 ;;
+        *)
+            [ -d "$MP_ROOT/runtime" ] || return 0
+            mp_validate_action_profile_permissions "$profile" || {
+                ui_error "The action finished, but its runtime permission contract is unsafe. Validate the installation before continuing."
+                return 1
+            }
+            ;;
+    esac
+}
+
 # Run one menu action with strict error handling without closing the dashboard.
 mp_run_action() {
-    local status
+    local status profile action="${1:-}"
+    profile="$(mp_action_permission_profile "$action")" || {
+        ui_error "This management action has no permission profile and was not run."
+        mp_audit "menu.action" "permission-profile-missing" "$action"
+        return 0
+    }
     set +e
     (
         set -Eeuo pipefail
         trap ':' INT
+        mp_action_permission_preflight "$profile"
         "$@"
+        mp_action_permission_postflight "$profile"
     )
     status=$?
     set -e
