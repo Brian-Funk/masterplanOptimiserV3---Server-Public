@@ -16,7 +16,6 @@ update_operation_stage() {
     local stage_name="$1" state_name="${2:-pending}" operation_id="" operation_sequence=""
     [ -n "$request_file" ] || return 0
     [ "$(jq -r '.format // empty' "$request_file" 2>/dev/null)" = "mp-opt-replication-batch-v2" ] || return 0
-    install -d -m 0711 "$MP_ROOT/runtime/ha-operation-results"
     while IFS=$'\t' read -r operation_id operation_sequence; do
         [ -n "$operation_id" ] || continue
         jq -n --arg operation "$operation_id" --arg state "$state_name" \
@@ -61,6 +60,7 @@ assert_current_holder() {
 
 # shellcheck source=../management/common.sh
 source "$MP_ROOT/deploy/management/common.sh"
+mp_prepare_runtime_permissions
 mp_load_ha_config
 [ "$HA_MODE" = "ha" ] || exit 1
 [ "$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json")" = "$HA_NODE_ID" ] || exit 1

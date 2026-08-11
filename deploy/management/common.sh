@@ -147,8 +147,8 @@ mp_queue_ha_replication() {
     local reason="${1:-operator-change}" job temporary
     [ "$(mp_ha_role 2>/dev/null || printf standalone)" = "dynamic" ] || return 0
     [[ "$reason" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || return 1
+    mp_prepare_runtime_permissions || return 1
     job="$(cat /proc/sys/kernel/random/uuid)" || return 1
-    mkdir -p "$MP_ROOT/runtime/ha-requests" || return 1
     temporary="$MP_ROOT/runtime/ha-requests/.${job}.tmp"
     printf '{"format":"mp-opt-replication-request-v1","job_id":"%s","reason":"%s","created_at":"%s"}\n' \
         "$job" "$reason" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$temporary" || return 1
@@ -857,6 +857,7 @@ mp_validate_protected_file_modes() {
 # Build the exact production Compose command, including the local override.
 mp_compose_init() {
     mp_load_ha_config || return 1
+    mp_prepare_runtime_permissions || return 1
     MP_COMPOSE=(
         docker compose
         --env-file "$MP_ROOT/.env"
@@ -926,17 +927,30 @@ mp_retire_root_bootstrap_secret() {
     fi
 }
 
-# Prepare generated frontend-policy storage and safely repair the empty
-# directory created by Docker's legacy missing-file bind behaviour.
-mp_prepare_frontend_csp_runtime() {
+# Establish the complete host/container runtime permission contract.  This is
+# the only helper allowed to create or change shared runtime directories.
+# Docker may create missing bind sources as root-owned 0755 directories and
+# older service installers used to reset the HA queue to host-only 0700.  Run
+# this helper before every container activation and after installing services.
+mp_prepare_runtime_permissions() {
     local runtime_dir="$MP_ROOT/runtime"
     local policy_path="$runtime_dir/frontend-csp.caddy"
     local request_dir="$runtime_dir/ha-requests"
     local operation_result_dir="$runtime_dir/ha-operation-results"
+    local deferred_dir="$runtime_dir/ha-deferred-requests"
+    local jobs_dir="$runtime_dir/ha-jobs"
     local compliance_request_dir="$runtime_dir/compliance-requests"
     local compliance_receipt_dir="$runtime_dir/compliance-receipts"
     local owner directory
 
+    if [ -L "$runtime_dir" ] || { [ -e "$runtime_dir" ] && [ ! -d "$runtime_dir" ]; }; then
+        printf 'Runtime path is unsafe: %s\n' "$runtime_dir" >&2
+        return 1
+    fi
+    if [ -L "$policy_path" ]; then
+        printf 'CSP output path is a symbolic link: %s\n' "$policy_path" >&2
+        return 1
+    fi
     if [ -d "$policy_path" ]; then
         if find "$policy_path" -mindepth 1 -print -quit | grep -q .; then
             printf 'Refusing to replace non-empty CSP path: %s\n' "$policy_path" >&2
@@ -961,7 +975,8 @@ mp_prepare_frontend_csp_runtime() {
     # Containers run as dedicated non-host UIDs. Permit traversal to the
     # deliberately mounted child paths without allowing directory listing.
     chmod 0711 "$runtime_dir" || return 1
-    for directory in "$request_dir" "$compliance_request_dir" "$compliance_receipt_dir"; do
+    for directory in "$request_dir" "$compliance_request_dir" "$compliance_receipt_dir" \
+            "$deferred_dir" "$jobs_dir" "$operation_result_dir"; do
         if [ -e "$directory" ] && { [ ! -d "$directory" ] || [ -L "$directory" ]; }; then
             printf 'Refusing unsafe runtime request path: %s\n' "$directory" >&2
             return 1
@@ -975,15 +990,7 @@ mp_prepare_frontend_csp_runtime() {
     # The unprivileged API may enqueue opaque replication jobs without being
     # able to list or replace requests created by another process.
     chmod 1733 "$request_dir" || return 1
-    if [ -e "$operation_result_dir" ] && { [ ! -d "$operation_result_dir" ] || [ -L "$operation_result_dir" ]; }; then
-        printf 'Refusing unsafe HA operation-result path: %s\n' "$operation_result_dir" >&2
-        return 1
-    fi
-    mkdir -p "$operation_result_dir" 2>/dev/null || true
-    [ -d "$operation_result_dir" ] || return 1
-    [ "$(stat -c '%u:%g' "$operation_result_dir")" = "$owner" ] \
-        || sudo -n chown "$owner" "$operation_result_dir" \
-        || return 1
+    chmod 0700 "$deferred_dir" "$jobs_dir" || return 1
     # UUID filenames are known only to the authenticated caller. The backend
     # may traverse and read a named 0644 result but cannot list the directory.
     chmod 0711 "$operation_result_dir" || return 1
@@ -993,6 +1000,72 @@ mp_prepare_frontend_csp_runtime() {
     # bind mount; signatures prevent a readable file from being trusted after
     # modification.
     chmod 0755 "$compliance_receipt_dir" || return 1
+}
+
+# Validate the host side of the runtime permission contract without changing
+# it. This intentionally checks metadata only and never reads request, receipt,
+# status, or secret contents.
+mp_validate_runtime_permissions() {
+    local runtime_dir="$MP_ROOT/runtime"
+    local owner expected path actual_mode actual_owner failed=0
+    owner="$(id -u):$(id -g)"
+    if [ ! -d "$runtime_dir" ] || [ -L "$runtime_dir" ]; then
+        printf 'UNSAFE RUNTIME PATH: %s\n' "$runtime_dir"
+        return 1
+    fi
+    actual_mode="$(stat -c '%a' "$runtime_dir" 2>/dev/null || true)"
+    actual_owner="$(stat -c '%u:%g' "$runtime_dir" 2>/dev/null || true)"
+    if [ "$actual_mode" != 711 ] || [ "$actual_owner" != "$owner" ]; then
+        printf 'UNSAFE RUNTIME DIRECTORY: %s mode=%s owner=%s\n' \
+            "$runtime_dir" "${actual_mode:-missing}" "${actual_owner:-missing}"
+        failed=1
+    fi
+    while IFS=$'\t' read -r path expected; do
+        [ -n "$path" ] || continue
+        if [ ! -d "$path" ] || [ -L "$path" ]; then
+            printf 'UNSAFE RUNTIME DIRECTORY: %s\n' "$path"
+            failed=1
+            continue
+        fi
+        actual_mode="$(stat -c '%a' "$path" 2>/dev/null || true)"
+        actual_owner="$(stat -c '%u:%g' "$path" 2>/dev/null || true)"
+        if [ "$actual_mode" != "$expected" ] || [ "$actual_owner" != "$owner" ]; then
+            printf 'UNSAFE RUNTIME DIRECTORY: %s mode=%s owner=%s\n' \
+                "$path" "${actual_mode:-missing}" "${actual_owner:-missing}"
+            failed=1
+        fi
+    done <<EOF
+$runtime_dir/ha-requests	1733
+$runtime_dir/ha-deferred-requests	700
+$runtime_dir/ha-jobs	700
+$runtime_dir/ha-operation-results	711
+$runtime_dir/compliance-requests	1733
+$runtime_dir/compliance-receipts	755
+EOF
+    path="$runtime_dir/frontend-csp.caddy"
+    if [ -e "$path" ]; then
+        if [ ! -f "$path" ] || [ -L "$path" ]; then
+            printf 'UNSAFE CSP OUTPUT: %s\n' "$path"
+            failed=1
+        else
+            actual_mode="$(stat -c '%a' "$path" 2>/dev/null || true)"
+            actual_owner="$(stat -c '%u:%g' "$path" 2>/dev/null || true)"
+            if ! [[ "$actual_mode" =~ ^[0-7]{3,4}$ ]] \
+                || (( (8#$actual_mode & 8#022) != 0 )) \
+                || [ "$actual_owner" != "$owner" ]; then
+                printf 'UNSAFE CSP OUTPUT: %s mode=%s owner=%s\n' \
+                    "$path" "${actual_mode:-missing}" "${actual_owner:-missing}"
+                failed=1
+            fi
+        fi
+    fi
+    return "$failed"
+}
+
+# Compatibility name for older management extensions.  New callers must use
+# mp_prepare_runtime_permissions so the scope of the operation is explicit.
+mp_prepare_frontend_csp_runtime() {
+    mp_prepare_runtime_permissions
 }
 
 # Build the static frontend in the pinned Node container while preserving an
