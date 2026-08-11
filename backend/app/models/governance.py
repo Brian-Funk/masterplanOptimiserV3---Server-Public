@@ -30,7 +30,6 @@ class InstanceGovernanceProfile(Base):
     controller_postal_address = Column(String(500), nullable=False)
     controller_country = Column(String(2), nullable=False)
     privacy_contact_email = Column(String(320), nullable=False)
-    privacy_contact_phone = Column(String(64), nullable=True)
     dpo_contact = Column(String(320), nullable=True)
     supervisory_authority_name = Column(String(200), nullable=False)
     supervisory_authority_url = Column(String(500), nullable=False)

@@ -15,7 +15,6 @@ PROFILE = {
     "controller_postal_address": "Example Street 1, 8000 Zurich",
     "controller_country": "ch",
     "privacy_contact_email": "privacy@synthetic-controller.ch",
-    "privacy_contact_phone": None,
     "dpo_contact": None,
     "supervisory_authority_name": "Federal Data Protection and Information Commissioner",
     "supervisory_authority_url": "https://www.edoeb.admin.ch/",
@@ -400,7 +399,6 @@ def test_immutable_privacy_and_rights_pages_are_styled_human_readable_notices(db
     client, _root = _root_with_reauth(db)
     profile = {
         **PROFILE,
-        "privacy_contact_phone": "+41 44 555 01 23",
         "dpo_contact": "dpo@synthetic-controller.ch",
     }
     assert client.put("/api/v1/admin/governance", json=profile).status_code == 200
@@ -428,7 +426,7 @@ def test_immutable_privacy_and_rights_pages_are_styled_human_readable_notices(db
     assert "Purpose and permitted information" in privacy.text
     assert "Cookies and browser storage" in privacy.text
     assert "Processors and service providers" in privacy.text
-    assert 'href="tel:+41445550123">+41 44 555 01 23</a>' in privacy.text
+    assert 'href="tel:' not in privacy.text
     assert 'href="mailto:dpo@synthetic-controller.ch">dpo@synthetic-controller.ch</a>' in privacy.text
     assert 'href="rights.html">Read how to exercise your rights</a>' in privacy.text
     terms = client.get("/api/v1/governance/public/versions/1/terms.html")
@@ -449,6 +447,29 @@ def test_immutable_privacy_and_rights_pages_are_styled_human_readable_notices(db
     assert "FADP Art. 25" in rights.text
     assert "GDPR Articles 77 and 79" in rights.text
     assert "FADP Articles 32 and 49 onward" in rights.text
+
+
+def test_governance_rejects_the_retired_phone_contact(db):
+    client, _root = _root_with_reauth(db)
+    response = client.put(
+        "/api/v1/admin/governance",
+        json={**PROFILE, "privacy_contact_phone": "+41 00 000 00 00"},
+    )
+
+    assert response.status_code == 422
+    assert "privacy_contact_phone is retired" in response.text
+
+
+def test_email_only_governance_migration_does_not_rewrite_publications():
+    migration = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "migrations"
+        / "20260811_governance_email_only.sql"
+    ).read_text(encoding="utf-8").lower()
+
+    assert "drop column if exists privacy_contact_phone" in migration
+    assert "governance_publications" not in migration
 
 
 def test_every_public_governance_section_uses_the_shared_masterplan_shell(db):

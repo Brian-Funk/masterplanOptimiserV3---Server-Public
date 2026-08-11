@@ -228,7 +228,6 @@ def build_publication_payload(profile: InstanceGovernanceProfile) -> dict[str, A
         "controller_postal_address": profile.controller_postal_address,
         "controller_country": profile.controller_country,
         "privacy_contact_email": profile.privacy_contact_email,
-        "privacy_contact_phone": profile.privacy_contact_phone,
         "dpo_name_or_role": structured.get("dpo_name_or_role"),
         "dpo_contact": profile.dpo_contact,
         "eu_representative": structured.get("eu_representative"),
