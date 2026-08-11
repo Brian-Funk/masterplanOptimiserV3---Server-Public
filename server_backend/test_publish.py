@@ -142,6 +142,30 @@ def test_publish_creates_data(db):
     assert persons[0].first_name == "John"
 
 
+def test_publish_preserves_deterministic_uuid5_person_identity(db):
+    """Converted Desktop identities remain stable across publishing."""
+
+    event, secret = create_test_event(db, name="Converted publish")
+    subject_ref = str(uuid.uuid5(uuid.NAMESPACE_URL, "mp-opt:person:published"))
+    payload = {
+        **_MINIMAL_PAYLOAD,
+        "persons": [
+            {
+                "id": 1,
+                "first_name": "Converted",
+                "last_name": "Person",
+                "evidence_subject_id": subject_ref,
+            }
+        ],
+    }
+
+    response = _publish_client(secret).post("/api/v1/publish/publish", json=payload)
+
+    assert response.status_code == 200
+    person = db.query(PublishedPerson).filter(PublishedPerson.event_id == event.id).one()
+    assert person.evidence_subject_id == subject_ref
+
+
 def test_publish_adds_range_and_unavailability_without_touching_registered_users(db):
     """Publishing adds schedule data while preserving existing server accounts."""
     event, secret = create_test_event(db, name="Overnight Evt")
