@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
+import os
 from pathlib import Path
 import re
 import uuid
@@ -20,6 +22,15 @@ from sqlalchemy.orm import Session
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _FINAL_STATES = {"accepted", "failed", "cancelled"}
+_LOGGER = logging.getLogger("ha.protection")
+
+
+class HAProtectionQueueError(RuntimeError):
+    """A bounded infrastructure error raised before a protected commit."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -57,6 +68,55 @@ def find_protection_operation(db: Session, idempotency_key: str) -> HAProtection
     )
 
 
+def protection_queue_error() -> str | None:
+    """Return a safe error code for the backend-visible HA request queue."""
+
+    if settings.HA_MODE != "ha":
+        return None
+    request_dir = Path(settings.HA_REPLICATION_REQUEST_DIR)
+    try:
+        if request_dir.is_symlink():
+            return "replication_queue_unsafe"
+        if not request_dir.exists():
+            return "replication_queue_missing"
+        if not request_dir.is_dir():
+            return "replication_queue_unsafe"
+        if not os.access(request_dir, os.W_OK | os.X_OK):
+            return "replication_queue_not_writable"
+    except OSError:
+        return "replication_queue_unsafe"
+    return None
+
+
+def require_protection_queue_ready() -> None:
+    """Prove an atomic write before opening a witness guard or transaction."""
+
+    code = protection_queue_error()
+    if code is not None:
+        raise HAProtectionQueueError(code)
+    request_dir = Path(settings.HA_REPLICATION_REQUEST_DIR)
+    probe_id = str(uuid.uuid4())
+    temporary = request_dir / f".{probe_id}.permission-probe.tmp"
+    target = request_dir / f".{probe_id}.permission-probe"
+    try:
+        temporary.write_text("{}\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(target)
+        target.unlink()
+    except PermissionError as exc:
+        raise HAProtectionQueueError("replication_queue_not_writable") from exc
+    except FileNotFoundError as exc:
+        raise HAProtectionQueueError("replication_queue_missing") from exc
+    except OSError as exc:
+        raise HAProtectionQueueError("replication_queue_atomic_write_failed") from exc
+    finally:
+        for candidate in (temporary, target):
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def create_protection_operation(
     db: Session,
     *,
@@ -72,6 +132,7 @@ def create_protection_operation(
     existing = find_protection_operation(db, idempotency_key)
     if existing is not None:
         return existing
+    require_protection_queue_ready()
     if not re.fullmatch(r"[a-z][a-z0-9_.-]{1,63}", operation_type):
         raise ValueError("invalid_operation_type")
     if not re.fullmatch(r"[a-z][a-z0-9_.-]{1,63}", resource_type):
@@ -128,16 +189,17 @@ def queue_protection_operation(
     operation: HAProtectionOperation | None,
     *,
     privacy_assertion: dict | None = None,
-) -> bool:
+) -> str | None:
     """Atomically queue a committed operation marker for host replication."""
 
     if operation is None:
-        return True
+        return None
     marker = protection_marker(operation)
     request_dir = Path(settings.HA_REPLICATION_REQUEST_DIR)
+    temporary: Path | None = None
     try:
-        request_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        temporary = request_dir / f".{operation.id}.tmp"
+        require_protection_queue_ready()
+        temporary = request_dir / f".{operation.id}.{uuid.uuid4()}.tmp"
         target = request_dir / f"{operation.id}.json"
         document = {
             "format": "mp-opt-replication-request-v2",
@@ -152,9 +214,26 @@ def queue_protection_operation(
         temporary.write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
         temporary.chmod(0o644)
         temporary.replace(target)
-        return True
+        return None
+    except HAProtectionQueueError as exc:
+        code = exc.code
+    except PermissionError:
+        code = "replication_queue_not_writable"
+    except FileNotFoundError:
+        code = "replication_queue_missing"
     except OSError:
-        return False
+        code = "replication_queue_atomic_write_failed"
+    if temporary is not None:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    _LOGGER.error(json.dumps({
+        "event": "ha.protection.queue_failed",
+        "operation_id": operation.id,
+        "error_code": code,
+    }, sort_keys=True))
+    return code
 
 
 def sync_protection_operation(db: Session, operation: HAProtectionOperation) -> HAProtectionOperation:
@@ -266,8 +345,8 @@ def request_ha_replication(
     job_id = str(uuid.uuid4())
     request_dir = Path(settings.HA_REPLICATION_REQUEST_DIR)
     try:
-        request_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        temporary = request_dir / f".{job_id}.tmp"
+        require_protection_queue_ready()
+        temporary = request_dir / f".{job_id}.{uuid.uuid4()}.tmp"
         target = request_dir / f"{job_id}.json"
         document = {
             "format": "mp-opt-replication-request-v1",
@@ -281,6 +360,6 @@ def request_ha_replication(
         temporary.write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
         temporary.chmod(0o644)
         temporary.replace(target)
-    except OSError:
+    except (HAProtectionQueueError, OSError):
         return None
     return job_id

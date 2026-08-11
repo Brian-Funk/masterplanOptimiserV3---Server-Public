@@ -46,7 +46,7 @@ AUDIT_ACTIONS = frozenset({
     "gdpr.resolve_backups", "gdpr.resolve_outstanding_actions", "gdpr.withdraw_deletion",
     "general_schedule.publish", "governance.data_policy_acknowledged",
     "governance.draft_saved", "governance.event_override_saved",
-    "governance.published", "ha.replication_requested",
+    "governance.published", "ha.protection.retry", "ha.replication_requested",
     "history.delete", "history.restore", "history.update", "passkey.auth_failed",
     "passkey.bootstrap", "passkey.bootstrap_failed", "passkey.delete",
     "passkey.duplicate_denied", "passkey.register", "passkey.registration_failed",

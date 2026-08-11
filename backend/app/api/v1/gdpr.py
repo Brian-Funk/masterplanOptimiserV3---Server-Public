@@ -845,12 +845,14 @@ def _advance_peer_protection(
             db.rollback()
             cancel_uncommitted_protection(operation)
             raise
-        if operation is not None and not queue_protection_operation(
-            operation, privacy_assertion=assertion,
-        ):
+        queue_error = (
+            queue_protection_operation(operation, privacy_assertion=assertion)
+            if operation is not None else None
+        )
+        if operation is not None and queue_error is not None:
             operation.state = "indeterminate"
             operation.stage = "attention_required"
-            operation.error_code = "replication_agent_unavailable"
+            operation.error_code = queue_error
             db.commit()
             raise EvidenceUnavailable(
                 "Standby protection could not be queued. The deletion remains durable and will be retried automatically."
@@ -858,9 +860,18 @@ def _advance_peer_protection(
     elif (
         operation is not None
         and operation.state == "indeterminate"
-        and operation.error_code == "replication_agent_unavailable"
+        and operation.error_code in {
+            "replication_agent_unavailable",
+            "replication_queue_missing",
+            "replication_queue_unsafe",
+            "replication_queue_not_writable",
+            "replication_queue_atomic_write_failed",
+        }
     ):
-        if not queue_protection_operation(operation, privacy_assertion=assertion):
+        queue_error = queue_protection_operation(operation, privacy_assertion=assertion)
+        if queue_error is not None:
+            operation.error_code = queue_error
+            db.commit()
             raise EvidenceUnavailable(
                 "Standby protection is still unavailable. The deletion remains durable and locked."
             )

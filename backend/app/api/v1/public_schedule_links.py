@@ -129,6 +129,7 @@ class PublicScheduleLinkOut(BaseModel):
     protection_operation_id: Optional[str] = None
     protection_state: Optional[str] = None
     protection_stage: Optional[str] = None
+    protection_error_code: Optional[str] = None
 
 
 class PublicScheduleLinkCreatedOut(PublicScheduleLinkOut):
@@ -283,10 +284,11 @@ def _queue_link_operation(
     if operation is None:
         return
     db.refresh(operation)
-    if not queue_protection_operation(operation):
+    queue_error = queue_protection_operation(operation)
+    if queue_error is not None:
         operation.state = "indeterminate"
         operation.stage = "attention_required"
-        operation.error_code = "replication_agent_unavailable"
+        operation.error_code = queue_error
         db.commit()
     response.status_code = status.HTTP_202_ACCEPTED
 
@@ -334,6 +336,7 @@ def _serialise_link(
         "protection_operation_id": operation.id if operation else None,
         "protection_state": operation.state if operation else None,
         "protection_stage": operation.stage if operation else None,
+        "protection_error_code": operation.error_code if operation else None,
         "views": [
             PublicScheduleLinkViewOut(
                 id=row.external_view_id,

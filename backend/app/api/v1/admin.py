@@ -310,6 +310,7 @@ class EventOut(BaseModel):
     protection_operation_id: Optional[str] = None
     protection_state: Optional[str] = None
     protection_stage: Optional[str] = None
+    protection_error_code: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -803,6 +804,7 @@ def _event_out(event: Event, db: Session, *, now: datetime | None = None) -> Eve
         protection_operation_id=operation.id if operation else None,
         protection_state=operation.state if operation else None,
         protection_stage=operation.stage if operation else None,
+        protection_error_code=operation.error_code if operation else None,
     )
 
 
@@ -825,6 +827,85 @@ def get_ha_protection_operation(
     if operation is None:
         raise HTTPException(status_code=404, detail="Protection operation not found")
     sync_protection_operation(db, operation)
+    db.commit()
+    db.refresh(operation)
+    return _operation_out(operation)
+
+
+@router.post(
+    "/ha-protection-operations/{operation_id}/retry",
+    response_model=HAProtectionStatusOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def retry_ha_protection_operation(
+    operation_id: str,
+    request: Request,
+    root: User = Depends(require_root_recent_reauth),
+    db: Session = Depends(get_db),
+):
+    """Requeue one exact non-privacy mutation after a transport-path failure."""
+
+    try:
+        parsed = uuid.UUID(operation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Protection operation not found") from exc
+    if str(parsed) != operation_id:
+        raise HTTPException(status_code=404, detail="Protection operation not found")
+    operation = db.query(HAProtectionOperation).filter(HAProtectionOperation.id == operation_id).first()
+    if operation is None:
+        raise HTTPException(status_code=404, detail="Protection operation not found")
+    sync_protection_operation(db, operation)
+    retryable_errors = {
+        "replication_agent_unavailable",
+        "replication_queue_missing",
+        "replication_queue_unsafe",
+        "replication_queue_not_writable",
+        "replication_queue_atomic_write_failed",
+    }
+    retryable_operations = {
+        "publisher-secret-create",
+        "publisher-secret-import",
+        "publisher-secret-rotation",
+        "public-link-create",
+        "public-link-update",
+        "public-link-invalidate",
+        "public-link-delete",
+    }
+    if (
+        operation.state != "indeterminate"
+        or operation.error_code not in retryable_errors
+        or operation.operation_type not in retryable_operations
+    ):
+        # Preserve any accepted receiver receipt discovered during this retry
+        # request even though the operation no longer needs requeuing.
+        db.commit()
+        raise HTTPException(status_code=409, detail="This protection operation cannot be retried here")
+    queue_error = queue_protection_operation(operation)
+    if queue_error is not None:
+        operation.error_code = queue_error
+        operation.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "HA_PROTECTION_UNAVAILABLE",
+                "reason": queue_error,
+                "message": "Standby protection is still unavailable. The mutation remains durable and locked.",
+            },
+        )
+    operation.state = "pending"
+    operation.stage = "queued"
+    operation.error_code = None
+    operation.updated_at = datetime.now(timezone.utc)
+    audit(
+        db,
+        user=root,
+        action="ha.protection.retry",
+        resource_type=operation.resource_type,
+        resource_id=operation.resource_id,
+        detail=json.dumps({"operation_id": operation.id, "operation_type": operation.operation_type}),
+        request=request,
+    )
     db.commit()
     db.refresh(operation)
     return _operation_out(operation)
@@ -923,10 +1004,11 @@ def create_event(
     db.refresh(event)
     if protection is not None:
         db.refresh(protection)
-        if not queue_protection_operation(protection):
+        queue_error = queue_protection_operation(protection)
+        if queue_error is not None:
             protection.state = "indeterminate"
             protection.stage = "attention_required"
-            protection.error_code = "replication_agent_unavailable"
+            protection.error_code = queue_error
             db.commit()
         response.status_code = status.HTTP_202_ACCEPTED
 
@@ -1190,10 +1272,11 @@ def regenerate_event_secret(
         raise
     if protection is not None:
         db.refresh(protection)
-        if not queue_protection_operation(protection):
+        queue_error = queue_protection_operation(protection)
+        if queue_error is not None:
             protection.state = "indeterminate"
             protection.stage = "attention_required"
-            protection.error_code = "replication_agent_unavailable"
+            protection.error_code = queue_error
             db.commit()
         response.status_code = status.HTTP_202_ACCEPTED
     return ProtectedSecretMutationOut(
@@ -3149,10 +3232,11 @@ def import_setup(
         raise
     if protection is not None:
         db.refresh(protection)
-        if not queue_protection_operation(protection):
+        queue_error = queue_protection_operation(protection)
+        if queue_error is not None:
             protection.state = "indeterminate"
             protection.stage = "attention_required"
-            protection.error_code = "replication_agent_unavailable"
+            protection.error_code = queue_error
             db.commit()
         response.status_code = status.HTTP_202_ACCEPTED
 
