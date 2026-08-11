@@ -1,5 +1,30 @@
 # Changes
 
+## 3.9.4 — 11 August 2026
+
+This patch release completes the first protected copy to a fresh HA peer and
+keeps the joining node's progress truthful until that copy is locally healthy.
+
+### Fresh peer service activation
+
+- Start Caddy when a receiving peer has no running reverse proxy, even when
+  its preconfigured domain already matches the incoming shared configuration.
+- Keep an established, healthy Caddy instance running across ordinary copies
+  when its effective domain is unchanged.
+- Verify PostgreSQL, Backend and Caddy before writing the accepted receiver
+  receipt, with bounded errors for each activation and health boundary.
+- Preserve the existing atomic rollback to the previous database,
+  configuration, evidence, secrets and service state after a failed copy.
+
+### Accurate join progress
+
+- Keep signed Node B in a resumable **Waiting for first verified copy** state
+  after the one-time join code is consumed.
+- Complete its setup checkpoint only after an accepted receiver receipt and
+  healthy local database, Backend and Caddy services agree.
+- Add executable Linux coverage for the fresh and established Caddy state
+  matrix, first-copy reconciliation, missing services and malformed receipts.
+
 ## 3.9.3 — 11 August 2026
 
 This patch release makes the first root commissioning write available on a
