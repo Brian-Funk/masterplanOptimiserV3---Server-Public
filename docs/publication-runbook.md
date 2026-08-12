@@ -32,4 +32,4 @@ build whose public source is elsewhere, must set all three non-secret values:
 The build fails closed for a floating revision, embedded credentials or a
 mismatched source link.
 
-The old `v3.4.0` release is retired. Do not reuse or replace its tag. The current prepared stable release is `v3.9.7`. Development deployments continue to use commit-addressed unsigned test artefacts and must show that they are not a production release.
+The old `v3.4.0` release is retired. Do not reuse or replace its tag. The current prepared stable release is `v3.9.8`. Development deployments continue to use commit-addressed unsigned test artefacts and must show that they are not a production release.
