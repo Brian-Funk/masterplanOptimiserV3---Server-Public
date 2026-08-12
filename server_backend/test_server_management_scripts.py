@@ -256,7 +256,24 @@ def test_caddy_validation_and_logs_follow_active_topology(tmp_path: Path):
 source "{common}"
 source "{actions}"
 mp_compose_init() {{ MP_COMPOSE=(fake_compose); }}
-fake_compose() {{ printf 'compose:%s\n' "$*" >> "{command_log}"; }}
+fake_compose() {{
+    printf 'compose:%s\n' "$*" >> "{command_log}"
+    case " $* " in
+        *" ps -q caddy "*) printf 'fake-caddy-container\n' ;;
+    esac
+}}
+docker() {{
+    printf 'docker:%s\n' "$*" >> "{command_log}"
+    case " $* " in
+        *" inspect --format "*) printf 'true\n' ;;
+    esac
+}}
+systemctl() {{
+    printf 'systemctl:%s\n' "$*" >> "{command_log}"
+    case " $* " in
+        *" is-active --quiet caddy "*) return 0 ;;
+    esac
+}}
 sudo() {{ printf 'sudo:%s\n' "$*" >> "{command_log}"; }}
 mp_caddy_mode() {{ printf 'container\n'; }}
 mp_caddy_validate

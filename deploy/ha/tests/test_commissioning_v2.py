@@ -373,8 +373,10 @@ class SignedJoinReconciliationTests(unittest.TestCase):
                 """#!/usr/bin/env bash
 set -eu
 case " $* " in
+    *" inspect --format "*) printf 'true\\n' ;;
     *" config --services "*) printf 'db\\nbackend\\ncaddy\\n' ;;
     *" ps --status running --services "*) cat "$FAKE_SERVICES" ;;
+    *" ps -q caddy "*) printf 'fake-caddy-container\\n' ;;
     *" exec -T "*) exit 0 ;;
     *) printf 'unexpected fake docker invocation: %s\\n' "$*" >&2; exit 97 ;;
 esac
