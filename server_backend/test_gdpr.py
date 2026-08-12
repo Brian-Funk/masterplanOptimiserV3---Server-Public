@@ -188,7 +188,7 @@ def test_ha_deletion_automatically_queues_peer_and_recovery_work(
         case.state = "awaiting_clean_backup"
 
     monkeypatch.setattr(gdpr, "create_protection_operation", create_operation)
-    monkeypatch.setattr(gdpr, "queue_protection_operation", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gdpr, "queue_protection_operation", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(gdpr, "sync_protection_operation", accept_operation)
     monkeypatch.setattr(gdpr, "confirm_case_peer", confirm_peer)
     monkeypatch.setattr(

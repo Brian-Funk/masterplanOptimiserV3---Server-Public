@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import pty
+import re
 import select
 import shlex
 import shutil
@@ -251,13 +252,78 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
         self.assertIn('expected="$(mp_expected_protected_file_mode "$file")"', mode_validation)
 
     def test_runtime_bind_sources_reclaim_only_safe_exact_directories(self) -> None:
-        runtime = function_body(COMMON_SOURCE, "mp_prepare_frontend_csp_runtime")
+        runtime = function_body(COMMON_SOURCE, "mp_prepare_runtime_permissions")
         self.assertIn("Refusing unsafe runtime request path", runtime)
         self.assertIn('[ ! -d "$directory" ] || [ -L "$directory" ]', runtime)
         self.assertIn('stat -c \'%u:%g\' "$directory"', runtime)
         self.assertIn('sudo -n chown "$owner" "$directory"', runtime)
+        self.assertIn('chmod 1733 "$request_dir"', runtime)
         self.assertIn('chmod 1733 "$compliance_request_dir"', runtime)
         self.assertIn('chmod 0755 "$compliance_receipt_dir"', runtime)
+        self.assertNotIn('install -d -m 0700 "$MP_ROOT/runtime/ha-requests"', INSTALL_SERVICES_SOURCE)
+        self.assertGreaterEqual(
+            INSTALL_SERVICES_SOURCE.count("mp_prepare_runtime_permissions"),
+            2,
+        )
+
+    def test_runtime_permission_contract_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "application"
+            root.mkdir()
+            script = f'''
+                set -Eeuo pipefail
+                export MP_ROOT={shlex.quote(str(root))}
+                source {shlex.quote(str(ROOT / "deploy/management/common.sh"))}
+                mp_prepare_runtime_permissions
+                mp_prepare_runtime_permissions
+                mp_validate_runtime_permissions
+                [ "$(stat -c %a "$MP_ROOT/runtime/ha-requests")" = 1733 ]
+                [ "$(stat -c %a "$MP_ROOT/runtime/compliance-requests")" = 1733 ]
+                [ "$(stat -c %a "$MP_ROOT/runtime/ha-jobs")" = 700 ]
+                [ "$(stat -c %a "$MP_ROOT/runtime/ha-operation-results")" = 711 ]
+                [ "$(stat -c %a "$MP_ROOT/runtime/compliance-receipts")" = 755 ]
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_every_menu_action_has_an_explicit_permission_profile(self) -> None:
+        actions = set(re.findall(r"mp_run_action\s+([A-Za-z0-9_]+)", MENU_SOURCE))
+        profiles = function_body(COMMON_SOURCE, "mp_action_permission_profile")
+        self.assertTrue(actions)
+        for action in sorted(actions):
+            self.assertIn(action, profiles, action)
+        runner = function_body(COMMON_SOURCE, "mp_run_action")
+        self.assertIn("mp_action_permission_preflight", runner)
+        self.assertIn("mp_action_permission_postflight", runner)
+        self.assertIn("permission-profile-missing", runner)
+
+    def test_installation_validation_checks_all_effective_boundaries(self) -> None:
+        validation = function_body(ACTIONS_SOURCE, "mp_validate_installation")
+        for check in (
+            "mp_validate_protected_file_modes",
+            "mp_validate_host_state_permissions",
+            "mp_validate_runtime_permissions",
+            "mp_validate_effective_service_permissions",
+            "mp_validate_ha_systemd_permissions",
+        ):
+            self.assertIn(check, validation)
+        effective = function_body(ACTIONS_SOURCE, "mp_validate_effective_service_permissions")
+        self.assertIn('[ "$(id -u)" = 10001 ]', effective)
+        for path in (
+            "/runtime/ha-requests",
+            "/runtime/compliance-requests",
+            "/runtime/compliance-receipts",
+            "/runtime/ha-operation-results",
+            "/evidence",
+            "/srv/static",
+            "/var/lib/postgresql/data",
+        ):
+            self.assertIn(path, effective)
 
     def test_snapshot_payload_permissions_do_not_depend_on_operator_umask(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

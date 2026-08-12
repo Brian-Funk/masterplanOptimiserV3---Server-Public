@@ -17,6 +17,7 @@ def test_operation_marker_is_transactional_idempotent_and_reconcilable(
     monkeypatch.setattr(settings, "HA_CLUSTER_ID", "cluster-test")
     monkeypatch.setattr(settings, "HA_NODE_ID", "node-a")
     monkeypatch.setattr(settings, "HA_REPLICATION_REQUEST_DIR", str(requests))
+    requests.mkdir()
     monkeypatch.setattr(
         ha_replication,
         "witness_post",
@@ -45,7 +46,7 @@ def test_operation_marker_is_transactional_idempotent_and_reconcilable(
     assert repeated.id == operation.id
     assert len(calls) == 1
 
-    assert ha_replication.queue_protection_operation(operation)
+    assert ha_replication.queue_protection_operation(operation) is None
     queued = json.loads((requests / f"{operation.id}.json").read_text(encoding="utf-8"))
     assert queued["format"] == "mp-opt-replication-request-v2"
     assert queued["operation"]["operation_id"] == operation.id
@@ -83,6 +84,7 @@ def test_result_receipt_must_match_the_exact_database_marker(db, monkeypatch, tm
     monkeypatch.setattr(settings, "HA_CLUSTER_ID", "cluster-test")
     monkeypatch.setattr(settings, "HA_NODE_ID", "node-a")
     monkeypatch.setattr(settings, "HA_REPLICATION_REQUEST_DIR", str(requests))
+    requests.mkdir()
     monkeypatch.setattr(ha_replication, "witness_post", lambda *_args, **_kwargs: {})
     operation = ha_replication.create_protection_operation(
         db,
@@ -111,3 +113,39 @@ def test_result_receipt_must_match_the_exact_database_marker(db, monkeypatch, tm
     )
     ha_replication.sync_protection_operation(db, operation)
     assert operation.state == "pending"
+
+
+def test_queue_preflight_returns_bounded_permission_errors(monkeypatch, tmp_path):
+    requests = tmp_path / "ha-requests"
+    monkeypatch.setattr(settings, "HA_MODE", "ha")
+    monkeypatch.setattr(settings, "HA_REPLICATION_REQUEST_DIR", str(requests))
+
+    assert ha_replication.protection_queue_error() == "replication_queue_missing"
+    requests.mkdir()
+    monkeypatch.setattr(ha_replication.os, "access", lambda *_args: False)
+    assert ha_replication.protection_queue_error() == "replication_queue_not_writable"
+
+
+def test_queue_atomic_write_failure_has_a_bounded_error(db, monkeypatch, tmp_path):
+    requests = tmp_path / "ha-requests"
+    requests.mkdir()
+    monkeypatch.setattr(settings, "HA_MODE", "ha")
+    monkeypatch.setattr(settings, "HA_CLUSTER_ID", "cluster-test")
+    monkeypatch.setattr(settings, "HA_NODE_ID", "node-a")
+    monkeypatch.setattr(settings, "HA_REPLICATION_REQUEST_DIR", str(requests))
+    monkeypatch.setattr(ha_replication, "witness_post", lambda *_args, **_kwargs: {})
+    operation = ha_replication.create_protection_operation(
+        db,
+        idempotency_key="test-operation-atomic-failure",
+        operation_type="publisher-secret-create",
+        resource_type="event",
+        resource_id="15",
+    )
+    db.commit()
+    monkeypatch.setattr(ha_replication.Path, "replace", lambda *_args: (_ for _ in ()).throw(OSError()))
+
+    assert (
+        ha_replication.queue_protection_operation(operation)
+        == "replication_queue_atomic_write_failed"
+    )
+    assert not (requests / f"{operation.id}.json").exists()

@@ -281,7 +281,7 @@ prepare_runtime_from_installed_sources() {
     env MP_ROOT="$MP_ROOT" bash -c '
         set -Eeuo pipefail
         source "$MP_ROOT/deploy/management/common.sh"
-        mp_prepare_frontend_csp_runtime
+        mp_prepare_runtime_permissions
     '
 }
 

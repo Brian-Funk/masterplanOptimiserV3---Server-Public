@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api";
+import { withReauth } from "@/lib/reauth";
 import {
   newIdempotencyKey,
   pendingSecrets,
@@ -56,6 +57,7 @@ export interface PublicScheduleLinkRecord {
   protection_operation_id?: string | null;
   protection_state?: string | null;
   protection_stage?: string | null;
+  protection_error_code?: string | null;
 }
 
 interface PublicScheduleLinkCreated extends PublicScheduleLinkRecord {
@@ -65,6 +67,7 @@ interface PublicScheduleLinkCreated extends PublicScheduleLinkRecord {
 /** Props for the Public Schedule link-management tab. */
 export interface PublicScheduleLinksTabProps {
   eventId: number | null;
+  isRootAdmin?: boolean;
 }
 
 /** Minimum role flags needed to decide whether the Public Links tab is visible. */
@@ -117,11 +120,16 @@ function statusClasses(status: PublicScheduleLinkRecord["status"]): string {
 
 async function responseError(response: Response, fallback: string): Promise<string> {
   const data = await response.json().catch(() => null);
-  return typeof data?.detail === "string" ? data.detail : fallback;
+  if (typeof data?.detail === "string") return data.detail;
+  if (typeof data?.detail?.message === "string") return data.detail.message;
+  return fallback;
 }
 
 /** Manage reusable, expiring links for selected Public Schedule views. */
-export function PublicScheduleLinksTab({ eventId }: PublicScheduleLinksTabProps) {
+export function PublicScheduleLinksTab({
+  eventId,
+  isRootAdmin = false,
+}: PublicScheduleLinksTabProps) {
   const [links, setLinks] = useState<PublicScheduleLinkRecord[]>([]);
   const [availableViews, setAvailableViews] = useState<PublicScheduleLinkViewOption[]>([]);
   const [loading, setLoading] = useState(false);
@@ -137,6 +145,7 @@ export function PublicScheduleLinksTab({ eventId }: PublicScheduleLinksTabProps)
   const [confirmInvalidateId, setConfirmInvalidateId] = useState<number | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [protectionStages, setProtectionStages] = useState<Record<string, string>>({});
+  const [retryingProtectionId, setRetryingProtectionId] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     if (!eventId) {
@@ -385,6 +394,36 @@ export function PublicScheduleLinksTab({ eventId }: PublicScheduleLinksTabProps)
     }
   };
 
+  const handleRetryProtection = async (operationId: string) => {
+    setError("");
+    setRetryingProtectionId(operationId);
+    try {
+      const response = await withReauth(() =>
+        apiFetch(`/api/v1/admin/ha-protection-operations/${operationId}/retry`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+      );
+      if (!response.ok) {
+        throw new Error(await responseError(response, "Standby protection could not be retried."));
+      }
+      const retainedSecret = pendingSecrets().find(
+        (pending) => pending.operationId === operationId && pending.kind === "public-link-create",
+      );
+      if (retainedSecret) monitorCreatedLink(retainedSecret);
+      else monitorOperation(operationId);
+      await loadData();
+    } catch (retryError) {
+      setError(
+        retryError instanceof Error
+          ? retryError.message
+          : "Standby-protection retry was cancelled or reauthentication failed.",
+      );
+    } finally {
+      setRetryingProtectionId(null);
+    }
+  };
+
   if (!eventId) {
     return (
       <div className="py-12 text-center text-sm text-gray-500 dark:text-gray-400">
@@ -608,12 +647,40 @@ export function PublicScheduleLinksTab({ eventId }: PublicScheduleLinksTabProps)
                       {link.status}
                     </span>
                     {link.status === "securing" && (
-                      <p className="mt-1 text-xs text-blue-700 dark:text-blue-300">
-                        {protectionStageLabel(
-                          (link.protection_operation_id && protectionStages[link.protection_operation_id])
-                          || link.protection_stage,
+                      <div className="mt-1">
+                        <p className="text-xs text-blue-700 dark:text-blue-300">
+                          {protectionStageLabel(
+                            (link.protection_operation_id && protectionStages[link.protection_operation_id])
+                            || link.protection_stage,
+                          )}
+                        </p>
+                        {isRootAdmin
+                          && link.protection_state === "indeterminate"
+                          && link.protection_operation_id
+                          && [
+                            "replication_agent_unavailable",
+                            "replication_queue_missing",
+                            "replication_queue_unsafe",
+                            "replication_queue_not_writable",
+                            "replication_queue_atomic_write_failed",
+                          ].includes(link.protection_error_code || "") && (
+                          <Button
+                            className="mt-2"
+                            variant="outline"
+                            size="sm"
+                            disabled={retryingProtectionId === link.protection_operation_id}
+                            onClick={() => handleRetryProtection(link.protection_operation_id!)}
+                          >
+                            <RefreshCw
+                              size={14}
+                              className={retryingProtectionId === link.protection_operation_id ? "animate-spin" : ""}
+                            />
+                            {retryingProtectionId === link.protection_operation_id
+                              ? "Retrying protection"
+                              : "Retry standby protection"}
+                          </Button>
                         )}
-                      </p>
+                      </div>
                     )}
                   </td>
                   <td className="px-4 py-3">

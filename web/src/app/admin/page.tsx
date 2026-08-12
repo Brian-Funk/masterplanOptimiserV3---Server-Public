@@ -165,6 +165,7 @@ interface Event {
   protection_operation_id?: string | null;
   protection_state?: string | null;
   protection_stage?: string | null;
+  protection_error_code?: string | null;
 }
 
 interface AdminUser {
@@ -586,7 +587,10 @@ export default function AdminPage() {
           <HistoryTab selectedEventId={selectedEvent} />
         )}
         {tab === "public-links" && (
-          <PublicScheduleLinksTab eventId={publicLinksEventId || null} />
+          <PublicScheduleLinksTab
+            eventId={publicLinksEventId || null}
+            isRootAdmin={!!user?.is_root_admin}
+          />
         )}
         {tab === "security" && user?.is_root_admin && <SecurityTab />}
         {tab === "privacy" && user?.is_root_admin && <ComplianceEvidenceTab events={events} />}
@@ -651,6 +655,7 @@ function EventsTab({
   const [eventError, setEventError] = useState("");
   const [importLoading, setImportLoading] = useState(false);
   const [protectionStages, setProtectionStages] = useState<Record<string, string>>({});
+  const [retryingProtectionId, setRetryingProtectionId] = useState<string | null>(null);
   const router = useRouter();
   const dateRangeError = eventDateRangeError(
     newEvent.start_date,
@@ -829,6 +834,71 @@ function EventsTab({
       );
     } finally {
       setRegeneratingSecretId(null);
+    }
+  };
+
+  const handleRetryProtection = async (operationId: string) => {
+    setEventError("");
+    setRetryingProtectionId(operationId);
+    try {
+      const response = await withReauth(() =>
+        apiFetch(`/api/v1/admin/ha-protection-operations/${operationId}/retry`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+      );
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        setEventError(
+          responseMessage(
+            data,
+            `Standby protection could not be retried (${response.status}).`,
+          ),
+        );
+        return;
+      }
+
+      setProtectionStages((current) => ({ ...current, [operationId]: "queued" }));
+      const retainedSecret = pendingSecrets().find(
+        (pending) => pending.operationId === operationId,
+      );
+      if (retainedSecret) {
+        monitorSecretProtection(retainedSecret);
+      } else {
+        void pollProtection(operationId, (operation) => {
+          setProtectionStages((current) => ({
+            ...current,
+            [operationId]: operation.stage,
+          }));
+        }).then((operation) => {
+          if (operation.state !== "accepted") {
+            setEventError(
+              operation.error_code
+                ? `Standby protection still needs attention (${operation.error_code}). The mutation remains durable and locked.`
+                : "Standby protection still needs attention. The mutation remains durable and locked.",
+            );
+            return;
+          }
+          setProtectionStages((current) => {
+            const next = { ...current };
+            delete next[operationId];
+            return next;
+          });
+          onRefresh();
+        }).catch((cause) => {
+          setEventError(
+            cause instanceof Error ? cause.message : "Protection status is unavailable.",
+          );
+        });
+      }
+    } catch (cause) {
+      setEventError(
+        cause instanceof Error
+          ? cause.message
+          : "Standby-protection retry was cancelled or reauthentication failed.",
+      );
+    } finally {
+      setRetryingProtectionId(null);
     }
   };
 
@@ -1212,12 +1282,33 @@ function EventsTab({
                       : fmtDate(ev.start_date) || "No dates"}
                   </p>
                   {ev.status === "securing" && (
-                    <p className="mt-1 text-xs font-medium text-blue-700 dark:text-blue-300" role="status">
-                      Securing on standby · {protectionStageLabel(
-                        (ev.protection_operation_id && protectionStages[ev.protection_operation_id])
-                        || ev.protection_stage,
+                    <div className="mt-1">
+                      <p className="text-xs font-medium text-blue-700 dark:text-blue-300" role="status">
+                        Securing on standby · {protectionStageLabel(
+                          (ev.protection_operation_id && protectionStages[ev.protection_operation_id])
+                          || ev.protection_stage,
+                        )}
+                      </p>
+                      {isRootAdmin
+                        && ev.protection_state === "indeterminate"
+                        && ev.protection_operation_id && (
+                        <Button
+                          className="mt-2"
+                          variant="outline"
+                          size="sm"
+                          disabled={retryingProtectionId === ev.protection_operation_id}
+                          onClick={() => handleRetryProtection(ev.protection_operation_id!)}
+                        >
+                          <RefreshCw
+                            size={14}
+                            className={retryingProtectionId === ev.protection_operation_id ? "animate-spin" : ""}
+                          />
+                          {retryingProtectionId === ev.protection_operation_id
+                            ? "Retrying protection"
+                            : "Retry standby protection"}
+                        </Button>
                       )}
-                    </p>
+                    </div>
                   )}
                   {ev.purge_case_request_id ? (
                     <p className="mt-1 text-xs font-medium text-amber-700 dark:text-amber-300">

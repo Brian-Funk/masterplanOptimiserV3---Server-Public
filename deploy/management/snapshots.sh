@@ -1198,11 +1198,7 @@ mp_snapshot_restore_interactive() {
             mp_portable_mark_export_required "snapshot-restore" || return 1
         fi
         if [ "$(mp_ha_role)" = "dynamic" ]; then
-            mkdir -p "$MP_ROOT/runtime/ha-requests"
-            printf '{"format":"mp-opt-replication-request-v1","job_id":"%s","reason":"snapshot-restore","created_at":"%s"}\n' \
-                "$(cat /proc/sys/kernel/random/uuid)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                > "$MP_ROOT/runtime/ha-requests/restore-$(date -u +%s).json"
-            chmod 600 "$MP_ROOT/runtime/ha-requests/"*.json
+            mp_queue_ha_replication "snapshot-restore" || return 1
             ui_message "Restore complete" \
                 "The selected snapshot was restored, bearer access was revoked, and a fresh peer copy was queued. Passkeys remain registered.$([ "${HA_RECOVERY_STORAGE_MODE:-manual_portable}" = manual_portable ] && printf '\n\nManual recovery action required: create, deep-verify and export a fresh full workstation snapshot.' || true)"
         else

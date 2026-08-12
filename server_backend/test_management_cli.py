@@ -672,6 +672,10 @@ def test_menu_actions_keep_strict_failure_handling_without_closing_menu(tmp_path
             false
             touch "$MP_STATE/should-not-exist"
         }
+        mp_action_permission_profile() {
+            test "${1:-}" = unsafe_action || return 1
+            printf 'observe\n'
+        }
         mp_run_action unsafe_action
         test ! -e "$MP_STATE/should-not-exist"
         grep -Fq '|menu.action|failed|unsafe_action|' "$MP_AUDIT_FILE"

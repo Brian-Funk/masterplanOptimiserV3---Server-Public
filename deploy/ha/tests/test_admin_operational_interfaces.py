@@ -300,6 +300,22 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
         self.assertNotIn("publisher-secret-rotation-rollback", ADMIN_API)
         self.assertNotIn("public-link-create-rollback", PUBLIC_LINK_API)
 
+    def test_indeterminate_nonprivacy_protection_is_retryable_without_recreating_it(self) -> None:
+        self.assertIn('@router.post(\n    "/ha-protection-operations/{operation_id}/retry"', ADMIN_API)
+        self.assertIn("require_root_recent_reauth", ADMIN_API)
+        self.assertIn("queue_protection_operation(operation)", ADMIN_API)
+        self.assertIn("operation.state = \"pending\"", ADMIN_API)
+        self.assertIn("Retry standby protection", ADMIN_UI)
+        self.assertIn("retryingProtectionId === ev.protection_operation_id", ADMIN_UI)
+        self.assertIn("HA_PROTECTION_UNAVAILABLE", MAIN)
+        for code in (
+            "replication_queue_missing",
+            "replication_queue_unsafe",
+            "replication_queue_not_writable",
+            "replication_queue_atomic_write_failed",
+        ):
+            self.assertIn(code, HA_REPLICATION_CORE)
+
     def test_smtp_replication_busy_state_is_retried_and_both_nodes_are_probed(self) -> None:
         self.assertIn("ha-deferred-requests", REPLICATION_SCHEDULER)
         self.assertIn("deferred_request", REPLICATION_SCHEDULER)

@@ -31,6 +31,7 @@ from app.core.ha import (
     public_service_status,
     record_heartbeat,
 )
+from app.core.ha_replication import HAProtectionQueueError
 from app.core.ha_witness import HAWritePermitError, require_write_permit
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,21 @@ async def ha_write_permit_exception_handler(request: Request, exc: HAWritePermit
     return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         content={"detail": "Writes are paused because ownership cannot be verified.", "code": "HA_OWNERSHIP_UNVERIFIED"},
+        headers={"Cache-Control": "no-store", "Retry-After": "5"},
+    )
+
+
+@app.exception_handler(HAProtectionQueueError)
+async def ha_protection_queue_exception_handler(request: Request, exc: HAProtectionQueueError):
+    """Reject a critical mutation before commit when host protection is unavailable."""
+
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={
+            "detail": "Standby protection is temporarily unavailable. No protected change was committed.",
+            "code": "HA_PROTECTION_UNAVAILABLE",
+            "reason": exc.code,
+        },
         headers={"Cache-Control": "no-store", "Retry-After": "5"},
     )
 

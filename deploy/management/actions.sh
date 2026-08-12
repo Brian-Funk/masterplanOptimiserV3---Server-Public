@@ -1292,7 +1292,7 @@ mp_change_application_name() {
 # Build only the exported web frontend through the pinned Node container.
 mp_rebuild_frontend() {
     mp_lock || return 1
-    if ! mp_prepare_frontend_csp_runtime; then
+    if ! mp_prepare_runtime_permissions; then
         mp_audit "frontend.rebuild" "failed" "csp-runtime"
         ui_error "The protected frontend policy directory could not be prepared."
         return 1
@@ -1742,7 +1742,138 @@ mp_collect_recovery_evidence_interactive() {
         "$evidence_dir\n\nThe bundle contains hashes and metadata, but no secret values or database rows."
 }
 
-# Validate Compose, Caddy, health and protected file permissions.
+# Verify one effective Compose mount without reading anything beneath it.
+mp_validate_compose_mount() {
+    local service="$1" destination="$2" expected_rw="$3" container mounts
+    container="$("${MP_COMPOSE[@]}" ps -q "$service" 2>/dev/null)"
+    [ -n "$container" ] || return 1
+    mounts="$(docker inspect --format '{{range .Mounts}}{{printf "%s %v\n" .Destination .RW}}{{end}}' "$container" 2>/dev/null)" \
+        || return 1
+    grep -Fqx "$destination $expected_rw" <<< "$mounts"
+}
+
+# Exercise the effective identities and mounts used by the three application
+# containers. Probe names are random, their contents are empty/public, and all
+# probes are removed before returning.
+mp_validate_effective_service_permissions() {
+    local failed=0 role probe operation_probe receipt_probe
+    role="$(mp_ha_role 2>/dev/null || printf standalone)"
+    probe="permission-probe-$(cat /proc/sys/kernel/random/uuid)"
+    operation_probe="$MP_ROOT/runtime/ha-operation-results/$probe"
+    receipt_probe="$MP_ROOT/runtime/compliance-receipts/$probe"
+    : > "$operation_probe" || return 1
+    : > "$receipt_probe" || { rm -f "$operation_probe"; return 1; }
+    chmod 0644 "$operation_probe" "$receipt_probe" || {
+        rm -f "$operation_probe" "$receipt_probe"
+        return 1
+    }
+
+    if ! "${MP_COMPOSE[@]}" exec -T backend sh -ec '
+        [ "$(id -u)" = 10001 ]
+        test -w /runtime/compliance-requests
+        test -r "/runtime/compliance-receipts/$1"
+        test -r "/runtime/ha-operation-results/$1"
+        test -w /evidence
+        compliance="/runtime/compliance-requests/.$1"
+        : > "$compliance" && rm -f "$compliance"
+        if [ "$2" = dynamic ]; then
+            test -w /runtime/ha-requests
+            request="/runtime/ha-requests/.$1"
+            : > "$request" && rm -f "$request"
+        fi
+    ' sh "$probe" "$role" >/dev/null 2>&1; then
+        printf 'Backend UID or runtime write/read contract: INVALID\n'
+        failed=1
+    else
+        printf 'Backend UID and runtime write/read contract: valid\n'
+    fi
+
+    mp_validate_compose_mount backend /runtime false \
+        || { printf 'Backend /runtime read-only mount: INVALID\n'; failed=1; }
+    mp_validate_compose_mount backend /runtime/compliance-requests true \
+        || { printf 'Backend compliance request mount: INVALID\n'; failed=1; }
+    mp_validate_compose_mount backend /evidence true \
+        || { printf 'Backend evidence mount: INVALID\n'; failed=1; }
+    if [ "$role" = dynamic ]; then
+        mp_validate_compose_mount backend /runtime/ha-requests true \
+            || { printf 'Backend HA request mount: INVALID\n'; failed=1; }
+    fi
+
+    if [ "$(mp_caddy_mode)" = container ]; then
+        "${MP_COMPOSE[@]}" exec -T caddy sh -ec \
+            'test -r /etc/caddy/Caddyfile && test -r /etc/caddy/runtime/frontend-csp.caddy && test -r /srv/static/index.html' \
+            >/dev/null 2>&1 \
+            || { printf 'Caddy configuration/runtime/web access: INVALID\n'; failed=1; }
+        mp_validate_compose_mount caddy /etc/caddy/Caddyfile false \
+            || { printf 'Caddy configuration mount: INVALID\n'; failed=1; }
+        mp_validate_compose_mount caddy /etc/caddy/runtime false \
+            || { printf 'Caddy runtime mount: INVALID\n'; failed=1; }
+        mp_validate_compose_mount caddy /srv/static false \
+            || { printf 'Caddy web-output mount: INVALID\n'; failed=1; }
+    fi
+
+    "${MP_COMPOSE[@]}" exec -T db sh -ec \
+        'test -r /run/secrets/database_password && test -w /var/lib/postgresql/data' \
+        >/dev/null 2>&1 \
+        || { printf 'PostgreSQL secret/data access: INVALID\n'; failed=1; }
+    mp_validate_compose_mount db /var/lib/postgresql/data true \
+        || { printf 'PostgreSQL data-volume mount: INVALID\n'; failed=1; }
+
+    rm -f "$operation_probe" "$receipt_probe"
+    return "$failed"
+}
+
+mp_validate_ha_systemd_permissions() {
+    local unit property current_user failed=0
+    [ "$(mp_ha_role 2>/dev/null || printf standalone)" = dynamic ] || return 0
+    current_user="$(id -un)"
+    for unit in mp-opt-ha-lease.service mp-opt-ha-replication.service mp-opt-ha-snapshots.service; do
+        if [ "$(systemctl show -p User --value "$unit" 2>/dev/null)" != "$current_user" ]; then
+            printf 'systemd identity %s: INVALID\n' "$unit"
+            failed=1
+        fi
+        property="$(systemctl show -p ReadWritePaths --value "$unit" 2>/dev/null || true)"
+        if [[ " $property " != *" /opt/masterplan/runtime "* ]]; then
+            printf 'systemd runtime sandbox %s: INVALID\n' "$unit"
+            failed=1
+        fi
+    done
+    [ "$failed" -ne 0 ] || printf 'HA systemd identities and runtime sandboxes: valid\n'
+    return "$failed"
+}
+
+mp_validate_host_state_permissions() {
+    local owner path mode actual_owner failed=0
+    owner="$(id -u):$(id -g)"
+    for path in "$MP_HOME" "$MP_STATE" "$MP_SNAPSHOTS"; do
+        mode="$(stat -c '%a' "$path" 2>/dev/null || true)"
+        actual_owner="$(stat -c '%u:%g' "$path" 2>/dev/null || true)"
+        if [ ! -d "$path" ] || [ -L "$path" ] || [ "$mode" != 700 ] || [ "$actual_owner" != "$owner" ]; then
+            printf 'Host-private state %s: INVALID mode=%s owner=%s\n' \
+                "$path" "${mode:-missing}" "${actual_owner:-missing}"
+            failed=1
+        fi
+    done
+    path="$MP_ROOT/state/evidence"
+    mode="$(stat -c '%a' "$path" 2>/dev/null || true)"
+    actual_owner="$(stat -c '%u:%g' "$path" 2>/dev/null || true)"
+    if [ ! -d "$path" ] || [ -L "$path" ] || [ "$mode" != 700 ] || [ "$actual_owner" != 10001:10001 ]; then
+        printf 'Backend evidence state: INVALID mode=%s owner=%s\n' \
+            "${mode:-missing}" "${actual_owner:-missing}"
+        failed=1
+    else
+        printf 'Backend evidence state: valid\n'
+    fi
+    if [ -d "$MP_ROOT/web/out" ] && [ ! -L "$MP_ROOT/web/out" ]; then
+        printf 'Caddy web output path: valid\n'
+    else
+        printf 'Caddy web output path: INVALID\n'
+        failed=1
+    fi
+    return "$failed"
+}
+
+# Validate Compose, Caddy, health and the complete permission contract.
 mp_validate_installation() {
     local report failed=0
     report="$(mktemp "${MP_STATE}/validation.XXXXXX")"
@@ -1757,6 +1888,14 @@ mp_validate_installation() {
         printf '\nProtected files\n'
         mp_permissions_report
         mp_validate_protected_file_modes || failed=1
+        printf '\nHost state contract\n'
+        mp_validate_host_state_permissions || failed=1
+        printf '\nHost runtime contract\n'
+        mp_validate_runtime_permissions || failed=1
+        printf '\nEffective container contract\n'
+        mp_validate_effective_service_permissions || failed=1
+        printf '\nService sandbox contract\n'
+        mp_validate_ha_systemd_permissions || failed=1
     } > "$report"
     ui_text_file "Installation validation" "$report"
     rm -f "$report"

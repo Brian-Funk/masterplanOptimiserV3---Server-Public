@@ -196,7 +196,7 @@ if [ "$(mp_ha_role)" = "dynamic" ] \
 fi
 
 # ── 3. Build frontend (static export) ───────────────────────
-mp_prepare_frontend_csp_runtime
+mp_prepare_runtime_permissions
 if [ -f "$REPO_DIR/.release.env" ]; then
     echo "[3/5] Using the verified frontend from $(grep -m1 '^MP_RELEASE_TAG=' .release.env | cut -d= -f2-)..."
     test -s "$REPO_DIR/web/out/index.html" \
@@ -219,6 +219,7 @@ if sudo -n true >/dev/null 2>&1; then
             mp-opt-ha-replication.service mp-opt-ha-lease.service >/dev/null 2>&1 || true
     fi
 fi
+mp_prepare_runtime_permissions
 
 # ── 4. Build and start containers ───────────────────────────
 echo "[4/5] Starting the database and applying schema updates..."
