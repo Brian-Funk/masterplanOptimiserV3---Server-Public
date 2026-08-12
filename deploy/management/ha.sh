@@ -369,8 +369,10 @@ mp_ha_replicate_now() {
 # copied into the terminal, audit log, or peer command line.
 mp_ha_verify_smtp_both_nodes() {
     local local_report peer_report local_ready peer_ready local_fingerprint peer_fingerprint
-    local recipient send_message local_node peer_node require_delivery="${1:-optional}" delivery_sent=false
+    local recipient="${2:-}" correlation_id="${3:-}" send_message local_node peer_node require_delivery="${1:-optional}" delivery_sent=false
+    local -a correlation_args=()
     mp_load_ha_config || return 1
+    [ -z "$correlation_id" ] || correlation_args=(--correlation-id "$correlation_id")
     [ "$HA_ROLE" = "dynamic" ] || { ui_error "Symmetric HA is not configured."; return 1; }
     [[ "$HA_NODE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
         && [[ "$HA_PEER_NODE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
@@ -406,7 +408,9 @@ mp_ha_verify_smtp_both_nodes() {
         && [ -n "$local_fingerprint" ] && [ "$local_fingerprint" = "$peer_fingerprint" ] \
         && { [ "$require_delivery" = required ] \
             || ui_confirm "SMTP delivery" "Both origins authenticate with the same protected SMTP configuration. Send one token-free delivery test from each origin?"; }; then
-        recipient="$(ui_input "SMTP delivery" "Test recipient email")" || recipient=""
+        [ -n "$recipient" ] \
+            || recipient="$(ui_input "SMTP delivery" "Test recipient email")" \
+            || recipient=""
         if [ -n "$recipient" ]; then
             mp_validate_email_address "$recipient" || {
                 rm -f "$local_report" "$peer_report"
@@ -415,13 +419,15 @@ mp_ha_verify_smtp_both_nodes() {
             }
             python3 "$MP_ROOT/deploy/ha/smtp_probe.py" \
                 --root "$MP_ROOT" --node-id "$HA_NODE_ID" \
-                --output "$MP_ROOT/runtime/ha-smtp-status.json" --send-to "$recipient" >/dev/null \
+                --output "$MP_ROOT/runtime/ha-smtp-status.json" --send-to "$recipient" \
+                "${correlation_args[@]}" >/dev/null \
                 || local_ready=false
             ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
                 -o ClearAllForwardings=yes "$HA_PEER_SSH" \
                 python3 /opt/masterplan/deploy/ha/smtp_probe.py \
                 --root /opt/masterplan --node-id "$HA_PEER_NODE_ID" \
-                --output /opt/masterplan/runtime/ha-smtp-status.json --send-to "$recipient" >/dev/null \
+                --output /opt/masterplan/runtime/ha-smtp-status.json --send-to "$recipient" \
+                "${correlation_args[@]}" >/dev/null \
                 || peer_ready=false
             if [ "$local_ready" = true ] && [ "$peer_ready" = true ]; then
                 send_message="Both origins sent and the provider accepted a token-free test message."

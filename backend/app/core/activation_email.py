@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import io
 import logging
+import re
 import smtplib
 import socket
 import ssl
@@ -823,7 +824,7 @@ def build_activation_message(
     return message, message_id
 
 
-def build_test_message(recipient: str) -> EmailMessage:
+def build_test_message(recipient: str, *, correlation_id: str | None = None) -> EmailMessage:
     """Build a branded token-free SMTP configuration test message."""
 
     brand = _mail_brand_name()
@@ -832,6 +833,10 @@ def build_test_message(recipient: str) -> EmailMessage:
         f"{brand} email test",
         sender_name=brand,
     )
+    if correlation_id is not None:
+        if re.fullmatch(r"[0-9a-f]{32}", correlation_id) is None:
+            raise ValueError("invalid SMTP test correlation identifier")
+        message["X-MP-OPT-Test-ID"] = correlation_id
     logo_cid = make_msgid(domain=message_id.rsplit("@", 1)[-1].rstrip(">"))
     message.set_content(
         f"{brand} email delivery is ready.\n\n"

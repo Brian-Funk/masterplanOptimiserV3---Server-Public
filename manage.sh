@@ -7,6 +7,14 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 ROOT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 export MP_ROOT="${MP_ROOT:-$ROOT_DIR}"
 
+# The no-argument entry point remains the graphical TUI. A deliberately
+# explicit subcommand exposes only the host-local, machine-readable setup
+# adapter and therefore does not require an interactive terminal.
+if [ "${1:-}" = setup ]; then
+    shift
+    exec bash "$MP_ROOT/deploy/commissioning-machine.sh" "$@"
+fi
+
 # shellcheck source=deploy/management/common.sh
 source "$MP_ROOT/deploy/management/common.sh"
 # shellcheck source=deploy/management/snapshots.sh
@@ -319,6 +327,15 @@ main() {
         set +e
         (
             set -Eeuo pipefail
+            if mp_setup_execution_acquire "tui-$(date -u +%Y%m%dT%H%M%SZ)-$$" mp_setup_v2; then
+                :
+            else
+                setup_lease_status=$?
+                [ "$setup_lease_status" -ne 75 ] \
+                    || ui_error "Another commissioning coordinator is active. Return to that run or wait for its lease to be released."
+                exit "$setup_lease_status"
+            fi
+            trap 'mp_setup_execution_release' EXIT
             mp_setup_v2
         )
         setup_status=$?

@@ -88,7 +88,7 @@ class PairingCodeTests(unittest.TestCase):
 
     def test_setup_state_actions_are_checkpoint_bound_and_clear_after_completion(self) -> None:
         action = shell_function(SETUP, "mp_setup_state_action")
-        mark = shell_function(SETUP, "mp_setup_state_mark")
+        mark = shell_function(SETUP, "mp_setup_state_mark_now")
         failure = shell_function(SETUP, "mp_setup_state_failure")
         self.assertIn("current_action_code", action)
         self.assertIn("current_checkpoint", action)
@@ -514,7 +514,7 @@ class PairingSetupContractTests(unittest.TestCase):
 
     def test_local_pending_receipts_cover_both_remote_commit_boundaries(self) -> None:
         self.assertIn("pending-witness-bootstrap.json", SETUP)
-        self.assertIn("mp-opt-pending-witness-bootstrap-v1", SETUP)
+        self.assertIn("mp-opt-pending-witness-bootstrap-v2", SETUP)
         self.assertIn("pending-local-join.json", SETUP)
         self.assertIn("mp-opt-pending-local-join-v2", SETUP)
         self.assertIn("mp-opt-ha-join-v2", SETUP)
@@ -789,6 +789,7 @@ class PairingSetupContractTests(unittest.TestCase):
         for prefix in (
             "pair-state", "pair-wait", "witness-bootstrap", "witness-join",
             "ha-join", "configure-dns", "routing-ready",
+            "pending-witness-bootstrap", "pending-local-join", "setup-state",
         ):
             self.assertIn(prefix, cleanup)
         self.assertIn("[ ! -L", cleanup)

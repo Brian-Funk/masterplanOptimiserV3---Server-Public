@@ -513,7 +513,8 @@ mp_snapshot_verify_extracted() {
 # the recovered server starts as a safe standalone node and can commission a
 # new peer only after local origin health has passed.
 mp_snapshot_restore_full_loss() {
-    local snapshot_path="$1" expected_recipient identity temporary payload
+    local snapshot_path="$1" supplied_identity="${2:-}" machine_approved="${3:-false}"
+    local expected_recipient identity temporary payload
     local installed=false resume_installed=false
     mp_require_commands age jq sha256sum diff docker || return 1
     if [ -e "$MP_ROOT/.env" ]; then
@@ -538,8 +539,18 @@ mp_snapshot_restore_full_loss() {
     expected_recipient="$(jq -er '.encryption.recipient | select(test("^age1[0-9a-z]+$"))' \
         "$snapshot_path/receipt.json")" \
         || { ui_error "The snapshot receipt has no valid public recovery recipient."; return 1; }
-    identity="$(mp_prompt_identity_for_recipient "$expected_recipient" "the imported full snapshot")" \
-        || return 1
+    if [ -n "$supplied_identity" ]; then
+        [ "$machine_approved" = true ] || return 64
+        [ -f "$supplied_identity" ] && [ ! -L "$supplied_identity" ] \
+            && [ "$(stat -c '%a' "$supplied_identity" 2>/dev/null)" = 600 ] \
+            || return 65
+        identity="$supplied_identity"
+        [ "$(mp_identity_recipient "$identity" 2>/dev/null || true)" = "$expected_recipient" ] \
+            || return 65
+    else
+        identity="$(mp_prompt_identity_for_recipient "$expected_recipient" "the imported full snapshot")" \
+            || return 1
+    fi
     temporary="$(mktemp -d "$MP_SNAPSHOTS/.full-loss.XXXXXX")" || {
         mp_remove_identity_file "$identity"; return 1;
     }
@@ -570,7 +581,7 @@ mp_snapshot_restore_full_loss() {
         installed=true
         ui_message "Resume recovery" "The protected shared configuration matches the imported snapshot exactly. Database restoration will restart from its clean restore boundary."
     else
-        if ! ui_require_phrase "Recover blank server" \
+        if [ "$machine_approved" != true ] && ! ui_require_phrase "Recover blank server" \
             "This installs the verified shared configuration and database as a standalone server. Old HA identity, TLS topology, sessions, and one-time ceremonies are not restored." \
             "RECOVER BLANK SERVER"; then
             rm -rf "$temporary"

@@ -196,7 +196,7 @@ mp_cleanup_stale_setup_transients() {
     state_real="$(readlink -f "$MP_STATE")" || return 1
     while IFS= read -r -d '' file; do
         name="$(basename "$file")"
-        [[ "$name" =~ ^(wrangler-secrets|wrangler-repair|wrangler-deploy|pair-wait|pair-state|witness-bootstrap|witness-bootstrap-error|witness-join|witness-join-error|ha-join|pair-open|configure-dns|routing-ready|decommission-cloudflare)\.[A-Za-z0-9]{6}$ ]] \
+        [[ "$name" =~ ^(wrangler-secrets|wrangler-repair|wrangler-deploy|pair-wait|pair-state|witness-bootstrap|witness-bootstrap-error|witness-join|witness-join-error|ha-join|pair-open|configure-dns|routing-ready|decommission-cloudflare|setup-machine-input|setup-recovery-package|setup-recovery-identity|portable-last-import|provider-worker-probe|pending-witness-bootstrap|pending-local-join|pending-ha-join|pending-replacement-request|setup-state|setup-execution|setup-cancel-request|setup-deployment-lifecycle|provider-cleanup-receipt)\.[A-Za-z0-9]{6}$ ]] \
             || continue
         found=1
         file_parent="$(readlink -f "$(dirname "$file")")" || return 1
@@ -1493,6 +1493,42 @@ mp_wait_for_database() {
     return 1
 }
 
+# Append non-secret commissioning telemetry from the authoritative setup state.
+# Callers serialise writers with either the management lock or setup lease.
+mp_append_setup_event() (
+    local event_type="$1" setup_state="$2" events_file="$3" run_id="${4:-host-$$}"
+    local sequence=1 last=0 state="{}" line event_fd
+    [[ "$event_type" =~ ^[a-z][a-z0-9._-]{0,63}$ ]] || return 1
+    [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || return 1
+    mkdir -p "$(dirname "$events_file")" || return 1
+    exec {event_fd}>"${events_file}.lock" || return 1
+    chmod 600 "${events_file}.lock" || { exec {event_fd}>&-; return 1; }
+    flock -x "$event_fd" || { exec {event_fd}>&-; return 1; }
+    if [ -s "$events_file" ]; then
+        [ -f "$events_file" ] && [ ! -L "$events_file" ] || return 1
+        last="$(tail -n 1 "$events_file" | jq -r '.sequence // 0' 2>/dev/null || printf 0)"
+        [[ "$last" =~ ^[0-9]+$ ]] || return 1
+        sequence=$((last + 1))
+    fi
+    [ ! -s "$setup_state" ] || state="$(cat "$setup_state")" || return 1
+    line="$(jq -cn --arg type "$event_type" --arg run "$run_id" \
+        --arg event_id "$(cat /proc/sys/kernel/random/uuid)" \
+        --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson sequence "$sequence" \
+        --argjson setup "$state" '
+        {format:"mp-opt-setup-event-v1",sequence:$sequence,event_id:$event_id,
+         run_id:$run,at:$at,type:$type,state:($setup.state // "absent"),
+         mode:($setup.mode // null),deployment_lane:($setup.deployment_lane // null),
+         checkpoint:($setup.current_checkpoint // null),
+         action_code:($setup.current_action_code // null),
+         action:($setup.current_action // null),failure:($setup.last_failure // null)}')" \
+        || return 1
+    printf '%s\n' "$line" >> "$events_file" || return 1
+    chmod 600 "$events_file"
+    sync -f "$events_file" 2>/dev/null || true
+    flock -u "$event_fd" >/dev/null 2>&1 || true
+    exec {event_fd}>&-
+)
+
 # Complete a signed joining peer only after its first accepted receiver receipt
 # and the replicated application services are locally healthy. Before that
 # point the setup state remains resumable and truthfully reports that Node A
@@ -1541,7 +1577,10 @@ mp_reconcile_signed_join_setup() {
         | .state="complete"
         | .completed_at=$now
         | .updated_at=$now
-        | .current_action="Waiting for root administration on Node A"
+        | .current_action=null
+        | .current_action_code=null
+        | .current_checkpoint=null
+        | .action_started_at=null
         | .last_failure=null
         | .first_verified_bundle={
             bundle_id:$bundle,
@@ -1554,6 +1593,8 @@ mp_reconcile_signed_join_setup() {
     sync -f "$temporary" 2>/dev/null || { rm -f "$temporary"; return 1; }
     mv "$temporary" "$setup_state"
     sync -f "$(dirname "$setup_state")" 2>/dev/null || return 1
+    mp_append_setup_event workflow.completed "$setup_state" \
+        "$MP_STATE/setup-events-v1.jsonl" "receiver-$$"
 }
 
 # Return whether SQLAlchemy's base schema is already present.
@@ -2003,6 +2044,24 @@ mp_run_action() {
     (
         set -Eeuo pipefail
         trap ':' INT
+        if [ "$profile" = commissioning ]; then
+            declare -F mp_setup_execution_acquire >/dev/null || {
+                ui_error "The commissioning execution lease is unavailable. Setup was not started."
+                exit 1
+            }
+            if mp_setup_execution_acquire "tui-$(date -u +%Y%m%dT%H%M%SZ)-$$" "$action"; then
+                :
+            else
+                status=$?
+                if [ "$status" -eq 75 ]; then
+                    ui_error "Another commissioning coordinator is active. Return to that run or wait for its lease to be released."
+                else
+                    ui_error "The commissioning execution lease could not be established. Setup was not started."
+                fi
+                exit "$status"
+            fi
+            trap 'mp_setup_execution_release' EXIT
+        fi
         mp_action_permission_preflight "$profile"
         "$@"
         mp_action_permission_postflight "$profile"

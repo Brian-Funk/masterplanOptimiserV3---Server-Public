@@ -10,6 +10,104 @@ MP_SETUP_V2_PENDING_BOOTSTRAP="${MP_SETUP_V2_PENDING_BOOTSTRAP:-$MP_STATE/pendin
 MP_SETUP_V2_PENDING_LOCAL_JOIN="${MP_SETUP_V2_PENDING_LOCAL_JOIN:-$MP_STATE/pending-local-join.json}"
 MP_SETUP_V2_PENDING_REPLACEMENT="${MP_SETUP_V2_PENDING_REPLACEMENT:-$MP_STATE/pending-replacement-request.json}"
 MP_SETUP_V2_IMPORT_RECEIPT="${MP_SETUP_V2_IMPORT_RECEIPT:-$MP_STATE/setup-import-receipt.json}"
+MP_SETUP_V2_EVENTS="${MP_SETUP_V2_EVENTS:-$MP_STATE/setup-events-v1.jsonl}"
+MP_SETUP_V2_EXECUTION_LOCK="${MP_SETUP_V2_EXECUTION_LOCK:-$MP_STATE/setup-execution.lock}"
+MP_SETUP_V2_EXECUTION_STATE="${MP_SETUP_V2_EXECUTION_STATE:-$MP_STATE/setup-execution.json}"
+MP_SETUP_V2_CANCEL_REQUEST="${MP_SETUP_V2_CANCEL_REQUEST:-$MP_STATE/setup-cancel-request.json}"
+MP_SETUP_V2_ARTIFACTS="${MP_SETUP_V2_ARTIFACTS:-$MP_STATE/setup-artifacts}"
+
+# One host-local lease serialises the graphical TUI and the private test
+# coordinator. The metadata is diagnostic only; flock remains authoritative.
+mp_setup_execution_acquire() {
+    local run_id="${1:-tui-$$}" command_name="${2:-commissioning}" temporary
+    [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || return 64
+    [[ "$command_name" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] || return 64
+    mkdir -p "$MP_STATE" && chmod 700 "$MP_STATE" || return 1
+    exec 8>"$MP_SETUP_V2_EXECUTION_LOCK" || return 1
+    chmod 600 "$MP_SETUP_V2_EXECUTION_LOCK" || { exec 8>&-; return 1; }
+    if ! flock -n 8; then
+        exec 8>&-
+        return 75
+    fi
+    temporary="$(mktemp "$MP_STATE/setup-execution.XXXXXX")" || {
+        flock -u 8 >/dev/null 2>&1 || true; exec 8>&-; return 1;
+    }
+    jq -n --arg run "$run_id" --arg command "$command_name" \
+        --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --argjson pid "$$" --argjson uid "$(id -u)" \
+        '{format:"mp-opt-setup-execution-v1",run_id:$run,command:$command,
+          pid:$pid,uid:$uid,started_at:$started}' > "$temporary" \
+        && chmod 600 "$temporary" && mv "$temporary" "$MP_SETUP_V2_EXECUTION_STATE" \
+        || { rm -f "$temporary"; flock -u 8 >/dev/null 2>&1 || true; exec 8>&-; return 1; }
+    export MP_SETUP_RUN_ID="$run_id" MP_SETUP_EXECUTION_LEASE_HELD=1
+}
+
+mp_setup_execution_release() {
+    if [ "${MP_SETUP_EXECUTION_LEASE_HELD:-0}" = 1 ]; then
+        rm -f "$MP_SETUP_V2_EXECUTION_STATE"
+        flock -u 8 >/dev/null 2>&1 || true
+        exec 8>&- 2>/dev/null || true
+        unset MP_SETUP_EXECUTION_LEASE_HELD
+    fi
+}
+
+# Report execution metadata only while the kernel lease is actually held.
+# A killed process releases flock automatically; the next observer then
+# removes its stale diagnostic metadata before reporting the coordinator idle.
+mp_setup_execution_observe() {
+    local metadata=null
+    mkdir -p "$MP_STATE" && chmod 700 "$MP_STATE" || return 1
+    exec 9>"$MP_SETUP_V2_EXECUTION_LOCK" || return 1
+    chmod 600 "$MP_SETUP_V2_EXECUTION_LOCK" || { exec 9>&-; return 1; }
+    if flock -n 9; then
+        rm -f "$MP_SETUP_V2_EXECUTION_STATE"
+        flock -u 9 >/dev/null 2>&1 || true; exec 9>&-
+        jq -cn '{active:false,metadata:null}'
+        return 0
+    fi
+    exec 9>&-
+    if [ -s "$MP_SETUP_V2_EXECUTION_STATE" ]; then
+        metadata="$(jq -c 'select(.format=="mp-opt-setup-execution-v1")' \
+            "$MP_SETUP_V2_EXECUTION_STATE" 2>/dev/null || printf null)"
+    fi
+    jq -cn --argjson metadata "$metadata" '{active:true,metadata:$metadata}'
+}
+
+mp_setup_cancellation_requested() {
+    [ -s "$MP_SETUP_V2_CANCEL_REQUEST" ] || return 1
+    [ -f "$MP_SETUP_V2_CANCEL_REQUEST" ] && [ ! -L "$MP_SETUP_V2_CANCEL_REQUEST" ] \
+        && [ "$(stat -c '%u:%a' "$MP_SETUP_V2_CANCEL_REQUEST" 2>/dev/null)" = "$(id -u):600" ] \
+        && jq -e '.format == "mp-opt-setup-cancel-v1" and (.requested_at | type == "string")' \
+            "$MP_SETUP_V2_CANCEL_REQUEST" >/dev/null 2>&1
+}
+
+# Cancellation is cooperative: destructive or non-atomic host operations are
+# never killed halfway through. Long-running wait loops consume the request at
+# their next safe boundary and leave the resumable setup state intact.
+mp_setup_consume_cancellation() {
+    mp_setup_cancellation_requested || return 1
+    rm -f "$MP_SETUP_V2_CANCEL_REQUEST" || return 1
+    if [ -s "$MP_SETUP_V2_STATE" ]; then
+        mp_setup_state_update \
+            '.current_action="Commissioning paused by operator"
+             | .current_action_code="SETUP_CANCELLED"
+             | .current_checkpoint=null | .action_started_at=null
+             | .last_failure={code:"SETUP_CANCELLED",
+                 message:"The current automation run was cancelled at a safe boundary. Commissioning remains resumable.",
+                 at:$now,action_code:"SETUP_CANCELLED",checkpoint:null}' \
+            || return 1
+        mp_setup_journal_event execution.cancelled || return 1
+    fi
+    return 0
+}
+
+# Append safe progress telemetry. The setup state and signed receipts remain
+# authoritative; a missing journal entry after power loss is repaired by the
+# next status snapshot rather than guessed.
+mp_setup_journal_event() {
+    mp_append_setup_event "$1" "$MP_SETUP_V2_STATE" "$MP_SETUP_V2_EVENTS" \
+        "${MP_SETUP_RUN_ID:-tui-$$}"
+}
 
 mp_setup_install_signed_release() {
     local lane
@@ -130,6 +228,8 @@ mp_setup_state_begin() {
     sync -f "$temporary" 2>/dev/null || { rm -f "$temporary"; return 1; }
     mv "$temporary" "$MP_SETUP_V2_STATE"
     sync -f "$(dirname "$MP_SETUP_V2_STATE")" 2>/dev/null || return 1
+    rm -f "$MP_SETUP_V2_CANCEL_REQUEST"
+    mp_setup_journal_event workflow.started
 }
 
 mp_setup_state_update() {
@@ -151,7 +251,8 @@ mp_setup_state_action() {
         '.current_action=$action | .current_action_code=$code
          | .current_checkpoint=(if $checkpoint == "" then null else $checkpoint end)
          | .action_started_at=$now | .last_failure=null' \
-        --arg action "$action" --arg code "$code" --arg checkpoint "$checkpoint"
+        --arg action "$action" --arg code "$code" --arg checkpoint "$checkpoint" \
+        && mp_setup_journal_event checkpoint.started
 }
 
 mp_setup_state_failure() {
@@ -160,7 +261,8 @@ mp_setup_state_failure() {
         '.last_failure={code:$code,message:$message,at:$now,
           action_code:(.current_action_code // "SETUP_ACTION"),
           checkpoint:(.current_checkpoint // null)}' \
-        --arg code "$code" --arg message "$message"
+        --arg code "$code" --arg message "$message" \
+        && mp_setup_journal_event checkpoint.failed
 }
 
 mp_setup_record_signed_baseline() {
@@ -173,7 +275,8 @@ mp_setup_record_signed_baseline() {
     }
     mp_setup_state_update \
         '.signed_baseline={tag:$tag,commit:$commit} | .completed=((.completed+["signed_baseline_verified"])|unique)' \
-        --arg tag "$tag" --arg commit "$commit"
+        --arg tag "$tag" --arg commit "$commit" \
+        && mp_setup_journal_event checkpoint.completed
 }
 
 mp_setup_state_has() {
@@ -181,20 +284,55 @@ mp_setup_state_has() {
         "$MP_SETUP_V2_STATE" >/dev/null 2>&1
 }
 
+mp_setup_state_mark_now() {
+    mp_setup_state_has "$1" && return 0
+    if [ "${MP_SETUP_MACHINE_CHECKPOINT:-}" = "$1" ] \
+        && [ -n "${MP_SETUP_MACHINE_IDEMPOTENCY_KEY:-}" ]; then
+        mp_setup_state_update \
+            'if .machine_transitions[$step].idempotency_key != $key then error("machine transition mismatch") else . end
+             | .completed=((.completed + [$step]) | unique)
+             | .last_completed_action={checkpoint:$step,
+                 action_code:(.current_action_code // "SETUP_ACTION"),
+                 label:(.current_action // "Commissioning step"),completed_at:$now}
+             | .machine_transitions[$step].state="completed"
+             | .machine_transitions[$step].completed_at=$now
+             | .current_action="Reconciling the next commissioning step"
+             | .current_action_code="SETUP_RECONCILING" | .current_checkpoint=null
+             | .action_started_at=null | .last_failure=null' --arg step "$1" \
+            --arg key "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
+            && mp_setup_journal_event checkpoint.completed
+    else
+        mp_setup_state_update \
+            '.completed=((.completed + [$step]) | unique)
+             | .last_completed_action={checkpoint:$step,
+                 action_code:(.current_action_code // "SETUP_ACTION"),
+                 label:(.current_action // "Commissioning step"),completed_at:$now}
+             | .current_action="Reconciling the next commissioning step"
+             | .current_action_code="SETUP_RECONCILING" | .current_checkpoint=null
+             | .action_started_at=null | .last_failure=null' --arg step "$1" \
+            && mp_setup_journal_event checkpoint.completed
+    fi
+}
+
 mp_setup_state_mark() {
-    mp_setup_state_update \
-        '.completed=((.completed + [$step]) | unique)
-         | .last_completed_action={checkpoint:$step,
-             action_code:(.current_action_code // "SETUP_ACTION"),
-             label:(.current_action // "Commissioning step"),completed_at:$now}
-         | .current_action="Reconciling the next commissioning step"
-         | .current_action_code="SETUP_RECONCILING" | .current_checkpoint=null
-         | .action_started_at=null | .last_failure=null' --arg step "$1"
+    # The candidate-only fault harness defers only the current machine
+    # checkpoint.  This lets the real side effect return before a durable test
+    # receipt and the normal setup checkpoint are written in distinct windows.
+    if [ -n "${MP_SETUP_TEST_DEFER_CHECKPOINT:-}" ] \
+        && [ "$1" = "$MP_SETUP_TEST_DEFER_CHECKPOINT" ]; then
+        MP_SETUP_TEST_MARK_REQUESTED=true
+        return 0
+    fi
+    mp_setup_state_mark_now "$1"
 }
 
 mp_setup_state_complete() {
     mp_setup_state_update \
-        '.state="complete" | .completed_at=$now | .current_action="Complete" | .last_failure=null'
+        '.state="complete" | .completed_at=$now
+         | .current_action=null | .current_action_code=null
+         | .current_checkpoint=null | .action_started_at=null
+         | .last_failure=null' \
+        && mp_setup_journal_event workflow.completed
 }
 
 mp_setup_state_clear_completed() {
@@ -203,6 +341,931 @@ mp_setup_state_clear_completed() {
     rm -f "$MP_SETUP_V2_STATE" "$MP_SETUP_V2_PENDING_JOIN" \
         "$MP_SETUP_V2_PENDING_BOOTSTRAP" "$MP_SETUP_V2_PENDING_LOCAL_JOIN" \
         "$MP_SETUP_V2_PENDING_REPLACEMENT" "$MP_SETUP_V2_IMPORT_RECEIPT"
+}
+
+mp_setup_machine_identity_file() {
+    local identity="$1" temporary recipient identity_prefix suffix
+    # Keep the private identity format out of all display-oriented setup
+    # source and output. Construct the well-known prefix only at validation.
+    identity_prefix="$(printf 'AGE-%s-KEY-1' SECRET)"
+    suffix="${identity#"$identity_prefix"}"
+    [ "${#identity}" -ge 40 ] && [ "${#identity}" -le 4096 ] \
+        && [ "$identity" != "$suffix" ] && [[ "$suffix" =~ ^[0-9A-Z]+$ ]] || return 65
+    temporary="$(mktemp "$MP_STATE/setup-recovery-identity.XXXXXX")" || return 1
+    chmod 600 "$temporary" || { rm -f "$temporary"; return 1; }
+    printf '%s\n' "$identity" > "$temporary" || { rm -f "$temporary"; return 1; }
+    recipient="$(mp_identity_recipient "$temporary" 2>/dev/null || true)"
+    [[ "$recipient" =~ ^age1[0-9a-z]+$ ]] \
+        || { mp_secure_remove_file "$temporary"; return 65; }
+    printf '%s\n' "$temporary"
+}
+
+# Create and deeply verify the conversion guard snapshot, then stage one
+# encrypted portable package behind an opaque ticket. The private identity is
+# used only from the bounded stdin document and is securely removed before the
+# safe receipt is returned. Downloading the package is a separate raw-artifact
+# operation; the conversion checkpoint is not completed until its digest is
+# confirmed back through advance.
+mp_setup_machine_stage_migration_snapshot() {
+    local input_file="$1" existing ticket directory snapshot identity recipient
+    local output package package_id package_hash package_size receipt temporary
+    jq -e '.format == "mp-opt-migration-snapshot-input-v1"
+        and ((keys | sort) == ["format","recovery_identity"])
+        and (.recovery_identity | type == "string" and length >= 40 and length <= 4096)' \
+        "$input_file" >/dev/null 2>&1 || return 64
+    jq -e '.state == "in_progress" and .mode == "convert-ha"
+        and ((.completed // []) | index("migration_snapshot") == null)' \
+        "$MP_SETUP_V2_STATE" >/dev/null 2>&1 || return 65
+    existing="$(jq -r '.pending_artifacts.migration_snapshot.ticket // empty' \
+        "$MP_SETUP_V2_STATE")"
+    if [[ "$existing" =~ ^[0-9a-f-]{36}$ ]] \
+        && [ -s "$MP_SETUP_V2_ARTIFACTS/$existing/receipt.json" ]; then
+        jq '{format:"mp-opt-migration-snapshot-stage-v1",ok:true,
+            ticket,sha256:.package_sha256,size:.package_size,
+            snapshot_receipt_sha256,resumed:true,exit_code:0}' \
+            "$MP_SETUP_V2_ARTIFACTS/$existing/receipt.json"
+        return 0
+    fi
+    identity="$(mp_setup_machine_identity_file "$(jq -r .recovery_identity "$input_file")")" \
+        || return $?
+    recipient="$(mp_identity_recipient "$identity")" || {
+        mp_secure_remove_file "$identity"; return 65;
+    }
+    [ "$recipient" = "$(mp_recovery_recipient 2>/dev/null || true)" ] || {
+        mp_secure_remove_file "$identity"; return 65;
+    }
+    snapshot="$(mp_snapshot_create full "single-to-ha-machine-$(date -u +%Y%m%dT%H%M%SZ)")" \
+        || { mp_secure_remove_file "$identity"; return 1; }
+    mp_snapshot_verify_path "$snapshot" "$identity" \
+        || { mp_secure_remove_file "$identity"; return 1; }
+    mp_secure_remove_file "$identity"
+    ticket="$(cat /proc/sys/kernel/random/uuid)" || return 1
+    directory="$MP_SETUP_V2_ARTIFACTS/$ticket"
+    mkdir -p "$MP_SETUP_V2_ARTIFACTS" && chmod 700 "$MP_SETUP_V2_ARTIFACTS" \
+        && mkdir -m 0700 "$directory" || return 1
+    package="$directory/migration.mpopt-snapshot"
+    output="$(python3 "$MP_PORTABLE_TOOL" export --snapshot "$snapshot" \
+        --output "$package" --source-node "$(mp_ha_role 2>/dev/null || printf standalone)")" \
+        || { rm -rf "$directory"; return 1; }
+    package_id="$(jq -er .package_id <<< "$output")" || { rm -rf "$directory"; return 1; }
+    package_hash="$(jq -er '.sha256 | select(test("^[0-9a-f]{64}$"))' <<< "$output")" \
+        || { rm -rf "$directory"; return 1; }
+    package_size="$(jq -er '.size | select(type == "number" and . >= 1)' <<< "$output")" \
+        || { rm -rf "$directory"; return 1; }
+    [ "$(sha256sum "$package" | awk '{print $1}')" = "$package_hash" ] \
+        || { rm -rf "$directory"; return 1; }
+    chmod 600 "$package"
+    receipt="$directory/receipt.json"; temporary="$(mktemp "$directory/.receipt.XXXXXX")" || return 1
+    jq -n --arg ticket "$ticket" --arg path "$package" --arg snapshot "$snapshot" \
+        --arg package_id "$package_id" --arg package_hash "$package_hash" \
+        --arg snapshot_hash "$(sha256sum "$snapshot/receipt.json" | awk '{print $1}')" \
+        --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson size "$package_size" \
+        '{format:"mp-opt-machine-artifact-v1",kind:"migration-snapshot",ticket:$ticket,
+          package_path:$path,package_id:$package_id,package_sha256:$package_hash,
+          package_size:$size,snapshot_path:$snapshot,snapshot_receipt_sha256:$snapshot_hash,
+          created_at:$created_at}' > "$temporary" \
+        && chmod 600 "$temporary" && mv "$temporary" "$receipt" \
+        || { rm -f "$temporary"; rm -rf "$directory"; return 1; }
+    sync -f "$package" 2>/dev/null && sync -f "$receipt" 2>/dev/null \
+        && sync -f "$directory" 2>/dev/null || return 1
+    mp_setup_state_update \
+        '.pending_artifacts.migration_snapshot={ticket:$ticket,sha256:$sha,size:$size}' \
+        --arg ticket "$ticket" --arg sha "$package_hash" --argjson size "$package_size" || return 1
+    jq -cn --arg ticket "$ticket" --arg sha "$package_hash" --arg snap "$(sha256sum "$snapshot/receipt.json" | awk '{print $1}')" \
+        --argjson size "$package_size" \
+        '{format:"mp-opt-migration-snapshot-stage-v1",ok:true,ticket:$ticket,
+          sha256:$sha,size:$size,snapshot_receipt_sha256:$snap,resumed:false,exit_code:0}'
+}
+
+mp_setup_machine_import_recovery_package() {
+    local package="$1" expected_sha="$2" actual result status name package_hash existing_snapshot
+    local imported_path state_tmp
+    [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || return 64
+    jq -e '.state == "in_progress" and .mode == "full-restore"
+        and ((.completed // []) | index("imported") == null)' \
+        "$MP_SETUP_V2_STATE" >/dev/null 2>&1 || return 65
+    if [ "$(jq -r '.pending_artifacts.recovery_import.sha256 // empty' \
+            "$MP_SETUP_V2_STATE")" = "$expected_sha" ] \
+        && jq -e --arg sha "$expected_sha" \
+            '.format == "mp-opt-portable-import-receipt-v1"
+             and .package_sha256 == $sha
+             and (.snapshot_path | type == "string")' \
+            "$MP_PORTABLE_LAST_IMPORT_STATE" >/dev/null 2>&1; then
+        existing_snapshot="$(jq -r .snapshot_path "$MP_PORTABLE_LAST_IMPORT_STATE")"
+        case "$(readlink -f "$existing_snapshot" 2>/dev/null || true)" in
+            "$(readlink -f "$MP_SNAPSHOTS")"/*) ;;
+            *) return 65 ;;
+        esac
+        [ -d "$existing_snapshot" ] && [ -f "$existing_snapshot/receipt.json" ] \
+            && [ ! -L "$existing_snapshot/receipt.json" ] || return 65
+        jq -cn --arg sha "$expected_sha" --arg snapshot_receipt_sha256 \
+            "$(sha256sum "$existing_snapshot/receipt.json" | awk '{print $1}')" \
+            '{format:"mp-opt-recovery-package-stage-v1",ok:true,sha256:$sha,
+              snapshot_receipt_sha256:$snapshot_receipt_sha256,resumed:true,exit_code:0}'
+        return 0
+    fi
+    actual="$(sha256sum "$package" | awk '{print $1}')" || return 1
+    [ "$actual" = "$expected_sha" ] || return 65
+    mp_portable_initialise || return 1
+    result="$(python3 "$MP_PORTABLE_TOOL" import --package "$package" \
+        --snapshots "$MP_SNAPSHOTS" --expected-sha256 "$expected_sha")" || return 1
+    status="$(jq -er .status <<< "$result")" || return 1
+    name="$(jq -er .snapshot_directory <<< "$result")" || return 1
+    package_hash="$(jq -er .package_sha256 <<< "$result")" || return 1
+    imported_path="$MP_SNAPSHOTS/$name"
+    [ -d "$imported_path" ] && [ "$package_hash" = "$expected_sha" ] || return 1
+    state_tmp="$(mktemp "$MP_STATE/portable-last-import.XXXXXX")" || return 1
+    jq -n --arg snapshot "$name" --arg path "$imported_path" \
+        --arg package_hash "$package_hash" --arg status "$status" \
+        --arg imported_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{format:"mp-opt-portable-import-receipt-v1",snapshot:$snapshot,
+          snapshot_path:$path,package_sha256:$package_hash,status:$status,
+          imported_at:$imported_at}' > "$state_tmp" \
+        && chmod 600 "$state_tmp" && mv "$state_tmp" "$MP_PORTABLE_LAST_IMPORT_STATE" \
+        || { rm -f "$state_tmp"; return 1; }
+    mp_setup_state_update \
+        '.pending_artifacts.recovery_import={sha256:$sha,snapshot:$snapshot}' \
+        --arg sha "$package_hash" --arg snapshot "$name" || return 1
+    jq -cn --arg sha "$package_hash" --arg snapshot_receipt_sha256 \
+        "$(sha256sum "$imported_path/receipt.json" | awk '{print $1}')" \
+        '{format:"mp-opt-recovery-package-stage-v1",ok:true,sha256:$sha,
+          snapshot_receipt_sha256:$snapshot_receipt_sha256,resumed:false,exit_code:0}'
+}
+
+mp_setup_machine_open_replacement() {
+    local pair body token response pending replacement_tmp lane campaign
+    mp_load_ha_config || return 1
+    [ "$HA_ROLE" = dynamic ] || return 65
+    mp_require_active_or_standalone || return 65
+    [ "$(jq -r '.automatic_failover // false' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null)" = false ] \
+        || return 65
+    if [ ! -s "$MP_SETUP_V2_PENDING_REPLACEMENT" ]; then
+        replacement_tmp="$(mktemp "$MP_STATE/pending-replacement-request.XXXXXX")" || return 1
+        jq -n --arg pair "$(mp_random_secret)" --arg target "$HA_PEER_NODE_ID" \
+            '{format:"mp-opt-pending-replacement-v1",pairing_secret:$pair,target_node_id:$target}' \
+            > "$replacement_tmp" \
+            && chmod 600 "$replacement_tmp" \
+            && mv "$replacement_tmp" "$MP_SETUP_V2_PENDING_REPLACEMENT" \
+            || { rm -f "$replacement_tmp"; return 1; }
+    fi
+    jq -e --arg target "$HA_PEER_NODE_ID" \
+        '.format == "mp-opt-pending-replacement-v1" and .target_node_id == $target' \
+        "$MP_SETUP_V2_PENDING_REPLACEMENT" >/dev/null || return 65
+    pair="$(jq -r .pairing_secret "$MP_SETUP_V2_PENDING_REPLACEMENT")"
+    token="$(cat "$MP_HA_HOME/secrets/node_token")" || return 1
+    body="$(mktemp "$MP_STATE/pair-open.XXXXXX")" || return 1
+    jq -n --arg node "$HA_NODE_ID" --arg target "$HA_PEER_NODE_ID" --arg pair "$pair" \
+        '{node_id:$node,target_node_id:$target,pairing_secret:$pair}' > "$body" || return 1
+    response="$(mp_setup_witness_call pair-open "$HA_WITNESS_URL" "$HA_CLUSTER_ID" "$token" "$body")" \
+        || { rm -f "$body"; unset pair token; return 1; }
+    rm -f "$body"; unset token
+    jq -e '.pairing_open == true' <<< "$response" >/dev/null 2>&1 || return 1
+    lane="$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")"
+    campaign="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
+    pending="$(mktemp "$MP_STATE/pending-ha-join.XXXXXX")" || return 1
+    jq -n --arg cluster "$HA_CLUSTER_ID" --arg domain "$(mp_env_get DOMAIN)" \
+        --arg witness "$HA_WITNESS_URL" --arg pair "$pair" \
+        --arg target "$HA_PEER_NODE_ID" --arg lane "$lane" --arg commit "$campaign" \
+        '{format:"mp-opt-ha-join-v2",cluster_id:$cluster,domain:$domain,witness_url:$witness,
+          pairing_secret:$pair,node_id:$target,deployment_lane:$lane,
+          campaign_commit:(if $commit == "" then null else $commit end)}' > "$pending" \
+        && chmod 600 "$pending" && mv "$pending" "$MP_SETUP_V2_PENDING_JOIN" \
+        || { rm -f "$pending"; return 1; }
+    rm -f "$MP_SETUP_V2_PENDING_REPLACEMENT"; unset pair
+    mp_setup_state_mark witness_bootstrap
+    mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed
+    mp_setup_state_action "Waiting for replacement node join" PEER_JOIN_WAIT paired
+}
+
+# Return the durable checkpoint order used by both the TUI and the local
+# automation adapter. This is a plan, not permission to execute a step.
+mp_setup_checkpoint_plan_json() {
+    local mode="$1" lane="${2:-signed}"
+    case "$mode:$lane" in
+        standalone-new:signed|standalone-new:unsigned)
+            jq -cn '["signed_baseline_verified","configuration","public_dns",
+                "application_deployed","public_routing_ready",
+                "root_commissioning_complete","recovery_recipient","validated",
+                "smtp_verified"]'
+            ;;
+        ha-primary-new:signed|ha-primary-new:unsigned)
+            jq -cn '["signed_baseline_verified","configuration","witness_bootstrap",
+                "paired","application_deployed","witness_ready","public_routing_ready",
+                "root_commissioning_complete","recovery_recipient","replicated",
+                "ha_services_activated","validated","smtp_verified",
+                "automatic_failover_readiness"]'
+            ;;
+        convert-ha:signed)
+            jq -cn '["signed_baseline_verified","configuration","recovery_recipient",
+                "migration_snapshot","witness_bootstrap","paired","application_deployed",
+                "witness_ready","public_routing_ready","replicated",
+                "ha_services_activated","validated","smtp_verified",
+                "automatic_failover_readiness"]'
+            ;;
+        convert-ha:unsigned)
+            jq -cn '["signed_baseline_verified","configuration","recovery_recipient",
+                "migration_snapshot","witness_bootstrap","paired","application_deployed",
+                "witness_ready","public_routing_ready","replicated",
+                "ha_services_activated","peer_exact_deployment","validated","smtp_verified",
+                "automatic_failover_readiness"]'
+            ;;
+        ha-join:signed|replace-node:signed)
+            jq -cn '["signed_baseline_verified","joined","application_deployed","replicated"]'
+            ;;
+        ha-join:unsigned|replace-node:unsigned)
+            jq -cn '["signed_baseline_verified","joined","application_deployed","replicated",
+                "peer_exact_deployment"]'
+            ;;
+        replace-primary:signed|replace-primary:unsigned)
+            jq -cn '["signed_baseline_verified","witness_bootstrap","paired",
+                "application_deployed","witness_ready","public_routing_ready","replicated",
+                "ha_services_activated","validated","smtp_verified",
+                "automatic_failover_readiness"]'
+            ;;
+        full-restore:signed|full-restore:unsigned)
+            jq -cn '["signed_baseline_verified","imported","restored",
+                "application_deployed","public_routing_ready","validated","smtp_verified"]'
+            ;;
+        *) return 64 ;;
+    esac
+}
+
+mp_setup_validate_state_contract() {
+    local state_file="${1:-$MP_SETUP_V2_STATE}" owner expected_owner mode lane plan
+    [ -f "$state_file" ] && [ ! -L "$state_file" ] || return 66
+    owner="$(stat -c '%u' "$state_file" 2>/dev/null)" || return 66
+    expected_owner="$(stat -c '%u' "$MP_STATE" 2>/dev/null)" || return 77
+    [ "$owner" = "$expected_owner" ] || return 77
+    [ "$(stat -c '%a' "$state_file" 2>/dev/null)" = 600 ] || return 77
+    jq -e '
+        .format == "mp-opt-setup-state-v2"
+        and (.mode | IN("standalone-new","ha-primary-new","ha-join","convert-ha",
+            "replace-primary","replace-node","full-restore"))
+        and (.state | IN("in_progress","complete"))
+        and (.deployment_lane | IN("signed","unsigned"))
+        and (.completed | type == "array")
+        and all(.completed[]; type == "string" and test("^[a-z0-9_]{1,64}$"))
+        and ((.campaign_commit == null)
+            or (.campaign_commit | test("^[0-9a-f]{40}$")))
+        and (if .deployment_lane == "signed" then .campaign_commit == null else true end)
+        and ((.current_action == null) or (.current_action | type == "string" and length <= 400))
+        and ((.current_action_code == null) or (.current_action_code | test("^[A-Z0-9_]{1,64}$")))
+        and ((.current_checkpoint == null) or (.current_checkpoint | test("^[a-z0-9_]{1,64}$")))
+        and ((.machine_transitions // {}) | type == "object")
+        and (((.machine_transitions // {}) | to_entries) | all(.[].key;
+            test("^[a-z0-9_]{1,64}$")))
+        and (((.machine_transitions // {}) | to_entries) | all(.[].value;
+            (.idempotency_key | type == "string"
+                and test("^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"))
+            and (.state | IN("started","completed"))))
+    ' "$state_file" >/dev/null 2>&1 || return 65
+    mode="$(jq -r .mode "$state_file")"; lane="$(jq -r .deployment_lane "$state_file")"
+    plan="$(mp_setup_checkpoint_plan_json "$mode" "$lane")" || return 65
+    jq -e --argjson plan "$plan" 'all(.completed[]; . as $step | $plan | index($step) != null)' \
+        "$state_file" >/dev/null 2>&1 || return 65
+}
+
+mp_setup_machine_complete_if_plan_finished() {
+    local plan="$1" remaining
+    remaining="$(jq -r --argjson plan "$plan" '
+        . as $setup
+        | $plan | map(select(. as $step | ($setup.completed | index($step)) == null))
+        | length
+    ' "$MP_SETUP_V2_STATE")" || return 1
+    [ "$remaining" -ne 0 ] || mp_setup_state_complete
+}
+
+mp_setup_upgrade_pending_witness_bootstrap() {
+    local file="${1:-$MP_SETUP_V2_PENDING_BOOTSTRAP}" temporary
+    [ -s "$file" ] || return 0
+    [ -f "$file" ] && [ ! -L "$file" ] \
+        && [ "$(stat -c '%u:%a' "$file" 2>/dev/null)" = "$(id -u):600" ] \
+        || return 77
+    jq -e '.format == "mp-opt-pending-witness-bootstrap-v1"' \
+        "$file" >/dev/null 2>&1 || return 0
+    # v1 was written only after the Worker deployment had succeeded. Preserve
+    # its exact cluster, credentials, node material, URL and zone while adding
+    # the explicit lifecycle state required by the resumable v2 contract.
+    jq -e '
+        (.cluster_id | test("^mp-opt-[0-9a-f-]{36}$"))
+        and (.node_token | type == "string" and length >= 32 and length <= 4096)
+        and (.pairing_secret | type == "string" and length >= 32 and length <= 4096)
+        and (.admin_token | type == "string" and length >= 32 and length <= 4096)
+        and (.zone_id | type == "string" and length >= 1)
+        and (.witness_url | test("^https://[^[:space:]]+\\.workers\\.dev/?$"))
+    ' "$file" >/dev/null 2>&1 || return 65
+    temporary="$(mktemp "$MP_STATE/pending-witness-bootstrap.XXXXXX")" || return 1
+    jq '.format="mp-opt-pending-witness-bootstrap-v2" | .state="deployed"' \
+        "$file" > "$temporary" \
+        && chmod 600 "$temporary" && sync -f "$temporary" 2>/dev/null \
+        && mv "$temporary" "$file" && sync -f "$MP_STATE" 2>/dev/null \
+        || { rm -f "$temporary"; return 1; }
+}
+
+mp_setup_validate_pending_witness_bootstrap() {
+    local file="${1:-$MP_SETUP_V2_PENDING_BOOTSTRAP}"
+    [ -f "$file" ] && [ ! -L "$file" ] \
+        && [ "$(stat -c '%u:%a' "$file" 2>/dev/null)" = "$(id -u):600" ] \
+        || return 77
+    jq -e '
+        .format == "mp-opt-pending-witness-bootstrap-v2"
+        and (.state | IN("planned","deployed","registered"))
+        and (.cluster_id | test("^mp-opt-[0-9a-f-]{36}$"))
+        and (.domain | type == "string" and length >= 1 and length <= 253)
+        and (.node_token | type == "string" and length >= 32 and length <= 4096)
+        and (.pairing_secret | type == "string" and length >= 32 and length <= 4096)
+        and (.admin_token | type == "string" and length >= 32 and length <= 4096)
+        and (.node_a_ipv4 | type == "string" and length >= 1 and length <= 45)
+        and (.node_a_ipv6 | type == "string" and length <= 45)
+        and (.node_a_ssh_public_key | type == "string" and length >= 1)
+        and (.node_a_ssh_host_key | type == "string" and length >= 1)
+        and (.node_a_age_recipient | test("^age1[0-9a-z]+$"))
+        and (if .state == "planned" then
+            .zone_id == null and .witness_url == null
+          else
+            (.zone_id | type == "string" and length >= 1)
+            and (.witness_url | test("^https://[^[:space:]]+\\.workers\\.dev/?$"))
+          end)
+    ' "$file" >/dev/null 2>&1
+}
+
+# Reconcile only facts which can be proved locally or from signed/accepted
+# receipts. It never prompts, deploys, changes provider state, or invents a
+# completed human acknowledgement.
+mp_setup_machine_reconcile() {
+    local state mode lane stage changed=false
+    [ -s "$MP_SETUP_V2_STATE" ] || return 10
+    mp_setup_validate_state_contract "$MP_SETUP_V2_STATE" || return $?
+    state="$(jq -r .state "$MP_SETUP_V2_STATE")"
+    if [ "$state" = complete ]; then
+        if jq -e '.current_action != null or .current_action_code != null
+            or .current_checkpoint != null or .action_started_at != null
+            or .last_failure != null' "$MP_SETUP_V2_STATE" >/dev/null; then
+            mp_setup_state_update '.current_action=null | .current_action_code=null
+                | .current_checkpoint=null | .action_started_at=null | .last_failure=null' \
+                || return 1
+            changed=true
+        fi
+        [ "$changed" = false ] || mp_setup_journal_event state.reconciled || return 1
+        return 0
+    fi
+    mode="$(jq -r .mode "$MP_SETUP_V2_STATE")"
+    lane="$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")"
+    if [[ "$mode" =~ ^(ha-join|replace-node)$ ]]; then
+        if [ "$lane" = signed ]; then
+            mp_reconcile_signed_join_setup || return 1
+        else
+            mp_setup_reconcile_unsigned_join || return 1
+        fi
+        [ "$(jq -r .state "$MP_SETUP_V2_STATE")" != complete ] || return 0
+    fi
+    if ! mp_setup_state_has application_deployed; then
+        if [ "$lane" = signed ]; then
+            if mp_setup_verify_signed_application >/dev/null 2>&1; then
+                mp_setup_state_mark application_deployed || return 1
+                changed=true
+            fi
+        else
+            if [ "$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)" \
+                    = "$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")" ] \
+                && mp_setup_verify_exact_environment \
+                    "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")" >/dev/null 2>&1 \
+                && mp_wait_for_stable_local_services 1 1 >/dev/null 2>&1; then
+                mp_setup_state_mark application_deployed || return 1
+                changed=true
+            fi
+        fi
+    fi
+    if [[ "$mode" =~ ^(ha-primary-new|convert-ha|replace-primary)$ ]] \
+        && mp_setup_state_has paired && ! mp_setup_state_has replicated; then
+        if mp_load_ha_config >/dev/null 2>&1 \
+            && mp_setup_record_first_verified_bundle >/dev/null 2>&1; then
+            mp_setup_state_mark replicated || return 1
+            changed=true
+        fi
+    fi
+    if [[ "$mode" =~ ^(standalone-new|ha-primary-new)$ ]] \
+        && mp_setup_state_has application_deployed \
+        && ! mp_setup_state_has root_commissioning_complete \
+        && mp_root_bootstrap_is_disabled >/dev/null 2>&1; then
+        stage="$(mp_setup_commissioning_stage 2>/dev/null || true)"
+        if [ "$stage" = complete ]; then
+            mp_setup_state_mark root_commissioning_complete || return 1
+            mp_setup_state_mark recovery_recipient || return 1
+            changed=true
+        fi
+    fi
+    [ "$changed" = false ] || mp_setup_journal_event state.reconciled || return 1
+    return 10
+}
+
+# Execute exactly one non-interactive transition. The input document has
+# already been schema-validated by the machine adapter and names the expected
+# next checkpoint, preventing a stale coordinator from advancing another step.
+mp_setup_machine_advance_one() {
+    local input_file="$1" mode lane plan checkpoint expected ipv4 ipv6 commit
+    local idempotency_key recorded_key recorded_state remaining
+    local smtp_enabled smtp_host smtp_port smtp_username smtp_token smtp_security
+    local smtp_from_email smtp_from_name smtp_reply_to
+    local cluster_id node_token pairing_secret body pending bootstrap_tmp response peer current
+    local requested_tag requested_commit fault_transition="" replay_test_receipt=false
+    local fault_hook_active=false hook_status=0 step_status=0
+    local -a install_args
+    mp_setup_validate_state_contract "$MP_SETUP_V2_STATE" || return $?
+    checkpoint="$(jq -r .checkpoint "$input_file")"
+    idempotency_key="$(jq -r .idempotency_key "$input_file")"
+    if [ "$(jq -r .state "$MP_SETUP_V2_STATE")" = complete ]; then
+        recorded_key="$(jq -r --arg checkpoint "$checkpoint" \
+            '.machine_transitions[$checkpoint].idempotency_key // empty' \
+            "$MP_SETUP_V2_STATE")"
+        recorded_state="$(jq -r --arg checkpoint "$checkpoint" \
+            '.machine_transitions[$checkpoint].state // empty' \
+            "$MP_SETUP_V2_STATE")"
+        [ "$recorded_state" = completed ] && [ "$recorded_key" = "$idempotency_key" ]
+        return $?
+    fi
+    mode="$(jq -r .mode "$MP_SETUP_V2_STATE")"
+    lane="$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")"
+    plan="$(mp_setup_checkpoint_plan_json "$mode" "$lane")" || return 65
+    expected="$(jq -r --argjson plan "$plan" '
+        . as $setup
+        | $plan | map(select(. as $step | ($setup.completed | index($step)) == null))
+        | .[0] // empty
+    ' "$MP_SETUP_V2_STATE")"
+    recorded_key="$(jq -r --arg checkpoint "$checkpoint" \
+        '.machine_transitions[$checkpoint].idempotency_key // empty' \
+        "$MP_SETUP_V2_STATE")"
+    recorded_state="$(jq -r --arg checkpoint "$checkpoint" \
+        '.machine_transitions[$checkpoint].state // empty' \
+        "$MP_SETUP_V2_STATE")"
+    if mp_setup_state_has "$checkpoint"; then
+        [ "$recorded_key" = "$idempotency_key" ] || return 65
+        if [ "$recorded_state" = started ]; then
+            mp_setup_state_update \
+                '.machine_transitions[$checkpoint].state="completed"
+                 | .machine_transitions[$checkpoint].completed_at=$now' \
+                --arg checkpoint "$checkpoint" || return 1
+        else
+            [ "$recorded_state" = completed ] || return 65
+        fi
+        mp_setup_machine_complete_if_plan_finished "$plan" || return $?
+        return 0
+    fi
+    [ -n "$expected" ] && [ "$checkpoint" = "$expected" ] || return 65
+    if [ -n "$recorded_key" ]; then
+        [ "$recorded_key" = "$idempotency_key" ] && [ "$recorded_state" = started ] \
+            || return 65
+    else
+        mp_setup_state_update \
+            '.machine_transitions=((.machine_transitions // {}) + {
+                ($checkpoint):{idempotency_key:$key,state:"started",started_at:$now}})' \
+            --arg checkpoint "$checkpoint" --arg key "$idempotency_key" || return 1
+    fi
+    MP_SETUP_MACHINE_CHECKPOINT="$checkpoint"
+    MP_SETUP_MACHINE_IDEMPOTENCY_KEY="$idempotency_key"
+    if declare -F mp_setup_test_hook_transition_for_checkpoint >/dev/null; then
+        fault_transition="$(mp_setup_test_hook_transition_for_checkpoint "$checkpoint")"
+    fi
+    if [ -n "$fault_transition" ] && [ -s "${MP_SETUP_TEST_HOOK_ENABLED:-/nonexistent}" ]; then
+        hook_status=0
+        mp_setup_test_hook_should_wrap "$fault_transition" "$checkpoint" \
+            "$idempotency_key" || hook_status=$?
+        case "$hook_status" in
+            0) fault_hook_active=true ;;
+            1) fault_hook_active=false ;;
+            *) return "$hook_status" ;;
+        esac
+    fi
+    if [ "$fault_hook_active" = true ]; then
+        if mp_setup_test_hook_receipt_matches "$fault_transition" "$checkpoint" "$idempotency_key"; then
+            replay_test_receipt=true
+        else
+            MP_SETUP_TEST_DEFER_CHECKPOINT="$checkpoint"
+            MP_SETUP_TEST_MARK_REQUESTED=false
+            mp_setup_test_hook_reach_named "$fault_transition" before-side-effect || return $?
+        fi
+    fi
+    if [ "$replay_test_receipt" = false ]; then
+      case "$checkpoint" in
+        signed_baseline_verified)
+            if [ "$(jq -r '.values | length' "$input_file")" -gt 0 ]; then
+                requested_tag="$(jq -r .values.tag "$input_file")"
+                requested_commit="$(jq -r .values.commit "$input_file")"
+                install_args=(--repo-root "$MP_ROOT" --tag "$requested_tag")
+                [ "$lane" != unsigned ] || install_args+=(--baseline-only)
+                python3 "$MP_ROOT/deploy/release/install_release.py" "${install_args[@]}" || return 1
+                [ "$(sed -n 's/^MP_RELEASE_TAG=//p' "$MP_ROOT/.release.env" | head -1)" = "$requested_tag" ] \
+                    && [ "$(sed -n 's/^MP_RELEASE_COMMIT=//p' "$MP_ROOT/.release.env" | head -1)" = "$requested_commit" ] \
+                    || return 65
+                mp_setup_record_signed_baseline || return 1
+            else
+                mp_setup_install_signed_release
+            fi
+            ;;
+        configuration)
+            if [ "$mode" = convert-ha ]; then
+                [ "$(jq -r '.values | length' "$input_file")" -eq 0 ] \
+                    && [ -s "$MP_ROOT/.env" ] \
+                    && mp_validate_hostname "$(mp_env_get DOMAIN 2>/dev/null || true)" \
+                    || return 65
+                mp_setup_state_mark configuration
+            else
+                smtp_enabled="$(jq -r '.values.smtp.enabled' "$input_file")"
+                if [ "$smtp_enabled" = true ]; then
+                smtp_host="$(jq -r .values.smtp.host "$input_file")"
+                smtp_port="$(jq -r .values.smtp.port "$input_file")"
+                smtp_username="$(jq -r .values.smtp.username "$input_file")"
+                smtp_token="$(jq -r .values.smtp.token "$input_file")"
+                smtp_security="$(jq -r .values.smtp.security "$input_file")"
+                smtp_from_email="$(jq -r .values.smtp.from_email "$input_file")"
+                smtp_from_name="$(jq -r .values.smtp.from_name "$input_file")"
+                smtp_reply_to="$(jq -r '.values.smtp.reply_to // empty' "$input_file")"
+                else
+                    smtp_host=""; smtp_port=587; smtp_username=""; smtp_token=""
+                    smtp_security=starttls; smtp_from_email=""; smtp_from_name="Masterplan Access"
+                    smtp_reply_to=""
+                fi
+                mp_setup_state_action "Protected configuration" \
+                    CONFIGURATION_WRITING configuration || return 1
+                mp_apply_initial_configuration \
+                "$(jq -r .values.domain "$input_file")" \
+                "$(jq -r .values.application_name "$input_file")" \
+                "$(jq -r .values.vapid_contact_email "$input_file")" \
+                "$(openssl rand -hex 32)" \
+                "$([ "$smtp_enabled" = true ] && printf yes || printf no)" \
+                "$smtp_host" "$smtp_port" "$smtp_username" "$smtp_token" \
+                "$smtp_security" "$smtp_from_email" "$smtp_from_name" "$smtp_reply_to" \
+                    || return 1
+                unset smtp_token MP_INITIAL_ROOT_TOKEN
+                mp_setup_state_mark configuration
+            fi
+            ;;
+        public_dns)
+            ipv4="$(jq -r '.values.ipv4 // empty' "$input_file")"
+            ipv6="$(jq -r '.values.ipv6 // empty' "$input_file")"
+            python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$ipv4" \
+                >/dev/null 2>&1 || return 65
+            [ -z "$ipv6" ] || python3 -c \
+                'import ipaddress,sys; ipaddress.IPv6Address(sys.argv[1])' "$ipv6" \
+                >/dev/null 2>&1 || return 65
+            mp_setup_state_action "Verifying public DNS" \
+                PUBLIC_DNS_VERIFY public_dns || return 1
+            mp_setup_standalone_dns_matches "$(mp_env_get DOMAIN)" "$ipv4" "$ipv6" \
+                || return 10
+            mp_setup_state_update \
+                '.public_routing={ipv4:$ipv4,ipv6:(if $ipv6 == "" then null else $ipv6 end)}' \
+                --arg ipv4 "$ipv4" --arg ipv6 "$ipv6" || return 1
+            mp_setup_state_mark public_dns
+            ;;
+        witness_bootstrap)
+            if [ "$mode" = replace-primary ]; then
+                [ "$(jq -r '.values.old_peer_powered_off // false' "$input_file")" = true ] \
+                    || return 65
+                mp_setup_state_action "Opening replacement-node pairing" \
+                    WITNESS_REPLACEMENT_OPENING witness_bootstrap || return 1
+                mp_setup_machine_open_replacement || return $?
+            else
+                [[ "$mode" =~ ^(ha-primary-new|convert-ha)$ ]] || return 10
+                ipv4="$(jq -r .values.ipv4 "$input_file")"
+                ipv6="$(jq -r '.values.ipv6 // empty' "$input_file")"
+            mp_setup_state_action "Deploying HA witness" \
+                WITNESS_DEPLOYING witness_bootstrap || return 1
+            if [ ! -s "$MP_SETUP_V2_PENDING_BOOTSTRAP" ]; then
+                mp_setup_prepare_node_material_machine node-a "$ipv4" "$ipv6" || return 1
+                cluster_id="mp-opt-$(cat /proc/sys/kernel/random/uuid)"
+                node_token="$(mp_random_secret)"; pairing_secret="$(mp_random_secret)"
+                MP_SETUP_WITNESS_ADMIN_TOKEN="$(mp_random_secret)"
+                bootstrap_tmp="$(mktemp "$MP_STATE/pending-witness-bootstrap.XXXXXX")" || return 1
+                jq -n --arg cluster "$cluster_id" --arg token "$node_token" \
+                    --arg pair "$pairing_secret" --arg domain "$(mp_env_get DOMAIN)" \
+                    --arg admin "$MP_SETUP_WITNESS_ADMIN_TOKEN" \
+                    --arg ipv4 "$MP_SETUP_NODE_IPV4" --arg ipv6 "$MP_SETUP_NODE_IPV6" \
+                    --arg ssh "$MP_SETUP_NODE_SSH_PUBLIC" --arg host "$MP_SETUP_NODE_SSH_HOST" \
+                    --arg age "$MP_SETUP_NODE_AGE_RECIPIENT" \
+                    '{format:"mp-opt-pending-witness-bootstrap-v2",state:"planned",
+                      cluster_id:$cluster,node_token:$token,pairing_secret:$pair,
+                      zone_id:null,domain:$domain,witness_url:null,admin_token:$admin,
+                      node_a_ipv4:$ipv4,node_a_ipv6:$ipv6,node_a_ssh_public_key:$ssh,
+                      node_a_ssh_host_key:$host,node_a_age_recipient:$age}' > "$bootstrap_tmp" \
+                    && chmod 600 "$bootstrap_tmp" && sync -f "$bootstrap_tmp" 2>/dev/null \
+                    && mv "$bootstrap_tmp" "$MP_SETUP_V2_PENDING_BOOTSTRAP" \
+                    && sync -f "$MP_STATE" 2>/dev/null \
+                    || { rm -f "$bootstrap_tmp"; return 1; }
+            fi
+            mp_setup_upgrade_pending_witness_bootstrap || return $?
+            mp_setup_validate_pending_witness_bootstrap || return $?
+            cluster_id="$(jq -r .cluster_id "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
+            node_token="$(jq -r .node_token "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
+            pairing_secret="$(jq -r .pairing_secret "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
+            MP_SETUP_WITNESS_ADMIN_TOKEN="$(jq -r .admin_token "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
+            if [ "$(jq -r .state "$MP_SETUP_V2_PENDING_BOOTSTRAP")" = planned ]; then
+                mp_setup_deploy_witness_machine "$(jq -r .domain "$MP_SETUP_V2_PENDING_BOOTSTRAP")" \
+                    "$cluster_id" "$(jq -r .values.cloudflare_deploy_token "$input_file")" \
+                    "$(jq -r .values.cloudflare_dns_token "$input_file")" \
+                    "$MP_SETUP_WITNESS_ADMIN_TOKEN" || return 1
+                bootstrap_tmp="$(mktemp "$MP_STATE/pending-witness-bootstrap.XXXXXX")" || return 1
+                jq --arg witness "$MP_SETUP_WITNESS_URL" --arg zone "$MP_SETUP_ZONE_ID" \
+                    '.state="deployed" | .witness_url=$witness | .zone_id=$zone' \
+                    "$MP_SETUP_V2_PENDING_BOOTSTRAP" > "$bootstrap_tmp" \
+                    && chmod 600 "$bootstrap_tmp" && sync -f "$bootstrap_tmp" 2>/dev/null \
+                    && mv "$bootstrap_tmp" "$MP_SETUP_V2_PENDING_BOOTSTRAP" \
+                    && sync -f "$MP_STATE" 2>/dev/null || return 1
+            fi
+            MP_SETUP_WITNESS_URL="$(jq -r .witness_url "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
+            MP_SETUP_ZONE_ID="$(jq -r .zone_id "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
+            MP_SETUP_NODE_IPV4="$(jq -r .node_a_ipv4 "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
+            MP_SETUP_NODE_IPV6="$(jq -r .node_a_ipv6 "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
+            MP_SETUP_NODE_SSH_PUBLIC="$(jq -r .node_a_ssh_public_key "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
+            MP_SETUP_NODE_SSH_HOST="$(jq -r .node_a_ssh_host_key "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
+            MP_SETUP_NODE_AGE_RECIPIENT="$(jq -r .node_a_age_recipient "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
+            body="$(mktemp "$MP_STATE/witness-bootstrap.XXXXXX")" || return 1
+            jq -n --arg cluster "$cluster_id" --arg token "$node_token" \
+                --arg pair "$pairing_secret" --arg zone "$MP_SETUP_ZONE_ID" \
+                --arg domain "$(mp_env_get DOMAIN)" --arg ipv4 "$MP_SETUP_NODE_IPV4" \
+                --arg ipv6 "$MP_SETUP_NODE_IPV6" --arg ssh "$MP_SETUP_NODE_SSH_PUBLIC" \
+                --arg host "$MP_SETUP_NODE_SSH_HOST" --arg age "$MP_SETUP_NODE_AGE_RECIPIENT" \
+                '{cluster_id:$cluster,initial_holder:"node-a",node_a_token:$token,
+                  pairing_secret:$pair,zone_id:$zone,hostname:$domain,node_a_ipv4:$ipv4,
+                  node_a_ipv6:$ipv6,node_a_ssh_public_key:$ssh,node_a_ssh_host_key:$host,
+                  node_a_age_recipient:$age}' > "$body" || return 1
+            mp_setup_state_action "Registering Node A with HA witness" \
+                WITNESS_REGISTERING witness_bootstrap || return 1
+            if [ "$(jq -r .state "$MP_SETUP_V2_PENDING_BOOTSTRAP")" != registered ]; then
+                mp_setup_witness_call bootstrap "$MP_SETUP_WITNESS_URL" "$cluster_id" \
+                    "$MP_SETUP_WITNESS_ADMIN_TOKEN" "$body" >/dev/null || return 1
+                bootstrap_tmp="$(mktemp "$MP_STATE/pending-witness-bootstrap.XXXXXX")" || return 1
+                jq '.state="registered"' "$MP_SETUP_V2_PENDING_BOOTSTRAP" > "$bootstrap_tmp" \
+                    && chmod 600 "$bootstrap_tmp" && sync -f "$bootstrap_tmp" 2>/dev/null \
+                    && mv "$bootstrap_tmp" "$MP_SETUP_V2_PENDING_BOOTSTRAP" \
+                    && sync -f "$MP_STATE" 2>/dev/null || return 1
+            fi
+            rm -f "$body"
+            mp_setup_install_ha_identity node-a node-b "$cluster_id" \
+                "$MP_SETUP_WITNESS_URL" "$node_token" || return 1
+            pending="$(mktemp "$MP_STATE/pending-ha-join.XXXXXX")" || return 1
+            jq -n --arg cluster "$cluster_id" --arg domain "$(mp_env_get DOMAIN)" \
+                --arg witness "$MP_SETUP_WITNESS_URL" --arg pair "$pairing_secret" \
+                --arg lane "$lane" --arg commit "$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")" \
+                '{format:"mp-opt-ha-join-v2",cluster_id:$cluster,domain:$domain,
+                  witness_url:$witness,pairing_secret:$pair,node_id:"node-b",
+                  deployment_lane:$lane,campaign_commit:(if $commit == "" then null else $commit end)}' \
+                > "$pending" || return 1
+            chmod 600 "$pending" && mv "$pending" "$MP_SETUP_V2_PENDING_JOIN" || return 1
+            # Retain the protected intent through the checkpoint. It is safe
+            # to remove only after pairing has moved to the next checkpoint.
+            unset node_token pairing_secret MP_SETUP_WITNESS_ADMIN_TOKEN
+            mp_setup_state_mark witness_bootstrap
+                mp_setup_state_action "Waiting for Node B join" PEER_JOIN_WAIT paired
+            fi
+            ;;
+        joined)
+            [[ "$mode" =~ ^(ha-join|replace-node)$ ]] || return 10
+            mp_setup_join_node_machine "$input_file"
+            ;;
+        paired)
+            # The join code is already installed. A receipt from the witness,
+            # rather than an input assertion, proves that Node B consumed it.
+            mp_load_ha_config || return 10
+            node_token="$(cat "$MP_HA_HOME/secrets/node_token")" || return 10
+            body="$(mktemp "$MP_STATE/pair-state.XXXXXX")" || return 1
+            jq -n --arg node "$HA_NODE_ID" '{node_id:$node}' > "$body"
+            response="$(mp_setup_witness_call pair-state "$HA_WITNESS_URL" \
+                "$HA_CLUSTER_ID" "$node_token" "$body")" || { rm -f "$body"; return 10; }
+            rm -f "$body"; unset node_token
+            jq -e '.paired == true' <<< "$response" >/dev/null 2>&1 || return 10
+            peer="$(jq -c --arg peer "$HA_PEER_NODE_ID" '.nodes[] | select(.node_id == $peer)' <<< "$response")"
+            [ -n "$peer" ] || return 10
+            mp_setup_install_peer_trust "$(jq -r .ipv4 <<< "$peer")" \
+                "$(jq -r .ssh_public_key <<< "$peer")" "$(jq -r .ssh_host_key <<< "$peer")" \
+                "$(jq -r .age_recipient <<< "$peer")" || return 1
+            current="$(jq -c --arg node "$HA_NODE_ID" \
+                '.nodes[] | select(.node_id == $node)' <<< "$response")"
+            if [ -n "$current" ]; then
+                mp_setup_state_update \
+                    '.public_routing={ipv4:$ipv4,ipv6:(if $ipv6 == "" then null else $ipv6 end)}' \
+                    --arg ipv4 "$(jq -r '.ipv4 // empty' <<< "$current")" \
+                    --arg ipv6 "$(jq -r '.ipv6 // empty' <<< "$current")" || return 1
+            fi
+            mp_setup_state_mark paired
+            rm -f "$MP_SETUP_V2_PENDING_BOOTSTRAP"
+            ;;
+        application_deployed)
+            if [ "$mode" = full-restore ]; then
+                mp_wait_for_stable_local_services 2 1 >/dev/null 2>&1 || return 10
+                mp_setup_state_mark application_deployed
+            elif [ "$mode" = replace-primary ]; then
+                mp_setup_state_mark application_deployed
+            elif [ "$mode" = convert-ha ] && [ "$lane" = unsigned ]; then
+                mp_setup_activate_converted_unsigned_pair || return 1
+                mp_setup_state_mark application_deployed
+            elif [ "$lane" = unsigned ] \
+                && [ -s "$MP_STATE/test-deployments/candidate/receipt.json" ]; then
+                [ "$(jq -r '.commit // empty' "$MP_STATE/test-deployments/candidate/receipt.json")" \
+                    = "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")" ] || return 65
+                jq -c '.values.registry' "$input_file" \
+                    | "$MP_ROOT/deploy/test-deployment.sh" apply-prebuilt \
+                        "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")" \
+                        --fresh-commissioning --registry-credentials-stdin || return 1
+            else
+                mp_setup_deploy_application || return 1
+            fi
+            mp_setup_state_mark application_deployed
+            ;;
+        public_routing_ready)
+            if [ "$mode" = full-restore ]; then
+                mp_wait_for_public_health 45 || return 10
+                mp_setup_state_mark public_routing_ready
+            else
+                ipv4="$(jq -r '.public_routing.ipv4 // empty' "$MP_SETUP_V2_STATE")"
+                ipv6="$(jq -r '.public_routing.ipv6 // empty' "$MP_SETUP_V2_STATE")"
+                [ -n "$ipv4" ] || return 65
+                mp_setup_verify_public_routing "$(mp_env_get DOMAIN)" "$ipv4" "$ipv6"
+            fi
+            ;;
+        replicated)
+            if ! mp_setup_record_first_verified_bundle >/dev/null 2>&1; then
+                mp_setup_state_action "Replicating complete application state to Node B" \
+                    FIRST_BUNDLE_TRANSFER replicated || return 1
+                mp_ha_replicate_now || return 1
+                mp_setup_record_first_verified_bundle >/dev/null 2>&1 || return 1
+            fi
+            mp_setup_state_mark replicated
+            ;;
+        ha_services_activated)
+            mp_setup_state_action "Activating verified HA services" \
+                HA_SERVICES_ACTIVATING ha_services_activated || return 1
+            "$MP_ROOT/deploy/ha/install_services.sh" || return 1
+            mp_setup_state_mark ha_services_activated
+            ;;
+        peer_exact_deployment)
+            [ "$lane" = unsigned ] || return 65
+            commit="$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")"
+            mp_setup_state_action "Finalising Node B exact deployment" \
+                PEER_EXACT_DEPLOYMENT_FINALISING peer_exact_deployment || return 1
+            ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+                env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+                /opt/masterplan/deploy/test-deployment.sh internal-finalize-peer "$commit" \
+                || return 1
+            mp_setup_state_mark peer_exact_deployment
+            ;;
+        validated)
+            mp_setup_state_action "Validating the complete installation" \
+                INSTALLATION_VALIDATING validated || return 1
+            mp_validate_installation || return 1
+            mp_setup_state_mark validated
+            ;;
+        smtp_verified)
+            mp_setup_state_action "Verifying SMTP and DNS" \
+                SMTP_VALIDATING smtp_verified || return 1
+            mp_setup_verify_smtp_and_dns_machine \
+                "$(jq -r '.values.dkim_selector // empty' "$input_file")" \
+                "$(jq -r '.values.test_recipient // empty' "$input_file")" \
+                "$(jq -r '.values.correlation_id // empty' "$input_file")" || return $?
+            mp_setup_state_mark smtp_verified
+            ;;
+        automatic_failover_readiness)
+            mp_setup_state_action "Verifying automatic failover readiness" \
+                AUTOMATIC_FAILOVER_VALIDATING automatic_failover_readiness || return 1
+            mp_ha_refresh_witness_observations || return 1
+            mp_ha_active_verification_readiness || return 1
+            python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic disabled >/dev/null \
+                || return 1
+            mp_ha_set_config_value HA_AUTOMATIC_FAILOVER disabled || return 1
+            mp_setup_state_mark automatic_failover_readiness
+            ;;
+        recovery_recipient)
+            local recipient probe role
+            recipient="$(jq -r .values.recipient "$input_file")"
+            [[ "$recipient" =~ ^age1[0-9a-z]+$ ]] || return 65
+            probe="$(mktemp "${TMPDIR:-/tmp}/mp-opt-age-probe.XXXXXX")" || return 1
+            printf '' | age -r "$recipient" -o "$probe" >/dev/null 2>&1 \
+                || { rm -f "$probe"; return 65; }
+            rm -f "$probe"
+            role="$(mp_ha_role)" || return 1
+            if [ "$role" = dynamic ]; then
+                mp_ha_sync_recovery_recipient "$recipient" || return 1
+            else
+                mp_store_recovery_recipient_local "$recipient" || return 1
+            fi
+            mp_setup_state_mark recovery_recipient
+            ;;
+        migration_snapshot)
+            local artifact_ticket artifact_receipt package_hash package_size snapshot_path package_id
+            artifact_ticket="$(jq -r .values.artifact_ticket "$input_file")"
+            artifact_receipt="$MP_SETUP_V2_ARTIFACTS/$artifact_ticket/receipt.json"
+            [ -f "$artifact_receipt" ] && [ ! -L "$artifact_receipt" ] \
+                && [ "$(stat -c '%a' "$artifact_receipt" 2>/dev/null)" = 600 ] \
+                || return 65
+            package_hash="$(jq -r .package_sha256 "$artifact_receipt")"
+            [ "$package_hash" = "$(jq -r .values.package_sha256 "$input_file")" ] \
+                && [ "$package_hash" = "$(jq -r '.pending_artifacts.migration_snapshot.sha256 // empty' "$MP_SETUP_V2_STATE")" ] \
+                || return 65
+            [ "$(sha256sum "$(jq -r .package_path "$artifact_receipt")" | awk '{print $1}')" = "$package_hash" ] \
+                || return 65
+            snapshot_path="$(jq -r .snapshot_path "$artifact_receipt")"
+            package_id="$(jq -r .package_id "$artifact_receipt")"
+            package_size="$(jq -r .package_size "$artifact_receipt")"
+            mp_portable_initialise || return 1
+            mp_portable_record_confirmed_export "$snapshot_path" "$package_id" \
+                "$package_hash" "$package_size" || return 1
+            rm -rf "$MP_SETUP_V2_ARTIFACTS/$artifact_ticket"
+            mp_setup_state_update 'del(.pending_artifacts.migration_snapshot)' || return 1
+            mp_setup_state_mark migration_snapshot
+            ;;
+        imported)
+            local import_hash
+            import_hash="$(jq -r .values.package_sha256 "$input_file")"
+            [ "$import_hash" = "$(jq -r '.pending_artifacts.recovery_import.sha256 // empty' "$MP_SETUP_V2_STATE")" ] \
+                && [ "$import_hash" = "$(jq -r '.package_sha256 // empty' "$MP_PORTABLE_LAST_IMPORT_STATE" 2>/dev/null || true)" ] \
+                || return 65
+            jq -e '.format == "mp-opt-portable-import-receipt-v1"' \
+                "$MP_PORTABLE_LAST_IMPORT_STATE" >/dev/null || return 65
+            install -m 0600 "$MP_PORTABLE_LAST_IMPORT_STATE" "$MP_SETUP_V2_IMPORT_RECEIPT" || return 1
+            mp_setup_state_update 'del(.pending_artifacts.recovery_import)' || return 1
+            mp_setup_state_mark imported
+            ;;
+        restored)
+            local restore_identity imported_snapshot
+            imported_snapshot="$(jq -er '.snapshot_path | select(type == "string")' \
+                "$MP_SETUP_V2_IMPORT_RECEIPT")" || return 65
+            case "$(readlink -f "$imported_snapshot")" in
+                "$(readlink -f "$MP_SNAPSHOTS")"/*) ;;
+                *) return 65 ;;
+            esac
+            restore_identity="$(mp_setup_machine_identity_file \
+                "$(jq -r .values.recovery_identity "$input_file")")" || return $?
+            mp_snapshot_restore_full_loss "$imported_snapshot" "$restore_identity" true || {
+                mp_secure_remove_file "$restore_identity"; return 1;
+            }
+            mp_secure_remove_file "$restore_identity"
+            mp_setup_state_mark restored
+            ;;
+        witness_ready)
+            mp_setup_state_action "Activating public HA routing" \
+                WITNESS_ROUTING witness_ready || return 1
+            python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null \
+                || { mp_setup_state_failure WITNESS_ROUTING_FAILED \
+                    "The HA witness did not accept the routing-ready transition." || true; return 1; }
+            mp_setup_state_mark witness_ready
+            ;;
+        root_commissioning_complete)
+            # These transitions need an explicit interactive ceremony, a
+            # provider-specific input contract, or a browser/peer receipt.
+            return 10
+            ;;
+        *) return 65 ;;
+      esac
+      step_status=$?
+      [ "$step_status" -eq 0 ] || return "$step_status"
+    fi
+    if [ "$fault_hook_active" = true ]; then
+        if [ "$replay_test_receipt" = false ]; then
+            [ "${MP_SETUP_TEST_MARK_REQUESTED:-false}" = true ] || return 65
+            mp_setup_test_hook_reach_named "$fault_transition" \
+                after-side-effect-before-receipt || return $?
+            mp_setup_test_hook_record_transition_receipt "$fault_transition" \
+                "$checkpoint" "$idempotency_key" || return $?
+        fi
+        mp_setup_test_hook_reach_named "$fault_transition" \
+            after-receipt-before-checkpoint || return $?
+        unset MP_SETUP_TEST_DEFER_CHECKPOINT MP_SETUP_TEST_MARK_REQUESTED
+        mp_setup_state_mark_now "$checkpoint" || return 1
+        mp_setup_test_hook_reach_named "$fault_transition" \
+            after-checkpoint-before-next-action || return $?
+    fi
+    mp_setup_state_update \
+        '.machine_transitions[$checkpoint].state="completed"
+         | .machine_transitions[$checkpoint].completed_at=$now' \
+        --arg checkpoint "$checkpoint" || return 1
+    unset MP_SETUP_MACHINE_CHECKPOINT MP_SETUP_MACHINE_IDEMPOTENCY_KEY
+    mp_setup_machine_complete_if_plan_finished "$plan"
+}
+
+mp_setup_reconcile_unsigned_join() {
+    local receiver="$MP_ROOT/runtime/ha-receiver.json" commit receipt
+    [ -s "$MP_SETUP_V2_STATE" ] || return 0
+    jq -e '
+        .format == "mp-opt-setup-state-v2"
+        and (.mode | IN("ha-join","replace-node"))
+        and .deployment_lane == "unsigned" and .state == "in_progress"
+        and ((.completed // []) | index("joined") != null)
+    ' "$MP_SETUP_V2_STATE" >/dev/null 2>&1 || return 0
+    [ -s "$receiver" ] || return 0
+    jq -e '
+        .format == "mp-opt-receiver-state-v2"
+        and (.last_bundle_id | type == "string" and length > 0)
+        and (.last_bundle_sha256 | test("^[0-9a-f]{64}$"))
+        and (.generation | type == "number" and . >= 1)
+    ' "$receiver" >/dev/null 2>&1 || return 1
+    commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
+    receipt="$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)"
+    [ "$receipt" = "$commit" ] || return 0
+    mp_setup_verify_exact_environment "$commit" >/dev/null 2>&1 || return 0
+    mp_wait_for_stable_local_services 1 1 >/dev/null 2>&1 || return 0
+    mp_setup_state_mark application_deployed || return 1
+    mp_setup_state_mark replicated || return 1
+    mp_setup_state_mark peer_exact_deployment || return 1
+    mp_setup_state_complete
 }
 
 # Present the already-installed bootstrap value as a separately acknowledged
@@ -268,6 +1331,7 @@ mp_setup_wait_for_root_commissioning() (
     [[ "$interval" =~ ^[0-9]+$ ]] || interval=5
     trap 'return 130' INT TERM PIPE
     while true; do
+        mp_setup_consume_cancellation && return 130
         if ! mp_root_bootstrap_is_disabled; then
             label="Root passkey registration"
             action="Open the bootstrap page and register the root passkey."
@@ -315,14 +1379,23 @@ mp_setup_register_root_passkey() {
 }
 
 mp_setup_verify_exact_environment() {
-    local commit="$1" short key value
+    local commit="$1" short key value candidate manifest_key expected
     short="${commit:0:12}"
     [ "$(sed -n 's/^MP_TEST_COMMIT=//p' "$MP_ROOT/.test-deployment.env" 2>/dev/null | head -1)" = "$commit" ] \
         || { ui_error "The unsigned environment does not match the pinned campaign commit."; return 1; }
+    candidate="$MP_STATE/test-deployments/candidate/receipt.json"
     for key in MP_BACKEND_IMAGE MP_CADDY_IMAGE MP_POSTGRES_IMAGE MP_TOOLS_IMAGE; do
         value="$(sed -n "s/^${key}=//p" "$MP_ROOT/.test-deployment.env" | head -1)"
-        [[ "$value" =~ ^masterplan-(backend|caddy|postgres|tools):test-${short}$ ]] \
-            || { ui_error "${key} is not pinned to test-${short}."; return 1; }
+        if [ -s "$candidate" ] && [ "$(jq -r '.commit // empty' "$candidate")" = "$commit" ]; then
+            case "$key" in MP_BACKEND_IMAGE) manifest_key=backend ;; MP_CADDY_IMAGE) manifest_key=caddy ;;
+                MP_POSTGRES_IMAGE) manifest_key=postgres ;; MP_TOOLS_IMAGE) manifest_key=tools ;; esac
+            expected="$(jq -r --arg key "$manifest_key" '.manifest.images[$key] // empty' "$candidate")"
+            [ "$value" = "$expected" ] && [[ "$value" =~ @sha256:[0-9a-f]{64}$ ]] \
+                || { ui_error "${key} does not match the staged candidate digest."; return 1; }
+        else
+            [[ "$value" =~ ^masterplan-(backend|caddy|postgres|tools):test-${short}$ ]] \
+                || { ui_error "${key} is not pinned to test-${short}."; return 1; }
+        fi
         docker image inspect "$value" >/dev/null 2>&1 \
             || { ui_error "Pinned image ${value} is missing."; return 1; }
     done
@@ -561,6 +1634,40 @@ mp_setup_prepare_node_material() {
     export MP_SETUP_NODE_IPV4 MP_SETUP_NODE_IPV6 MP_SETUP_NODE_SSH_PUBLIC MP_SETUP_NODE_SSH_HOST MP_SETUP_NODE_AGE_RECIPIENT
 }
 
+# Non-interactive counterpart used by the local automation adapter. Public
+# addresses come from the schema-validated stdin document, not prompts.
+mp_setup_prepare_node_material_machine() {
+    local node_id="$1" public_ip="$2" public_ipv6="${3:-}" identity ssh_key observed_ipv4=""
+    mp_require_commands age age-keygen jq openssl ssh ssh-keygen || return 1
+    python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$public_ip" \
+        >/dev/null 2>&1 || return 65
+    [ -z "$public_ipv6" ] || python3 -c \
+        'import ipaddress,sys; ipaddress.IPv6Address(sys.argv[1])' "$public_ipv6" \
+        >/dev/null 2>&1 || return 65
+    if [ -n "${SSH_CONNECTION:-}" ]; then
+        observed_ipv4="$(awk '{print $3}' <<< "$SSH_CONNECTION")"
+        python3 -c 'import ipaddress,sys; value=ipaddress.IPv4Address(sys.argv[1]); raise SystemExit(0 if value.is_global else 1)' \
+            "$observed_ipv4" >/dev/null 2>&1 || observed_ipv4=""
+    fi
+    [ -z "$observed_ipv4" ] || [ "$public_ip" = "$observed_ipv4" ] || return 65
+    sudo -n install -d -o "$USER" -g "$(id -gn)" -m 0700 \
+        "$MP_HA_HOME" "$MP_HA_HOME/secrets" || return 1
+    identity="$MP_HA_HOME/secrets/replication_age_identity"
+    ssh_key="$HOME/.ssh/mp_opt_ha_peer"
+    install -d -m 0700 "$HOME/.ssh"
+    [ -s "$identity" ] || { age-keygen -o "$identity" >/dev/null 2>&1 && chmod 600 "$identity"; } \
+        || return 1
+    [ -s "$ssh_key" ] || ssh-keygen -q -t ed25519 -N '' -C "mp-opt-${node_id}" -f "$ssh_key" \
+        || return 1
+    chmod 600 "$ssh_key"; chmod 644 "$ssh_key.pub"
+    MP_SETUP_NODE_IPV4="$public_ip"; MP_SETUP_NODE_IPV6="$public_ipv6"
+    MP_SETUP_NODE_SSH_PUBLIC="$(cat "$ssh_key.pub")"
+    MP_SETUP_NODE_SSH_HOST="$(sudo -n cat /etc/ssh/ssh_host_ed25519_key.pub)"
+    MP_SETUP_NODE_AGE_RECIPIENT="$(age-keygen -y "$identity")"
+    export MP_SETUP_NODE_IPV4 MP_SETUP_NODE_IPV6 MP_SETUP_NODE_SSH_PUBLIC \
+        MP_SETUP_NODE_SSH_HOST MP_SETUP_NODE_AGE_RECIPIENT
+}
+
 mp_setup_install_peer_trust() {
     local peer_ip="$1" peer_public="$2" peer_host="$3" peer_recipient="$4" verification="${5:-required}"
     local config_include="$HOME/.ssh/mp-opt-ha.conf" temporary
@@ -664,7 +1771,7 @@ mp_setup_repair_witness_admin_secret() {
 }
 
 mp_setup_deploy_witness_scoped() (
-    local domain="$1" cluster_id="$2" deploy_token dns_token admin_token worker_name tools_image
+    local domain="$1" cluster_id="$2" admin_token="${3:-}" deploy_token dns_token worker_name tools_image
     local output="" witness zone_id secrets_file=""
     cleanup() {
         mp_secure_remove_file "$secrets_file" || true
@@ -686,7 +1793,7 @@ mp_setup_deploy_witness_scoped() (
         | python3 "$MP_ROOT/deploy/ha/commission_api.py" zone-id "$domain")" \
         || { unset deploy_token dns_token; ui_error "Cloudflare zone discovery failed. The DNS token needs Zone Read and DNS Edit for this zone."; return 1; }
     worker_name="mp-opt-ha-$(tr -cd 'a-z0-9' <<< "${cluster_id:0:12}")"
-    admin_token="$(mp_random_secret)"
+    [ -n "$admin_token" ] || admin_token="$(mp_random_secret)"
     secrets_file="$(mktemp "$MP_STATE/wrangler-secrets.XXXXXX")" || return 1
     output="$(mktemp "$MP_STATE/wrangler-deploy.XXXXXX")" || return 1
     jq -n --arg admin "$admin_token" --arg dns "$dns_token" \
@@ -709,8 +1816,8 @@ mp_setup_deploy_witness_scoped() (
 )
 
 mp_setup_deploy_witness() {
-    local domain="$1" cluster_id="$2" result
-    result="$(mp_setup_deploy_witness_scoped "$domain" "$cluster_id")" || return 1
+    local domain="$1" cluster_id="$2" admin_token="${3:-}" result
+    result="$(mp_setup_deploy_witness_scoped "$domain" "$cluster_id" "$admin_token")" || return 1
     jq -e '.witness_url | test("^https://[^[:space:]]+\\.workers\\.dev$")' \
         <<< "$result" >/dev/null || { unset result; return 1; }
     MP_SETUP_WITNESS_URL="$(jq -r .witness_url <<< "$result")"
@@ -718,6 +1825,43 @@ mp_setup_deploy_witness() {
     MP_SETUP_WITNESS_ADMIN_TOKEN="$(jq -r .admin_token <<< "$result")"
     export MP_SETUP_WITNESS_URL MP_SETUP_ZONE_ID MP_SETUP_WITNESS_ADMIN_TOKEN
     unset result
+}
+
+mp_setup_deploy_witness_machine() {
+    local domain="$1" cluster_id="$2" deploy_token="$3" dns_token="$4"
+    local admin_token="${5:-}" worker_name tools_image output="" witness zone_id secrets_file=""
+    cleanup() {
+        mp_secure_remove_file "$secrets_file" || true
+        [ -z "$output" ] || rm -f -- "$output"
+        unset deploy_token dns_token admin_token
+    }
+    trap cleanup EXIT
+    [ "${#deploy_token}" -ge 32 ] && [ "${#dns_token}" -ge 32 ] || return 65
+    tools_image="$(sed -n 's/^MP_TOOLS_IMAGE=//p' "$MP_ROOT/.release.env" | head -1)"
+    [[ "$tools_image" =~ ^ghcr\.io/brian-funk/masterplanoptimiserv3---server/tools@sha256:[0-9a-f]{64}$ ]] \
+        || return 65
+    zone_id="$(printf '%s' "$dns_token" | python3 "$MP_ROOT/deploy/ha/commission_api.py" zone-id "$domain")" \
+        || return 1
+    worker_name="mp-opt-ha-$(tr -cd 'a-z0-9' <<< "${cluster_id:0:12}")"
+    [ -n "$admin_token" ] || admin_token="$(mp_random_secret)"
+    secrets_file="$(mktemp "$MP_STATE/wrangler-secrets.XXXXXX")" || return 1
+    output="$(mktemp "$MP_STATE/wrangler-deploy.XXXXXX")" || return 1
+    jq -n --arg admin "$admin_token" --arg dns "$dns_token" \
+        '{ADMIN_TOKEN:$admin,CLOUDFLARE_DNS_API_TOKEN:$dns}' > "$secrets_file" \
+        && chmod 600 "$secrets_file" || return 1
+    CLOUDFLARE_API_TOKEN="$deploy_token" docker run --rm -e CLOUDFLARE_API_TOKEN \
+        -v "$MP_ROOT/infra/cloudflare-ha-witness:/worker:ro" \
+        -v "$secrets_file:/run/mp-opt-witness-secrets.json:ro" \
+        "$tools_image" deploy /worker/src/index.ts --config /worker/wrangler.toml \
+            --name "$worker_name" --secrets-file /run/mp-opt-witness-secrets.json \
+        > "$output" 2>&1 || return 1
+    witness="$(grep -Eo 'https://[^[:space:]]+\.workers\.dev' "$output" | tail -1)"
+    [[ "$witness" =~ ^https://[^[:space:]]+\.workers\.dev/?$ ]] || return 1
+    MP_SETUP_WITNESS_URL="${witness%/}"; MP_SETUP_ZONE_ID="$zone_id"
+    MP_SETUP_WITNESS_ADMIN_TOKEN="$admin_token"
+    export MP_SETUP_WITNESS_URL MP_SETUP_ZONE_ID MP_SETUP_WITNESS_ADMIN_TOKEN
+    cleanup
+    trap - EXIT
 }
 
 mp_setup_verify_smtp_and_dns() {
@@ -752,6 +1896,34 @@ mp_setup_verify_smtp_and_dns() {
     ui_message "Email verified" "SMTP delivery succeeded and public SPF, DKIM and DMARC records are visible. The TUI did not modify mail DNS."
 }
 
+# Machine equivalent of the SMTP checkpoint. All values arrive through the
+# bounded 0600 commissioning-input file; none are persisted in setup state or
+# events. Missing public DNS is a retryable wait, not an interactive prompt.
+mp_setup_verify_smtp_and_dns_machine() {
+    local selector="$1" recipient="$2" correlation_id="${3:-}" from_email domain spf dmarc dkim
+    [ -n "$(mp_env_get SMTP_HOST 2>/dev/null || true)" ] || {
+        [ -z "$selector" ] && [ -z "$recipient" ]
+        return $?
+    }
+    mp_require_commands dig || return 1
+    [[ "$selector" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || return 65
+    mp_validate_email_address "$recipient" || return 65
+    [ -z "$correlation_id" ] || [[ "$correlation_id" =~ ^[0-9a-f]{32}$ ]] || return 65
+    if [ "$(mp_ha_role 2>/dev/null || printf standalone)" = dynamic ]; then
+        mp_ha_verify_smtp_both_nodes required "$recipient" "$correlation_id" || return 1
+    else
+        mp_send_smtp_test_to "$recipient" "$correlation_id" || return 1
+    fi
+    from_email="$(mp_env_get SMTP_FROM_EMAIL)" || return 1
+    domain="${from_email##*@}"
+    spf="$(mp_public_dns_consensus "$domain" TXT | grep -m1 'v=spf1' || true)"
+    dmarc="$(mp_public_dns_consensus "_dmarc.$domain" TXT | grep -m1 'v=DMARC1' || true)"
+    dkim="$(mp_public_dns_consensus "${selector}._domainkey.$domain" TXT | grep -m1 'v=DKIM1' || true)"
+    [ -n "$dkim" ] \
+        || dkim="$(mp_public_dns_consensus "${selector}._domainkey.$domain" CNAME | grep -m1 '\.' || true)"
+    [ -n "$spf" ] && [ -n "$dmarc" ] && [ -n "$dkim" ] || return 10
+}
+
 mp_setup_standalone_dns_matches() {
     local domain="$1" public_ip="$2" public_ipv6="${3:-}"
     mp_public_dns_observe "$domain" A "$public_ip" || return $?
@@ -769,6 +1941,7 @@ mp_setup_wait_for_standalone_dns() (
     [[ "$interval" =~ ^[0-9]+$ ]] || interval=30
     trap 'return 130' INT TERM PIPE
     while ! mp_setup_standalone_dns_matches "$domain" "$public_ip" "$public_ipv6"; do
+        mp_setup_consume_cancellation && return 130
         system_answer="$(timeout 3 getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true)"
         printf '[%s] Public DNS: %s (%s). Host resolver: %s. Check %d; retrying in %s seconds.\n' \
             "$(date -u +%H:%M:%SZ)" "${MP_PUBLIC_DNS_STATUS:-pending}" \
@@ -820,6 +1993,7 @@ mp_setup_wait_for_public_routing() (
     [[ "$interval" =~ ^[0-9]+$ ]] || interval=30
     trap 'return 130' INT TERM PIPE
     while true; do
+        mp_setup_consume_cancellation && return 130
         code=""; message=""; dns_result=""
         if mp_public_dns_observe "$domain" A "$public_ip"; then
             a_status=ready
@@ -919,6 +2093,7 @@ mp_setup_wait_for_peer_join() {
     trap 'rm -f "$body"; unset token response; return 130' INT TERM PIPE
     jq -n --arg node "$HA_NODE_ID" '{node_id:$node}' > "$body" || return 1
     while true; do
+        mp_setup_consume_cancellation && return 130
         response="$(mp_setup_witness_call pair-state "$HA_WITNESS_URL" \
             "$HA_CLUSTER_ID" "$token" "$body" 2>/dev/null || true)"
         if jq -e '.paired == true' <<< "$response" >/dev/null 2>&1; then
@@ -1002,33 +2177,47 @@ mp_setup_primary_create() {
             mp_setup_prepare_node_material node-a || return 1
             cluster_id="mp-opt-$(cat /proc/sys/kernel/random/uuid)"
             node_token="$(mp_random_secret)"; pairing_secret="$(mp_random_secret)"
-            mp_setup_deploy_witness "$domain" "$cluster_id" || return 1
+            MP_SETUP_WITNESS_ADMIN_TOKEN="$(mp_random_secret)"
             bootstrap_tmp="$(mktemp "$MP_STATE/pending-witness-bootstrap.XXXXXX")" || return 1
             jq -n --arg cluster "$cluster_id" --arg token "$node_token" \
-                --arg pair "$pairing_secret" --arg zone "$MP_SETUP_ZONE_ID" \
-                --arg domain "$domain" --arg witness "$MP_SETUP_WITNESS_URL" \
-                --arg admin "$MP_SETUP_WITNESS_ADMIN_TOKEN" \
+                --arg pair "$pairing_secret" --arg domain "$domain" \
                 --arg ipv4 "$MP_SETUP_NODE_IPV4" --arg ipv6 "$MP_SETUP_NODE_IPV6" \
                 --arg ssh "$MP_SETUP_NODE_SSH_PUBLIC" --arg host "$MP_SETUP_NODE_SSH_HOST" \
                 --arg age "$MP_SETUP_NODE_AGE_RECIPIENT" \
-                '{format:"mp-opt-pending-witness-bootstrap-v1",cluster_id:$cluster,
-                  node_token:$token,pairing_secret:$pair,zone_id:$zone,domain:$domain,
-                  witness_url:$witness,admin_token:$admin,node_a_ipv4:$ipv4,
+                --arg admin "$MP_SETUP_WITNESS_ADMIN_TOKEN" \
+                '{format:"mp-opt-pending-witness-bootstrap-v2",state:"planned",
+                  cluster_id:$cluster,node_token:$token,pairing_secret:$pair,
+                  zone_id:null,domain:$domain,witness_url:null,admin_token:$admin,node_a_ipv4:$ipv4,
                   node_a_ipv6:$ipv6,node_a_ssh_public_key:$ssh,
                   node_a_ssh_host_key:$host,node_a_age_recipient:$age}' \
                 > "$bootstrap_tmp" || { rm -f "$bootstrap_tmp"; return 1; }
-            chmod 600 "$bootstrap_tmp" && mv "$bootstrap_tmp" "$MP_SETUP_V2_PENDING_BOOTSTRAP" \
+            chmod 600 "$bootstrap_tmp" && sync -f "$bootstrap_tmp" 2>/dev/null \
+                && mv "$bootstrap_tmp" "$MP_SETUP_V2_PENDING_BOOTSTRAP" \
+                && sync -f "$MP_STATE" 2>/dev/null \
                 || { rm -f "$bootstrap_tmp"; return 1; }
             unset node_token pairing_secret MP_SETUP_WITNESS_ADMIN_TOKEN
         fi
-        jq -e '.format == "mp-opt-pending-witness-bootstrap-v1"' \
-            "$MP_SETUP_V2_PENDING_BOOTSTRAP" >/dev/null || {
+        mp_setup_upgrade_pending_witness_bootstrap || return $?
+        mp_setup_validate_pending_witness_bootstrap || {
             ui_error "The protected pending Worker bootstrap receipt is invalid. It was retained for manual inspection."
             return 1
         }
         cluster_id="$(jq -r .cluster_id "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
         node_token="$(jq -r .node_token "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
         pairing_secret="$(jq -r .pairing_secret "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
+        MP_SETUP_WITNESS_ADMIN_TOKEN="$(jq -r .admin_token "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
+        if [ "$(jq -r .state "$MP_SETUP_V2_PENDING_BOOTSTRAP")" = planned ]; then
+            mp_setup_deploy_witness "$domain" "$cluster_id" \
+                "$MP_SETUP_WITNESS_ADMIN_TOKEN" || return 1
+            bootstrap_tmp="$(mktemp "$MP_STATE/pending-witness-bootstrap.XXXXXX")" || return 1
+            jq --arg witness "$MP_SETUP_WITNESS_URL" --arg zone "$MP_SETUP_ZONE_ID" \
+                --arg admin "$MP_SETUP_WITNESS_ADMIN_TOKEN" \
+                '.state="deployed" | .witness_url=$witness | .zone_id=$zone
+                 | .admin_token=$admin' "$MP_SETUP_V2_PENDING_BOOTSTRAP" > "$bootstrap_tmp" \
+                && chmod 600 "$bootstrap_tmp" && sync -f "$bootstrap_tmp" 2>/dev/null \
+                && mv "$bootstrap_tmp" "$MP_SETUP_V2_PENDING_BOOTSTRAP" \
+                && sync -f "$MP_STATE" 2>/dev/null || return 1
+        fi
         MP_SETUP_WITNESS_URL="$(jq -r .witness_url "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
         MP_SETUP_WITNESS_ADMIN_TOKEN="$(jq -r .admin_token "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
         body="$(mktemp "$MP_STATE/witness-bootstrap.XXXXXX")" || return 1
@@ -1052,6 +2241,10 @@ mp_setup_primary_create() {
         bootstrap_error="$(mktemp "$MP_STATE/witness-bootstrap-error.XXXXXX")" \
             || { rm -f "$body"; return 1; }
         for attempt in 1 2 3 4 5; do
+            if [ "$(jq -r .state "$MP_SETUP_V2_PENDING_BOOTSTRAP")" = registered ]; then
+                bootstrap_ok=true
+                break
+            fi
             if mp_setup_witness_call bootstrap "$MP_SETUP_WITNESS_URL" "$cluster_id" \
                 "$MP_SETUP_WITNESS_ADMIN_TOKEN" "$body" >/dev/null 2> "$bootstrap_error"; then
                 bootstrap_ok=true
@@ -1072,6 +2265,11 @@ mp_setup_primary_create() {
             || { ui_text_file "Worker registration failed" "$bootstrap_error"; \
                 rm -f "$body" "$bootstrap_error"; \
                 unset node_token pairing_secret MP_SETUP_WITNESS_ADMIN_TOKEN; return 1; }
+        bootstrap_tmp="$(mktemp "$MP_STATE/pending-witness-bootstrap.XXXXXX")" || return 1
+        jq '.state="registered"' "$MP_SETUP_V2_PENDING_BOOTSTRAP" > "$bootstrap_tmp" \
+            && chmod 600 "$bootstrap_tmp" && sync -f "$bootstrap_tmp" 2>/dev/null \
+            && mv "$bootstrap_tmp" "$MP_SETUP_V2_PENDING_BOOTSTRAP" \
+            && sync -f "$MP_STATE" 2>/dev/null || return 1
         rm -f "$body" "$bootstrap_error"
         mp_setup_install_ha_identity node-a node-b "$cluster_id" "$MP_SETUP_WITNESS_URL" "$node_token" || return 1
         pending="$(mktemp "$MP_STATE/pending-ha-join.XXXXXX")" || return 1
@@ -1085,7 +2283,6 @@ mp_setup_primary_create() {
             > "$pending"
         chmod 600 "$pending"; mv "$pending" "$MP_SETUP_V2_PENDING_JOIN"
         mp_setup_state_mark witness_bootstrap
-        rm -f "$MP_SETUP_V2_PENDING_BOOTSTRAP"
         unset node_token pairing_secret MP_SETUP_WITNESS_ADMIN_TOKEN
     fi
     mp_setup_state_action "Waiting for Node B join" \
@@ -1238,6 +2435,87 @@ mp_setup_join_node() {
             FIRST_BUNDLE_WAIT replicated
         ui_message "HA node joined" "The one-time code is consumed for ${node_id}. Peer trust and replication-encryption material were installed. Keep this VPS available. The current holder will verify reciprocal SSH before sending the first protected application copy, and setup completes only after that copy is verified here."
     fi
+}
+
+# Join Node B using the same protected pending-receipt and receiver scaffold as
+# the TUI, with the join code and public addresses supplied by validated stdin.
+mp_setup_join_node_machine() {
+    local input_file="$1" decoded cluster domain witness pair node_id peer_id
+    local node_token body response pair_body peer db_password pending lane campaign policy
+    [ ! -f "$MP_ROOT/.env" ] || return 65
+    decoded="$(mktemp "$MP_STATE/ha-join.XXXXXX")" || return 1
+    printf '%s' "$(jq -r .values.join_code "$input_file")" \
+        | python3 "$MP_ROOT/deploy/ha/pairing.py" decode > "$decoded" \
+        || { rm -f "$decoded"; return 65; }
+    cluster="$(jq -r .cluster_id "$decoded")"; domain="$(jq -r .domain "$decoded")"
+    witness="$(jq -r .witness_url "$decoded")"; pair="$(jq -r .pairing_secret "$decoded")"
+    node_id="$(jq -r .node_id "$decoded")"; lane="$(jq -r .deployment_lane "$decoded")"
+    campaign="$(jq -r '.campaign_commit // empty' "$decoded")"
+    [ "$node_id" = node-b ] || { rm -f "$decoded"; return 65; }
+    policy="$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)"
+    [ "$policy:$lane" = production:signed ] || [ "$policy:$lane" = test:unsigned ] \
+        || { rm -f "$decoded"; return 65; }
+    mp_setup_state_update '.deployment_lane=$lane
+        | .campaign_commit=(if $commit == "" then null else $commit end)' \
+        --arg lane "$lane" --arg commit "$campaign" || return 1
+    peer_id=node-a
+    mp_setup_prepare_node_material_machine "$node_id" \
+        "$(jq -r .values.ipv4 "$input_file")" \
+        "$(jq -r '.values.ipv6 // empty' "$input_file")" || return 1
+    node_token="$(mp_random_secret)"
+    pending="$(mktemp "$MP_STATE/pending-local-join.XXXXXX")" || return 1
+    jq -n --arg cluster "$cluster" --arg domain "$domain" --arg witness "$witness" \
+        --arg pair "$pair" --arg node "$node_id" --arg peer "$peer_id" \
+        --arg token "$node_token" --arg ipv4 "$MP_SETUP_NODE_IPV4" \
+        --arg ipv6 "$MP_SETUP_NODE_IPV6" --arg ssh "$MP_SETUP_NODE_SSH_PUBLIC" \
+        --arg host "$MP_SETUP_NODE_SSH_HOST" --arg age "$MP_SETUP_NODE_AGE_RECIPIENT" \
+        --arg lane "$lane" --arg commit "$campaign" \
+        '{format:"mp-opt-pending-local-join-v2",cluster_id:$cluster,domain:$domain,
+          witness_url:$witness,pairing_secret:$pair,node_id:$node,peer_id:$peer,
+          node_token:$token,ipv4:$ipv4,ipv6:$ipv6,ssh_public_key:$ssh,
+          ssh_host_key:$host,age_recipient:$age,deployment_lane:$lane,
+          campaign_commit:(if $commit == "" then null else $commit end)}' > "$pending" \
+        || { rm -f "$decoded" "$pending"; return 1; }
+    chmod 600 "$pending" && mv "$pending" "$MP_SETUP_V2_PENDING_LOCAL_JOIN" \
+        || return 1
+    rm -f "$decoded"
+    body="$(mktemp "$MP_STATE/witness-join.XXXXXX")" || return 1
+    jq -n --arg pair "$pair" --arg token "$node_token" \
+        --arg ipv4 "$MP_SETUP_NODE_IPV4" --arg ipv6 "$MP_SETUP_NODE_IPV6" \
+        --arg ssh "$MP_SETUP_NODE_SSH_PUBLIC" --arg host "$MP_SETUP_NODE_SSH_HOST" \
+        --arg age "$MP_SETUP_NODE_AGE_RECIPIENT" --arg node "$node_id" \
+        '{pairing_secret:$pair,node_id:$node,node_token:$token,ipv4:$ipv4,ipv6:$ipv6,
+          ssh_public_key:$ssh,ssh_host_key:$host,age_recipient:$age}' > "$body"
+    response="$(mp_setup_witness_call join "$witness" "$cluster" "$pair" "$body")" \
+        || { rm -f "$body"; return 1; }
+    rm -f "$body"
+    jq -e '.joined == true' <<< "$response" >/dev/null || return 1
+    mp_setup_install_ha_identity "$node_id" "$peer_id" "$cluster" "$witness" "$node_token" \
+        || return 1
+    pair_body="$(mktemp "$MP_STATE/pair-state.XXXXXX")" || return 1
+    jq -n --arg node "$node_id" '{node_id:$node}' > "$pair_body"
+    response="$(mp_setup_witness_call pair-state "$witness" "$cluster" "$node_token" "$pair_body")" \
+        || return 1
+    rm -f "$pair_body"
+    peer="$(jq -c --arg peer "$peer_id" '.nodes[] | select(.node_id == $peer)' <<< "$response")"
+    [ -n "$peer" ] || return 1
+    mp_setup_install_peer_trust "$(jq -r .ipv4 <<< "$peer")" \
+        "$(jq -r .ssh_public_key <<< "$peer")" "$(jq -r .ssh_host_key <<< "$peer")" \
+        "$(jq -r .age_recipient <<< "$peer")" deferred || return 1
+    db_password="$(openssl rand -hex 32)"
+    printf 'DOMAIN=%s\n' "$domain" > "$MP_ROOT/.env" && chmod 600 "$MP_ROOT/.env"
+    mkdir -p "$MP_ROOT/secrets" && chmod 700 "$MP_ROOT/secrets"
+    printf '%s' "$db_password" > "$MP_ROOT/secrets/database_password"
+    : > "$MP_ROOT/secrets/secret_key"; : > "$MP_ROOT/secrets/ip_hmac_key"
+    : > "$MP_ROOT/secrets/vapid_private_key"; : > "$MP_ROOT/secrets/root_bootstrap_token"
+    : > "$MP_ROOT/secrets/smtp_token"; : > "$MP_ROOT/secrets/evidence_signing_key"
+    chmod 600 "$MP_ROOT/secrets/"*
+    mp_prepare_node_local_optional_secret_mounts || return 1
+    "$MP_ROOT/deploy/ha/install_services.sh" || return 1
+    rm -f "$MP_SETUP_V2_PENDING_LOCAL_JOIN"; unset pair node_token db_password
+    mp_setup_state_mark joined
+    mp_setup_state_action "Waiting for first verified copy from Node A" \
+        FIRST_BUNDLE_WAIT replicated
 }
 
 mp_setup_replace_standby() {
@@ -1476,6 +2754,89 @@ mp_setup_decommission_cloudflare() {
     ui_message "Cloudflare resources retired" "The HA DNS records, Worker state and Worker were removed. The VPS installations were not changed."
 }
 
+mp_setup_decommission_cloudflare_machine() {
+    local deploy_token="$1" cluster witness worker_name admin_token tools_image body receipt probe
+    local worker_present=false reconciled=false temporary
+    [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)" = test ] || return 77
+    mp_load_ha_config || return 1
+    [ "$HA_ROLE" = dynamic ] || return 65
+    [ "${#deploy_token}" -ge 32 ] || return 65
+    cluster="$HA_CLUSTER_ID"; witness="$HA_WITNESS_URL"
+    worker_name="mp-opt-ha-$(tr -cd 'a-z0-9' <<< "${cluster:0:12}")"
+    receipt="$MP_STATE/provider-cleanup-${cluster}.json"
+    if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+        [ -f "$receipt" ] && [ ! -L "$receipt" ] \
+            && [ "$(stat -c '%u:%a' "$receipt" 2>/dev/null)" = "$(id -u):600" ] \
+            || return 77
+        jq -e --arg cluster "$cluster" --arg worker "$worker_name" '
+            .format == "mp-opt-provider-cleanup-receipt-v1"
+            and .cluster_id == $cluster and .worker_name == $worker
+            and .witness_state_deleted == true
+            and (.worker_deleted | type == "boolean")
+            and (.witness_state_deleted_at | type == "string" and length > 0)
+        ' "$receipt" >/dev/null 2>&1 || return 65
+    fi
+    tools_image="$(sed -n 's/^MP_TOOLS_IMAGE=//p' "$MP_ROOT/.release.env" | head -1)"
+    [[ "$tools_image" =~ ^ghcr\.io/brian-funk/masterplanoptimiserv3---server/tools@sha256:[0-9a-f]{64}$ ]] \
+        || return 65
+    if [ ! -s "$receipt" ]; then
+        admin_token="$(mp_random_secret)"
+        printf '%s' "$admin_token" | CLOUDFLARE_API_TOKEN="$deploy_token" \
+            docker run --rm -i -e CLOUDFLARE_API_TOKEN "$tools_image" \
+                secret put ADMIN_TOKEN --name "$worker_name" >/dev/null || return 1
+        body="$(mktemp "$MP_STATE/decommission-cloudflare.XXXXXX")" || return 1
+        jq -n --arg cluster "$cluster" '{confirm_cluster_id:$cluster}' > "$body"
+        mp_setup_witness_call decommission "$witness" "$cluster" "$admin_token" "$body" >/dev/null \
+            || { rm -f "$body"; unset admin_token; return 1; }
+        rm -f "$body"; unset admin_token
+        temporary="$(mktemp "$MP_STATE/provider-cleanup-receipt.XXXXXX")" || return 1
+        jq -n --arg cluster "$cluster" --arg worker "$worker_name" \
+            --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{format:"mp-opt-provider-cleanup-receipt-v1",cluster_id:$cluster,
+              worker_name:$worker,witness_state_deleted:true,worker_deleted:false,
+              witness_state_deleted_at:$at}' > "$temporary" \
+            && chmod 600 "$temporary" && sync -f "$temporary" 2>/dev/null \
+            && mv "$temporary" "$receipt" \
+            || { rm -f "$temporary"; return 1; }
+        sync -f "$receipt" 2>/dev/null || return 1
+        sync -f "$MP_STATE" 2>/dev/null || return 1
+    fi
+    if ! jq -e '.worker_deleted == true' "$receipt" >/dev/null 2>&1; then
+        # The witness-state receipt is durable before Worker deletion. A retry
+        # observes the exact Worker first, so a lost acknowledgement can never
+        # cause an unexamined second destructive request.
+        probe="$(mktemp "$MP_STATE/provider-worker-probe.XXXXXX")" || return 1
+        if CLOUDFLARE_API_TOKEN="$deploy_token" docker run --rm \
+            -e CLOUDFLARE_API_TOKEN "$tools_image" deployments list \
+            --name "$worker_name" > /dev/null 2> "$probe"; then
+            worker_present=true
+        elif grep -Eqi '(not[ -]?found|does not exist|10090)' "$probe"; then
+            reconciled=true
+        else
+            rm -f "$probe"
+            return 1
+        fi
+        rm -f "$probe"
+        if [ "$worker_present" = true ]; then
+            printf 'y\n' | CLOUDFLARE_API_TOKEN="$deploy_token" docker run --rm -i \
+                -e CLOUDFLARE_API_TOKEN "$tools_image" delete --name "$worker_name" >/dev/null \
+                || return 1
+        fi
+        temporary="$(mktemp "$MP_STATE/provider-cleanup-receipt.XXXXXX")" || return 1
+        jq --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson reconciled "$reconciled" \
+            '.worker_deleted=true | .worker_deleted_at=$at
+             | .worker_deletion_reconciled=$reconciled' "$receipt" > "$temporary" \
+            && chmod 600 "$temporary" && sync -f "$temporary" 2>/dev/null \
+            && mv "$temporary" "$receipt" || { rm -f "$temporary"; return 1; }
+        sync -f "$receipt" 2>/dev/null || return 1
+        sync -f "$MP_STATE" 2>/dev/null || return 1
+    fi
+    unset deploy_token
+    jq '{format,cluster_id,worker_name,witness_state_deleted,worker_deleted,
+         witness_state_deleted_at,worker_deleted_at,
+         worker_deletion_reconciled:(.worker_deletion_reconciled // false)}' "$receipt"
+}
+
 # Bind Node A's commissioning checkpoint to the exact durable sender receipt
 # and Node B's independently written receiver receipt. This makes an SSH loss
 # after acknowledgement resumable without sending a second full copy.
@@ -1602,7 +2963,8 @@ mp_setup_primary_resume() {
             /opt/masterplan/deploy/test-deployment.sh internal-repin-setup "$commit" \
             || { ui_error "Node B could not record Node A's verified fast-forwarded campaign pin."; return 1; }
     fi
-    mp_setup_state_mark paired
+    mp_setup_state_has paired || mp_setup_state_mark paired
+    rm -f "$MP_SETUP_V2_PENDING_BOOTSTRAP"
     if ! mp_setup_state_has application_deployed; then
         if [ "$mode" = convert-ha ] && [ -f "$MP_ROOT/infra/docker-compose.override.yml" ]; then
             mp_ha_convert_host_caddy || return 1
@@ -1662,7 +3024,8 @@ mp_setup_primary_resume() {
         mp_setup_state_mark ha_services_activated
     fi
     if [ "$mode" = convert-ha ] \
-        && [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ]; then
+        && [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ] \
+        && ! mp_setup_state_has peer_exact_deployment; then
         commit="$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")"
         mp_setup_state_action "Finalising Node B exact deployment" \
             PEER_EXACT_DEPLOYMENT_FINALISING peer_exact_deployment || return 1
@@ -1670,6 +3033,7 @@ mp_setup_primary_resume() {
             env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
             /opt/masterplan/deploy/test-deployment.sh internal-finalize-peer "$commit" \
             || { ui_error "Node B accepted the replication bundle but could not record the exact deployment receipt."; return 1; }
+        mp_setup_state_mark peer_exact_deployment
     fi
     if ! mp_setup_state_has validated; then
         mp_setup_state_action "Validating the complete installation" \
@@ -1683,21 +3047,24 @@ mp_setup_primary_resume() {
         mp_setup_verify_smtp_and_dns || return 1
         mp_setup_state_mark smtp_verified
     fi
-    if ! mp_setup_state_has automatic_failover; then
+    if ! mp_setup_state_has automatic_failover_readiness; then
         mp_setup_state_action "Verifying automatic failover readiness" \
-            AUTOMATIC_FAILOVER_VALIDATING automatic_failover || return 1
+            AUTOMATIC_FAILOVER_VALIDATING automatic_failover_readiness || return 1
         mp_ha_refresh_witness_observations || return 1
         mp_ha_active_verification_readiness || return 1
-        python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic enabled >/dev/null || return 1
-        mp_ha_set_config_value HA_AUTOMATIC_FAILOVER enabled || return 1
-        mp_setup_state_mark automatic_failover
+        # Commissioning proves that automatic failover could be enabled, but
+        # activation remains a separate, explicit guarded TUI action after the
+        # operator has tested handover and both failover directions.
+        python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic disabled >/dev/null || return 1
+        mp_ha_set_config_value HA_AUTOMATIC_FAILOVER disabled || return 1
+        mp_setup_state_mark automatic_failover_readiness
     fi
     rm -f "$body" "$MP_SETUP_V2_PENDING_JOIN"; unset token
     mp_setup_state_complete
     if [ "$mode" = convert-ha ]; then
-        ui_message "HA conversion complete" "${HA_NODE_ID} is primary. ${HA_PEER_NODE_ID} accepted the current complete encrypted copy, all readiness gates passed, and automatic failover is enabled with a two-minute loss threshold and five-minute copy target. High availability changes the deployment facts. Review Policies & notices at https://$(mp_env_get DOMAIN)/admin/governance, save the authoritative HA state, review the exact diff and publish a new policy version."
+        ui_message "HA conversion complete" "${HA_NODE_ID} is primary. ${HA_PEER_NODE_ID} accepted the current complete encrypted copy and all readiness gates passed. Automatic failover remains disabled until it is explicitly enabled through the guarded High availability action after handover and failover testing. High availability changes the deployment facts. Review Policies & notices at https://$(mp_env_get DOMAIN)/admin/governance, save the authoritative HA state, review the exact diff and publish a new policy version."
     else
-        ui_message "HA commissioning complete" "${HA_NODE_ID} is primary. ${HA_PEER_NODE_ID} accepted the current complete encrypted copy, all readiness gates passed, and automatic failover is enabled with a two-minute loss threshold and five-minute copy target. Open https://$(mp_env_get DOMAIN)/admin/governance to publish the controller-specific legal centre."
+        ui_message "HA commissioning complete" "${HA_NODE_ID} is primary. ${HA_PEER_NODE_ID} accepted the current complete encrypted copy and all readiness gates passed. Automatic failover remains disabled until it is explicitly enabled through the guarded High availability action after handover and failover testing. Open https://$(mp_env_get DOMAIN)/admin/governance to publish the controller-specific legal centre."
     fi
 }
 
@@ -1766,10 +3133,10 @@ mp_setup_restore_full_loss() {
     fi
     mp_setup_state_begin full-restore || return 1
     mp_setup_state_has signed_baseline_verified || mp_setup_install_signed_release || return 1
-    mp_setup_state_action "Importing verified recovery snapshot" \
-        RECOVERY_IMPORTING imported || return 1
-    ui_message "Full-loss recovery" "Import the latest encrypted portable snapshot. The restore flow verifies its receipt and requires the recovery identity held outside the VPS."
     if ! mp_setup_state_has imported; then
+        mp_setup_state_action "Importing verified recovery snapshot" \
+            RECOVERY_IMPORTING imported || return 1
+        ui_message "Full-loss recovery" "Import the latest encrypted portable snapshot. The restore flow verifies its receipt and requires the recovery identity held outside the VPS."
         mp_snapshot_import_portable_interactive || return 1
         [ -s "$MP_PORTABLE_LAST_IMPORT_STATE" ] \
             && jq -e '.format == "mp-opt-portable-import-receipt-v1"' \
@@ -1870,8 +3237,16 @@ mp_setup_v2() {
         ha-join)
             if mp_setup_state_has joined 2>/dev/null; then
                 if [ "$(jq -r '.deployment_lane // empty' "$MP_SETUP_V2_STATE")" = unsigned ]; then
-                    ui_message "Waiting for pinned deployment" \
-                        "Node B is paired and pinned to $(jq -r .campaign_commit "$MP_SETUP_V2_STATE"). Resume on Node A; it will transfer, verify and activate the exact images here."
+                    mp_setup_reconcile_unsigned_join || {
+                        ui_error "Node B could not reconcile its pinned first copy. The protected waiting state was retained."
+                        status=1
+                    }
+                    if [ "$(jq -r '.state // empty' "$MP_SETUP_V2_STATE")" = complete ]; then
+                        ui_message "HA node ready" "Node B accepted and verified its pinned first application copy. Continue commissioning on Node A."
+                    elif [ "$status" -eq 0 ]; then
+                        ui_message "Waiting for pinned deployment" \
+                            "Node B is paired and pinned to $(jq -r .campaign_commit "$MP_SETUP_V2_STATE"). Resume on Node A; it will transfer, verify and activate the exact images here."
+                    fi
                 else
                     mp_reconcile_signed_join_setup || {
                         ui_error "Node B could not reconcile its first verified copy. The protected waiting state was retained."

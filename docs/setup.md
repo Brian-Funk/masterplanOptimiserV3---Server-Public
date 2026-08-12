@@ -138,7 +138,10 @@ routes the public DNS record to Node A, creates and deeply verifies a complete
 encrypted copy on Node B, synchronises the public snapshot recipient, verifies
 SMTP from both origins, and checks all HA readiness gates.
 
-When those gates pass, automatic failover is enabled with a two-minute primary
+When those gates pass, commissioning records automatic-failover readiness but
+leaves automatic failover disabled. Test planned handover and both failure
+directions first, then enable it explicitly through the guarded High
+availability action. The supported automatic mode uses a two-minute primary
 loss threshold and a five-minute verified-copy target. No provider power API,
 load balancer, origin certificate, manually copied peer identity, or custom
 node name is required.
@@ -147,6 +150,89 @@ The first encrypted peer copy establishes safe empty mount targets for optional
 node-local credentials before starting the standby backend. Those credentials
 are not copied from Node A. An unsafe or substituted path stops the receiver
 with a resumable error instead of leaving an unexplained partial activation.
+
+## Local commissioning automation adapter
+
+The graphical TUI remains the normal operator interface. A coordinator running
+on the VPS through the protected `deploy` account can inspect and advance the
+same durable state with `mp-opt setup`:
+
+```bash
+mp-opt setup validate --json
+mp-opt setup plan --mode ha-primary-new --lane signed --json
+mp-opt setup start --mode ha-primary-new --lane signed --json
+mp-opt setup status --json
+mp-opt setup events --jsonl --after 0
+printf '%s\n' '{"format":"mp-opt-commissioning-input-v1","checkpoint":"signed_baseline_verified","idempotency_key":"run01-baseline","values":{"tag":"v3.9.8","commit":"<exact-40-character-release-commit>"}}' \
+  | mp-opt setup advance --input-stdin --json
+```
+
+For an unsigned private-lab run, stage the build-once candidate bundle through
+stdin before `application_deployed`:
+
+```bash
+mp-opt setup stage-candidate --commit "$COMMIT" --sha256 "$BUNDLE_SHA256" \
+  --input-stdin --json < candidate-bundle.zip
+```
+
+The accepted bundle is the private lab's non-release-eligible five-file
+contract: candidate index, candidate manifest, frontend and operations
+archives, and bootstrap script. All assets and four GHCR images are bound to
+exact SHA-256 digests. Registry credentials are supplied only in the bounded
+`application_deployed` stdin document and are removed after the pull. They do
+not enter status or events.
+
+Only one TUI or machine coordinator may hold the commissioning lease. Each
+`advance` call can perform at most the exact next checkpoint named in its
+schema-validated stdin document. Fresh standalone configuration, fresh HA
+witness setup, Node B joining and SMTP verification have structured input
+contracts. Browser commissioning and recovery ceremonies remain waiting until
+their authoritative receipt is available. Every input carries an idempotency
+key; a completed transition can be replayed only with the same key. `reconcile`
+records only completion that existing local facts or signed receipts prove.
+Standalone-to-HA conversion uses `stage-migration`, a digest-bound raw
+`artifact` download and an explicit confirmation advance. Full-loss recovery
+uses a bounded raw `stage-recovery` upload followed by the `imported` and
+`restored` advances. Replacement pairing uses `replace-primary` on the
+surviving active holder and `replace-node` on the blank VPS. The holder must
+prove that automatic failover is disabled before it opens the replacement
+code. Private recovery identities are consumed from protected stdin documents
+and never enter status, errors, events or receipts.
+
+Exact deployment lifecycle operations use another stdin-only contract:
+
+```bash
+printf '%s\n' '{"format":"mp-opt-deployment-lifecycle-input-v1","action":"signed-upgrade","tag":"v3.9.8","commit":"<exact-40-character-release-commit>","idempotency_key":"run01-signed-upgrade","values":{}}' \
+  | mp-opt setup deployment --input-stdin --json
+```
+
+Signed upgrade and rollback require the exact signed tag and commit. Candidate
+advance and rollback require a previously staged or retained exact candidate,
+set `tag` to `null`, and carry registry credentials plus the matching recovery
+identity inside `values`. Before an established candidate advance, the Server
+creates and deeply verifies an encrypted rollback snapshot and retains the
+previous exact candidate bundle. Candidate rollback accepts only that recorded
+prior commit. Automatic failover remains disabled throughout these lifecycle
+operations. In an explicit test-policy candidate deployment, seven real
+commissioning transitions expose one-shot adjacent fault hooks at four crash
+boundaries. Production policy rejects the hook before creating state. The
+machine status publishes the exact transition list; the private laboratory
+must match it before arming a fault. Packaged PTY acceptance remains reported
+as unavailable and is not inferred from machine-interface coverage.
+
+Two narrowly scoped handoffs are available at their exact pending checkpoint:
+
+```bash
+mp-opt setup handoff --kind root-bootstrap
+mp-opt setup handoff --kind ha-join
+```
+
+These commands write the raw secret value and a trailing newline to stdout.
+Treat stdout as secret: pass it directly to the intended browser or joining
+node, do not log it, and discard it after use. The root bootstrap value is
+unavailable after root registration. An HA join code is short-lived and is
+consumed or invalidated by the witness. Handoff values never appear in status,
+errors, event journals, or diagnostics.
 
 ## First participant activation
 

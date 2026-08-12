@@ -157,6 +157,7 @@ chown -R deploy:deploy /opt/masterplan
 if [ -f /opt/masterplan/manage.sh ]; then
     chmod 755 /opt/masterplan/manage.sh /opt/masterplan/configure-production.sh \
         /opt/masterplan/deploy/deploy.sh /opt/masterplan/deploy/setup-server.sh \
+        /opt/masterplan/deploy/commissioning-machine.sh \
         /opt/masterplan/deploy/management/*.sh
     chmod 755 /opt/masterplan/deploy/ha/*.sh
     ln -sf /opt/masterplan/manage.sh /usr/local/bin/mp-opt

@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import smtplib
 import socket
 import ssl
@@ -65,6 +66,7 @@ def main() -> int:
     parser.add_argument("--node-id", default=os.getenv("HA_NODE_ID", "unknown"))
     parser.add_argument("--output", type=Path)
     parser.add_argument("--send-to")
+    parser.add_argument("--correlation-id")
     args = parser.parse_args()
     observed = datetime.now(timezone.utc).isoformat()
     document: dict[str, object] = {
@@ -100,10 +102,14 @@ def main() -> int:
         try:
             smtp.login(values["SMTP_USERNAME"], token)
             if args.send_to:
+                if args.correlation_id is not None and re.fullmatch(r"[0-9a-f]{32}", args.correlation_id) is None:
+                    raise ValueError("invalid SMTP test correlation identifier")
                 message = EmailMessage()
                 message["Subject"] = f"MP-OPT SMTP verification from {args.node_id}"
                 message["From"] = values["SMTP_FROM_EMAIL"]
                 message["To"] = args.send_to
+                if args.correlation_id is not None:
+                    message["X-MP-OPT-Test-ID"] = args.correlation_id
                 message.set_content("This token-free message verifies SMTP delivery from one HA node.")
                 refused = smtp.send_message(message)
                 if refused: raise smtplib.SMTPRecipientsRefused(refused)

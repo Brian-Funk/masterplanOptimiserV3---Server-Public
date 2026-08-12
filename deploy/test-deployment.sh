@@ -30,6 +30,10 @@ MP_TEST_STATE_FILE="$MP_TEST_STATE_DIR/current.json"
 MP_TEST_ENV="$MP_ROOT/.test-deployment.env"
 MP_TEST_FAILURE_FILE="$MP_TEST_STATE_DIR/last-failure.json"
 MP_TEST_STAGE_FILE="$MP_TEST_STATE_DIR/current-stage"
+MP_TEST_CANDIDATE_DIR="$MP_TEST_STATE_DIR/candidate"
+MP_TEST_CANDIDATE_RECEIPT="$MP_TEST_CANDIDATE_DIR/receipt.json"
+MP_TEST_ACCEPTED_CANDIDATES="$MP_TEST_STATE_DIR/accepted-candidates"
+MP_TEST_CANDIDATE_LIFECYCLE="$MP_TEST_STATE_DIR/candidate-lifecycle.json"
 
 usage() {
     cat <<'EOF'
@@ -39,6 +43,13 @@ Usage:
   deploy/test-deployment.sh apply COMMIT [--confirm-full] [--confirm-migrations]
       [--fresh-commissioning]
       [--cloudflare-worker NAME --cloudflare-token-stdin]
+  deploy/test-deployment.sh stage-candidate COMMIT SHA256 < bundle.zip
+  deploy/test-deployment.sh apply-prebuilt COMMIT [--fresh-commissioning]
+      --registry-credentials-stdin
+  deploy/test-deployment.sh apply-prebuilt-established COMMIT
+      --registry-credentials-stdin
+  deploy/test-deployment.sh rollback-prebuilt COMMIT
+      --registry-credentials-stdin
   deploy/test-deployment.sh rollback
   deploy/test-deployment.sh restore-signed
   deploy/test-deployment.sh status
@@ -195,6 +206,271 @@ prepare_source() {
     [ "$(git -C "$MP_TEST_SOURCE" cat-file -t "$commit")" = commit ]
     git -C "$MP_TEST_SOURCE" checkout --detach --force "$commit"
     git -C "$MP_TEST_SOURCE" clean -ffdqx
+}
+
+stage_candidate() {
+    local target="$1" expected="$2" temporary actual manifest
+    require_test_policy
+    require_commit "$target"
+    [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || return 2
+    mkdir -p "$MP_TEST_CANDIDATE_DIR"; chmod 700 "$MP_TEST_CANDIDATE_DIR"
+    temporary="$(mktemp "$MP_TEST_CANDIDATE_DIR/bundle.XXXXXX")" || return 1
+    # The private harness streams the bundle; it is never accepted as a path.
+    head -c 402653185 > "$temporary" || { mp_secure_remove_file "$temporary"; return 1; }
+    [ "$(stat -c %s "$temporary")" -le 402653184 ] \
+        || { mp_secure_remove_file "$temporary"; ui_error "Candidate bundle exceeds 384 MiB."; return 1; }
+    actual="$(sha256sum "$temporary" | awk '{print $1}')"
+    [ "$actual" = "$expected" ] \
+        || { mp_secure_remove_file "$temporary"; ui_error "Candidate bundle digest mismatch."; return 1; }
+    manifest="$(python3 "$MP_ROOT/deploy/candidate_bundle.py" validate \
+        --bundle "$temporary" --commit "$target")" \
+        || { mp_secure_remove_file "$temporary"; return 1; }
+    chmod 600 "$temporary"; mv "$temporary" "$MP_TEST_CANDIDATE_DIR/bundle.zip"
+    sync -f "$MP_TEST_CANDIDATE_DIR/bundle.zip" 2>/dev/null || return 1
+    jq -n --arg commit "$target" --arg sha "$actual" --arg staged "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --argjson manifest "$manifest" \
+        '{format:"mp-opt-candidate-stage-receipt-v1",commit:$commit,bundle_sha256:$sha,
+          staged_at:$staged,manifest:$manifest}' > "$MP_TEST_CANDIDATE_RECEIPT"
+    chmod 600 "$MP_TEST_CANDIDATE_RECEIPT"
+    sync -f "$MP_TEST_CANDIDATE_RECEIPT" 2>/dev/null || return 1
+    sync -f "$MP_TEST_CANDIDATE_DIR" 2>/dev/null || return 1
+    jq '{format,commit,bundle_sha256,staged_at,
+         image_digests:(.manifest.images|with_entries(.value |= split("@sha256:")[1]))}' \
+        "$MP_TEST_CANDIDATE_RECEIPT"
+}
+
+archive_accepted_candidate() {
+    local target="$1" destination temporary
+    [[ "$target" =~ ^[0-9a-f]{40}$ ]] || return 1
+    [ -s "$MP_TEST_CANDIDATE_DIR/bundle.zip" ] && [ -s "$MP_TEST_CANDIDATE_RECEIPT" ] \
+        && [ "$(jq -r .commit "$MP_TEST_CANDIDATE_RECEIPT")" = "$target" ] || return 1
+    mkdir -p "$MP_TEST_ACCEPTED_CANDIDATES"; chmod 700 "$MP_TEST_ACCEPTED_CANDIDATES"
+    destination="$MP_TEST_ACCEPTED_CANDIDATES/$target"
+    if [ -d "$destination" ]; then
+        [ ! -L "$destination" ] \
+            && [ "$(sha256sum "$destination/bundle.zip" | awk '{print $1}')" \
+                = "$(jq -r .bundle_sha256 "$destination/receipt.json")" ] || return 1
+        return 0
+    fi
+    temporary="$(mktemp -d "$MP_TEST_ACCEPTED_CANDIDATES/.candidate.XXXXXX")" || return 1
+    chmod 700 "$temporary"
+    install -m 0600 "$MP_TEST_CANDIDATE_DIR/bundle.zip" "$temporary/bundle.zip" \
+        && install -m 0600 "$MP_TEST_CANDIDATE_RECEIPT" "$temporary/receipt.json" \
+        && sync -f "$temporary/bundle.zip" 2>/dev/null \
+        && sync -f "$temporary/receipt.json" 2>/dev/null \
+        && mv "$temporary" "$destination" \
+        && sync -f "$MP_TEST_ACCEPTED_CANDIDATES" 2>/dev/null \
+        || { rm -rf "$temporary"; return 1; }
+}
+
+select_candidate_bundle() {
+    local target="$1" source="${2:-staged}"
+    if [ "$source" = accepted ]; then
+        MP_TEST_CANDIDATE_DIR="$MP_TEST_ACCEPTED_CANDIDATES/$target"
+        MP_TEST_CANDIDATE_RECEIPT="$MP_TEST_CANDIDATE_DIR/receipt.json"
+    fi
+    [ -d "$MP_TEST_CANDIDATE_DIR" ] && [ ! -L "$MP_TEST_CANDIDATE_DIR" ] \
+        && [ -f "$MP_TEST_CANDIDATE_DIR/bundle.zip" ] \
+        && [ ! -L "$MP_TEST_CANDIDATE_DIR/bundle.zip" ] \
+        && [ -f "$MP_TEST_CANDIDATE_RECEIPT" ] && [ ! -L "$MP_TEST_CANDIDATE_RECEIPT" ] \
+        && [ "$(stat -c %a "$MP_TEST_CANDIDATE_DIR/bundle.zip")" = 600 ] \
+        && [ "$(stat -c %a "$MP_TEST_CANDIDATE_RECEIPT")" = 600 ] \
+        && [ "$(jq -r .commit "$MP_TEST_CANDIDATE_RECEIPT")" = "$target" ] \
+        && [ "$(sha256sum "$MP_TEST_CANDIDATE_DIR/bundle.zip" | awk '{print $1}')" \
+            = "$(jq -r .bundle_sha256 "$MP_TEST_CANDIDATE_RECEIPT")" ]
+}
+
+apply_prebuilt_candidate() {
+    local target="$1" fresh_commissioning="$2" established="${3:-false}" source="${4:-staged}"
+    local prepare_only="${5:-false}"
+    local credentials username token docker_config stage manifest identity="${MP_TEST_RECOVERY_IDENTITY_FILE:-}"
+    local previous role peer_ready=false image key plan components snapshot="" automatic=false
+    require_test_policy
+    [ "$fresh_commissioning" != true ] || require_fresh_commissioning_database "$target"
+    select_candidate_bundle "$target" "$source" \
+        || { ui_error "The exact candidate bundle has not been staged."; return 1; }
+    previous="$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)"
+    if [ "$established" = true ]; then
+        [[ "$previous" =~ ^[0-9a-f]{40}$ ]] && [ "$previous" != "$target" ] \
+            || { ui_error "An established candidate transition requires a different verified target."; return 1; }
+        [ -f "$identity" ] && [ ! -L "$identity" ] && [ "$(stat -c %a "$identity")" = 600 ] \
+            || { ui_error "A protected recovery identity is required for candidate transition rollback."; return 1; }
+        [ "$(mp_identity_recipient "$identity" 2>/dev/null || true)" = "$(mp_recovery_recipient 2>/dev/null || true)" ] \
+            || { ui_error "The recovery identity does not match this deployment."; return 1; }
+        [ -d "$MP_TEST_ACCEPTED_CANDIDATES/$previous" ] \
+            && [ ! -L "$MP_TEST_ACCEPTED_CANDIDATES/$previous" ] \
+            && [ -f "$MP_TEST_ACCEPTED_CANDIDATES/$previous/bundle.zip" ] \
+            && [ ! -L "$MP_TEST_ACCEPTED_CANDIDATES/$previous/bundle.zip" ] \
+            && [ "$(sha256sum "$MP_TEST_ACCEPTED_CANDIDATES/$previous/bundle.zip" | awk '{print $1}')" \
+                = "$(jq -r .bundle_sha256 "$MP_TEST_ACCEPTED_CANDIDATES/$previous/receipt.json" 2>/dev/null)" ] || {
+            ui_error "The prior exact candidate bundle is unavailable; transition stopped before mutation."
+            return 1
+        }
+        snapshot="$(mp_snapshot_create full "candidate-before-${target:0:12}")" || return 1
+        mp_snapshot_verify_path "$snapshot" "$identity" || {
+            ui_error "The candidate rollback snapshot did not deep-verify."
+            return 1
+        }
+        jq -n --arg previous "$previous" --arg target "$target" --arg snapshot "$snapshot" \
+            --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{format:"mp-opt-candidate-lifecycle-v1",state:"prepared",previous:$previous,
+              target:$target,snapshot:$snapshot,prepared_at:$at}' > "$MP_TEST_CANDIDATE_LIFECYCLE"
+        chmod 600 "$MP_TEST_CANDIDATE_LIFECYCLE"
+        sync -f "$MP_TEST_CANDIDATE_LIFECYCLE" 2>/dev/null || return 1
+    fi
+    credentials=""; docker_config=""; stage=""
+    cleanup_candidate_credentials() {
+        unset token username
+        [ -z "$credentials" ] || mp_secure_remove_file "$credentials" || true
+        [ -z "$stage" ] || [ ! -d "$stage" ] || rm -rf -- "$stage"
+        [ -z "$docker_config" ] || [ ! -d "$docker_config" ] || { find "$docker_config" -type f -exec sh -c \
+            'for f do size=$(stat -c %s "$f" 2>/dev/null || printf 0); dd if=/dev/zero of="$f" bs=1 count="$size" conv=notrunc status=none 2>/dev/null || true; done' sh {} +; rm -rf -- "$docker_config"; }
+    }
+    trap cleanup_candidate_credentials EXIT
+    credentials="$(mktemp "$MP_TEST_CANDIDATE_DIR/registry-input.XXXXXX")" || return 1
+    head -c 8193 > "$credentials" || return 1
+    [ "$(stat -c %s "$credentials")" -le 8192 ] \
+        && jq -e 'type=="object" and (keys|sort)==["token","username"]
+            and (.username|type=="string" and length>=1 and length<=255)
+            and (.token|type=="string" and length>=1 and length<=4096)' \
+            "$credentials" >/dev/null 2>&1 \
+        || { mp_secure_remove_file "$credentials"; return 2; }
+    username="$(jq -r .username "$credentials")"; token="$(jq -r .token "$credentials")"
+    docker_config="$(mktemp -d "$MP_TEST_CANDIDATE_DIR/docker-config.XXXXXX")" || return 1
+    printf '%s' "$token" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
+        --username "$username" --password-stdin >/dev/null || return 1
+    unset token
+    stage="$(mktemp -d "$MP_TEST_CANDIDATE_DIR/extracted.XXXXXX")" || return 1
+    manifest="$(python3 "$MP_ROOT/deploy/candidate_bundle.py" extract \
+        --bundle "$MP_TEST_CANDIDATE_DIR/bundle.zip" --commit "$target" --output "$stage")" \
+        || return 1
+    for key in backend caddy postgres tools; do
+        image="$(jq -r --arg key "$key" '.images[$key]' <<< "$manifest")"
+        DOCKER_CONFIG="$docker_config" docker pull "$image" >/dev/null || return 1
+    done
+    prepare_source "$target"
+    rm -rf "$MP_TEST_SOURCE/web/out" "$MP_TEST_SOURCE/runtime/frontend-csp.caddy"
+    cp -a "$stage/frontend/web/out" "$MP_TEST_SOURCE/web/out"
+    mkdir -p "$MP_TEST_SOURCE/runtime"
+    cp -a "$stage/frontend/runtime/frontend-csp.caddy" "$MP_TEST_SOURCE/runtime/frontend-csp.caddy"
+    # Git proves the commit object; the independently hashed release-shaped
+    # operations archive is what gets installed and executed.
+    components="backend frontend caddy database tools operations"
+    cp -a "$MP_TEST_ENV" "$MP_TEST_STATE_DIR/next.env" 2>/dev/null || : > "$MP_TEST_STATE_DIR/next.env"
+    chmod 600 "$MP_TEST_STATE_DIR/next.env"
+    env_set "$MP_TEST_STATE_DIR/next.env" MP_TEST_COMMIT "$target"
+    env_set "$MP_TEST_STATE_DIR/next.env" MP_BACKEND_IMAGE "$(jq -r .images.backend <<< "$manifest")"
+    env_set "$MP_TEST_STATE_DIR/next.env" MP_CADDY_IMAGE "$(jq -r .images.caddy <<< "$manifest")"
+    env_set "$MP_TEST_STATE_DIR/next.env" MP_POSTGRES_IMAGE "$(jq -r .images.postgres <<< "$manifest")"
+    env_set "$MP_TEST_STATE_DIR/next.env" MP_TOOLS_IMAGE "$(jq -r .images.tools <<< "$manifest")"
+    install -m 0600 "$MP_TEST_STATE_DIR/next.env" "$MP_TEST_ENV"
+    mp_load_ha_config; role="$HA_ROLE"
+    if [ "$role" = dynamic ] \
+        && [ "$(jq -r '.automatic_failover // false' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || printf false)" = true ]; then
+        automatic=true
+        python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic disabled >/dev/null || return 1
+        mp_ha_set_config_value HA_AUTOMATIC_FAILOVER disabled || return 1
+    fi
+    export MP_TEST_CANDIDATE_OPERATIONS="$stage/operations"
+    if [ "$role" = dynamic ] && ha_pairing_complete; then
+        ha_pair_transport_ready || return 1
+        peer_ready=true
+        for key in backend caddy postgres tools; do
+            peer_copy_image "$(jq -r --arg key "$key" '.images[$key]' <<< "$manifest")" || return 1
+        done
+        if [ "$prepare_only" = true ]; then
+            peer_stage_prebuilt "$target" "$components" || return 1
+        else
+            peer_activate "$target" "$components" "$fresh_commissioning" || return 1
+        fi
+    fi
+    sync_operations "$MP_TEST_CANDIDATE_OPERATIONS"
+    sync_frontend "$MP_TEST_SOURCE"
+    if [ "$prepare_only" = true ]; then
+        rm -rf -- "$stage"
+        cleanup_candidate_credentials; trap - EXIT
+        unset MP_TEST_CANDIDATE_OPERATIONS
+        return 0
+    fi
+    compose_activate "$components" "$fresh_commissioning"
+    plan="$(jq -cn --arg target "$target" \
+        '{base:"",target:$target,full:true,migrations:true,prebuilt:true,
+          components:["backend","frontend","caddy","database","tools","operations"]}')"
+    write_state "$target" "$previous" "$plan" ""
+    advance_setup_campaign_pin "$target" "$previous"
+    archive_accepted_candidate "$target" || return 1
+    if [ "$role" = dynamic ] && [ "$peer_ready" = true ]; then
+        mp_ha_replicate_now || return 1
+        mp_ha_refresh_witness_observations || return 1
+        mp_ha_active_verification_readiness || return 1
+        python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic disabled >/dev/null || return 1
+        mp_ha_set_config_value HA_AUTOMATIC_FAILOVER disabled || return 1
+    fi
+    if [ "$established" = true ]; then
+        jq --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '.state="accepted" | .accepted_at=$at' "$MP_TEST_CANDIDATE_LIFECYCLE" \
+            > "${MP_TEST_CANDIDATE_LIFECYCLE}.tmp" \
+            && chmod 600 "${MP_TEST_CANDIDATE_LIFECYCLE}.tmp" \
+            && mv "${MP_TEST_CANDIDATE_LIFECYCLE}.tmp" "$MP_TEST_CANDIDATE_LIFECYCLE" \
+            && sync -f "$MP_TEST_CANDIDATE_LIFECYCLE" 2>/dev/null || return 1
+    fi
+    rm -rf -- "$stage"
+    cleanup_candidate_credentials; trap - EXIT
+    unset MP_TEST_CANDIDATE_OPERATIONS
+}
+
+rollback_prebuilt_candidate() {
+    local target="$1" identity="${MP_TEST_RECOVERY_IDENTITY_FILE:-}" snapshot previous components plan role
+    require_test_policy
+    jq -e --arg target "$target" \
+        '.format=="mp-opt-candidate-lifecycle-v1" and .previous==$target
+         and (.state|IN("prepared","accepted")) and (.snapshot|type=="string")' \
+        "$MP_TEST_CANDIDATE_LIFECYCLE" >/dev/null 2>&1 || {
+            ui_error "No exact candidate rollback receipt matches the requested target."
+            return 1
+        }
+    [ -f "$identity" ] && [ ! -L "$identity" ] && [ "$(stat -c %a "$identity")" = 600 ] \
+        || return 1
+    snapshot="$(jq -r .snapshot "$MP_TEST_CANDIDATE_LIFECYCLE")"
+    [ -d "$snapshot" ] && mp_snapshot_verify_path "$snapshot" "$identity" || return 1
+    # Pull, verify and stage the exact prior bundle on both nodes before the
+    # restore boundary. This changes no service or database state.
+    apply_prebuilt_candidate "$target" false false accepted true || return 1
+    mp_load_ha_config; role="$HA_ROLE"
+    if [ "$role" = dynamic ]; then
+        ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+            docker stop masterplan-backend-1 >/dev/null 2>&1 || return 1
+    fi
+    mp_lock || return 1
+    MP_MANAGEMENT_LOCK_HELD=1 mp_snapshot_apply "$snapshot" "$identity" || {
+        mp_unlock; return 1;
+    }
+    mp_unlock
+    components="backend frontend caddy database tools operations"
+    compose_activate "$components" false || return 1
+    previous="$(jq -r '.target // empty' "$MP_TEST_CANDIDATE_LIFECYCLE")"
+    plan="$(jq -cn --arg target "$target" \
+        '{base:"",target:$target,full:true,migrations:true,prebuilt:true,
+          rollback:true,components:["backend","frontend","caddy","database","tools","operations"]}')"
+    write_state "$target" "$previous" "$plan" "$snapshot"
+    advance_setup_campaign_pin "$target" "$previous"
+    if [ "$role" = dynamic ]; then
+        mp_ha_replicate_now || return 1
+        ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+            env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+            /opt/masterplan/deploy/test-deployment.sh internal-activate \
+                "$target" "backend,frontend,caddy,database,tools,operations" false || return 1
+        mp_ha_refresh_witness_observations || return 1
+        mp_ha_active_verification_readiness || return 1
+        python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic disabled >/dev/null || return 1
+        mp_ha_set_config_value HA_AUTOMATIC_FAILOVER disabled || return 1
+    fi
+    jq --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '.state="rolled_back" | .rolled_back_at=$at' "$MP_TEST_CANDIDATE_LIFECYCLE" \
+        > "${MP_TEST_CANDIDATE_LIFECYCLE}.tmp" \
+        && chmod 600 "${MP_TEST_CANDIDATE_LIFECYCLE}.tmp" \
+        && mv "${MP_TEST_CANDIDATE_LIFECYCLE}.tmp" "$MP_TEST_CANDIDATE_LIFECYCLE" \
+        && sync -f "$MP_TEST_CANDIDATE_LIFECYCLE" 2>/dev/null
 }
 
 baseline_commit() {
@@ -422,6 +698,31 @@ peer_copy_image() {
     [ "$local_id" = "$peer_id" ]
 }
 
+# Stage a verified prebuilt candidate on the peer without changing containers,
+# database state or deployment receipts. Candidate rollback uses this boundary
+# so both nodes possess the exact prior operations, assets, environment and
+# images before either database is restored.
+peer_stage_prebuilt() {
+    local target="$1" components="$2"
+    [[ "$target" =~ ^[0-9a-f]{40}$ ]] || return 1
+    scp -q "$MP_TEST_ENV" mp-opt-ha-peer:/tmp/mp-opt-test-deployment.env || return 1
+    tar -C "$MP_TEST_SOURCE" -czf - web/out runtime/frontend-csp.caddy \
+        | ssh -T -o BatchMode=yes mp-opt-ha-peer \
+            "rm -rf '$MP_TEST_HOME/peer-assets' && mkdir -p '$MP_TEST_HOME/peer-assets' && tar -C '$MP_TEST_HOME/peer-assets' -xzf -" \
+        || return 1
+    tar -C "$MP_TEST_CANDIDATE_OPERATIONS" -czf - \
+        deploy infra manage.sh configure-production.sh \
+        | ssh -T -o BatchMode=yes mp-opt-ha-peer \
+            "mkdir -p '$MP_TEST_HOME/peer-assets/operations' && tar -C '$MP_TEST_HOME/peer-assets/operations' -xzf -" \
+        || return 1
+    scp -q "$MP_TEST_CANDIDATE_RECEIPT" mp-opt-ha-peer:/tmp/mp-opt-candidate-receipt.json \
+        || return 1
+    ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+        env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+        /opt/masterplan/deploy/test-deployment.sh internal-stage-prebuilt \
+            "$target" "${components// /,}"
+}
+
 peer_activate() {
     local target="$1" components="$2" fresh_commissioning="${3:-false}" peer_state peer_components
     # OpenSSH joins command arguments into a remote shell command without
@@ -437,6 +738,15 @@ peer_activate() {
         tar -C "$MP_TEST_SOURCE" -czf - web/out runtime/frontend-csp.caddy \
             | ssh -T -o BatchMode=yes mp-opt-ha-peer \
                 "rm -rf '$MP_TEST_HOME/peer-assets' && mkdir -p '$MP_TEST_HOME/peer-assets' && tar -C '$MP_TEST_HOME/peer-assets' -xzf -"
+    fi
+    if [ -n "${MP_TEST_CANDIDATE_OPERATIONS:-}" ] \
+        && [ -d "$MP_TEST_CANDIDATE_OPERATIONS/deploy" ]; then
+        tar -C "$MP_TEST_CANDIDATE_OPERATIONS" -czf - \
+            deploy infra manage.sh configure-production.sh \
+            | ssh -T -o BatchMode=yes mp-opt-ha-peer \
+                "mkdir -p '$MP_TEST_HOME/peer-assets/operations' && tar -C '$MP_TEST_HOME/peer-assets/operations' -xzf -"
+        scp -q "$MP_TEST_CANDIDATE_RECEIPT" \
+            mp-opt-ha-peer:/tmp/mp-opt-candidate-receipt.json
     fi
     ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
         env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
@@ -587,8 +897,17 @@ internal_activate() {
         prepare_source "$target"
         install -m 0600 /tmp/mp-opt-test-deployment.env "$MP_TEST_ENV"
         rm -f /tmp/mp-opt-test-deployment.env
+        if [ -s /tmp/mp-opt-candidate-receipt.json ]; then
+            mkdir -p "$MP_TEST_CANDIDATE_DIR"; chmod 700 "$MP_TEST_CANDIDATE_DIR"
+            install -m 0600 /tmp/mp-opt-candidate-receipt.json "$MP_TEST_CANDIDATE_RECEIPT"
+            rm -f /tmp/mp-opt-candidate-receipt.json
+        fi
         if grep -qw operations <<< "$components" || grep -qw caddy <<< "$components"; then
-            sync_operations "$MP_TEST_SOURCE"
+            if [ -d "$MP_TEST_HOME/peer-assets/operations/deploy" ]; then
+                sync_operations "$MP_TEST_HOME/peer-assets/operations"
+            else
+                sync_operations "$MP_TEST_SOURCE"
+            fi
         fi
         if grep -qw frontend <<< "$components"; then
             sync_frontend "$MP_TEST_HOME/peer-assets"
@@ -629,6 +948,26 @@ internal_activate() {
     fi
     mp_unlock
     trap - EXIT
+}
+
+internal_stage_prebuilt() {
+    local target="$1" component_token="$2" components
+    require_test_policy
+    [[ "$target" =~ ^[0-9a-f]{40}$ ]] || return 1
+    [[ "$component_token" =~ ^(backend|frontend|caddy|database|tools|operations)(,(backend|frontend|caddy|database|tools|operations))*$ ]] \
+        || return 1
+    components="${component_token//,/ }"
+    [ -s /tmp/mp-opt-test-deployment.env ] \
+        && [ "$(sed -n 's/^MP_TEST_COMMIT=//p' /tmp/mp-opt-test-deployment.env | head -1)" = "$target" ] \
+        && [ -s /tmp/mp-opt-candidate-receipt.json ] \
+        && [ "$(jq -r .commit /tmp/mp-opt-candidate-receipt.json)" = "$target" ] || return 1
+    install -m 0600 /tmp/mp-opt-test-deployment.env "$MP_TEST_ENV" || return 1
+    mkdir -p "$MP_TEST_CANDIDATE_DIR"; chmod 700 "$MP_TEST_CANDIDATE_DIR"
+    install -m 0600 /tmp/mp-opt-candidate-receipt.json "$MP_TEST_CANDIDATE_RECEIPT" || return 1
+    rm -f /tmp/mp-opt-test-deployment.env /tmp/mp-opt-candidate-receipt.json
+    sync_operations "$MP_TEST_HOME/peer-assets/operations" || return 1
+    sync_frontend "$MP_TEST_HOME/peer-assets" || return 1
+    sync -f "$MP_ROOT" 2>/dev/null || true
 }
 
 deploy_witness() {
@@ -907,6 +1246,34 @@ shift || true
 case "$command" in
     policy) set_policy "${1:-status}" ;;
     plan) [ "$#" -eq 1 ] || { usage; exit 2; }; create_plan "$1" | jq . ;;
+    stage-candidate)
+        [ "$#" -eq 2 ] || { usage; exit 2; }
+        stage_candidate "$1" "$2"
+        ;;
+    apply-prebuilt|apply-prebuilt-established|rollback-prebuilt)
+        [ "$#" -ge 2 ] || { usage; exit 2; }
+        target="$1"; shift; fresh_commissioning=false; registry_stdin=false
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --fresh-commissioning) fresh_commissioning=true ;;
+                --registry-credentials-stdin) registry_stdin=true ;;
+                *) usage; exit 2 ;;
+            esac
+            shift
+        done
+        [ "$registry_stdin" = true ] || { usage; exit 2; }
+        case "$command" in
+            apply-prebuilt) apply_prebuilt_candidate "$target" "$fresh_commissioning" false staged ;;
+            apply-prebuilt-established)
+                [ "$fresh_commissioning" = false ] || { usage; exit 2; }
+                apply_prebuilt_candidate "$target" false true staged
+                ;;
+            rollback-prebuilt)
+                [ "$fresh_commissioning" = false ] || { usage; exit 2; }
+                rollback_prebuilt_candidate "$target"
+                ;;
+        esac
+        ;;
     apply)
         [ "$#" -ge 1 ] || { usage; exit 2; }
         target="$1"; shift
@@ -948,6 +1315,7 @@ case "$command" in
     internal-prepare-peer) [ "$#" -eq 1 ] || exit 2; internal_prepare_peer "$1" ;;
     internal-repin-setup) [ "$#" -eq 1 ] || exit 2; internal_repin_setup "$1" ;;
     internal-finalize-peer) [ "$#" -eq 1 ] || exit 2; internal_finalize_peer "$1" ;;
+    internal-stage-prebuilt) [ "$#" -eq 2 ] || exit 2; internal_stage_prebuilt "$1" "$2" ;;
     internal-activate) [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || exit 2; internal_activate "$1" "$2" "${3:-false}" ;;
     help|-h|--help|'') usage ;;
     *) usage; exit 2 ;;

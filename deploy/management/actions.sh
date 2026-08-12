@@ -76,6 +76,97 @@ mp_validate_email_address() {
 }
 
 # Run the first-production configuration wizard without overwriting an installation.
+# Install one fully validated initial configuration without prompting. Secret
+# arguments are accepted only from an in-memory TUI flow or a protected stdin
+# document; this helper never prints them or writes them to state/journals.
+mp_apply_initial_configuration() {
+    local domain="$1" app_name="$2" claims_email="$3" db_password="$4"
+    local configure_smtp="$5" smtp_host="$6" smtp_port="$7" smtp_username="$8"
+    local smtp_token="$9" smtp_security="${10}" smtp_from_email="${11}"
+    local smtp_from_name="${12}" smtp_reply_to="${13}"
+    local vapid root_token instance_id staging
+    [ ! -f "$MP_ROOT/.env" ] || return 65
+    mp_validate_hostname "$domain" || return 65
+    mp_validate_env_value "$app_name" || return 65
+    mp_validate_email_address "$claims_email" || return 65
+    [ "${#db_password}" -ge 24 ] && [ "${#db_password}" -le 128 ] \
+        && [[ "$db_password" =~ ^[A-Za-z0-9._~-]+$ ]] || return 65
+    case "$configure_smtp" in yes|no) ;; *) return 65 ;; esac
+    if [ "$configure_smtp" = yes ]; then
+        mp_validate_hostname "$smtp_host" || return 65
+        [[ "$smtp_port" =~ ^[0-9]+$ ]] && [ "$smtp_port" -ge 1 ] && [ "$smtp_port" -le 65535 ] \
+            || return 65
+        case "$smtp_security" in starttls|tls) ;; *) return 65 ;; esac
+        mp_validate_env_value "$smtp_username" || return 65
+        [ -n "$smtp_token" ] || return 65
+        mp_validate_email_address "$smtp_from_email" || return 65
+        mp_validate_env_value "$smtp_from_name" || return 65
+        [ -z "$smtp_reply_to" ] || mp_validate_email_address "$smtp_reply_to" || return 65
+    else
+        smtp_host=""; smtp_port=587; smtp_username=""; smtp_token=""
+        smtp_security=starttls; smtp_from_email=""; smtp_reply_to=""
+    fi
+    vapid="$(mp_generate_vapid_private_key)" || return 1
+    root_token="$(mp_random_secret)" || return 1
+    instance_id="$(cat /proc/sys/kernel/random/uuid)" || return 1
+    staging="$(mktemp -d "${TMPDIR:-/tmp}/mp-opt-config.XXXXXX")" || return 1
+    chmod 700 "$staging"
+    mkdir -p "$staging/secrets" && chmod 700 "$staging/secrets" || { rm -rf "$staging"; return 1; }
+    {
+        printf '# MP-OPT_SERVER production configuration\n'
+        printf '# Generated %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'CORS_ORIGINS=["https://%s"]\n' "$domain"
+        printf 'WEBAUTHN_RP_ID=%s\nWEBAUTHN_RP_NAME=%s\n' "$domain" "$app_name"
+        printf 'WEBAUTHN_ORIGIN=https://%s\n' "$domain"
+        printf 'COOKIE_SECURE=true\nSESSION_COOKIE_NAME=__Host-mp_session\nCSRF_COOKIE_NAME=__Host-mp_csrf\n'
+        printf 'DOMAIN=%s\nMP_INSTANCE_ID=%s\n' "$domain" "$instance_id"
+        printf 'GOVERNANCE_SETUP_ACK_VERSION=2026-07-27\nEVIDENCE_MODE=required\n'
+        printf 'EVIDENCE_TOMBSTONE_RETENTION_DAYS=1095\nEVENT_PURGE_GRACE_DAYS=90\n'
+        printf 'RETENTION_SCHEDULER_INTERVAL_SECONDS=300\n'
+        printf 'SESSION_TTL_HOURS=8\nSESSION_TTL_HOURS_ADMIN=1\nSESSION_INACTIVITY_MINUTES=30\n'
+        printf 'VAPID_CLAIMS_EMAIL=mailto:%s\n' "$claims_email"
+        printf 'SMTP_HOST=%s\nSMTP_PORT=%s\nSMTP_USERNAME=%s\n' "$smtp_host" "$smtp_port" "$smtp_username"
+        printf 'SMTP_SECURITY=%s\nSMTP_FROM_EMAIL=%s\n' "$smtp_security" "$smtp_from_email"
+        printf 'SMTP_FROM_NAME=%s\nSMTP_REPLY_TO=%s\nSMTP_TIMEOUT_SECONDS=15\n' "$smtp_from_name" "$smtp_reply_to"
+    } > "$staging/.env" || { rm -rf "$staging"; return 1; }
+    printf '%s' "$db_password" > "$staging/secrets/database_password"
+    printf '%s' "$(mp_random_secret)" > "$staging/secrets/ip_hmac_key"
+    printf '%s' "$(mp_random_secret)" > "$staging/secrets/secret_key"
+    printf '%s' "$vapid" > "$staging/secrets/vapid_private_key"
+    printf '%s' "$root_token" > "$staging/secrets/root_bootstrap_token"
+    printf '%s' "$smtp_token" > "$staging/secrets/smtp_token"
+    : > "$staging/secrets/evidence_github_fine_grained_token"
+    python3 "$MP_ROOT/deploy/management/instance_key.py" commission \
+        --secret-dir "$staging/secrets" --instance-id "$instance_id" >/dev/null \
+        || { rm -rf "$staging"; return 1; }
+    chmod 600 "$staging/.env" "$staging/secrets/"*
+    if ! cp -a "$staging/.env" "$MP_ROOT/.env" \
+        || ! mkdir -p "$MP_ROOT/secrets" || ! chmod 700 "$MP_ROOT/secrets" \
+        || ! cp -a "$staging/secrets/." "$MP_ROOT/secrets/" \
+        || ! chmod 600 "$MP_ROOT/.env" "$MP_ROOT/secrets/"*; then
+        rm -f "$MP_ROOT/.env" "$MP_ROOT/secrets/secret_key" \
+            "$MP_ROOT/secrets/database_password" "$MP_ROOT/secrets/ip_hmac_key" \
+            "$MP_ROOT/secrets/vapid_private_key" "$MP_ROOT/secrets/root_bootstrap_token" \
+            "$MP_ROOT/secrets/smtp_token" "$MP_ROOT/secrets/evidence_github_fine_grained_token" \
+            "$MP_ROOT/secrets/evidence_signing_key" "$MP_ROOT/secrets/evidence_signing_key.pub"
+        rm -rf "$staging"
+        return 1
+    fi
+    rm -rf "$staging"
+    if ! mp_compose_validate; then
+        rm -f "$MP_ROOT/.env" "$MP_ROOT/secrets/secret_key" \
+            "$MP_ROOT/secrets/database_password" "$MP_ROOT/secrets/ip_hmac_key" \
+            "$MP_ROOT/secrets/vapid_private_key" "$MP_ROOT/secrets/root_bootstrap_token" \
+            "$MP_ROOT/secrets/smtp_token" "$MP_ROOT/secrets/evidence_github_fine_grained_token" \
+            "$MP_ROOT/secrets/evidence_signing_key" "$MP_ROOT/secrets/evidence_signing_key.pub"
+        return 1
+    fi
+    MP_INITIAL_ROOT_TOKEN="$root_token"
+    export MP_INITIAL_ROOT_TOKEN
+    mp_audit "configuration.initial" "success" "smtp:${configure_smtp};permitted-data:2026-07-27"
+    unset vapid root_token instance_id db_password smtp_token
+}
+
 mp_guided_initial_configuration() {
     if [ -f "$MP_ROOT/.env" ]; then
         ui_message "Production configuration" "An existing .env was detected. Use the Configuration menu to edit it safely."
@@ -87,9 +178,9 @@ mp_guided_initial_configuration() {
         return 1
     fi
     mp_require_commands openssl ssh-keygen docker || return 1
-    local domain app_name db_password db_repeat vapid claims_email root_token bootstrap_view instance_id
+    local domain app_name db_password db_repeat claims_email root_token bootstrap_view
     local configure_smtp smtp_host smtp_port smtp_username smtp_token smtp_repeat
-    local smtp_security smtp_from_email smtp_from_name smtp_reply_to staging
+    local smtp_security smtp_from_email smtp_from_name smtp_reply_to
 
     domain="$(ui_input "Site identity" "Public application domain (for example schedule.example.org)" "")" || return 1
     mp_validate_hostname "$domain" || { ui_error "Enter a valid DNS hostname."; return 1; }
@@ -109,10 +200,6 @@ mp_guided_initial_configuration() {
 
     claims_email="$(ui_input "Web push" "VAPID contact email (for example admin@example.org)" "")" || return 1
     mp_validate_email_address "$claims_email" || { ui_error "Enter a valid VAPID contact email."; return 1; }
-    vapid="$(mp_generate_vapid_private_key)"
-    root_token="$(mp_random_secret)"
-    instance_id="$(cat /proc/sys/kernel/random/uuid)" || return 1
-
     configure_smtp="no"
     smtp_host=""; smtp_port="587"; smtp_username=""; smtp_token=""
     smtp_security="starttls"; smtp_from_email=""; smtp_from_name="Masterplan Access"; smtp_reply_to=""
@@ -158,81 +245,14 @@ mp_guided_initial_configuration() {
         return 0
     fi
 
-    staging="$(mktemp -d "${TMPDIR:-/tmp}/mp-opt-config.XXXXXX")"
-    chmod 700 "$staging"
-    mkdir -p "$staging/secrets"
-    chmod 700 "$staging/secrets"
-    {
-        printf '# MP-OPT_SERVER production configuration\n'
-        printf '# Generated %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        printf 'CORS_ORIGINS=["https://%s"]\n' "$domain"
-        printf 'WEBAUTHN_RP_ID=%s\n' "$domain"
-        printf 'WEBAUTHN_RP_NAME=%s\n' "$app_name"
-        printf 'WEBAUTHN_ORIGIN=https://%s\n' "$domain"
-        printf 'COOKIE_SECURE=true\n'
-        printf 'SESSION_COOKIE_NAME=__Host-mp_session\n'
-        printf 'CSRF_COOKIE_NAME=__Host-mp_csrf\n'
-        printf 'DOMAIN=%s\n' "$domain"
-        printf 'MP_INSTANCE_ID=%s\n' "$instance_id"
-        printf 'GOVERNANCE_SETUP_ACK_VERSION=2026-07-27\n'
-        printf 'EVIDENCE_MODE=required\n'
-        printf 'EVIDENCE_TOMBSTONE_RETENTION_DAYS=1095\n'
-        printf 'EVENT_PURGE_GRACE_DAYS=90\n'
-        printf 'RETENTION_SCHEDULER_INTERVAL_SECONDS=300\n'
-        printf 'SESSION_TTL_HOURS=8\nSESSION_TTL_HOURS_ADMIN=1\nSESSION_INACTIVITY_MINUTES=30\n'
-        printf 'VAPID_CLAIMS_EMAIL=mailto:%s\n' "$claims_email"
-        printf 'SMTP_HOST=%s\nSMTP_PORT=%s\nSMTP_USERNAME=%s\n' "$smtp_host" "$smtp_port" "$smtp_username"
-        printf 'SMTP_SECURITY=%s\nSMTP_FROM_EMAIL=%s\n' "$smtp_security" "$smtp_from_email"
-        printf 'SMTP_FROM_NAME=%s\nSMTP_REPLY_TO=%s\nSMTP_TIMEOUT_SECONDS=15\n' "$smtp_from_name" "$smtp_reply_to"
-    } > "$staging/.env"
-    printf '%s' "$db_password" > "$staging/secrets/database_password"
-    printf '%s' "$(mp_random_secret)" > "$staging/secrets/ip_hmac_key"
-    printf '%s' "$(mp_random_secret)" > "$staging/secrets/secret_key"
-    printf '%s' "$vapid" > "$staging/secrets/vapid_private_key"
-    printf '%s' "$root_token" > "$staging/secrets/root_bootstrap_token"
-    printf '%s' "$smtp_token" > "$staging/secrets/smtp_token"
-    # Evidence Git archival is optional. Compose still requires a protected
-    # bind source even when no repository token has been configured.
-    : > "$staging/secrets/evidence_github_fine_grained_token"
-    python3 "$MP_ROOT/deploy/management/instance_key.py" commission \
-        --secret-dir "$staging/secrets" --instance-id "$instance_id" >/dev/null \
-        || { rm -rf "$staging"; return 1; }
-    chmod 600 "$staging/.env" "$staging/secrets/"*
-
-    if ! cp -a "$staging/.env" "$MP_ROOT/.env" \
-        || ! mkdir -p "$MP_ROOT/secrets" \
-        || ! chmod 700 "$MP_ROOT/secrets" \
-        || ! cp -a "$staging/secrets/." "$MP_ROOT/secrets/" \
-        || ! chmod 600 "$MP_ROOT/.env" "$MP_ROOT/secrets/"*; then
-        rm -f "$MP_ROOT/.env" "$MP_ROOT/secrets/secret_key" \
-            "$MP_ROOT/secrets/database_password" \
-            "$MP_ROOT/secrets/ip_hmac_key" \
-            "$MP_ROOT/secrets/vapid_private_key" \
-            "$MP_ROOT/secrets/root_bootstrap_token" \
-            "$MP_ROOT/secrets/smtp_token" \
-            "$MP_ROOT/secrets/evidence_github_fine_grained_token" \
-            "$MP_ROOT/secrets/evidence_signing_key" \
-            "$MP_ROOT/secrets/evidence_signing_key.pub"
-        rm -rf "$staging"
-        ui_error "The protected configuration could not be installed. Partial generated files were removed."
+    mp_apply_initial_configuration "$domain" "$app_name" "$claims_email" "$db_password" \
+        "$configure_smtp" "$smtp_host" "$smtp_port" "$smtp_username" "$smtp_token" \
+        "$smtp_security" "$smtp_from_email" "$smtp_from_name" "$smtp_reply_to" || {
+        ui_error "The protected configuration could not be validated and installed. Partial generated files were removed."
         return 1
-    fi
-    rm -rf "$staging"
-    unset db_password db_repeat smtp_token smtp_repeat vapid instance_id
-    if ! mp_compose_validate; then
-        rm -f "$MP_ROOT/.env" "$MP_ROOT/secrets/secret_key" \
-            "$MP_ROOT/secrets/database_password" \
-            "$MP_ROOT/secrets/ip_hmac_key" \
-            "$MP_ROOT/secrets/vapid_private_key" \
-            "$MP_ROOT/secrets/root_bootstrap_token" \
-            "$MP_ROOT/secrets/smtp_token" \
-            "$MP_ROOT/secrets/evidence_github_fine_grained_token" \
-            "$MP_ROOT/secrets/evidence_signing_key" \
-            "$MP_ROOT/secrets/evidence_signing_key.pub"
-        ui_error "Compose rejected the generated configuration. Generated files were removed without changing an existing installation."
-        return 1
-    fi
-    mp_audit "configuration.initial" "success" "smtp:${configure_smtp};permitted-data:2026-07-27"
+    }
+    root_token="$MP_INITIAL_ROOT_TOKEN"
+    unset db_password db_repeat smtp_token smtp_repeat MP_INITIAL_ROOT_TOKEN
     if [ "${MP_SETUP_V2_ACTIVE:-0}" != 1 ]; then
         printf -v bootstrap_view \
             'Production configuration is ready.\n\nOpen https://%s/bootstrap\n\nRoot bootstrap code:\n%s\n\nStore this code securely. It is not written to the management log.' \
@@ -404,20 +424,23 @@ mp_disable_smtp() {
 }
 
 # Send one token-free SMTP test message from the running backend.
-mp_send_smtp_test() {
-    local recipient result reason
-    mp_require_active_or_standalone || return 1
-    recipient="$(ui_input "SMTP test" "Test recipient email")" || return 1
+mp_send_smtp_test_to() {
+    local recipient="$1" correlation_id="${2:-}" result reason
     mp_validate_email_address "$recipient" || { ui_error "Enter a valid recipient email."; return 1; }
+    mp_require_active_or_standalone || return 1
     mp_compose_init
-    if result="$("${MP_COMPOSE[@]}" exec -T -e MP_TEST_RECIPIENT="$recipient" backend python -c '
+    if result="$("${MP_COMPOSE[@]}" exec -T -e MP_TEST_RECIPIENT="$recipient" \
+        -e MP_TEST_CORRELATION_ID="$correlation_id" backend python -c '
 import os
 import sys
 from app.core.activation_email import ActivationMailError, ActivationMailer, build_test_message
 
 try:
     with ActivationMailer() as mailer:
-        mailer.send(build_test_message(os.environ["MP_TEST_RECIPIENT"]))
+        mailer.send(build_test_message(
+            os.environ["MP_TEST_RECIPIENT"],
+            correlation_id=os.environ.get("MP_TEST_CORRELATION_ID") or None,
+        ))
 except ActivationMailError as exc:
     print(f"MP_SMTP_ERROR:{exc.code}:{exc}", file=sys.stderr)
     raise SystemExit(1)
@@ -432,6 +455,12 @@ except ActivationMailError as exc:
         ui_error "The mail server did not accept the test message.\n\n${reason}\n\nReview Configuration > SMTP and retry the guarded test."
         return 1
     fi
+}
+
+mp_send_smtp_test() {
+    local recipient
+    recipient="$(ui_input "SMTP test" "Test recipient email")" || return 1
+    mp_send_smtp_test_to "$recipient"
 }
 
 # Prepare a new full rollback snapshot and deep-verify it with the recovery key.
@@ -1085,6 +1114,74 @@ mp_service_action() {
 }
 
 # Run the canonical deployment script after explicit confirmation.
+mp_deploy_signed_exact() {
+    local tag="$1" commit="$2" role
+    [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+        && [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 65
+    [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)" = production ] \
+        || return 65
+    mp_load_ha_config || return 1
+    role="$HA_ROLE"
+    if [ "$role" = dynamic ]; then
+        mp_require_active_or_standalone || return 65
+        python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic disabled >/dev/null || return 1
+        mp_ha_set_config_value HA_AUTOMATIC_FAILOVER disabled || return 1
+        ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+            "python3 /opt/masterplan/deploy/release/install_release.py --repo-root /opt/masterplan --tag '$tag' && test \"\$(sed -n 's/^MP_RELEASE_COMMIT=//p' /opt/masterplan/.release.env | head -1)\" = '$commit' && /opt/masterplan/deploy/deploy.sh --no-pull" \
+            || return 1
+    fi
+    mp_lock || return 1
+    if ! python3 "$MP_ROOT/deploy/release/install_release.py" --repo-root "$MP_ROOT" --tag "$tag" \
+        || [ "$(sed -n 's/^MP_RELEASE_COMMIT=//p' "$MP_ROOT/.release.env" | head -1)" != "$commit" ] \
+        || ! "$MP_ROOT/deploy/deploy.sh" --no-pull; then
+        mp_unlock
+        return 1
+    fi
+    mp_unlock
+    if [ "$role" = dynamic ]; then
+        MP_MANAGEMENT_LOCK_HELD=1 mp_ha_replicate_now || return 1
+        mp_ha_refresh_witness_observations || return 1
+        mp_ha_active_verification_readiness || return 1
+        python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic disabled >/dev/null || return 1
+        mp_ha_set_config_value HA_AUTOMATIC_FAILOVER disabled || return 1
+    fi
+    mp_wait_for_local_health 30 && mp_wait_for_public_health 15
+}
+
+mp_rollback_signed_exact() {
+    local tag="$1" commit="$2" role
+    [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+        && [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 65
+    [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)" = production ] \
+        || return 65
+    mp_load_ha_config || return 1; role="$HA_ROLE"
+    if [ "$role" = dynamic ]; then
+        mp_require_active_or_standalone || return 65
+        python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic disabled >/dev/null || return 1
+        mp_ha_set_config_value HA_AUTOMATIC_FAILOVER disabled || return 1
+        ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+            "python3 /opt/masterplan/deploy/release/install_release.py --repo-root /opt/masterplan --tag '$tag' && test \"\$(sed -n 's/^MP_RELEASE_TAG=//p' /opt/masterplan/.release.env | head -1)\" = '$tag' && test \"\$(sed -n 's/^MP_RELEASE_COMMIT=//p' /opt/masterplan/.release.env | head -1)\" = '$commit' && /opt/masterplan/deploy/deploy.sh --no-pull" \
+            || return 1
+    fi
+    mp_lock || return 1
+    if ! python3 "$MP_ROOT/deploy/release/install_release.py" --repo-root "$MP_ROOT" --tag "$tag" \
+        || [ "$(sed -n 's/^MP_RELEASE_TAG=//p' "$MP_ROOT/.release.env" | head -1)" != "$tag" ] \
+        || [ "$(sed -n 's/^MP_RELEASE_COMMIT=//p' "$MP_ROOT/.release.env" | head -1)" != "$commit" ] \
+        || ! "$MP_ROOT/deploy/deploy.sh" --no-pull; then
+        mp_unlock
+        return 1
+    fi
+    mp_unlock
+    if [ "$role" = dynamic ]; then
+        MP_MANAGEMENT_LOCK_HELD=1 mp_ha_replicate_now || return 1
+        mp_ha_refresh_witness_observations || return 1
+        mp_ha_active_verification_readiness || return 1
+        python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic disabled >/dev/null || return 1
+        mp_ha_set_config_value HA_AUTOMATIC_FAILOVER disabled || return 1
+    fi
+    mp_wait_for_local_health 30 && mp_wait_for_public_health 15
+}
+
 mp_deploy_latest() {
     local role automatic_was_enabled=false
     ui_confirm "Deploy" "Download, verify and deploy the latest signed stable release now?" || return 0
