@@ -511,7 +511,7 @@ mp_snapshot_verify_extracted() {
 # Recover a completely blank VPS from one exact imported full snapshot. This
 # deliberately ignores node-local HA, Compose override and host-Caddy files:
 # the recovered server starts as a safe standalone node and can commission a
-# new peer only after public health has passed.
+# new peer only after local origin health has passed.
 mp_snapshot_restore_full_loss() {
     local snapshot_path="$1" expected_recipient identity temporary payload
     local installed=false resume_installed=false
@@ -596,7 +596,7 @@ mp_snapshot_restore_full_loss() {
         && mp_snapshot_revoke_restored_access; then
         mp_compose_init
         if "${MP_COMPOSE[@]}" up -d --force-recreate >/dev/null \
-            && mp_caddy_validate && mp_wait_for_health 30; then
+            && mp_caddy_validate && mp_wait_for_local_health 30; then
             rm -rf "$temporary"
             mp_audit "snapshot.full-loss-restore" "success" "$(basename "$snapshot_path")"
             return 0
@@ -1110,8 +1110,8 @@ mp_snapshot_apply() {
         return 1
     }
     domain="$(mp_env_get DOMAIN)" || { rm -rf "$temporary"; return 1; }
-    MP_SNAPSHOT_APPLY_STAGE="public-health"
-    if ! mp_wait_for_health 30; then
+    MP_SNAPSHOT_APPLY_STAGE="local-origin-health"
+    if ! mp_wait_for_local_health 30; then
         rm -rf "$temporary"
         return 1
     fi
@@ -1203,7 +1203,7 @@ mp_snapshot_restore_interactive() {
                 "The selected snapshot was restored, bearer access was revoked, and a fresh peer copy was queued. Passkeys remain registered.$([ "${HA_RECOVERY_STORAGE_MODE:-manual_portable}" = manual_portable ] && printf '\n\nManual recovery action required: create, deep-verify and export a fresh full workstation snapshot.' || true)"
         else
             ui_message "Restore complete" \
-                "The selected snapshot was restored and public health passed. Bearer access and one-time activation ceremonies were revoked; registered passkeys, public schedule links, and publisher credentials remain valid.$([ "${HA_RECOVERY_STORAGE_MODE:-manual_portable}" = manual_portable ] && printf '\n\nManual recovery action required: create, deep-verify and export a fresh full workstation snapshot.' || true)"
+                "The selected snapshot was restored and local origin health passed. Bearer access and one-time activation ceremonies were revoked; registered passkeys, public schedule links, and publisher credentials remain valid.$([ "${HA_RECOVERY_STORAGE_MODE:-manual_portable}" = manual_portable ] && printf '\n\nManual recovery action required: create, deep-verify and export a fresh full workstation snapshot.' || true)"
         fi
         mp_snapshot_publish_status || true
         return 0
@@ -1225,8 +1225,8 @@ mp_snapshot_restore_interactive() {
         rollback_stage="${MP_SNAPSHOT_APPLY_STAGE:-unknown}"
         mp_remove_identity_file "$identity"
         [ "$rollback_identity" = "$identity" ] || mp_remove_identity_file "$rollback_identity"
-        if mp_wait_for_health 1; then
-            ui_error "Restore failed during ${failed_stage}; automatic rollback also reported failure during ${rollback_stage}, but public health is currently available. Do not retry until the retained state has been verified. Use the verified pre-restore snapshot if recovery is required: $(basename "$pre_snapshot")"
+        if mp_wait_for_local_health 1; then
+            ui_error "Restore failed during ${failed_stage}; automatic rollback also reported failure during ${rollback_stage}, but local origin health is currently available. Do not retry until the retained state has been verified. Use the verified pre-restore snapshot if recovery is required: $(basename "$pre_snapshot")"
         else
             ui_error "Restore failed during ${failed_stage} and automatic rollback failed during ${rollback_stage}. Application health is unavailable. Use the verified pre-restore snapshot: $(basename "$pre_snapshot")"
         fi

@@ -276,31 +276,23 @@ mp_retire_root_bootstrap_secret
 
 # ── 5. Health check ──────────────────────────────────────────
 echo "[5/5] Health check..."
-DOMAIN=$(grep -oP 'DOMAIN=\K.*' .env 2>/dev/null || echo "localhost")
-
+DOMAIN="$(mp_env_get DOMAIN)"
 for i in $(seq 1 15); do
-    if { [ "$(mp_ha_role)" = "dynamic" ] \
-        && "${MP_COMPOSE[@]}" exec -T backend python -c \
-            'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3).read()' \
-            >/dev/null 2>&1; } \
-        || { [ "$(mp_ha_role)" != "dynamic" ] \
-        && curl -sf --max-time 3 "https://${DOMAIN}/health" >/dev/null 2>&1; }; then
-        echo "       Backend healthy!"
+    if mp_backend_health_once && mp_origin_tls_health_once; then
+        echo "       Backend and local TLS origin healthy!"
         break
     fi
-    printf '       Waiting for public HTTPS health (%d/15)...\n' "$i"
+    printf '       Waiting for local application health (%d/15)...\n' "$i"
     if [ "$i" -eq 15 ]; then
-        if "${MP_COMPOSE[@]}" exec -T backend python -c \
-            'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3).read()' \
-            >/dev/null 2>&1; then
-            echo "  ERROR: The backend is healthy, but trusted public HTTPS is unavailable."
+        if mp_backend_health_once; then
+            echo "  ERROR: The backend is healthy, but the local certificate-bound TLS origin is unavailable."
             if [ "$(mp_caddy_mode)" = container ] \
                 && "${MP_COMPOSE[@]}" logs --tail 200 caddy 2>&1 | grep -q 'rateLimited'; then
                 echo "  The certificate authority has rate-limited certificate issuance."
                 echo "  Preserve Caddy certificate storage and resume after the retry time shown below."
             fi
         else
-            echo "  ERROR: The backend health endpoint is not responding."
+            echo "  ERROR: The local backend health endpoint is not responding."
         fi
         "${MP_COMPOSE[@]}" logs --tail 100 backend >&2 || true
         case "$(mp_caddy_mode)" in
