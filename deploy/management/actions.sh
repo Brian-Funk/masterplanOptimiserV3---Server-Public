@@ -42,7 +42,7 @@ mp_system_overview() {
                 "$(jq -r 'if .state == "operator-sha256-confirmed" then .confirmed_at + " | " + .snapshot + " | " + .package_sha256 else "ACTION REQUIRED since " + (.required_at // "unknown") + " | " + (.reason // "operator-action") end' "$MP_MANUAL_EXPORT_STATE" 2>/dev/null || printf INVALID)"
         fi
         printf 'Public health: '
-        if [ "$domain" != "not configured" ] && curl -fsS --max-time 5 "https://${domain}/health"; then
+        if [ "$domain" != "not configured" ] && mp_public_https_get /health "$domain"; then
             printf '\n'
         else
             printf 'unavailable\n'
@@ -262,14 +262,14 @@ mp_guided_initial_configuration() {
     fi
 }
 
-# Recreate only the backend and confirm public health after a static setting change.
+# Recreate only the backend and confirm local origin health after a static setting change.
 mp_recreate_backend() {
     mp_require_active_or_standalone || return 1
     mp_prepare_backend_secret_permissions || return 1
     mp_compose_validate || return 1
     mp_compose_init
     "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend >/dev/null || return 1
-    mp_wait_for_health 30 || return 1
+    mp_wait_for_local_health 30 || return 1
 }
 
 # Apply SMTP settings transactionally, including provider authentication.
@@ -354,7 +354,7 @@ mp_configure_smtp() {
             >/dev/null 2>&1 || true
     fi
     mp_queue_ha_replication "smtp-configuration" || true
-    ui_message "SMTP ready" "Provider authentication and public health passed. No email was sent. In HA mode, the protected configuration is queued for the peer; verify both origins under High availability before relying on failover delivery. Review Policies & notices at https://$(mp_env_get DOMAIN)/admin/governance. If a policy is already published, save the updated runtime facts, review the exact diff and publish a new version."
+    ui_message "SMTP ready" "Provider authentication and local origin health passed. No email was sent. In HA mode, the protected configuration is queued for the peer; verify both origins under High availability before relying on failover delivery. Review Policies & notices at https://$(mp_env_get DOMAIN)/admin/governance. If a policy is already published, save the updated runtime facts, review the exact diff and publish a new version."
 }
 
 # Disable SMTP without retaining an unencrypted token rollback file on disk.
@@ -787,7 +787,7 @@ SQL
     if ! "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend >/dev/null \
         || ! mp_caddy_reload \
         || ! mp_caddy_validate \
-        || ! mp_wait_for_health 45; then
+        || ! mp_wait_for_local_health 45; then
         unset new_token
         mp_guard_rollback "The new domain did not become healthy."
         return 1
@@ -848,10 +848,10 @@ mp_rotate_database_password() {
         mp_guard_rollback "Database container recreation failed."
         return 1
     fi
-    if ! mp_wait_for_health 30; then mp_guard_rollback "Database password health verification failed."; return 1; fi
+    if ! mp_wait_for_local_health 30; then mp_guard_rollback "Database password health verification failed."; return 1; fi
     mp_audit "database.password-rotate" "success" "credentials-updated"
     mp_clear_guard_snapshot
-    ui_message "Database password rotated" "The role, protected password file and running containers agree, and public health passed."
+    ui_message "Database password rotated" "The role, protected password file and running containers agree, and local origin health passed."
 }
 
 # Rotate the application secret and revoke all sessions derived from old state.
@@ -881,7 +881,7 @@ mp_rotate_application_secret() {
     mp_audit "secret.application-rotate" "success" "sessions-revoked"
     mp_queue_ha_replication "application-secret-rotation" || true
     mp_clear_guard_snapshot
-    ui_message "Application secret rotated" "All existing sessions were revoked and public health passed."
+    ui_message "Application secret rotated" "All existing sessions were revoked and local origin health passed."
 }
 
 # Rotate only the daily IP-pseudonymisation key. Existing pseudonyms remain
@@ -950,7 +950,7 @@ mp_rotate_vapid() {
     mp_audit "secret.vapid-rotate" "success" "subscriptions-cleared"
     mp_queue_ha_replication "vapid-rotation" || true
     mp_clear_guard_snapshot
-    ui_message "VAPID rotated" "Push subscriptions were cleared and public health passed."
+    ui_message "VAPID rotated" "Push subscriptions were cleared and local origin health passed."
 }
 
 # Select and edit one runtime setting using backend-owned bounds and validation.
@@ -1011,7 +1011,7 @@ mp_service_status() {
         printf '\nCaddy topology\n'
         mp_caddy_status
         printf '\nPublic health\n'
-        curl -fsS --max-time 10 "https://${domain}/health"
+        mp_public_https_get /health "$domain"
         printf '\n'
     } > "$report" 2>&1 || true
     ui_text_file "Service status" "$report"
@@ -1055,8 +1055,8 @@ mp_service_action() {
             ui_run_command "Start services" "Starting application containers" \
                 "${MP_COMPOSE[@]}" up -d \
                 || { ui_error "Application services could not be started."; return 1; }
-            mp_wait_for_health 30 \
-                || { ui_error "Services started, but public health did not become ready."; return 1; }
+            mp_wait_for_local_health 30 \
+                || { ui_error "Services started, but local origin health did not become ready."; return 1; }
             ;;
         stop)
             ui_confirm "Stop server" "Stop all application containers?" || return 0
@@ -1068,15 +1068,15 @@ mp_service_action() {
             ui_run_command "Restart services" "Restarting application containers" \
                 "${MP_COMPOSE[@]}" restart \
                 || { ui_error "Application services could not be restarted."; return 1; }
-            mp_wait_for_health 30 \
-                || { ui_error "Services restarted, but public health did not become ready."; return 1; }
+            mp_wait_for_local_health 30 \
+                || { ui_error "Services restarted, but local origin health did not become ready."; return 1; }
             ;;
         backend)
             ui_run_command "Recreate backend" "Recreating the application API container" \
                 "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend \
                 || { ui_error "The backend container could not be recreated."; return 1; }
-            mp_wait_for_health 30 \
-                || { ui_error "The backend was recreated, but public health did not become ready."; return 1; }
+            mp_wait_for_local_health 30 \
+                || { ui_error "The backend was recreated, but local origin health did not become ready."; return 1; }
             ;;
         *) return 1 ;;
     esac
@@ -1125,6 +1125,8 @@ mp_deploy_latest() {
             mp_ha_set_config_value HA_AUTOMATIC_FAILOVER enabled || return 1
         fi
     fi
+    mp_wait_for_public_health 15 \
+        || { ui_error "The signed release is locally healthy, but resolver-independent public HTTPS health is unavailable."; return 1; }
     ui_message "Deploy" "Deployment and public health verification completed.$([ "$role" = dynamic ] && printf ' Both nodes match and a fresh verified copy was accepted.' || true)"
 }
 
@@ -1255,7 +1257,7 @@ mp_test_deployment_restore_signed() {
         "RESTORE SIGNED BASELINE" || return 0
     ui_run_command "Restore signed baseline" "Verifying signed assets and restoring both nodes" \
         "$MP_ROOT/deploy/test-deployment.sh" restore-signed || return 1
-    ui_message "Signed baseline restored" "Unsigned overrides were removed and signed public health passed."
+    ui_message "Signed baseline restored" "Unsigned overrides were removed and signed local origin health passed."
 }
 
 # Change the WebAuthn display name without changing RP identity or credentials.
@@ -1324,9 +1326,9 @@ mp_rebuild_frontend() {
         ui_error "The frontend was built, but Caddy validation failed."
         return 1
     }
-    mp_wait_for_health 15 || {
-        mp_audit "frontend.rebuild" "failed" "public-health"
-        ui_error "The frontend was built, but public health did not recover."
+    mp_wait_for_local_health 15 || {
+        mp_audit "frontend.rebuild" "failed" "local-origin-health"
+        ui_error "The frontend was built, but local origin health did not recover."
         return 1
     }
     mp_audit "frontend.rebuild" "success" "static-export"
@@ -1539,7 +1541,7 @@ mp_diagnostics() {
         printf '\nDocker usage\n'; docker system df 2>&1 || true
         printf '\nDisk usage\n'; df -h "$MP_ROOT" "$MP_SNAPSHOTS" 2>&1 || true
         printf '\nCaddy status\n'; mp_caddy_status
-        printf '\nHealth\n'; curl -fsS --max-time 5 "https://${domain}/health" 2>&1 || true
+        printf '\nPublic health\n'; mp_public_https_get /health "$domain" 2>&1 || true
         if [ "$(mp_ha_role 2>/dev/null || printf standalone)" != "standalone" ]; then
             printf '\nHA lease observation\n'
             jq . "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || printf 'unavailable\n'
@@ -1608,7 +1610,7 @@ mp_collect_recovery_evidence() {
         ui_error "The repository worktree is changed. Commit or restore it before collecting evidence."
         return 1
     }
-    curl -fsS --max-time 10 "https://${domain}/health" >/dev/null || {
+    mp_public_https_get /health "$domain" >/dev/null || {
         rm -rf "$temporary_dir"
         ui_error "Public health is unavailable. Evidence collection was stopped."
         return 1
@@ -1626,7 +1628,7 @@ mp_collect_recovery_evidence() {
         fi
         printf 'Audit chain: %s\n' "$audit_status"
         printf 'Public health: '
-        curl -fsS --max-time 10 "https://${domain}/health" || printf 'UNAVAILABLE'
+        mp_public_https_get /health "$domain" || printf 'UNAVAILABLE'
         printf '\n'
     } > "$temporary_dir/summary.txt"
 
@@ -1884,7 +1886,7 @@ mp_validate_installation() {
         printf 'Caddy: '
         if mp_caddy_validate >/dev/null 2>&1; then printf '%s: valid\n' "$(mp_caddy_mode)"; else printf '%s: INVALID\n' "$(mp_caddy_mode)"; failed=1; fi
         printf 'Public health: '
-        if curl -fsS --max-time 5 "https://$(mp_env_get DOMAIN)/health" >/dev/null; then printf 'healthy\n'; else printf 'UNAVAILABLE\n'; failed=1; fi
+        if mp_public_https_get /health >/dev/null; then printf 'healthy\n'; else printf 'UNAVAILABLE\n'; failed=1; fi
         printf '\nProtected files\n'
         mp_permissions_report
         mp_validate_protected_file_modes || failed=1

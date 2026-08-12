@@ -1,5 +1,38 @@
 # Changes
 
+## 3.9.7 — 12 August 2026
+
+This patch release makes commissioning distinguish a healthy application from
+DNS propagation and public-routing readiness.
+
+### Deterministic deployment and resume
+
+- Verify the Backend and the certificate-bound local TLS origin without using
+  the VPS provider's DNS resolver.
+- Store the signed deployment checkpoint before waiting for public DNS, so an
+  interrupted or delayed routing check resumes without recreating services.
+- Reconcile a missing checkpoint from signed release metadata, image digests,
+  database invariants, running containers and local health.
+- Keep DNS propagation inside the TUI with resolver agreement, the expected
+  address, the observed answers and a bounded status for the current wait.
+
+### Resolver-independent public health
+
+- Require agreement from at least two of Cloudflare, Google and Quad9 before
+  using an address for public HTTPS verification.
+- Treat the host resolver as diagnostic information only and distinguish
+  pending propagation, unavailable quorum, conflicting answers, incorrect
+  addresses and unhealthy public TLS routing.
+- Classify deployment, restore, restart, rotation, SMTP/DKIM, HA and validation
+  checks as either local-origin or public-network checks.
+
+### Interrupted witness-secret cleanup
+
+- Remove temporary Wrangler secret files on success, error, interruption and
+  SSH termination without reading or printing their contents.
+- On resume, remove only strictly named, owner-controlled, mode-0600 regular
+  files in the expected state directory and reject substituted paths.
+
 ## 3.9.6 — 12 August 2026
 
 This patch release makes the host, container and service permission boundaries

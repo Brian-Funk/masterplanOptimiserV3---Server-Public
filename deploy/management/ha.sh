@@ -685,7 +685,7 @@ mp_ha_active_verification_readiness() {
     [ -n "$local_hash" ] && [ "$local_hash" = "$peer_hash" ] \
         || { ui_error "The snapshot recovery recipient is missing or differs between nodes."; return 1; }
     domain="$(mp_env_get DOMAIN)" || return 1
-    curl -fsS --max-time 10 "https://${domain}/health" >/dev/null \
+    mp_public_https_get /health "$domain" >/dev/null \
         || { ui_error "Public HTTPS health is not ready."; return 1; }
     ui_message "HA readiness" "Both nodes, the current verified copy, release identity, recovery encryption, SMTP parity and public health are ready for automatic failover."
 }

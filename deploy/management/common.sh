@@ -25,6 +25,7 @@ MP_HA_CONFIG="${MP_HA_CONFIG:-${MP_HA_HOME}/node.env}"
 MP_COPYRIGHT_YEAR="2026"
 MP_TUI="${MP_TUI:-auto}"
 MP_UI_SIZE="${MP_UI_SIZE:-}"
+MP_PUBLIC_DNS_RESOLVERS="${MP_PUBLIC_DNS_RESOLVERS:-1.1.1.1 8.8.8.8 9.9.9.9}"
 MP_TUI_BACKTITLE="MP-OPT_SERVER | Brian Funk | Copyright © ${MP_COPYRIGHT_YEAR} Brian Funk"
 
 declare -a MP_COMPOSE=()
@@ -163,6 +164,54 @@ mp_initialise_paths() {
     chmod 700 "$MP_HOME" "$MP_STATE" "$MP_SNAPSHOTS"
     touch "$MP_AUDIT_FILE" "$MP_LOCK_FILE"
     chmod 600 "$MP_AUDIT_FILE" "$MP_LOCK_FILE"
+    mp_cleanup_stale_wrangler_secrets
+}
+
+# Remove a transient regular file without ever reading or displaying it. The
+# overwrite is best-effort on copy-on-write and journalled storage; unlinking
+# the short-lived file remains the authoritative lifecycle boundary.
+mp_secure_remove_file() {
+    local file="${1:-}"
+    [ -n "$file" ] || return 0
+    if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+        return 0
+    fi
+    [ -f "$file" ] && [ ! -L "$file" ] || {
+        printf 'Refusing to remove an unsafe transient secret path.\n' >&2
+        return 1
+    }
+    chmod 600 -- "$file" || return 1
+    if command -v shred >/dev/null 2>&1; then
+        shred -u -z -n 1 -- "$file"
+    else
+        : > "$file" && rm -f -- "$file"
+    fi
+}
+
+# Clean only interrupted Wrangler secret payloads created by this management
+# interface. Unexpected ownership, type or mode stops startup rather than
+# following or deleting a substituted path.
+mp_cleanup_stale_wrangler_secrets() {
+    local file name owner mode state_real file_parent found=0
+    state_real="$(readlink -f "$MP_STATE")" || return 1
+    while IFS= read -r -d '' file; do
+        found=1
+        name="$(basename "$file")"
+        [[ "$name" =~ ^wrangler-secrets\.[A-Za-z0-9]{6}$ ]] || continue
+        file_parent="$(readlink -f "$(dirname "$file")")" || return 1
+        [ "$file_parent" = "$state_real" ] && [ -f "$file" ] && [ ! -L "$file" ] || {
+            printf 'A stale Wrangler secret path is unsafe; commissioning stopped before reading it.\n' >&2
+            return 1
+        }
+        owner="$(stat -c '%u' -- "$file")" || return 1
+        mode="$(stat -c '%a' -- "$file")" || return 1
+        [ "$owner" = "$(id -u)" ] && [ "$mode" = 600 ] || {
+            printf 'A stale Wrangler secret file has unsafe ownership or mode; commissioning stopped before reading it.\n' >&2
+            return 1
+        }
+        mp_secure_remove_file "$file" || return 1
+    done < <(find -P "$MP_STATE" -maxdepth 1 -name 'wrangler-secrets.??????' -print0)
+    [ "$found" -eq 0 ] || sync -f "$MP_STATE" 2>/dev/null || true
 }
 
 # Return whether this process still has an interactive controlling terminal.
@@ -650,7 +699,7 @@ mp_banner() {
     local health="not checked"
     [ -f "$MP_ROOT/.env" ] && domain="$(mp_env_get DOMAIN "$MP_ROOT/.env" || true)"
     commit="$(git -C "$MP_ROOT" rev-parse --short HEAD 2>/dev/null || printf unknown)"
-    if [ -n "$domain" ] && curl -fsS --max-time 2 "https://${domain}/health" >/dev/null 2>&1; then
+    if [ -n "$domain" ] && mp_public_https_get /health "$domain" >/dev/null 2>&1; then
         health="healthy"
     fi
     MP_TUI_BACKTITLE="MP-OPT_SERVER | Brian Funk | Copyright © ${MP_COPYRIGHT_YEAR} Brian Funk | ${domain:-not configured} | ${health}"
@@ -1183,14 +1232,190 @@ mp_caddy_status() {
     esac
 }
 
-# Wait for both database-backed health and the public HTTPS endpoint.
-mp_wait_for_health() {
-    local domain attempts="${1:-30}"
-    domain="$(mp_env_get DOMAIN)"
+# Verify the Backend from inside its own container without depending on DNS,
+# Caddy, routing or the public resolver selected by the VPS provider.
+mp_backend_health_once() {
+    mp_compose_init || return 1
+    "${MP_COMPOSE[@]}" exec -T backend python -c \
+        'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3).read()' \
+        >/dev/null 2>&1
+}
+
+mp_wait_for_backend_health() {
+    local attempts="${1:-30}"
     for _ in $(seq 1 "$attempts"); do
-        if curl -fsS --max-time 5 "https://${domain}/health" >/dev/null 2>&1; then
+        mp_backend_health_once && return 0
+        sleep 2
+    done
+    return 1
+}
+
+# Verify the local TLS origin explicitly. The certificate and hostname are
+# still validated, but the request cannot be redirected by stale host DNS.
+mp_origin_tls_health_once() {
+    local domain="${1:-}" address="${2:-127.0.0.1}"
+    [ -n "$domain" ] || domain="$(mp_env_get DOMAIN)" || return 1
+    curl -fsS --max-time 5 --resolve "${domain}:443:${address}" \
+        "https://${domain}/health" >/dev/null 2>&1
+}
+
+mp_wait_for_origin_tls_health() {
+    local attempts="${1:-30}" domain="${2:-}" address="${3:-127.0.0.1}"
+    for _ in $(seq 1 "$attempts"); do
+        mp_origin_tls_health_once "$domain" "$address" && return 0
+        sleep 2
+    done
+    return 1
+}
+
+# A local deployment is ready only when the Backend and the certificate-bound
+# local origin both answer. Public DNS is deliberately a separate contract.
+mp_wait_for_local_health() {
+    local attempts="${1:-30}"
+    mp_wait_for_backend_health "$attempts" && mp_wait_for_origin_tls_health "$attempts"
+}
+
+# Canonicalise resolver output so independent recursive resolvers can be
+# compared as complete sets rather than by order or textual IPv6 spelling.
+mp_normalise_dns_answer() {
+    local record_type="$1"
+    case "$record_type" in A|AAAA|TXT|CNAME) ;; *) return 2 ;; esac
+    python3 -c '
+import ipaddress, sys
+kind = sys.argv[1]
+values = []
+for raw in sys.stdin:
+    value = raw.strip()
+    if not value:
+        continue
+    if kind in {"A", "AAAA"}:
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            raise SystemExit(2)
+        if (kind == "A") != (address.version == 4):
+            raise SystemExit(2)
+        value = address.compressed
+    elif kind == "CNAME":
+        value = value.rstrip(".").lower()
+    else:
+        value = value.replace(chr(34), "")
+    values.append(value)
+for value in sorted(set(values)):
+    print(value)
+' "$record_type"
+}
+
+mp_public_dns_query() {
+    local resolver="$1" domain="$2" record_type="$3"
+    [[ "$resolver" =~ ^[0-9A-Fa-f:.]+$ ]] || return 2
+    [ "${#domain}" -le 253 ] \
+        && [[ "$domain" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*[A-Za-z0-9]$ ]] || return 2
+    case "$record_type" in A|AAAA|TXT|CNAME) ;; *) return 2 ;; esac
+    dig +time=2 +tries=1 +short "@${resolver}" "$domain" "$record_type" 2>/dev/null \
+        | mp_normalise_dns_answer "$record_type"
+}
+
+# Set safe diagnostic globals and return only when at least two independent
+# recursive resolvers agree. Expected may be a canonical answer set or the
+# sentinel __absent__ when a record must not exist.
+mp_public_dns_observe() {
+    local domain="$1" record_type="$2" expected="${3:-}" resolver answer key
+    local responses=0 best=0 winner="" expected_normalised="" expected_key=""
+    local -A counts=() answers=()
+    MP_PUBLIC_DNS_STATUS=quorum-unavailable
+    MP_PUBLIC_DNS_ANSWER=""
+    MP_PUBLIC_DNS_DETAILS=""
+    for resolver in $MP_PUBLIC_DNS_RESOLVERS; do
+        if answer="$(mp_public_dns_query "$resolver" "$domain" "$record_type")"; then
+            responses=$((responses + 1))
+            key="${answer:-<none>}"
+            counts["$key"]=$(( ${counts["$key"]:-0} + 1 ))
+            answers["$key"]="$answer"
+            MP_PUBLIC_DNS_DETAILS+="${resolver}=${key};"
+        else
+            MP_PUBLIC_DNS_DETAILS+="${resolver}=unavailable;"
+        fi
+    done
+    [ "$responses" -ge 2 ] || return 2
+    for key in "${!counts[@]}"; do
+        if [ "${counts[$key]}" -gt "$best" ]; then
+            best="${counts[$key]}"; winner="$key"
+        fi
+    done
+    if [ "$best" -lt 2 ]; then
+        MP_PUBLIC_DNS_STATUS=conflicting
+        return 3
+    fi
+    MP_PUBLIC_DNS_ANSWER="${answers[$winner]}"
+    if [ "$winner" = '<none>' ]; then
+        if [ "$expected" = __absent__ ]; then
+            MP_PUBLIC_DNS_STATUS=ready
             return 0
         fi
+        MP_PUBLIC_DNS_STATUS=pending
+        return 4
+    fi
+    if [ -n "$expected" ]; then
+        if [ "$expected" = __absent__ ]; then
+            expected_key='<none>'
+        else
+            expected_normalised="$(printf '%s\n' "$expected" | mp_normalise_dns_answer "$record_type")" \
+                || return 2
+            expected_key="$expected_normalised"
+        fi
+        if [ "$MP_PUBLIC_DNS_ANSWER" != "$expected_normalised" ]; then
+            if [ -n "${counts[$expected_key]+present}" ]; then
+                MP_PUBLIC_DNS_STATUS=propagating
+                return 4
+            fi
+            MP_PUBLIC_DNS_STATUS=mismatch
+            return 5
+        fi
+    fi
+    MP_PUBLIC_DNS_STATUS=ready
+}
+
+mp_public_dns_consensus() {
+    mp_public_dns_observe "$1" "$2" || return $?
+    printf '%s\n' "$MP_PUBLIC_DNS_ANSWER"
+}
+
+mp_curl_resolved_address() {
+    local domain="$1" address="$2" path="${3:-/health}" resolved
+    case "$address" in *:*) resolved="${domain}:443:[${address}]" ;; *) resolved="${domain}:443:${address}" ;; esac
+    curl -fsS --max-time 10 --resolve "$resolved" "https://${domain}${path}"
+}
+
+# Resolve through the public quorum, then connect to that exact address. This
+# observes the real public route without trusting the VPS host resolver.
+mp_public_https_get() {
+    local path="${1:-/health}" domain="${2:-}" answer address found=false
+    [ -n "$domain" ] || domain="$(mp_env_get DOMAIN)" || return 1
+    if mp_public_dns_observe "$domain" A; then
+        answer="$MP_PUBLIC_DNS_ANSWER"
+        while IFS= read -r address; do
+            [ -n "$address" ] || continue
+            found=true
+            mp_curl_resolved_address "$domain" "$address" "$path" && return 0
+        done <<< "$answer"
+    fi
+    if mp_public_dns_observe "$domain" AAAA; then
+        answer="$MP_PUBLIC_DNS_ANSWER"
+        while IFS= read -r address; do
+            [ -n "$address" ] || continue
+            found=true
+            mp_curl_resolved_address "$domain" "$address" "$path" && return 0
+        done <<< "$answer"
+    fi
+    [ "$found" = true ] || return 1
+    return 1
+}
+
+mp_wait_for_public_health() {
+    local attempts="${1:-30}"
+    for _ in $(seq 1 "$attempts"); do
+        mp_public_https_get /health >/dev/null 2>&1 && return 0
         sleep 2
     done
     return 1
@@ -1245,6 +1470,7 @@ mp_reconcile_signed_join_setup() {
         'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3).read()' \
         >/dev/null 2>&1 || return 0
     mp_caddy_validate >/dev/null 2>&1 || return 0
+    mp_origin_tls_health_once || return 0
     bundle="$(jq -r .last_bundle_id "$receiver_state")"
     hash="$(jq -r .last_bundle_sha256 "$receiver_state")"
     received="$(jq -r .last_received_at "$receiver_state")"
@@ -1266,7 +1492,9 @@ mp_reconcile_signed_join_setup() {
           }
     ' "$setup_state" > "$temporary" || { rm -f "$temporary"; return 1; }
     chmod 600 "$temporary"
+    sync -f "$temporary" 2>/dev/null || { rm -f "$temporary"; return 1; }
     mv "$temporary" "$setup_state"
+    sync -f "$(dirname "$setup_state")" 2>/dev/null || return 1
 }
 
 # Return whether SQLAlchemy's base schema is already present.

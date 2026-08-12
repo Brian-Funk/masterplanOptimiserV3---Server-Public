@@ -158,7 +158,7 @@ menu_root_recovery() {
         case "$choice" in
             reset) mp_run_action mp_reset_root_admin ;;
             disable) mp_run_action mp_disable_root_bootstrap ;;
-            status) mp_run_action mp_show_report "Bootstrap status" curl -fsS --max-time 10 "https://$(mp_env_get DOMAIN)/api/v1/passkey/bootstrap-status" ;;
+            status) mp_run_action mp_show_report "Bootstrap status" mp_public_https_get /api/v1/passkey/bootstrap-status ;;
             back|"") return 0 ;;
         esac
     done

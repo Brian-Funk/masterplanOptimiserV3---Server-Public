@@ -81,7 +81,7 @@ restore_verified_previous_deployment() {
     install -m 0600 "$MP_TEST_STATE_DIR/previous.env" "$MP_TEST_ENV"
     mp_compose_init || return 1
     "${MP_COMPOSE[@]}" up -d db backend caddy || return 1
-    mp_wait_for_health 45
+    mp_wait_for_local_health 45
 }
 
 require_test_policy() {
@@ -330,7 +330,7 @@ compose_activate() {
         "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate caddy
     fi
     set_apply_stage public-health
-    mp_wait_for_health 45
+    mp_wait_for_local_health 45
     domain="$(mp_env_get DOMAIN)"
     # Caddy may accept TLS a fraction of a second before a just-recreated
     # backend has bound its container address. Treat that bounded 502 window as
