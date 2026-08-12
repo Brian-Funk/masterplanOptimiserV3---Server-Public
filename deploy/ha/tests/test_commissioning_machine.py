@@ -581,6 +581,7 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 "signed_baseline_verified", "configuration", "public_dns",
                 "application_deployed", "public_routing_ready",
                 "root_commissioning_complete", "recovery_recipient",
+                "validated",
             ]
             self.write_state(environment, document)
             run_id = "12345678-1234-4234-8234-123456789abc"

@@ -486,7 +486,7 @@ mp_machine_read_advance_input() {
                 and (.values.smtp.from_name | type == "string" and length >= 1 and length <= 120)
                 and ((.values.smtp.reply_to == null)
                     or (.values.smtp.reply_to | type == "string" and length <= 320))
-              else true end))
+              else true end)))
           elif .checkpoint == "public_dns" then
             ((.values | keys - ["ipv4","ipv6"]) | length == 0)
             and (.values.ipv4 | type == "string" and length <= 45)
@@ -534,7 +534,7 @@ mp_machine_read_advance_input() {
             ((.values | keys) == ["recovery_identity"])
             and (.values.recovery_identity | type == "string" and length >= 40 and length <= 4096)
           else (.values | length == 0) end)
-    ' "$target" >/dev/null 2>&1
+    ' "$target" >/dev/null 2>&1 || return 64
 }
 
 mp_machine_stage_candidate() {
