@@ -698,7 +698,7 @@ class PairingSetupContractTests(unittest.TestCase):
         self.assertIn("application_deployed", standalone)
         self.assertIn("root_commissioning_complete", standalone)
         self.assertIn("Recovering exact deployment", reconcile)
-        self.assertIn("mp_wait_for_local_health 45", reconcile)
+        self.assertIn("mp_wait_for_stable_local_services 45 3", reconcile)
         self.assertIn("Automatic fallback is prohibited", reconcile)
 
     def test_setup_failure_returns_to_menu_with_specific_resume_state(self) -> None:
