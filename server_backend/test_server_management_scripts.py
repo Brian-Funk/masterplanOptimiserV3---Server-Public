@@ -293,7 +293,7 @@ mp_caddy_mode() {{ printf 'unavailable\n'; }}
         "/etc/caddy/Caddyfile --adapter caddyfile"
     ) in commands
     assert "compose:logs --tail 25 caddy" in commands
-    assert "sudo:caddy validate --config" in commands
+    assert "sudo:-n caddy validate --config" in commands
     assert "sudo:journalctl -u caddy --since -30m --no-pager" in commands
 
 
