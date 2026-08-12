@@ -138,6 +138,7 @@ class PairingCodeTests(unittest.TestCase):
                 export MP_ROOT="$1" MP_STATE="$2" MP_SETUP_V2_STATE="$2/setup.json"
                 export MP_DEPLOYMENT_POLICY_FILE="$3" FAKE_HEAD="$4"
                 export PATH="$5:$PATH"
+                source "$6/deploy/management/common.sh"
                 source "$6/deploy/management/setup_v2.sh"
                 ui_error() { printf '%s\n' "$*" >&2; }
                 mp_setup_state_begin standalone-new
@@ -212,6 +213,7 @@ class PairingCodeTests(unittest.TestCase):
                 export MP_ROOT="$1" MP_STATE="$2" MP_SETUP_V2_STATE="$2/setup.json"
                 export MP_DEPLOYMENT_POLICY_FILE="$3" FAKE_CHECKOUT="$4" FAKE_FETCHED="$5"
                 export PATH="$6:$PATH"
+                source "$7/deploy/management/common.sh"
                 source "$7/deploy/management/setup_v2.sh"
                 ui_error() { printf '%s\n' "$*" >&2; }
                 mp_setup_state_begin convert-ha

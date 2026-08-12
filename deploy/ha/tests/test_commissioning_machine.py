@@ -471,7 +471,10 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 environment, "test-hook", "enable", "--input-stdin", "--json",
                 input_document=json.dumps(enable),
             ).returncode, 0)
-            transition = "database.migrate"
+            # Use an advertised, real control-flow transition.  This test is
+            # about rejecting a mismatched fault identity after a valid arm;
+            # unsupported transition names are rejected earlier by design.
+            transition = "artifact.images-activate"
             boundary = "before-side-effect"
             fault_id = "fault-" + hashlib.sha256(
                 f"{transition}\0{boundary}".encode()

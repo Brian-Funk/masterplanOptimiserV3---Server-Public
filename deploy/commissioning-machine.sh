@@ -3,9 +3,27 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
-ROOT_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
-export MP_ROOT="${MP_ROOT:-$ROOT_DIR}"
+if [ -n "${MP_ROOT:-}" ]; then
+    # The test harness sources the function prefix into a non-interactive
+    # `bash -c` process, where BASH_SOURCE legitimately has no element zero.
+    # Production callers may also pin the installed checkout explicitly.  In
+    # both cases resolve that already-authoritative root without consulting a
+    # source-stack entry that does not exist.
+    ROOT_DIR="$(readlink -f -- "$MP_ROOT")"
+else
+    MACHINE_SOURCE="${BASH_SOURCE[0]:-}"
+    [ -n "$MACHINE_SOURCE" ] || {
+        printf '%s\n' 'The commissioning adapter source path is unavailable.' >&2
+        exit 65
+    }
+    SCRIPT_PATH="$(readlink -f -- "$MACHINE_SOURCE")"
+    ROOT_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+fi
+[ -d "$ROOT_DIR/deploy/management" ] || {
+    printf '%s\n' 'The commissioning adapter repository root is invalid.' >&2
+    exit 65
+}
+export MP_ROOT="$ROOT_DIR"
 
 # shellcheck source=management/common.sh
 source "$MP_ROOT/deploy/management/common.sh"
