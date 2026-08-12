@@ -367,7 +367,9 @@ esac
                 [
                     "bash",
                     "-c",
-                    'source "$COMMON_PATH"; mp_reconcile_signed_join_setup',
+                    'source "$COMMON_PATH"; '
+                    'mp_origin_tls_health_once() { return 0; }; '
+                    'mp_reconcile_signed_join_setup',
                 ],
                 check=False,
                 env=environment,

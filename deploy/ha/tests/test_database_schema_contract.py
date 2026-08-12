@@ -107,8 +107,9 @@ class DatabaseSchemaContractTests(unittest.TestCase):
         )
         self.assertLess(migration, verification)
         self.assertLess(verification, application_start)
-        self.assertIn("Waiting for public HTTPS health", DEPLOY)
-        self.assertIn("backend is healthy, but trusted public HTTPS is unavailable", DEPLOY)
+        self.assertIn("Waiting for local application health", DEPLOY)
+        self.assertIn("mp_backend_health_once && mp_origin_tls_health_once", DEPLOY)
+        self.assertIn("backend is healthy, but the local certificate-bound TLS origin is unavailable", DEPLOY)
         self.assertIn("certificate authority has rate-limited", DEPLOY)
 
     def test_recovery_evidence_contains_the_named_contract_report(self) -> None:
