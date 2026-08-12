@@ -1825,20 +1825,70 @@ mp_validate_effective_service_permissions() {
     return "$failed"
 }
 
+mp_normalise_systemd_paths() {
+    local raw="$1" value
+    local -a values=()
+    read -r -a values <<< "$raw"
+    for value in "${values[@]}"; do
+        value="${value#-}"
+        [[ "$value" == /* ]] || {
+            printf 'Invalid systemd path token: %s\n' "$value" >&2
+            return 1
+        }
+        printf '%s\n' "$value"
+    done | LC_ALL=C sort -u
+}
+
+mp_validate_systemd_path_contract() {
+    local unit="$1" property="$2" expected="$3" actual normalised_expected normalised_actual
+    actual="$(systemctl show -p "$property" --value "$unit" 2>/dev/null || true)"
+    normalised_expected="$(mp_normalise_systemd_paths "$expected")" || return 1
+    normalised_actual="$(mp_normalise_systemd_paths "$actual")" || return 1
+    if [ "$normalised_actual" != "$normalised_expected" ]; then
+        printf 'systemd %s %s: INVALID expected=%s observed=%s\n' \
+            "$unit" "$property" "${normalised_expected//$'\n'/,}" "${normalised_actual//$'\n'/,}"
+        return 1
+    fi
+}
+
+mp_validate_systemd_security_property() {
+    local unit="$1" property="$2" expected="$3" actual
+    actual="$(systemctl show -p "$property" --value "$unit" 2>/dev/null || true)"
+    if [ "$actual" != "$expected" ]; then
+        printf 'systemd %s %s: INVALID expected=%s observed=%s\n' \
+            "$unit" "$property" "$expected" "${actual:-missing}"
+        return 1
+    fi
+}
+
 mp_validate_ha_systemd_permissions() {
-    local unit property current_user failed=0
+    local unit current_user current_group failed=0 expected_rw expected_ro
     [ "$(mp_ha_role 2>/dev/null || printf standalone)" = dynamic ] || return 0
     current_user="$(id -un)"
+    current_group="$(id -gn)"
     for unit in mp-opt-ha-lease.service mp-opt-ha-replication.service mp-opt-ha-snapshots.service; do
-        if [ "$(systemctl show -p User --value "$unit" 2>/dev/null)" != "$current_user" ]; then
-            printf 'systemd identity %s: INVALID\n' "$unit"
-            failed=1
-        fi
-        property="$(systemctl show -p ReadWritePaths --value "$unit" 2>/dev/null || true)"
-        if [[ " $property " != *" /opt/masterplan/runtime "* ]]; then
-            printf 'systemd runtime sandbox %s: INVALID\n' "$unit"
-            failed=1
-        fi
+        case "$unit" in
+            mp-opt-ha-lease.service)
+                expected_rw="/opt/masterplan/runtime /opt/masterplan/secrets/root_bootstrap_token $MP_STATE"
+                ;;
+            mp-opt-ha-replication.service)
+                expected_rw="/opt/masterplan/runtime $HOME/.local/state/mp-opt-ha-replication $MP_STATE"
+                ;;
+            mp-opt-ha-snapshots.service)
+                expected_rw="$HOME/.config/mp-opt-server $MP_STATE $MP_SNAPSHOTS /opt/masterplan/runtime"
+                ;;
+        esac
+        expected_ro="/etc/mp-opt-ha /opt/masterplan"
+        mp_validate_systemd_security_property "$unit" LoadState loaded || failed=1
+        mp_validate_systemd_security_property "$unit" User "$current_user" || failed=1
+        mp_validate_systemd_security_property "$unit" Group "$current_group" || failed=1
+        mp_validate_systemd_security_property "$unit" ProtectSystem strict || failed=1
+        mp_validate_systemd_security_property "$unit" ProtectHome read-only || failed=1
+        mp_validate_systemd_security_property "$unit" NoNewPrivileges yes || failed=1
+        mp_validate_systemd_security_property "$unit" PrivateTmp yes || failed=1
+        mp_validate_systemd_security_property "$unit" RestrictSUIDSGID yes || failed=1
+        mp_validate_systemd_path_contract "$unit" ReadOnlyPaths "$expected_ro" || failed=1
+        mp_validate_systemd_path_contract "$unit" ReadWritePaths "$expected_rw" || failed=1
     done
     [ "$failed" -ne 0 ] || printf 'HA systemd identities and runtime sandboxes: valid\n'
     return "$failed"
@@ -1885,8 +1935,14 @@ mp_validate_installation() {
         if mp_compose_validate; then printf 'valid\n'; else printf 'INVALID\n'; failed=1; fi
         printf 'Caddy: '
         if mp_caddy_validate >/dev/null 2>&1; then printf '%s: valid\n' "$(mp_caddy_mode)"; else printf '%s: INVALID\n' "$(mp_caddy_mode)"; failed=1; fi
-        printf 'Public health: '
-        if mp_public_https_get /health >/dev/null; then printf 'healthy\n'; else printf 'UNAVAILABLE\n'; failed=1; fi
+        printf 'Local certificate-bound origin: '
+        if mp_origin_tls_health_once; then printf 'healthy\n'; else printf 'UNAVAILABLE\n'; failed=1; fi
+        printf 'Public route observation: '
+        if mp_public_https_get /health >/dev/null; then
+            printf 'healthy\n'
+        else
+            printf 'unavailable (reported separately; local installation remains valid)\n'
+        fi
         printf '\nProtected files\n'
         mp_permissions_report
         mp_validate_protected_file_modes || failed=1

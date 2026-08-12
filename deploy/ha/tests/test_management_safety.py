@@ -324,6 +324,53 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
             "/var/lib/postgresql/data",
         ):
             self.assertIn(path, effective)
+        self.assertIn("mp_origin_tls_health_once", validation)
+        self.assertIn("local installation remains valid", validation)
+        self.assertNotIn("mp_public_https_get /health >/dev/null; then printf 'healthy\\n'; else", validation)
+
+    def test_caddy_validation_distinguishes_service_exec_and_configuration_failures(self) -> None:
+        validation = function_body(COMMON_SOURCE, "mp_caddy_validate")
+        for code in (
+            "CADDY_CONTAINER_UNAVAILABLE",
+            "CADDY_EXECUTION_FAILED",
+            "CADDY_CONFIGURATION_INVALID",
+            "CADDY_SERVICE_UNAVAILABLE",
+            "CADDY_TOPOLOGY_UNAVAILABLE",
+        ):
+            self.assertIn(code, validation)
+        self.assertLess(validation.index("caddy version"), validation.index("caddy validate"))
+
+    def test_systemd_permission_contract_accepts_optional_missing_path_prefix(self) -> None:
+        script = f'''
+            set -Eeuo pipefail
+            source {shlex.quote(str(ROOT / "deploy/management/actions.sh"))}
+            expected="$(mp_normalise_systemd_paths '/opt/masterplan/runtime /home/deploy/state')"
+            observed="$(mp_normalise_systemd_paths '-/home/deploy/state -/opt/masterplan/runtime')"
+            [ "$expected" = "$observed" ]
+        '''
+        result = subprocess.run(
+            ["bash", "-Eeuo", "pipefail", "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_systemd_permission_contract_checks_exact_identity_paths_and_sandbox(self) -> None:
+        validation = function_body(ACTIONS_SOURCE, "mp_validate_ha_systemd_permissions")
+        for unit in (
+            "mp-opt-ha-lease.service",
+            "mp-opt-ha-replication.service",
+            "mp-opt-ha-snapshots.service",
+        ):
+            self.assertIn(unit, validation)
+        for property_name in (
+            "LoadState", "User", "Group", "ProtectSystem", "ProtectHome",
+            "NoNewPrivileges", "PrivateTmp", "RestrictSUIDSGID",
+            "ReadOnlyPaths", "ReadWritePaths",
+        ):
+            self.assertIn(property_name, validation)
+        self.assertIn("mp_validate_systemd_path_contract", validation)
 
     def test_snapshot_payload_permissions_do_not_depend_on_operator_umask(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

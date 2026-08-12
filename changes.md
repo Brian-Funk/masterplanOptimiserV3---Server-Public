@@ -1,5 +1,41 @@
 # Changes
 
+## 3.9.8 — 12 August 2026
+
+This patch release makes two-node commissioning report the step that actually
+needs attention and keeps first account activation compact without hiding the
+published processing information.
+
+### Deterministic commissioning and HA validation
+
+- Accept systemd's valid optional `-` prefix while enforcing the complete
+  service identity, sandbox and path contract for every HA service.
+- Store the exact sender and receiver bundle receipts before marking the first
+  protected copy complete, then activate and validate HA services in a separate
+  checkpoint.
+- Record an action code and checkpoint around every commissioning step so a
+  later installation, SMTP or recovery failure cannot inherit an earlier label.
+- Avoid recreating an already-correct primary backend during initial lease
+  registration and require consecutive healthy local observations before a
+  deployment is considered stable.
+- Distinguish an unavailable Caddy service, a failed Docker execution and a
+  configuration rejection, while keeping public routing separate from local
+  installation validity.
+- Clean interrupted setup, pairing, witness and validation files only after
+  strict path, owner, mode and file-type checks.
+
+### Compact first-account consent
+
+- Show the effective controller, a short purpose and the authenticated audience
+  directly on account setup.
+- Move the complete purposes, data categories, privacy contact, notice links,
+  policy digest and exact statement into an accessible responsive details
+  dialog.
+- Keep the confirmation unchecked and bound to the same immutable consent
+  document. Additional-passkey and credential-reset ceremonies are unchanged.
+- Continue showing only the effective controller; processor identities are not
+  exposed or remodelled by this release.
+
 ## 3.9.7 — 12 August 2026
 
 This patch release makes commissioning distinguish a healthy application from

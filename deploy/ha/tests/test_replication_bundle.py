@@ -442,6 +442,21 @@ class ReplicationBundleTests(unittest.TestCase):
             sender,
         )
 
+    def test_sender_persists_acceptance_before_reporting_success(self) -> None:
+        sender = (HA_DIR / "replicate_now.sh").read_text(encoding="utf-8")
+        acknowledgement = sender.index(
+            '[ "$response" = "ACCEPTED:$job_id:$archive_hash" ]'
+        )
+        receipt = sender.index("mp-opt-ha-sender-acceptance-v1", acknowledgement)
+        durable_move = sender.index(
+            'mv "$accepted_receipt" "$MP_ROOT/runtime/ha-last-accepted-bundle.json"',
+            receipt,
+        )
+        output = sender.index('printf \'%s\\n\' "$response"', durable_move)
+        self.assertLess(acknowledgement, receipt)
+        self.assertLess(receipt, durable_move)
+        self.assertLess(durable_move, output)
+
     def test_receiver_waits_for_a_cold_database_before_staging(self) -> None:
         receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(
             encoding="utf-8"
@@ -494,6 +509,7 @@ class ReplicationBundleTests(unittest.TestCase):
         database_health = receiver.index("HA_RECEIVER_DATABASE_HEALTH_FAILED")
         caddy_running = receiver.index("HA_RECEIVER_CADDY_NOT_RUNNING")
         caddy_validation = receiver.index("HA_RECEIVER_CADDY_VALIDATION_FAILED")
+        caddy_execution = receiver.index("HA_RECEIVER_CADDY_EXECUTION_FAILED")
         backend_health = receiver.index("HA_RECEIVER_BACKEND_HEALTH_FAILED")
         receiver_receipt = receiver.index(
             'install -m 0600 "$stage/receiver.json" "$MP_ROOT/runtime/ha-receiver.json"'
@@ -506,6 +522,7 @@ class ReplicationBundleTests(unittest.TestCase):
             database_health,
             caddy_running,
             caddy_validation,
+            caddy_execution,
             backend_health,
         ):
             self.assertLess(boundary, receiver_receipt)

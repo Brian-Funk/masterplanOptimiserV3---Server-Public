@@ -85,11 +85,19 @@ describe("initial account activation", () => {
 
     expect(register).toBeDisabled();
     expect(screen.getByText("Synthetic Controller")).toBeInTheDocument();
+    expect(screen.queryByText("Names and operational roles")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Review processing details" }));
+    expect(screen.getByRole("dialog", { name: "Processing details" })).toBeInTheDocument();
     expect(screen.getByText("Names and operational roles")).toBeInTheDocument();
+    expect(screen.getByText(consent.statement)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Privacy notice" })).toHaveAttribute(
       "href",
       consent.privacy_url,
     );
+    expect(screen.queryByText(/processor/i)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Return to account setup" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("checkbox"));
     expect(register).toBeEnabled();
@@ -121,5 +129,6 @@ describe("initial account activation", () => {
 
     expect(await screen.findByRole("button", { name: "Add passkey" })).toBeEnabled();
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Review processing details" })).not.toBeInTheDocument();
   });
 });

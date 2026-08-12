@@ -82,6 +82,35 @@ class PairingCodeTests(unittest.TestCase):
             resume,
         )
         self.assertLess(resume.index("mp_ha_replicate_now"), resume.index("internal-finalize-peer"))
+        self.assertIn("mp_setup_record_first_verified_bundle", resume)
+        self.assertIn("ha_services_activated", resume)
+        self.assertLess(resume.index("mp_setup_state_mark replicated"), resume.index("ha_services_activated"))
+
+    def test_setup_state_actions_are_checkpoint_bound_and_clear_after_completion(self) -> None:
+        action = shell_function(SETUP, "mp_setup_state_action")
+        mark = shell_function(SETUP, "mp_setup_state_mark")
+        failure = shell_function(SETUP, "mp_setup_state_failure")
+        self.assertIn("current_action_code", action)
+        self.assertIn("current_checkpoint", action)
+        self.assertIn("action_started_at", action)
+        self.assertIn("last_completed_action", mark)
+        self.assertIn("SETUP_RECONCILING", mark)
+        self.assertIn("current_checkpoint", failure)
+        calls = len(re.findall(r'mp_setup_state_action\s+"', SETUP))
+        bound_calls = len(re.findall(
+            r'mp_setup_state_action\s+"[^"]+"\s*\\?\s*\n?\s*'
+            r'[A-Z][A-Z0-9_]+\s+[a-z][a-z0-9_]*',
+            SETUP,
+        ))
+        self.assertEqual(bound_calls, calls)
+
+    def test_first_copy_uses_matching_durable_sender_and_receiver_receipts(self) -> None:
+        record = shell_function(SETUP, "mp_setup_record_first_verified_bundle")
+        self.assertIn("mp-opt-ha-sender-acceptance-v1", record)
+        self.assertIn("mp-opt-receiver-state-v2", record)
+        self.assertIn("ha-last-accepted-bundle.json", record)
+        for field in ("bundle_id", "sha256", "generation", "accepted_at"):
+            self.assertIn(field, record)
 
     @unittest.skipIf(os.name == "nt", "POSIX shell state contract")
     def test_unsigned_state_pins_first_pushed_head_and_ignores_moving_checkout(self) -> None:
@@ -344,8 +373,10 @@ class SignedJoinReconciliationTests(unittest.TestCase):
                 """#!/usr/bin/env bash
 set -eu
 case " $* " in
+    *" inspect --format "*) printf 'true\\n' ;;
     *" config --services "*) printf 'db\\nbackend\\ncaddy\\n' ;;
     *" ps --status running --services "*) cat "$FAKE_SERVICES" ;;
+    *" ps -q caddy "*) printf 'fake-caddy-container\\n' ;;
     *" exec -T "*) exit 0 ;;
     *) printf 'unexpected fake docker invocation: %s\\n' "$*" >&2; exit 97 ;;
 esac
@@ -608,6 +639,10 @@ class PairingSetupContractTests(unittest.TestCase):
             primary_resume.index("mp_setup_register_root_passkey"),
             primary_resume.index("mp_ha_replicate_now"),
         )
+        self.assertLess(
+            primary_resume.index("mp_setup_state_mark replicated"),
+            primary_resume.index("ha_services_activated"),
+        )
 
         primary = shell_function(SETUP, "mp_setup_primary_create")
         self.assertLess(primary.index("migration_snapshot"), primary.index("witness_bootstrap"))
@@ -665,7 +700,7 @@ class PairingSetupContractTests(unittest.TestCase):
         self.assertIn("application_deployed", standalone)
         self.assertIn("root_commissioning_complete", standalone)
         self.assertIn("Recovering exact deployment", reconcile)
-        self.assertIn("mp_wait_for_local_health 45", reconcile)
+        self.assertIn("mp_wait_for_stable_local_services 45 3", reconcile)
         self.assertIn("Automatic fallback is prohibited", reconcile)
 
     def test_setup_failure_returns_to_menu_with_specific_resume_state(self) -> None:
@@ -748,9 +783,14 @@ class PairingSetupContractTests(unittest.TestCase):
         self.assertIn("trap", wait)
 
     def test_wrangler_secret_files_have_defined_interruption_safe_cleanup(self) -> None:
-        cleanup = shell_function(COMMON, "mp_cleanup_stale_wrangler_secrets")
+        cleanup = shell_function(COMMON, "mp_cleanup_stale_setup_transients")
         remove = shell_function(COMMON, "mp_secure_remove_file")
         self.assertIn("wrangler-secrets", cleanup)
+        for prefix in (
+            "pair-state", "pair-wait", "witness-bootstrap", "witness-join",
+            "ha-join", "configure-dns", "routing-ready",
+        ):
+            self.assertIn(prefix, cleanup)
         self.assertIn("[ ! -L", cleanup)
         self.assertIn("stat -c '%u'", cleanup)
         self.assertIn("stat -c '%a'", cleanup)
@@ -833,10 +873,10 @@ class PairingSetupContractTests(unittest.TestCase):
                 set -Eeuo pipefail
                 export MP_STATE="$2"
                 source "$1/deploy/management/common.sh"
-                mp_cleanup_stale_wrangler_secrets
+                mp_cleanup_stale_setup_transients
                 test ! -e "$2/wrangler-secrets.Abc123"
                 ln -s "$2/target" "$2/wrangler-secrets.Def456"
-                ! mp_cleanup_stale_wrangler_secrets
+                ! mp_cleanup_stale_setup_transients
                 test -L "$2/wrangler-secrets.Def456"
                 test "$(cat "$2/target")" = keep
             '''

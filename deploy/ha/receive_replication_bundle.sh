@@ -426,9 +426,18 @@ if ! "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx ca
     echo "HA_RECEIVER_CADDY_NOT_RUNNING: the reverse proxy is not running after activation." >&2
     exit 1
 fi
-if ! "${MP_COMPOSE[@]}" exec -T caddy \
-    caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null; then
-    echo "HA_RECEIVER_CADDY_VALIDATION_FAILED: the active reverse-proxy configuration was rejected." >&2
+if ! mp_caddy_validate; then
+    case "${MP_CADDY_FAILURE_CODE:-}" in
+        CADDY_CONTAINER_UNAVAILABLE|CADDY_SERVICE_UNAVAILABLE)
+            echo "HA_RECEIVER_CADDY_NOT_RUNNING: the reverse proxy became unavailable during validation." >&2
+            ;;
+        CADDY_EXECUTION_FAILED)
+            echo "HA_RECEIVER_CADDY_EXECUTION_FAILED: the bounded validation command could not run." >&2
+            ;;
+        *)
+            echo "HA_RECEIVER_CADDY_VALIDATION_FAILED: the active reverse-proxy configuration was rejected." >&2
+            ;;
+    esac
     exit 1
 fi
 for _ in $(seq 1 30); do

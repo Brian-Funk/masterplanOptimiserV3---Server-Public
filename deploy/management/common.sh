@@ -164,7 +164,7 @@ mp_initialise_paths() {
     chmod 700 "$MP_HOME" "$MP_STATE" "$MP_SNAPSHOTS"
     touch "$MP_AUDIT_FILE" "$MP_LOCK_FILE"
     chmod 600 "$MP_AUDIT_FILE" "$MP_LOCK_FILE"
-    mp_cleanup_stale_wrangler_secrets
+    mp_cleanup_stale_setup_transients
 }
 
 # Remove a transient regular file without ever reading or displaying it. The
@@ -191,27 +191,34 @@ mp_secure_remove_file() {
 # Clean only interrupted Wrangler secret payloads created by this management
 # interface. Unexpected ownership, type or mode stops startup rather than
 # following or deleting a substituted path.
-mp_cleanup_stale_wrangler_secrets() {
+mp_cleanup_stale_setup_transients() {
     local file name owner mode state_real file_parent found=0
     state_real="$(readlink -f "$MP_STATE")" || return 1
     while IFS= read -r -d '' file; do
-        found=1
         name="$(basename "$file")"
-        [[ "$name" =~ ^wrangler-secrets\.[A-Za-z0-9]{6}$ ]] || continue
+        [[ "$name" =~ ^(wrangler-secrets|wrangler-repair|wrangler-deploy|pair-wait|pair-state|witness-bootstrap|witness-bootstrap-error|witness-join|witness-join-error|ha-join|pair-open|configure-dns|routing-ready|decommission-cloudflare)\.[A-Za-z0-9]{6}$ ]] \
+            || continue
+        found=1
         file_parent="$(readlink -f "$(dirname "$file")")" || return 1
         [ "$file_parent" = "$state_real" ] && [ -f "$file" ] && [ ! -L "$file" ] || {
-            printf 'A stale Wrangler secret path is unsafe; commissioning stopped before reading it.\n' >&2
+            printf 'A stale commissioning transient path is unsafe; commissioning stopped before reading it.\n' >&2
             return 1
         }
         owner="$(stat -c '%u' -- "$file")" || return 1
         mode="$(stat -c '%a' -- "$file")" || return 1
         [ "$owner" = "$(id -u)" ] && [ "$mode" = 600 ] || {
-            printf 'A stale Wrangler secret file has unsafe ownership or mode; commissioning stopped before reading it.\n' >&2
+            printf 'A stale commissioning transient has unsafe ownership or mode; commissioning stopped before reading it.\n' >&2
             return 1
         }
         mp_secure_remove_file "$file" || return 1
-    done < <(find -P "$MP_STATE" -maxdepth 1 -name 'wrangler-secrets.??????' -print0)
+    done < <(find -P "$MP_STATE" -maxdepth 1 -mindepth 1 -print0)
     [ "$found" -eq 0 ] || sync -f "$MP_STATE" 2>/dev/null || true
+}
+
+# Retained as a narrow compatibility entry point for older administrative
+# scripts. The central implementation now covers every setup-only transient.
+mp_cleanup_stale_wrangler_secrets() {
+    mp_cleanup_stale_setup_transients
 }
 
 # Return whether this process still has an interactive controlling terminal.
@@ -1166,22 +1173,74 @@ mp_caddy_mode() {
 
 # Validate the configured Caddy instance for the active topology.
 mp_caddy_validate() {
-    local mode
+    local mode container
+    MP_CADDY_FAILURE_CODE=""
+    MP_CADDY_FAILURE_MESSAGE=""
     mode="$(mp_caddy_mode)"
     case "$mode" in
         container)
             mp_compose_init
-            "${MP_COMPOSE[@]}" exec -T caddy \
-                caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
+            container="$("${MP_COMPOSE[@]}" ps -q caddy 2>/dev/null || true)"
+            if [ -z "$container" ] \
+                || [ "$(docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null || true)" != true ]; then
+                MP_CADDY_FAILURE_CODE=CADDY_CONTAINER_UNAVAILABLE
+                MP_CADDY_FAILURE_MESSAGE="The managed Caddy container is unavailable or still changing."
+                return 20
+            fi
+            if ! "${MP_COMPOSE[@]}" exec -T caddy caddy version >/dev/null 2>&1; then
+                MP_CADDY_FAILURE_CODE=CADDY_EXECUTION_FAILED
+                MP_CADDY_FAILURE_MESSAGE="Docker could not execute the bounded Caddy validation command."
+                return 21
+            fi
+            if ! "${MP_COMPOSE[@]}" exec -T caddy \
+                caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+                MP_CADDY_FAILURE_CODE=CADDY_CONFIGURATION_INVALID
+                MP_CADDY_FAILURE_MESSAGE="Caddy rejected the active configuration."
+                return 22
+            fi
             ;;
         host)
-            sudo caddy validate --config "$MP_HOST_CADDYFILE" --adapter caddyfile >/dev/null
+            if ! systemctl is-active --quiet caddy; then
+                MP_CADDY_FAILURE_CODE=CADDY_SERVICE_UNAVAILABLE
+                MP_CADDY_FAILURE_MESSAGE="The managed host Caddy service is unavailable or still changing."
+                return 20
+            fi
+            if ! sudo -n caddy validate --config "$MP_HOST_CADDYFILE" \
+                --adapter caddyfile >/dev/null 2>&1; then
+                MP_CADDY_FAILURE_CODE=CADDY_CONFIGURATION_INVALID
+                MP_CADDY_FAILURE_MESSAGE="Caddy rejected the active host configuration."
+                return 22
+            fi
             ;;
         *)
-            printf 'No managed Caddy topology is available.\n' >&2
-            return 1
+            MP_CADDY_FAILURE_CODE=CADDY_TOPOLOGY_UNAVAILABLE
+            MP_CADDY_FAILURE_MESSAGE="No managed Caddy topology is available."
+            return 20
             ;;
     esac
+    return 0
+}
+
+# Require several consecutive healthy observations before commissioning stores
+# a local-service checkpoint. This prevents a transient container recreation or
+# lease transition from being mistaken for a durable deployment result.
+mp_wait_for_stable_local_services() {
+    local timeout="${1:-30}" required="${2:-3}" deadline successes=0
+    [[ "$timeout" =~ ^[1-9][0-9]*$ ]] && [[ "$required" =~ ^[1-9][0-9]*$ ]] || return 2
+    deadline=$((SECONDS + timeout))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if mp_wait_for_database 1 >/dev/null 2>&1 \
+            && mp_wait_for_backend_health 1 \
+            && mp_caddy_validate >/dev/null 2>&1 \
+            && mp_origin_tls_health_once; then
+            successes=$((successes + 1))
+            [ "$successes" -ge "$required" ] && return 0
+        else
+            successes=0
+        fi
+        sleep 2
+    done
+    return 1
 }
 
 # Return success when a replication receiver must activate Caddy. An unchanged

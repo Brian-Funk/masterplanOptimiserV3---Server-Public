@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Logo } from "@/components/Logo";
+import { MobileActionSheet } from "@/components/MobileActionSheet";
 import { getApiUrl } from "@/lib/environment";
 import { passkeyErrorMessage } from "@/lib/passkeyError";
 import {
@@ -43,6 +44,12 @@ function activationHeading(purpose?: ActivationPurpose): string {
   return "Account setup";
 }
 
+function concisePurpose(purposes: string[]): string {
+  const first = purposes[0]?.trim() || "Authenticated operational event access";
+  if (first.length <= 150) return first;
+  return `${first.slice(0, 147).trimEnd()}...`;
+}
+
 function ActivateContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -59,6 +66,7 @@ function ActivateContent() {
     processing_consent?: ProcessingConsent;
   } | null>(null);
   const [consentConfirmed, setConsentConfirmed] = useState(false);
+  const [consentDetailsOpen, setConsentDetailsOpen] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -103,6 +111,7 @@ function ActivateContent() {
         processing_consent: data.processing_consent || undefined,
       });
       setConsentConfirmed(false);
+      setConsentDetailsOpen(false);
       setStatus("ready");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Validation failed");
@@ -226,51 +235,60 @@ function ActivateContent() {
                     : "Register a passkey to activate your account. You'll be prompted by your browser or password manager."}
               </p>
               {info.purpose === "initial_setup" && info.processing_consent && (
-                <section className="mb-6 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-800/60 dark:text-gray-200">
+                <section className="mb-5 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-800/60 dark:text-gray-200">
                   <h2 className="mb-2 text-base font-semibold text-gray-900 dark:text-gray-100">
                     Processing for your account
                   </h2>
-                  <dl className="space-y-2">
+                  <dl className="space-y-2.5">
                     <div>
-                      <dt className="font-medium">Controller</dt>
-                      <dd>{info.processing_consent.controller_identity}</dd>
+                      <dt className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                        Controller
+                      </dt>
+                      <dd className="mt-0.5 font-medium text-gray-900 dark:text-gray-100">
+                        {info.processing_consent.controller_identity}
+                      </dd>
                     </div>
                     <div>
-                      <dt className="font-medium">Purpose</dt>
-                      <dd>{info.processing_consent.processing_purposes.join(" ")}</dd>
+                      <dt className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                        Purpose
+                      </dt>
+                      <dd className="mt-0.5">
+                        {concisePurpose(info.processing_consent.processing_purposes)}
+                      </dd>
                     </div>
                     <div>
-                      <dt className="font-medium">Operational information</dt>
-                      <dd>{info.processing_consent.data_categories.join(", ")}</dd>
-                    </div>
-                    <div>
-                      <dt className="font-medium">Who can access it</dt>
-                      <dd>{info.processing_consent.authenticated_audience}</dd>
+                      <dt className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                        Access
+                      </dt>
+                      <dd className="mt-0.5">{info.processing_consent.authenticated_audience}</dd>
                     </div>
                   </dl>
-                  <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1">
-                    <a className="font-medium text-blue-700 underline underline-offset-2 dark:text-blue-300" href={info.processing_consent.privacy_url} target="_blank" rel="noreferrer">
-                      Privacy notice
-                    </a>
-                    <a className="font-medium text-blue-700 underline underline-offset-2 dark:text-blue-300" href={info.processing_consent.rights_url} target="_blank" rel="noreferrer">
-                      Your rights
-                    </a>
-                    {info.processing_consent.event_privacy_url && (
-                      <a className="font-medium text-blue-700 underline underline-offset-2 dark:text-blue-300" href={info.processing_consent.event_privacy_url} target="_blank" rel="noreferrer">
-                        Event privacy details
-                      </a>
-                    )}
-                  </div>
-                  <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-lg border border-gray-300 bg-white p-3 dark:border-gray-600 dark:bg-gray-900">
-                    <input
-                      type="checkbox"
-                      className="mt-1 h-4 w-4 shrink-0 accent-blue-600"
-                      checked={consentConfirmed}
-                      onChange={(event) => setConsentConfirmed(event.target.checked)}
-                    />
-                    <span>{info.processing_consent.statement}</span>
-                  </label>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    fullWidth
+                    className="mt-4"
+                    onClick={() => setConsentDetailsOpen(true)}
+                  >
+                    Review processing details
+                  </Button>
                 </section>
+              )}
+              {info.purpose === "initial_setup" && info.processing_consent && (
+                <label className="mb-5 flex cursor-pointer items-start gap-3 rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200">
+                  <input
+                    type="checkbox"
+                    className="mt-1 h-4 w-4 shrink-0 accent-blue-600"
+                    checked={consentConfirmed}
+                    onChange={(event) => setConsentConfirmed(event.target.checked)}
+                  />
+                  <span>
+                    I reviewed the processing details and consent to my account being used as described.
+                    <span className="mt-1 block text-xs text-gray-500 dark:text-gray-400">
+                      You can later use Delete my data or contact the controller.
+                    </span>
+                  </span>
+                </label>
               )}
               <Button
                 type="button"
@@ -334,6 +352,74 @@ function ActivateContent() {
           )}
         </div>
       </Card>
+      {info?.purpose === "initial_setup" && info.processing_consent && (
+        <MobileActionSheet
+          open={consentDetailsOpen}
+          title="Processing details"
+          description="Review the information that applies before you register a passkey."
+          onClose={() => setConsentDetailsOpen(false)}
+        >
+          <div className="space-y-5 text-sm text-gray-700 dark:text-gray-200">
+            <dl className="space-y-4">
+              <div>
+                <dt className="font-semibold text-gray-900 dark:text-gray-100">Controller</dt>
+                <dd className="mt-1">{info.processing_consent.controller_identity}</dd>
+              </div>
+              <div>
+                <dt className="font-semibold text-gray-900 dark:text-gray-100">Privacy contact</dt>
+                <dd className="mt-1 break-words">{info.processing_consent.privacy_contact}</dd>
+              </div>
+              <div>
+                <dt className="font-semibold text-gray-900 dark:text-gray-100">Purposes</dt>
+                <dd className="mt-1">
+                  <ul className="list-disc space-y-1 pl-5">
+                    {info.processing_consent.processing_purposes.map((purpose) => (
+                      <li key={purpose}>{purpose}</li>
+                    ))}
+                  </ul>
+                </dd>
+              </div>
+              <div>
+                <dt className="font-semibold text-gray-900 dark:text-gray-100">Operational information</dt>
+                <dd className="mt-1">
+                  <ul className="list-disc space-y-1 pl-5">
+                    {info.processing_consent.data_categories.map((category) => (
+                      <li key={category}>{category}</li>
+                    ))}
+                  </ul>
+                </dd>
+              </div>
+              <div>
+                <dt className="font-semibold text-gray-900 dark:text-gray-100">Who can access it</dt>
+                <dd className="mt-1">{info.processing_consent.authenticated_audience}</dd>
+              </div>
+            </dl>
+            <nav aria-label="Processing information" className="flex flex-wrap gap-x-4 gap-y-2">
+              <a className="font-medium text-blue-700 underline underline-offset-2 dark:text-blue-300" href={info.processing_consent.privacy_url} target="_blank" rel="noreferrer">
+                Privacy notice
+              </a>
+              <a className="font-medium text-blue-700 underline underline-offset-2 dark:text-blue-300" href={info.processing_consent.rights_url} target="_blank" rel="noreferrer">
+                Your rights
+              </a>
+              {info.processing_consent.event_privacy_url && (
+                <a className="font-medium text-blue-700 underline underline-offset-2 dark:text-blue-300" href={info.processing_consent.event_privacy_url} target="_blank" rel="noreferrer">
+                  Event privacy details
+                </a>
+              )}
+            </nav>
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-800/70">
+              <h3 className="font-semibold text-gray-900 dark:text-gray-100">Confirmation statement</h3>
+              <p className="mt-2">{info.processing_consent.statement}</p>
+            </div>
+            <p className="break-all text-xs text-gray-500 dark:text-gray-400">
+              Policy version {info.processing_consent.policy_version} · SHA-256 {info.processing_consent.policy_sha256}
+            </p>
+            <Button type="button" variant="primary" fullWidth onClick={() => setConsentDetailsOpen(false)}>
+              Return to account setup
+            </Button>
+          </div>
+        </MobileActionSheet>
+      )}
     </div>
   );
 }
