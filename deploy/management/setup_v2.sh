@@ -125,7 +125,9 @@ mp_setup_state_begin() {
           last_failure:null,started_at:$now,updated_at:$now}' \
         > "$temporary" || { rm -f "$temporary"; return 1; }
     chmod 600 "$temporary"
+    sync -f "$temporary" 2>/dev/null || { rm -f "$temporary"; return 1; }
     mv "$temporary" "$MP_SETUP_V2_STATE"
+    sync -f "$(dirname "$MP_SETUP_V2_STATE")" 2>/dev/null || return 1
 }
 
 mp_setup_state_update() {
@@ -136,7 +138,9 @@ mp_setup_state_update() {
         "$filter | .updated_at=\$now" "$MP_SETUP_V2_STATE" > "$temporary" \
         || { rm -f "$temporary"; return 1; }
     chmod 600 "$temporary"
+    sync -f "$temporary" 2>/dev/null || { rm -f "$temporary"; return 1; }
     mv "$temporary" "$MP_SETUP_V2_STATE"
+    sync -f "$(dirname "$MP_SETUP_V2_STATE")" 2>/dev/null || return 1
 }
 
 mp_setup_state_action() {
@@ -277,11 +281,11 @@ mp_setup_wait_for_root_commissioning() (
 
 mp_setup_register_root_passkey() {
     mp_setup_state_action "Root commissioning — Step 1 of 3" || return 1
-    mp_wait_for_health 45 || {
+    mp_wait_for_public_health 45 || {
         ui_error "The pinned application is not publicly healthy, so root commissioning was not presented."
         return 1
     }
-    curl -fsS --max-time 10 "https://$(mp_env_get DOMAIN)/api/v1/passkey/bootstrap-status" \
+    mp_public_https_get /api/v1/passkey/bootstrap-status \
         | jq -e 'has("needs_bootstrap") and has("stage")' >/dev/null || {
         ui_error "The pinned application health endpoint passed, but root bootstrap status is unavailable."
         return 1
@@ -307,6 +311,65 @@ mp_setup_verify_exact_environment() {
     done
 }
 
+# Prove an already-running signed deployment from immutable local facts. This
+# allows setup to recover the narrow window where deployment succeeded but SSH
+# ended before the checkpoint was written.
+mp_setup_verify_signed_application() {
+    local baseline_tag baseline_commit release_tag release_commit service key expected container actual
+    MP_SIGNED_DEPLOYMENT_FAILURE_CODE=SIGNED_DEPLOYMENT_FACTS_MISMATCH
+    MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE="The installed signed-release identity does not match the commissioning baseline."
+    baseline_tag="$(jq -r '.signed_baseline.tag // empty' "$MP_SETUP_V2_STATE" 2>/dev/null || true)"
+    baseline_commit="$(jq -r '.signed_baseline.commit // empty' "$MP_SETUP_V2_STATE" 2>/dev/null || true)"
+    release_tag="$(sed -n 's/^MP_RELEASE_TAG=//p' "$MP_ROOT/.release.env" 2>/dev/null | head -1)"
+    release_commit="$(sed -n 's/^MP_RELEASE_COMMIT=//p' "$MP_ROOT/.release.env" 2>/dev/null | head -1)"
+    [ -n "$baseline_tag" ] && [[ "$baseline_commit" =~ ^[0-9a-f]{40}$ ]] \
+        && [ "$release_tag" = "$baseline_tag" ] && [ "$release_commit" = "$baseline_commit" ] \
+        || return 1
+    mp_compose_init >/dev/null 2>&1 && mp_compose_validate >/dev/null 2>&1 || return 1
+    for service in db backend caddy; do
+        case "$service" in
+            db) key=MP_POSTGRES_IMAGE ;;
+            backend) key=MP_BACKEND_IMAGE ;;
+            caddy) key=MP_CADDY_IMAGE ;;
+        esac
+        expected="$(sed -n "s/^${key}=//p" "$MP_ROOT/.release.env" | head -1)"
+        [[ "$expected" =~ ^ghcr\.io/brian-funk/masterplanoptimiserv3---server/(backend|caddy|postgres)@sha256:[0-9a-f]{64}$ ]] \
+            || return 1
+        docker image inspect "$expected" >/dev/null 2>&1 || return 1
+        container="$("${MP_COMPOSE[@]}" ps -q "$service" 2>/dev/null)"
+        [ -n "$container" ] || return 1
+        [ "$(docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null)" = true ] || return 1
+        actual="$(docker inspect --format '{{.Config.Image}}' "$container" 2>/dev/null)"
+        [ "$actual" = "$expected" ] || return 1
+    done
+    expected="$(sed -n 's/^MP_TOOLS_IMAGE=//p' "$MP_ROOT/.release.env" | head -1)"
+    [[ "$expected" =~ ^ghcr\.io/brian-funk/masterplanoptimiserv3---server/tools@sha256:[0-9a-f]{64}$ ]] \
+        && docker image inspect "$expected" >/dev/null 2>&1 || return 1
+    MP_SIGNED_DEPLOYMENT_FAILURE_CODE=LOCAL_DATABASE_UNHEALTHY
+    MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE="The signed containers are present, but PostgreSQL or the canonical schema is not ready."
+    mp_wait_for_database 1 >/dev/null 2>&1 \
+        && mp_verify_database_schema_contract >/dev/null 2>&1 || return 2
+    MP_SIGNED_DEPLOYMENT_FAILURE_CODE=LOCAL_BACKEND_UNHEALTHY
+    MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE="The signed Backend container is running, but its local health endpoint is unavailable."
+    mp_wait_for_backend_health 1 || return 3
+    MP_SIGNED_DEPLOYMENT_FAILURE_CODE=CADDY_CONFIGURATION_INVALID
+    MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE="The signed Caddy container is running, but its active configuration is invalid."
+    mp_caddy_validate >/dev/null 2>&1 || return 4
+    MP_SIGNED_DEPLOYMENT_FAILURE_CODE=ORIGIN_TLS_UNHEALTHY
+    MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE="The local certificate-bound HTTPS origin is unavailable. Public DNS was not used for this check."
+    mp_wait_for_origin_tls_health 1 || return 5
+    MP_SIGNED_DEPLOYMENT_FAILURE_CODE=""
+    MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE=""
+}
+
+mp_setup_record_signed_deployment_failure() {
+    local code="${MP_SIGNED_DEPLOYMENT_FAILURE_CODE:-SIGNED_DEPLOYMENT_FACTS_MISMATCH}"
+    local message="${MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE:-The signed deployment could not be verified.}"
+    mp_setup_state_failure "$code" "$message" || true
+    ui_error "$message"
+    return 1
+}
+
 mp_setup_reconcile_unsigned_application() {
     local commit receipt mode failure_stage
     local -a deploy_args
@@ -324,8 +387,8 @@ mp_setup_reconcile_unsigned_application() {
         mp_setup_verify_exact_environment "$commit" || return 1
         mp_compose_init || return 1
         "${MP_COMPOSE[@]}" up -d db backend caddy || return 1
-        mp_wait_for_database 30 && mp_verify_database_schema_contract && mp_wait_for_health 45 \
-            || { ui_error "The exact deployment receipt exists, but its database, schema, containers, or public health could not be recovered."; return 1; }
+        mp_wait_for_database 30 && mp_verify_database_schema_contract && mp_wait_for_local_health 45 \
+            || { ui_error "The exact deployment receipt exists, but its database, schema, containers, or local TLS health could not be recovered."; return 1; }
         return 0
     fi
     mp_setup_state_action "Building pinned commit" || return 1
@@ -342,7 +405,7 @@ mp_setup_reconcile_unsigned_application() {
             return 1
         }
     [ "$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)" = "$commit" ] \
-        && mp_setup_verify_exact_environment "$commit" && mp_wait_for_health 45
+        && mp_setup_verify_exact_environment "$commit" && mp_wait_for_local_health 45
 }
 
 mp_setup_deploy_application() {
@@ -354,19 +417,22 @@ mp_setup_deploy_application() {
         signed)
             [ -z "$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")" ] \
                 || { ui_error "Signed commissioning must not contain a campaign commit."; return 1; }
+            if mp_setup_verify_signed_application; then
+                return 0
+            fi
             if mp_setup_state_has application_deployed; then
                 mp_setup_state_action "Recovering signed deployment" || return 1
-                mp_compose_init && "${MP_COMPOSE[@]}" up -d db backend caddy && mp_wait_for_health 45
+                mp_compose_init && "${MP_COMPOSE[@]}" up -d db backend caddy || return 1
             else
                 mp_setup_state_action "Deploying signed release" || return 1
                 case "$mode" in
                     standalone-new|ha-primary-new)
-                        "$MP_ROOT/deploy/deploy.sh" --no-pull --fresh-commissioning \
-                            && mp_wait_for_health 45
+                        "$MP_ROOT/deploy/deploy.sh" --no-pull --fresh-commissioning
                         ;;
-                    *) "$MP_ROOT/deploy/deploy.sh" --no-pull && mp_wait_for_health 45 ;;
+                    *) "$MP_ROOT/deploy/deploy.sh" --no-pull ;;
                 esac
             fi
+            mp_setup_verify_signed_application || mp_setup_record_signed_deployment_failure
             ;;
         *) ui_error "The setup deployment lane is invalid."; return 1 ;;
     esac
@@ -415,7 +481,7 @@ mp_setup_activate_converted_unsigned_pair() {
     mp_compose_validate || return 1
     "${MP_COMPOSE[@]}" up -d db backend caddy || return 1
     mp_setup_state_action "Verifying Node A HA health" || return 1
-    mp_wait_for_database 30 && mp_verify_database_schema_contract && mp_wait_for_health 45 \
+    mp_wait_for_database 30 && mp_verify_database_schema_contract && mp_wait_for_local_health 45 \
         || { ui_error "Node A could not activate the reconciled unsigned HA topology."; return 1; }
 }
 
@@ -523,23 +589,28 @@ mp_setup_witness_call() {
             "$action" "$witness" "$cluster"
 }
 
-mp_setup_repair_witness_admin_secret() {
-    local cluster_id="$1" admin_token="$2" deploy_token tools_image worker_name secrets_file output
-    ui_message "Repair HA witness access" \
-        "The deployed witness rejected its protected administrator binding. Re-enter the temporary Worker deployment token to atomically rebind that one secret. The existing long-lived DNS secret is preserved."
+mp_setup_repair_witness_admin_secret_scoped() (
+    local cluster_id="$1" admin_token="$2" deploy_token tools_image worker_name secrets_file="" output=""
+    cleanup() {
+        mp_secure_remove_file "$secrets_file" || true
+        [ -z "$output" ] || rm -f -- "$output"
+        unset deploy_token
+    }
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     deploy_token="$(ui_password "Cloudflare" "Temporary Worker deployment API token")" || return 1
     [ "${#deploy_token}" -ge 32 ] \
-        || { unset deploy_token; ui_error "The Cloudflare token appears incomplete."; return 1; }
+        || { ui_error "The Cloudflare token appears incomplete."; return 1; }
     tools_image="$(sed -n 's/^MP_TOOLS_IMAGE=//p' "$MP_ROOT/.release.env" | head -1)"
     [[ "$tools_image" =~ ^ghcr\.io/brian-funk/masterplanoptimiserv3---server/tools@sha256:[0-9a-f]{64}$ ]] \
-        || { unset deploy_token; ui_error "The signed release does not contain the commissioning tools image."; return 1; }
+        || { ui_error "The signed release does not contain the commissioning tools image."; return 1; }
     worker_name="mp-opt-ha-$(tr -cd 'a-z0-9' <<< "${cluster_id:0:12}")"
     secrets_file="$(mktemp "$MP_STATE/wrangler-secrets.XXXXXX")" || return 1
-    output="$(mktemp "$MP_STATE/wrangler-repair.XXXXXX")" \
-        || { mp_secure_remove_file "$secrets_file"; return 1; }
+    output="$(mktemp "$MP_STATE/wrangler-repair.XXXXXX")" || return 1
     jq -n --arg admin "$admin_token" '{ADMIN_TOKEN:$admin}' > "$secrets_file" \
-        && chmod 600 "$secrets_file" \
-        || { mp_secure_remove_file "$secrets_file"; rm -f "$output"; unset deploy_token; return 1; }
+        && chmod 600 "$secrets_file" || return 1
     docker run --rm \
         -e CLOUDFLARE_API_TOKEN="$deploy_token" \
         -v "$MP_ROOT/infra/cloudflare-ha-witness:/worker:ro" \
@@ -547,16 +618,28 @@ mp_setup_repair_witness_admin_secret() {
         "$tools_image" deploy /worker/src/index.ts --config /worker/wrangler.toml \
             --name "$worker_name" --secrets-file /run/mp-opt-witness-secrets.json \
         > "$output" 2>&1 \
-        || { ui_text_file "Worker credential repair failed" "$output"; \
-            mp_secure_remove_file "$secrets_file"; rm -f "$output"; unset deploy_token; return 1; }
-    mp_secure_remove_file "$secrets_file"
-    rm -f "$output"
-    unset deploy_token
+        || { ui_text_file "Worker credential repair failed" "$output"; return 1; }
+)
+
+mp_setup_repair_witness_admin_secret() {
+    local cluster_id="$1" admin_token="$2"
+    ui_message "Repair HA witness access" \
+        "The deployed witness rejected its protected administrator binding. Re-enter the temporary Worker deployment token to atomically rebind that one secret. The existing long-lived DNS secret is preserved."
+    mp_setup_repair_witness_admin_secret_scoped "$cluster_id" "$admin_token"
 }
 
-mp_setup_deploy_witness() {
+mp_setup_deploy_witness_scoped() (
     local domain="$1" cluster_id="$2" deploy_token dns_token admin_token worker_name tools_image
-    local output witness zone_id secrets_file
+    local output="" witness zone_id secrets_file=""
+    cleanup() {
+        mp_secure_remove_file "$secrets_file" || true
+        [ -z "$output" ] || rm -f -- "$output"
+        unset deploy_token dns_token admin_token
+    }
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     deploy_token="$(ui_password "Cloudflare" "Temporary Worker deployment API token")" || return 1
     dns_token="$(ui_password "Cloudflare" "Long-lived zone-scoped DNS Edit + Zone Read API token")" || return 1
     [ "${#deploy_token}" -ge 32 ] && [ "${#dns_token}" -ge 32 ] \
@@ -570,14 +653,10 @@ mp_setup_deploy_witness() {
     worker_name="mp-opt-ha-$(tr -cd 'a-z0-9' <<< "${cluster_id:0:12}")"
     admin_token="$(mp_random_secret)"
     secrets_file="$(mktemp "$MP_STATE/wrangler-secrets.XXXXXX")" || return 1
-    output="$(mktemp "$MP_STATE/wrangler-deploy.XXXXXX")" \
-        || { mp_secure_remove_file "$secrets_file"; \
-            unset deploy_token dns_token admin_token; return 1; }
+    output="$(mktemp "$MP_STATE/wrangler-deploy.XXXXXX")" || return 1
     jq -n --arg admin "$admin_token" --arg dns "$dns_token" \
         '{ADMIN_TOKEN:$admin,CLOUDFLARE_DNS_API_TOKEN:$dns}' > "$secrets_file" \
-        && chmod 600 "$secrets_file" \
-        || { mp_secure_remove_file "$secrets_file"; rm -f "$output"; \
-            unset deploy_token dns_token admin_token; return 1; }
+        && chmod 600 "$secrets_file" || return 1
     docker run --rm \
         -e CLOUDFLARE_API_TOKEN="$deploy_token" \
         -v "$MP_ROOT/infra/cloudflare-ha-witness:/worker:ro" \
@@ -585,20 +664,25 @@ mp_setup_deploy_witness() {
         "$tools_image" deploy /worker/src/index.ts --config /worker/wrangler.toml \
             --name "$worker_name" --secrets-file /run/mp-opt-witness-secrets.json \
         > "$output" 2>&1 \
-        || { ui_text_file "Worker deployment failed" "$output"; \
-            mp_secure_remove_file "$secrets_file"; rm -f "$output"; \
-            unset deploy_token dns_token admin_token; return 1; }
-    mp_secure_remove_file "$secrets_file"
+        || { ui_text_file "Worker deployment failed" "$output"; return 1; }
     witness="$(grep -Eo 'https://[^[:space:]]+\.workers\.dev' "$output" | tail -1)"
-    rm -f "$output"
     [ -n "$witness" ] || witness="$(ui_input "Cloudflare Worker" "Deployed Worker HTTPS URL")" || return 1
     [[ "$witness" =~ ^https://[^[:space:]]+\.workers\.dev/?$ ]] \
         || { ui_error "The deployed Worker URL is invalid."; return 1; }
-    MP_SETUP_WITNESS_URL="${witness%/}"
-    MP_SETUP_ZONE_ID="$zone_id"
-    MP_SETUP_WITNESS_ADMIN_TOKEN="$admin_token"
+    jq -cn --arg witness "${witness%/}" --arg zone "$zone_id" --arg admin "$admin_token" \
+        '{witness_url:$witness,zone_id:$zone,admin_token:$admin}'
+)
+
+mp_setup_deploy_witness() {
+    local domain="$1" cluster_id="$2" result
+    result="$(mp_setup_deploy_witness_scoped "$domain" "$cluster_id")" || return 1
+    jq -e '.witness_url | test("^https://[^[:space:]]+\\.workers\\.dev$")' \
+        <<< "$result" >/dev/null || { unset result; return 1; }
+    MP_SETUP_WITNESS_URL="$(jq -r .witness_url <<< "$result")"
+    MP_SETUP_ZONE_ID="$(jq -r .zone_id <<< "$result")"
+    MP_SETUP_WITNESS_ADMIN_TOKEN="$(jq -r .admin_token <<< "$result")"
     export MP_SETUP_WITNESS_URL MP_SETUP_ZONE_ID MP_SETUP_WITNESS_ADMIN_TOKEN
-    unset deploy_token dns_token
+    unset result
 }
 
 mp_setup_verify_smtp_and_dns() {
@@ -621,11 +705,11 @@ mp_setup_verify_smtp_and_dns() {
     ui_copyable_terminal_text "SMTP DNS records" "$records" \
         "Copy the record names needed at the DNS provider. Publish the provider-supplied values, wait for propagation, then press Enter to verify them." \
         || return 1
-    spf="$(dig +short TXT "$domain" | tr -d '"' | grep -m1 'v=spf1' || true)"
-    dmarc="$(dig +short TXT "_dmarc.$domain" | tr -d '"' | grep -m1 'v=DMARC1' || true)"
-    dkim="$(dig +short TXT "${selector}._domainkey.$domain" | tr -d '"' | grep -m1 'v=DKIM1' || true)"
+    spf="$(mp_public_dns_consensus "$domain" TXT | grep -m1 'v=spf1' || true)"
+    dmarc="$(mp_public_dns_consensus "_dmarc.$domain" TXT | grep -m1 'v=DMARC1' || true)"
+    dkim="$(mp_public_dns_consensus "${selector}._domainkey.$domain" TXT | grep -m1 'v=DKIM1' || true)"
     [ -n "$dkim" ] \
-        || dkim="$(dig +short CNAME "${selector}._domainkey.$domain" | grep -m1 '\.' || true)"
+        || dkim="$(mp_public_dns_consensus "${selector}._domainkey.$domain" CNAME | grep -m1 '\.' || true)"
     [ -n "$spf" ] && [ -n "$dmarc" ] && [ -n "$dkim" ] || {
         ui_error "Email delivery authenticated, but public DNS is incomplete. Required records: SPF on ${domain}, DMARC on _dmarc.${domain}, and DKIM on ${selector}._domainkey.${domain}. Publish the exact values supplied by your mail provider, wait for DNS propagation, then resume this checkpoint."
         return 1
@@ -634,23 +718,27 @@ mp_setup_verify_smtp_and_dns() {
 }
 
 mp_setup_standalone_dns_matches() {
-    local domain="$1" public_ip="$2" public_ipv6="${3:-}" answer answer6
-    answer="$(dig +short A "$domain" | grep -Fx "$public_ip" || true)"
-    [ -n "$answer" ] || return 1
+    local domain="$1" public_ip="$2" public_ipv6="${3:-}"
+    mp_public_dns_observe "$domain" A "$public_ip" || return $?
     if [ -n "$public_ipv6" ]; then
-        answer6="$(dig +short AAAA "$domain" | python3 -c 'import ipaddress,sys; expected=ipaddress.IPv6Address(sys.argv[1]); raise SystemExit(0 if any(ipaddress.IPv6Address(line.strip()) == expected for line in sys.stdin if line.strip()) else 1)' "$public_ipv6" 2>/dev/null && printf matched || true)"
-        [ "$answer6" = matched ] || return 1
+        mp_public_dns_observe "$domain" AAAA "$public_ipv6" || return $?
+    else
+        mp_public_dns_observe "$domain" AAAA __absent__ || return $?
     fi
 }
 
 mp_setup_wait_for_standalone_dns() (
     local domain="$1" public_ip="$2" public_ipv6="${3:-}" interval attempt=1 address_label=address
+    local system_answer
     interval="${MP_DNS_POLL_INTERVAL_SECONDS:-30}"
     [[ "$interval" =~ ^[0-9]+$ ]] || interval=30
     trap 'return 130' INT TERM PIPE
     while ! mp_setup_standalone_dns_matches "$domain" "$public_ip" "$public_ipv6"; do
-        printf '[%s] Public DNS is not visible yet (check %d). Retrying in %s seconds.\n' \
-            "$(date -u +%H:%M:%SZ)" "$attempt" "$interval"
+        system_answer="$(timeout 3 getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true)"
+        printf '[%s] Public DNS: %s (%s). Host resolver: %s. Check %d; retrying in %s seconds.\n' \
+            "$(date -u +%H:%M:%SZ)" "${MP_PUBLIC_DNS_STATUS:-pending}" \
+            "${MP_PUBLIC_DNS_DETAILS:-no public response}" "${system_answer:-no answer}" \
+            "$attempt" "$interval"
         sleep "$interval" || return $?
         attempt=$((attempt + 1))
     done
@@ -684,6 +772,101 @@ mp_setup_verify_standalone_dns() {
         "Checking immediately and every 30 seconds. Press Ctrl+C or close SSH to pause safely; commissioning will resume at this checkpoint." \
         mp_setup_wait_for_standalone_dns "$domain" "$public_ip" "$public_ipv6" \
         || { ui_message "DNS wait paused" "Public DNS is not ready yet. No deployment was started; resume commissioning whenever you want to continue the automatic checks."; return 1; }
+    mp_setup_state_update '.public_routing={ipv4:$ipv4,ipv6:(if $ipv6 == "" then null else $ipv6 end)}' \
+        --arg ipv4 "$public_ip" --arg ipv6 "$public_ipv6"
+}
+
+# Wait for the public resolver quorum and the exact expected origin addresses.
+# This never consults the VPS resolver for a success decision.
+mp_setup_wait_for_public_routing() (
+    local domain="$1" public_ip="$2" public_ipv6="${3:-}" interval attempt=1
+    local code message a_details a_status aaaa_details aaaa_status system_answer dns_result
+    interval="${MP_DNS_POLL_INTERVAL_SECONDS:-30}"
+    [[ "$interval" =~ ^[0-9]+$ ]] || interval=30
+    trap 'return 130' INT TERM PIPE
+    while true; do
+        code=""; message=""; dns_result=""
+        if mp_public_dns_observe "$domain" A "$public_ip"; then
+            a_status=ready
+        else
+            case "$?" in
+                2) code=PUBLIC_DNS_QUORUM_UNAVAILABLE; message="Fewer than two independent public DNS resolvers answered." ;;
+                3) code=PUBLIC_DNS_PENDING; message="Public DNS resolvers still disagree." ;;
+                4) code=PUBLIC_DNS_PENDING; message="Public A-record propagation is still incomplete." ;;
+                5) code=PUBLIC_DNS_MISMATCH; message="Public DNS agrees on an address other than the active Node A address." ;;
+                *) code=PUBLIC_DNS_PENDING; message="Public DNS is not ready." ;;
+            esac
+            a_status="$MP_PUBLIC_DNS_STATUS"
+        fi
+        a_details="$MP_PUBLIC_DNS_DETAILS"
+        if [ -z "$code" ]; then
+            if [ -n "$public_ipv6" ]; then
+                mp_public_dns_observe "$domain" AAAA "$public_ipv6" || dns_result=$?
+            else
+                mp_public_dns_observe "$domain" AAAA __absent__ || dns_result=$?
+            fi
+            aaaa_status="$MP_PUBLIC_DNS_STATUS"; aaaa_details="$MP_PUBLIC_DNS_DETAILS"
+            if [ -n "${dns_result:-}" ]; then
+                case "$dns_result" in
+                    2) code=PUBLIC_DNS_QUORUM_UNAVAILABLE; message="Fewer than two independent public DNS resolvers answered for the AAAA record." ;;
+                    3) code=PUBLIC_DNS_PENDING; message="Public DNS resolvers still disagree on the AAAA record." ;;
+                    4) code=PUBLIC_DNS_PENDING; message="Public AAAA-record propagation is still incomplete." ;;
+                    5) code=PUBLIC_DNS_MISMATCH; message="The public AAAA record does not match the configured Node A IPv6 state." ;;
+                    *) code=PUBLIC_DNS_PENDING; message="The public AAAA record is not ready." ;;
+                esac
+            fi
+        else
+            aaaa_status=not-checked; aaaa_details=""
+        fi
+        if [ -z "$code" ] \
+            && ! mp_curl_resolved_address "$domain" "$public_ip" /health >/dev/null 2>&1; then
+            code=PUBLIC_ROUTE_UNHEALTHY
+            message="Public DNS is correct, but the expected IPv4 origin did not pass certificate-bound HTTPS health."
+        elif [ -z "$code" ] && [ -n "$public_ipv6" ] \
+            && ! mp_curl_resolved_address "$domain" "$public_ipv6" /health >/dev/null 2>&1; then
+            code=PUBLIC_ROUTE_UNHEALTHY
+            message="Public DNS is correct, but the expected IPv6 origin did not pass certificate-bound HTTPS health."
+        fi
+        if [ -z "$code" ]; then
+            printf '[%s] Public resolver quorum and HTTPS health are ready for %s.\n' \
+                "$(date -u +%H:%M:%SZ)" "$domain"
+            return 0
+        fi
+        mp_setup_state_failure "$code" "$message" || return 1
+        system_answer="$(timeout 3 getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true)"
+        printf '[%s] %s A=%s [%s] AAAA=%s [%s] Host resolver=%s. Check %d; retrying in %s seconds.\n' \
+            "$(date -u +%H:%M:%SZ)" "$message" "$a_status" "$a_details" \
+            "$aaaa_status" "$aaaa_details" "${system_answer:-no answer}" "$attempt" "$interval"
+        case "$code" in
+            PUBLIC_DNS_MISMATCH|PUBLIC_ROUTE_UNHEALTHY) return 20 ;;
+        esac
+        sleep "$interval" || return $?
+        attempt=$((attempt + 1))
+    done
+)
+
+mp_setup_verify_public_routing() {
+    local domain="$1" public_ip="$2" public_ipv6="${3:-}" code message
+    mp_setup_state_action "Waiting for public DNS and HTTPS" || return 1
+    ui_run_command "Waiting for public routing" \
+        "Checking three independent public resolvers and the exact expected TLS origin every 30 seconds. The VPS resolver is shown only as a diagnostic. Press Ctrl+C or close SSH to pause safely." \
+        mp_setup_wait_for_public_routing "$domain" "$public_ip" "$public_ipv6" || {
+            code="$(jq -r '.last_failure.code // "PUBLIC_DNS_PENDING"' "$MP_SETUP_V2_STATE" 2>/dev/null || printf PUBLIC_DNS_PENDING)"
+            message="$(jq -r '.last_failure.message // "Public routing is not ready."' "$MP_SETUP_V2_STATE" 2>/dev/null || printf 'Public routing is not ready.')"
+            case "$code" in
+                PUBLIC_DNS_MISMATCH)
+                    ui_error "${message} Correct the application-domain DNS record, then resume commissioning. The verified deployment will not run again."
+                    ;;
+                PUBLIC_ROUTE_UNHEALTHY)
+                    ui_error "${message} Verify the public firewall, provider routing and certificate path, then resume commissioning. The verified deployment will not run again."
+                    ;;
+                *)
+                    ui_message "Public routing wait paused" "${code}: ${message}\n\nDeployment remains verified. Resume commissioning to continue DNS and HTTPS checks without redeploying the application."
+                    ;;
+            esac
+            return 1
+        }
+    mp_setup_state_mark public_routing_ready
 }
 
 # Keep the primary's TUI attached to the witness pairing checkpoint.  No
@@ -1153,7 +1336,7 @@ mp_setup_migrate_legacy_load_balancer() {
     for origin in "$node_a_ip" "$node_b_ip"; do
         direct_ready=false
         for _ in $(seq 1 18); do
-            if curl -fsS --max-time 10 --resolve "${domain}:443:${origin}" "https://${domain}/health" >/dev/null; then
+            if mp_curl_resolved_address "$domain" "$origin" /health >/dev/null; then
                 direct_ready=true
                 break
             fi
@@ -1175,7 +1358,7 @@ mp_setup_migrate_legacy_load_balancer() {
     mp_setup_witness_call ready "$witness" "$cluster" "$node_token" "$body" >/dev/null \
         || { rm -f "$body"; ui_error "Direct DNS routing was not activated. Confirm the legacy load balancer is disabled and retry."; return 1; }
     rm -f "$body"; unset node_token
-    if ! curl -fsS --max-time 20 "https://${domain}/health" >/dev/null; then
+    if ! mp_public_https_get /health "$domain" >/dev/null; then
         ui_message "DNS propagation" "Both origins passed direct TLS before cutover and the witness changed the DNS record. Public resolvers may still use the old answer for up to its previous TTL; keep the old load balancer disabled and check public health again after propagation."
     fi
     retirement="$MP_STATE/legacy-load-balancer-retirement.json"
@@ -1250,7 +1433,8 @@ mp_setup_decommission_cloudflare() {
 }
 
 mp_setup_primary_resume() {
-    local cluster witness token body response peer mode pairing_expires pairing_secret join_code domain pending commit
+    local cluster witness token body response peer current mode pairing_expires pairing_secret join_code domain pending commit
+    local public_ip public_ipv6
     [ -s "$MP_SETUP_V2_PENDING_JOIN" ] || { ui_error "The protected pending join record is missing."; return 1; }
     mp_setup_reconcile_primary_campaign_pin || return 1
     mp_load_ha_config || return 1
@@ -1312,6 +1496,15 @@ mp_setup_primary_resume() {
     fi
     peer="$(jq -c --arg peer "$HA_PEER_NODE_ID" '.nodes[] | select(.node_id == $peer)' <<< "$response")"
     [ -n "$peer" ] || { rm -f "$body"; ui_error "The witness did not return the expected peer metadata."; return 1; }
+    current="$(jq -c --arg node "$HA_NODE_ID" '.nodes[] | select(.node_id == $node)' <<< "$response")"
+    [ -n "$current" ] || { rm -f "$body"; ui_error "The witness did not return this node's routing metadata."; return 1; }
+    public_ip="$(jq -r '.ipv4 // empty' <<< "$current")"
+    public_ipv6="$(jq -r '.ipv6 // empty' <<< "$current")"
+    python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$public_ip" >/dev/null 2>&1 \
+        || { rm -f "$body"; ui_error "The witness returned an invalid Node A IPv4 address."; return 1; }
+    [ -z "$public_ipv6" ] \
+        || python3 -c 'import ipaddress,sys; ipaddress.IPv6Address(sys.argv[1])' "$public_ipv6" >/dev/null 2>&1 \
+        || { rm -f "$body"; ui_error "The witness returned an invalid Node A IPv6 address."; return 1; }
     mp_setup_install_peer_trust "$(jq -r .ipv4 <<< "$peer")" \
         "$(jq -r .ssh_public_key <<< "$peer")" "$(jq -r .ssh_host_key <<< "$peer")" \
         "$(jq -r .age_recipient <<< "$peer")" || return 1
@@ -1332,9 +1525,20 @@ mp_setup_primary_resume() {
             mp_setup_activate_converted_unsigned_pair || return 1
         else
             mp_setup_deploy_application || return 1
-            python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null || return 1
         fi
         mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed
+    fi
+    if ! mp_setup_state_has witness_ready; then
+        mp_setup_state_action "Activating public HA routing" || return 1
+        python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null \
+            || { mp_setup_state_failure WITNESS_ROUTING_FAILED "The HA witness did not accept the routing-ready transition." || true; return 1; }
+        mp_setup_state_mark witness_ready
+    fi
+    if ! mp_setup_state_has public_routing_ready; then
+        domain="$(mp_env_get DOMAIN)" || return 1
+        mp_setup_state_update '.public_routing={ipv4:$ipv4,ipv6:(if $ipv6 == "" then null else $ipv6 end)}' \
+            --arg ipv4 "$public_ip" --arg ipv6 "$public_ipv6" || return 1
+        mp_setup_verify_public_routing "$domain" "$public_ip" "$public_ipv6" || return 1
     fi
     if [ "$mode" = ha-primary-new ] && ! mp_setup_state_has root_commissioning_complete; then
         mp_setup_register_root_passkey || return 1
@@ -1388,6 +1592,7 @@ mp_setup_primary_resume() {
 }
 
 mp_setup_standalone() {
+    local public_ip public_ipv6
     if [ ! -f "$MP_SETUP_V2_STATE" ] && [ -f "$MP_ROOT/.env" ]; then
         ui_error "This server is already configured. Use the normal Configuration or Deploy menus instead of starting a fresh installation."
         return 1
@@ -1411,6 +1616,16 @@ mp_setup_standalone() {
         || ! mp_setup_state_has application_deployed; then
         mp_setup_deploy_application || return 1
         mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed
+    fi
+    if ! mp_setup_state_has public_routing_ready; then
+        public_ip="$(jq -r '.public_routing.ipv4 // empty' "$MP_SETUP_V2_STATE")"
+        public_ipv6="$(jq -r '.public_routing.ipv6 // empty' "$MP_SETUP_V2_STATE")"
+        [ -n "$public_ip" ] || {
+            mp_setup_state_failure PUBLIC_DNS_METADATA_MISSING \
+                "The verified public address metadata is missing; a clean commissioning restart is required." || true
+            return 1
+        }
+        mp_setup_verify_public_routing "$(mp_env_get DOMAIN)" "$public_ip" "$public_ipv6" || return 1
     fi
     if ! mp_setup_state_has root_commissioning_complete; then
         mp_setup_register_root_passkey || return 1
@@ -1459,6 +1674,15 @@ mp_setup_restore_full_loss() {
         mp_setup_state_mark restored
     fi
     mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed
+    if ! mp_setup_state_has public_routing_ready; then
+        mp_setup_state_action "Verifying restored public routing" || return 1
+        mp_wait_for_public_health 45 || {
+            mp_setup_state_failure PUBLIC_ROUTE_UNHEALTHY \
+                "The restored application is locally healthy, but resolver-independent public HTTPS health is unavailable." || true
+            return 1
+        }
+        mp_setup_state_mark public_routing_ready
+    fi
     if ! mp_setup_state_has validated; then
         mp_validate_installation || return 1
         mp_setup_state_mark validated
@@ -1472,7 +1696,7 @@ mp_setup_restore_full_loss() {
 }
 
 mp_setup_v2() {
-    local choice mode state role action status=0 completed_state=false
+    local choice mode state role action failure_code failure_message status=0 completed_state=false
     if [ -f "$MP_SETUP_V2_STATE" ]; then
         state="$(jq -r '.state // "invalid"' "$MP_SETUP_V2_STATE" 2>/dev/null || printf invalid)"
         mode="$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE" 2>/dev/null || true)"
@@ -1484,8 +1708,10 @@ mp_setup_v2() {
             ui_error "The setup checkpoint is invalid. Inspect $MP_SETUP_V2_STATE before continuing."
             return 1
         else
+            failure_code="$(jq -r '.last_failure.code // empty' "$MP_SETUP_V2_STATE" 2>/dev/null || true)"
+            failure_message="$(jq -r '.last_failure.message // empty' "$MP_SETUP_V2_STATE" 2>/dev/null || true)"
             ui_continue_message "Resuming commissioning" \
-                "Current action: $(jq -r '.current_action // "Reconcile setup"' "$MP_SETUP_V2_STATE"). Deployment lane: $(jq -r '.deployment_lane' "$MP_SETUP_V2_STATE"). The pinned target will not change."
+                "Current action: $(jq -r '.current_action // "Reconcile setup"' "$MP_SETUP_V2_STATE").$([ -z "$failure_code" ] || printf '\n\nLast verified status: %s — %s' "$failure_code" "$failure_message") Deployment lane: $(jq -r '.deployment_lane' "$MP_SETUP_V2_STATE"). The pinned target will not change."
         fi
     fi
     if [ -z "${mode:-}" ]; then
@@ -1552,8 +1778,10 @@ mp_setup_v2() {
         action="$(jq -r '.current_action // "the current action"' "$MP_SETUP_V2_STATE" 2>/dev/null || printf 'the current action')"
         jq -e '.last_failure != null' "$MP_SETUP_V2_STATE" >/dev/null 2>&1 \
             || mp_setup_state_failure "SETUP_ACTION_PAUSED" "${action} did not complete; resume will reconcile authoritative deployment facts before retrying." || true
+        failure_code="$(jq -r '.last_failure.code // "SETUP_ACTION_PAUSED"' "$MP_SETUP_V2_STATE" 2>/dev/null || printf SETUP_ACTION_PAUSED)"
+        failure_message="$(jq -r '.last_failure.message // "Resume commissioning to retry the verified checkpoint."' "$MP_SETUP_V2_STATE" 2>/dev/null || printf 'Resume commissioning to retry the verified checkpoint.')"
         ui_message "Commissioning paused" \
-            "Current action: ${action}. The exact lane and commit remain pinned. Run mp-opt to resume; setup will not fall back to another deployment."
+            "${failure_code}: ${failure_message}\n\nCurrent action: ${action}. The exact lane and commit remain pinned. Run mp-opt to resume; setup will not fall back to another deployment."
         return 0
     fi
     return "$status"
