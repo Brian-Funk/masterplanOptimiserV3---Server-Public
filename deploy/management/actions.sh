@@ -1935,8 +1935,14 @@ mp_validate_installation() {
         if mp_compose_validate; then printf 'valid\n'; else printf 'INVALID\n'; failed=1; fi
         printf 'Caddy: '
         if mp_caddy_validate >/dev/null 2>&1; then printf '%s: valid\n' "$(mp_caddy_mode)"; else printf '%s: INVALID\n' "$(mp_caddy_mode)"; failed=1; fi
-        printf 'Public health: '
-        if mp_public_https_get /health >/dev/null; then printf 'healthy\n'; else printf 'UNAVAILABLE\n'; failed=1; fi
+        printf 'Local certificate-bound origin: '
+        if mp_origin_tls_health_once; then printf 'healthy\n'; else printf 'UNAVAILABLE\n'; failed=1; fi
+        printf 'Public route observation: '
+        if mp_public_https_get /health >/dev/null; then
+            printf 'healthy\n'
+        else
+            printf 'unavailable (reported separately; local installation remains valid)\n'
+        fi
         printf '\nProtected files\n'
         mp_permissions_report
         mp_validate_protected_file_modes || failed=1

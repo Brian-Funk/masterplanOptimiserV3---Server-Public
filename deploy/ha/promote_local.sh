@@ -31,11 +31,13 @@ mp_compose_init
 "${MP_COMPOSE[@]}" up -d db >/dev/null
 current_generation="$("${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U masterplan -d masterplan -Atqc \
     "SELECT generation::text || ':' || active_node_id FROM ha_cluster_state WHERE id = 1" 2>/dev/null || true)"
+ownership_changed=false
 
 # Cloudflare routing can fail after the database promotion.  The lease agent
 # retries that final step, so promotion must be safe to repeat without revoking
 # freshly-created sessions or rotating publish credentials a second time.
 if [ "$current_generation" != "${generation}:${HA_NODE_ID}" ] || [ "$force_revoke" = "--force-revoke" ]; then
+    ownership_changed=true
     "${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U masterplan -d masterplan \
         --set=cluster_id="$HA_CLUSTER_ID" --set=generation="$generation" --set=node_id="$HA_NODE_ID" <<'SQL'
 BEGIN;
@@ -59,18 +61,24 @@ COMMIT;
 SQL
 fi
 
-# A registered root passkey makes the bootstrap bearer unnecessary. Ensure a
-# replicated or restored bootstrap code cannot survive an ownership change.
-registered_root="$("${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 \
-    -U masterplan -d masterplan -Atqc \
-    'SELECT EXISTS (SELECT 1 FROM users u JOIN webauthn_credentials c ON c.user_id=u.id WHERE u.is_root_admin)' \
-    2>/dev/null || true)"
-if [ "$registered_root" = "t" ]; then
-    : > "$MP_ROOT/secrets/root_bootstrap_token"
-    chmod 0640 "$MP_ROOT/secrets/root_bootstrap_token"
+if [ "$ownership_changed" = true ]; then
+    # A registered root passkey makes the bootstrap bearer unnecessary. Ensure
+    # a replicated or restored bootstrap code cannot survive an ownership change.
+    registered_root="$("${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 \
+        -U masterplan -d masterplan -Atqc \
+        'SELECT EXISTS (SELECT 1 FROM users u JOIN webauthn_credentials c ON c.user_id=u.id WHERE u.is_root_admin)' \
+        2>/dev/null || true)"
+    if [ "$registered_root" = "t" ]; then
+        : > "$MP_ROOT/secrets/root_bootstrap_token"
+        chmod 0640 "$MP_ROOT/secrets/root_bootstrap_token"
+    fi
+    "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend >/dev/null
+else
+    # Commissioning may register an already-correct initial generation with the
+    # witness. A no-op ownership confirmation must not race setup by recreating
+    # the healthy backend.
+    "${MP_COMPOSE[@]}" up -d --no-deps backend >/dev/null
 fi
-
-"${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend >/dev/null
 for _ in $(seq 1 30); do
     if "${MP_COMPOSE[@]}" exec -T backend python -c \
         'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3).read()' \

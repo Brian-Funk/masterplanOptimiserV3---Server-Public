@@ -127,6 +127,9 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
         self.assertNotIn('chmod 600 "$MP_ROOT/secrets/root_bootstrap_token"', PROMOTE)
         self.assertLess(PROMOTE.index(retire), PROMOTE.index(prepare))
         self.assertLess(PROMOTE.index(prepare), PROMOTE.index(restart))
+        self.assertIn("ownership_changed=false", PROMOTE)
+        self.assertIn('[ "$ownership_changed" = true ]', PROMOTE)
+        self.assertIn('up -d --no-deps backend', PROMOTE)
 
     def test_logout_is_single_flight_visible_and_does_not_change_admin_tabs(self) -> None:
         self.assertIn("logoutPromise = useRef<Promise<boolean> | null>(null)", AUTH_CONTEXT)

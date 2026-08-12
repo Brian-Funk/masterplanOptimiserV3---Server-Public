@@ -324,6 +324,21 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
             "/var/lib/postgresql/data",
         ):
             self.assertIn(path, effective)
+        self.assertIn("mp_origin_tls_health_once", validation)
+        self.assertIn("local installation remains valid", validation)
+        self.assertNotIn("mp_public_https_get /health >/dev/null; then printf 'healthy\\n'; else", validation)
+
+    def test_caddy_validation_distinguishes_service_exec_and_configuration_failures(self) -> None:
+        validation = function_body(COMMON_SOURCE, "mp_caddy_validate")
+        for code in (
+            "CADDY_CONTAINER_UNAVAILABLE",
+            "CADDY_EXECUTION_FAILED",
+            "CADDY_CONFIGURATION_INVALID",
+            "CADDY_SERVICE_UNAVAILABLE",
+            "CADDY_TOPOLOGY_UNAVAILABLE",
+        ):
+            self.assertIn(code, validation)
+        self.assertLess(validation.index("caddy version"), validation.index("caddy validate"))
 
     def test_systemd_permission_contract_accepts_optional_missing_path_prefix(self) -> None:
         script = f'''

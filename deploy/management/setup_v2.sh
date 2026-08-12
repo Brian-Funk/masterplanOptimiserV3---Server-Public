@@ -122,6 +122,8 @@ mp_setup_state_begin() {
         '{format:"mp-opt-setup-state-v2",mode:$mode,state:"in_progress",
           deployment_lane:$lane,campaign_commit:(if $commit == "" then null else $commit end),
           signed_baseline:null,completed:[],current_action:"Verifying signed rollback baseline",
+          current_action_code:"SIGNED_BASELINE_VERIFY",current_checkpoint:"signed_baseline_verified",
+          action_started_at:$now,last_completed_action:null,
           last_failure:null,started_at:$now,updated_at:$now}' \
         > "$temporary" || { rm -f "$temporary"; return 1; }
     chmod 600 "$temporary"
@@ -144,13 +146,20 @@ mp_setup_state_update() {
 }
 
 mp_setup_state_action() {
-    mp_setup_state_update '.current_action=$action | .last_failure=null' --arg action "$1"
+    local action="$1" code="${2:-SETUP_ACTION}" checkpoint="${3:-}"
+    mp_setup_state_update \
+        '.current_action=$action | .current_action_code=$code
+         | .current_checkpoint=(if $checkpoint == "" then null else $checkpoint end)
+         | .action_started_at=$now | .last_failure=null' \
+        --arg action "$action" --arg code "$code" --arg checkpoint "$checkpoint"
 }
 
 mp_setup_state_failure() {
     local code="$1" message="${2:0:400}"
     mp_setup_state_update \
-        '.last_failure={code:$code,message:$message,at:$now}' \
+        '.last_failure={code:$code,message:$message,at:$now,
+          action_code:(.current_action_code // "SETUP_ACTION"),
+          checkpoint:(.current_checkpoint // null)}' \
         --arg code "$code" --arg message "$message"
 }
 
@@ -173,7 +182,14 @@ mp_setup_state_has() {
 }
 
 mp_setup_state_mark() {
-    mp_setup_state_update '.completed=((.completed + [$step]) | unique) | .last_failure=null' --arg step "$1"
+    mp_setup_state_update \
+        '.completed=((.completed + [$step]) | unique)
+         | .last_completed_action={checkpoint:$step,
+             action_code:(.current_action_code // "SETUP_ACTION"),
+             label:(.current_action // "Commissioning step"),completed_at:$now}
+         | .current_action="Reconciling the next commissioning step"
+         | .current_action_code="SETUP_RECONCILING" | .current_checkpoint=null
+         | .action_started_at=null | .last_failure=null' --arg step "$1"
 }
 
 mp_setup_state_complete() {
@@ -280,7 +296,8 @@ mp_setup_wait_for_root_commissioning() (
 )
 
 mp_setup_register_root_passkey() {
-    mp_setup_state_action "Root commissioning — Step 1 of 3" || return 1
+    mp_setup_state_action "Root commissioning — Step 1 of 3" \
+        ROOT_COMMISSIONING root_commissioning_complete || return 1
     mp_wait_for_public_health 45 || {
         ui_error "The pinned application is not publicly healthy, so root commissioning was not presented."
         return 1
@@ -352,9 +369,11 @@ mp_setup_verify_signed_application() {
     MP_SIGNED_DEPLOYMENT_FAILURE_CODE=LOCAL_BACKEND_UNHEALTHY
     MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE="The signed Backend container is running, but its local health endpoint is unavailable."
     mp_wait_for_backend_health 1 || return 3
-    MP_SIGNED_DEPLOYMENT_FAILURE_CODE=CADDY_CONFIGURATION_INVALID
-    MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE="The signed Caddy container is running, but its active configuration is invalid."
-    mp_caddy_validate >/dev/null 2>&1 || return 4
+    if ! mp_caddy_validate >/dev/null 2>&1; then
+        MP_SIGNED_DEPLOYMENT_FAILURE_CODE="${MP_CADDY_FAILURE_CODE:-CADDY_VALIDATION_FAILED}"
+        MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE="${MP_CADDY_FAILURE_MESSAGE:-The signed Caddy service could not be validated.}"
+        return 4
+    fi
     MP_SIGNED_DEPLOYMENT_FAILURE_CODE=ORIGIN_TLS_UNHEALTHY
     MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE="The local certificate-bound HTTPS origin is unavailable. Public DNS was not used for this check."
     mp_wait_for_origin_tls_health 1 || return 5
@@ -383,15 +402,18 @@ mp_setup_reconcile_unsigned_application() {
         return 1
     fi
     if [ "$receipt" = "$commit" ]; then
-        mp_setup_state_action "Recovering exact deployment" || return 1
+        mp_setup_state_action "Recovering exact deployment" \
+            UNSIGNED_DEPLOYMENT_RECOVERY application_deployed || return 1
         mp_setup_verify_exact_environment "$commit" || return 1
         mp_compose_init || return 1
         "${MP_COMPOSE[@]}" up -d db backend caddy || return 1
-        mp_wait_for_database 30 && mp_verify_database_schema_contract && mp_wait_for_local_health 45 \
+        mp_wait_for_database 30 && mp_verify_database_schema_contract \
+            && mp_wait_for_stable_local_services 45 3 \
             || { ui_error "The exact deployment receipt exists, but its database, schema, containers, or local TLS health could not be recovered."; return 1; }
         return 0
     fi
-    mp_setup_state_action "Building pinned commit" || return 1
+    mp_setup_state_action "Building pinned commit" \
+        UNSIGNED_DEPLOYMENT_BUILD application_deployed || return 1
     deploy_args=(apply "$commit" --confirm-full --confirm-migrations)
     case "$mode" in standalone-new|ha-primary-new|ha-join) deploy_args+=(--fresh-commissioning) ;; esac
     ui_run_command "Install exact test-campaign build" \
@@ -405,7 +427,8 @@ mp_setup_reconcile_unsigned_application() {
             return 1
         }
     [ "$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)" = "$commit" ] \
-        && mp_setup_verify_exact_environment "$commit" && mp_wait_for_local_health 45
+        && mp_setup_verify_exact_environment "$commit" \
+        && mp_wait_for_stable_local_services 45 3
 }
 
 mp_setup_deploy_application() {
@@ -421,10 +444,12 @@ mp_setup_deploy_application() {
                 return 0
             fi
             if mp_setup_state_has application_deployed; then
-                mp_setup_state_action "Recovering signed deployment" || return 1
+                mp_setup_state_action "Recovering signed deployment" \
+                    SIGNED_DEPLOYMENT_RECOVERY application_deployed || return 1
                 mp_compose_init && "${MP_COMPOSE[@]}" up -d db backend caddy || return 1
             else
-                mp_setup_state_action "Deploying signed release" || return 1
+                mp_setup_state_action "Deploying signed release" \
+                    SIGNED_DEPLOYMENT application_deployed || return 1
                 case "$mode" in
                     standalone-new|ha-primary-new)
                         "$MP_ROOT/deploy/deploy.sh" --no-pull --fresh-commissioning
@@ -432,7 +457,13 @@ mp_setup_deploy_application() {
                     *) "$MP_ROOT/deploy/deploy.sh" --no-pull ;;
                 esac
             fi
-            mp_setup_verify_signed_application || mp_setup_record_signed_deployment_failure
+            if ! mp_setup_verify_signed_application; then
+                mp_setup_record_signed_deployment_failure
+            elif ! mp_wait_for_stable_local_services 30 3; then
+                MP_SIGNED_DEPLOYMENT_FAILURE_CODE=LOCAL_SERVICES_UNSTABLE
+                MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE="The signed services did not remain healthy across the commissioning observation window."
+                mp_setup_record_signed_deployment_failure
+            fi
             ;;
         *) ui_error "The setup deployment lane is invalid."; return 1 ;;
     esac
@@ -461,7 +492,8 @@ mp_setup_reconcile_primary_campaign_pin() {
 
 mp_setup_activate_converted_unsigned_pair() {
     local commit key image
-    mp_setup_state_action "Preparing exact images for Node B" || return 1
+    mp_setup_state_action "Preparing exact images for Node B" \
+        PEER_IMAGES_PREPARING application_deployed || return 1
     commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
     [ "$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)" = "$commit" ] \
         || { ui_error "Node A's verified deployment receipt does not match the reconciled campaign pin."; return 1; }
@@ -472,15 +504,18 @@ mp_setup_activate_converted_unsigned_pair() {
             || { ui_error "${key} is unavailable for the verified converted deployment."; return 1; }
     done
     "$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit" || return 1
-    mp_setup_state_action "Installing Node A HA services" || return 1
+    mp_setup_state_action "Installing Node A HA services" \
+        HA_SERVICES_INSTALLING application_deployed || return 1
     "$MP_ROOT/deploy/ha/install_services.sh" || return 1
-    mp_setup_state_action "Activating HA routing" || return 1
+    mp_setup_state_action "Activating HA routing" \
+        WITNESS_ROUTING application_deployed || return 1
     python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null || return 1
     mp_prepare_backend_secret_permissions || return 1
     mp_compose_init || return 1
     mp_compose_validate || return 1
     "${MP_COMPOSE[@]}" up -d db backend caddy || return 1
-    mp_setup_state_action "Verifying Node A HA health" || return 1
+    mp_setup_state_action "Verifying Node A HA health" \
+        LOCAL_SERVICES_VALIDATING application_deployed || return 1
     mp_wait_for_database 30 && mp_verify_database_schema_contract && mp_wait_for_local_health 45 \
         || { ui_error "Node A could not activate the reconciled unsigned HA topology."; return 1; }
 }
@@ -847,7 +882,8 @@ mp_setup_wait_for_public_routing() (
 
 mp_setup_verify_public_routing() {
     local domain="$1" public_ip="$2" public_ipv6="${3:-}" code message
-    mp_setup_state_action "Waiting for public DNS and HTTPS" || return 1
+    mp_setup_state_action "Waiting for public DNS and HTTPS" \
+        PUBLIC_ROUTING_WAIT public_routing_ready || return 1
     ui_run_command "Waiting for public routing" \
         "Checking three independent public resolvers and the exact expected TLS origin every 30 seconds. The VPS resolver is shown only as a diagnostic. Press Ctrl+C or close SSH to pause safely." \
         mp_setup_wait_for_public_routing "$domain" "$public_ip" "$public_ipv6" || {
@@ -931,7 +967,8 @@ mp_setup_primary_create() {
     mp_setup_state_begin "$mode" || return 1
     mp_setup_state_has signed_baseline_verified || mp_setup_install_signed_release || return 1
     if ! mp_setup_state_has configuration; then
-        mp_setup_state_action "Protected configuration" || return 1
+        mp_setup_state_action "Protected configuration" \
+            CONFIGURATION_WRITING configuration || return 1
         MP_SETUP_V2_ACTIVE=1 mp_guided_initial_configuration || return 1
         [ -f "$MP_ROOT/.env" ] || {
             ui_message "Commissioning paused" "The configuration review was cancelled. No configuration checkpoint was recorded; resume setup whenever you are ready."
@@ -941,12 +978,14 @@ mp_setup_primary_create() {
     fi
     domain="$(mp_env_get DOMAIN)" || return 1
     if [ "$mode" = convert-ha ] && ! mp_setup_state_has recovery_recipient; then
-        mp_setup_state_action "Verifying recovery identity" || return 1
+        mp_setup_state_action "Verifying recovery identity" \
+            RECOVERY_IDENTITY_VERIFY recovery_recipient || return 1
         [ -s "$MP_RECIPIENT_FILE" ] || mp_configure_recovery_recipient || return 1
         mp_setup_state_mark recovery_recipient
     fi
     if [ "$mode" = convert-ha ] && ! mp_setup_state_has migration_snapshot; then
-        mp_setup_state_action "Creating migration safety snapshot" || return 1
+        mp_setup_state_action "Creating migration safety snapshot" \
+            MIGRATION_SNAPSHOT_CREATE migration_snapshot || return 1
         mp_prepare_guard_snapshot "single-to-ha" || return 1
         if [ "$(mp_recovery_storage_mode)" = manual_portable ]; then
             mp_snapshot_export_portable_interactive || return 1
@@ -957,7 +996,8 @@ mp_setup_primary_create() {
         mp_setup_state_mark migration_snapshot
     fi
     if ! mp_setup_state_has witness_bootstrap; then
-        mp_setup_state_action "Deploying HA witness" || return 1
+        mp_setup_state_action "Deploying HA witness" \
+            WITNESS_DEPLOYING witness_bootstrap || return 1
         if [ ! -s "$MP_SETUP_V2_PENDING_BOOTSTRAP" ]; then
             mp_setup_prepare_node_material node-a || return 1
             cluster_id="mp-opt-$(cat /proc/sys/kernel/random/uuid)"
@@ -1005,7 +1045,8 @@ mp_setup_primary_create() {
               zone_id:$zone,hostname:$domain,node_a_ipv4:$ipv4,node_a_ipv6:$ipv6,
               node_a_ssh_public_key:$ssh,node_a_ssh_host_key:$host,node_a_age_recipient:$age}' \
             > "$body"
-        mp_setup_state_action "Registering Node A with HA witness" || { rm -f "$body"; return 1; }
+        mp_setup_state_action "Registering Node A with HA witness" \
+            WITNESS_REGISTERING witness_bootstrap || { rm -f "$body"; return 1; }
         bootstrap_ok=false
         repair_attempted=false
         bootstrap_error="$(mktemp "$MP_STATE/witness-bootstrap-error.XXXXXX")" \
@@ -1047,7 +1088,8 @@ mp_setup_primary_create() {
         rm -f "$MP_SETUP_V2_PENDING_BOOTSTRAP"
         unset node_token pairing_secret MP_SETUP_WITNESS_ADMIN_TOKEN
     fi
-    mp_setup_state_action "Waiting for Node B join" || return 1
+    mp_setup_state_action "Waiting for Node B join" \
+        PEER_JOIN_WAIT paired || return 1
     join_code="$(python3 "$MP_ROOT/deploy/ha/pairing.py" encode < "$MP_SETUP_V2_PENDING_JOIN")" || return 1
     ui_copyable_terminal_text "Node B join code" "$join_code" \
         "On the second VPS, start mp-opt, choose Join an existing HA pair with a one-time code, and paste this code within 15 minutes. Return to this window after copying; it will wait and continue automatically." || return 1
@@ -1188,10 +1230,12 @@ mp_setup_join_node() {
     rm -f "$body" "$pair_body" "$MP_SETUP_V2_PENDING_LOCAL_JOIN"; unset pair node_token
     mp_setup_state_mark joined
     if [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ]; then
-        mp_setup_state_action "Waiting for pinned images from Node A"
+        mp_setup_state_action "Waiting for pinned images from Node A" \
+            PEER_IMAGES_WAIT replicated
         ui_message "HA node joined" "The one-time code is consumed for ${node_id}. This node is pinned to $(jq -r .campaign_commit "$MP_SETUP_V2_STATE") and is waiting for Node A to transfer and activate those exact images."
     else
-        mp_setup_state_action "Waiting for first verified copy from Node A"
+        mp_setup_state_action "Waiting for first verified copy from Node A" \
+            FIRST_BUNDLE_WAIT replicated
         ui_message "HA node joined" "The one-time code is consumed for ${node_id}. Peer trust and replication-encryption material were installed. Keep this VPS available. The current holder will verify reciprocal SSH before sending the first protected application copy, and setup completes only after that copy is verified here."
     fi
 }
@@ -1432,6 +1476,49 @@ mp_setup_decommission_cloudflare() {
     ui_message "Cloudflare resources retired" "The HA DNS records, Worker state and Worker were removed. The VPS installations were not changed."
 }
 
+# Bind Node A's commissioning checkpoint to the exact durable sender receipt
+# and Node B's independently written receiver receipt. This makes an SSH loss
+# after acknowledgement resumable without sending a second full copy.
+mp_setup_record_first_verified_bundle() {
+    local sender_file="$MP_ROOT/runtime/ha-last-accepted-bundle.json"
+    local sender receiver bundle sha256 generation accepted_at
+    mp_load_ha_config || return 1
+    [ -s "$sender_file" ] && [ -f "$sender_file" ] && [ ! -L "$sender_file" ] \
+        || return 1
+    sender="$(cat "$sender_file")" || return 1
+    receiver="$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
+        -o ClearAllForwardings=yes "$HA_PEER_SSH" \
+        'cat /opt/masterplan/runtime/ha-receiver.json' 2>/dev/null)" || return 1
+    jq -e --arg source "$HA_NODE_ID" --arg target "$HA_PEER_NODE_ID" '
+        .format == "mp-opt-ha-sender-acceptance-v1"
+        and .source_node_id == $source and .target_node_id == $target
+        and (.bundle_id | type == "string" and length > 0)
+        and (.sha256 | test("^[0-9a-f]{64}$"))
+        and (.generation | type == "number" and . >= 1)
+        and (.accepted_at | type == "string" and length > 0)
+    ' <<< "$sender" >/dev/null || return 1
+    jq -e --arg source "$HA_NODE_ID" '
+        .format == "mp-opt-receiver-state-v2" and .source_node_id == $source
+        and (.last_bundle_id | type == "string" and length > 0)
+        and (.last_bundle_sha256 | test("^[0-9a-f]{64}$"))
+        and (.generation | type == "number" and . >= 1)
+        and (.last_received_at | type == "string" and length > 0)
+    ' <<< "$receiver" >/dev/null || return 1
+    bundle="$(jq -r .bundle_id <<< "$sender")"
+    sha256="$(jq -r .sha256 <<< "$sender")"
+    generation="$(jq -r .generation <<< "$sender")"
+    [ "$bundle" = "$(jq -r .last_bundle_id <<< "$receiver")" ] \
+        && [ "$sha256" = "$(jq -r .last_bundle_sha256 <<< "$receiver")" ] \
+        && [ "$generation" = "$(jq -r .generation <<< "$receiver")" ] \
+        || return 1
+    accepted_at="$(jq -r .last_received_at <<< "$receiver")"
+    mp_setup_state_update \
+        '.first_verified_bundle={bundle_id:$bundle,sha256:$sha256,
+          generation:$generation,accepted_at:$accepted}' \
+        --arg bundle "$bundle" --arg sha256 "$sha256" \
+        --argjson generation "$generation" --arg accepted "$accepted_at"
+}
+
 mp_setup_primary_resume() {
     local cluster witness token body response peer current mode pairing_expires pairing_secret join_code domain pending commit
     local public_ip public_ipv6
@@ -1529,7 +1616,8 @@ mp_setup_primary_resume() {
         mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed
     fi
     if ! mp_setup_state_has witness_ready; then
-        mp_setup_state_action "Activating public HA routing" || return 1
+        mp_setup_state_action "Activating public HA routing" \
+            WITNESS_ROUTING witness_ready || return 1
         python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null \
             || { mp_setup_state_failure WITNESS_ROUTING_FAILED "The HA witness did not accept the routing-ready transition." || true; return 1; }
         mp_setup_state_mark witness_ready
@@ -1551,31 +1639,53 @@ mp_setup_primary_resume() {
         mp_setup_state_mark recovery_recipient
     fi
     if ! mp_setup_state_has replicated; then
-        mp_setup_state_action "Replicating complete application state to Node B" || return 1
-        mp_ha_replicate_now || return 1
-        "$MP_ROOT/deploy/ha/install_services.sh" || return 1
+        mp_setup_state_action "Replicating complete application state to Node B" \
+            FIRST_BUNDLE_TRANSFER replicated || return 1
+        if ! mp_setup_record_first_verified_bundle; then
+            mp_ha_replicate_now || return 1
+            mp_setup_record_first_verified_bundle || {
+                mp_setup_state_failure FIRST_BUNDLE_RECEIPT_MISMATCH \
+                    "Node B may have accepted a copy, but the sender and receiver receipts do not identify the same bundle." || true
+                return 1
+            }
+        fi
         mp_setup_state_mark replicated
+    fi
+    if ! mp_setup_state_has ha_services_activated; then
+        mp_setup_state_action "Activating verified HA services" \
+            HA_SERVICES_ACTIVATING ha_services_activated || return 1
+        "$MP_ROOT/deploy/ha/install_services.sh" || {
+            mp_setup_state_failure HA_SERVICE_ACTIVATION_FAILED \
+                "The first copy is safely accepted, but the local HA services did not activate." || true
+            return 1
+        }
+        mp_setup_state_mark ha_services_activated
     fi
     if [ "$mode" = convert-ha ] \
         && [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ]; then
         commit="$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")"
-        mp_setup_state_action "Finalising Node B exact deployment" || return 1
+        mp_setup_state_action "Finalising Node B exact deployment" \
+            PEER_EXACT_DEPLOYMENT_FINALISING peer_exact_deployment || return 1
         ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
             env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
             /opt/masterplan/deploy/test-deployment.sh internal-finalize-peer "$commit" \
             || { ui_error "Node B accepted the replication bundle but could not record the exact deployment receipt."; return 1; }
     fi
     if ! mp_setup_state_has validated; then
+        mp_setup_state_action "Validating the complete installation" \
+            INSTALLATION_VALIDATING validated || return 1
         mp_validate_installation || return 1
         mp_setup_state_mark validated
     fi
     if ! mp_setup_state_has smtp_verified; then
-        mp_setup_state_action "Verifying SMTP and DNS after HA conversion" || return 1
+        mp_setup_state_action "Verifying SMTP and DNS after HA conversion" \
+            SMTP_VALIDATING smtp_verified || return 1
         mp_setup_verify_smtp_and_dns || return 1
         mp_setup_state_mark smtp_verified
     fi
     if ! mp_setup_state_has automatic_failover; then
-        mp_setup_state_action "Verifying automatic failover readiness" || return 1
+        mp_setup_state_action "Verifying automatic failover readiness" \
+            AUTOMATIC_FAILOVER_VALIDATING automatic_failover || return 1
         mp_ha_refresh_witness_observations || return 1
         mp_ha_active_verification_readiness || return 1
         python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic enabled >/dev/null || return 1
@@ -1600,7 +1710,8 @@ mp_setup_standalone() {
     mp_setup_state_begin standalone-new || return 1
     mp_setup_state_has signed_baseline_verified || mp_setup_install_signed_release || return 1
     if ! mp_setup_state_has configuration; then
-        mp_setup_state_action "Protected configuration" || return 1
+        mp_setup_state_action "Protected configuration" \
+            CONFIGURATION_WRITING configuration || return 1
         MP_SETUP_V2_ACTIVE=1 mp_guided_initial_configuration || return 1
         [ -f "$MP_ROOT/.env" ] || {
             ui_message "Commissioning paused" "The configuration review was cancelled. No configuration checkpoint was recorded; resume setup whenever you are ready."
@@ -1633,10 +1744,14 @@ mp_setup_standalone() {
     fi
     mp_setup_state_mark recovery_recipient
     if ! mp_setup_state_has validated; then
+        mp_setup_state_action "Validating the complete installation" \
+            INSTALLATION_VALIDATING validated || return 1
         mp_validate_installation || return 1
         mp_setup_state_mark validated
     fi
     if ! mp_setup_state_has smtp_verified; then
+        mp_setup_state_action "Verifying SMTP and DNS" \
+            SMTP_VALIDATING smtp_verified || return 1
         mp_setup_verify_smtp_and_dns || return 1
         mp_setup_state_mark smtp_verified
     fi
@@ -1651,7 +1766,8 @@ mp_setup_restore_full_loss() {
     fi
     mp_setup_state_begin full-restore || return 1
     mp_setup_state_has signed_baseline_verified || mp_setup_install_signed_release || return 1
-    mp_setup_state_action "Importing verified recovery snapshot" || return 1
+    mp_setup_state_action "Importing verified recovery snapshot" \
+        RECOVERY_IMPORTING imported || return 1
     ui_message "Full-loss recovery" "Import the latest encrypted portable snapshot. The restore flow verifies its receipt and requires the recovery identity held outside the VPS."
     if ! mp_setup_state_has imported; then
         mp_snapshot_import_portable_interactive || return 1
@@ -1664,6 +1780,8 @@ mp_setup_restore_full_loss() {
     fi
     if ! mp_setup_state_has restored; then
         local imported_snapshot
+        mp_setup_state_action "Restoring the verified application snapshot" \
+            RECOVERY_RESTORING restored || return 1
         imported_snapshot="$(jq -er '.snapshot_path | select(type == "string")' \
             "$MP_SETUP_V2_IMPORT_RECEIPT")" || return 1
         case "$(readlink -f "$imported_snapshot")" in
@@ -1675,7 +1793,8 @@ mp_setup_restore_full_loss() {
     fi
     mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed
     if ! mp_setup_state_has public_routing_ready; then
-        mp_setup_state_action "Verifying restored public routing" || return 1
+        mp_setup_state_action "Verifying restored public routing" \
+            PUBLIC_ROUTING_WAIT public_routing_ready || return 1
         mp_wait_for_public_health 45 || {
             mp_setup_state_failure PUBLIC_ROUTE_UNHEALTHY \
                 "The restored application is locally healthy, but resolver-independent public HTTPS health is unavailable." || true
@@ -1684,10 +1803,14 @@ mp_setup_restore_full_loss() {
         mp_setup_state_mark public_routing_ready
     fi
     if ! mp_setup_state_has validated; then
+        mp_setup_state_action "Validating the restored installation" \
+            INSTALLATION_VALIDATING validated || return 1
         mp_validate_installation || return 1
         mp_setup_state_mark validated
     fi
     if ! mp_setup_state_has smtp_verified; then
+        mp_setup_state_action "Verifying restored SMTP and DNS" \
+            SMTP_VALIDATING smtp_verified || return 1
         mp_setup_verify_smtp_and_dns || return 1
         mp_setup_state_mark smtp_verified
     fi

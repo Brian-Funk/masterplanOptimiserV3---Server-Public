@@ -85,6 +85,7 @@ flock -n 9 || { echo "Replication is already running." >&2; exit 75; }
 stage="$(mktemp -d "$MP_HA_STATE/outgoing/.stage.XXXXXX")"
 snapshot_input=""
 snapshot_pid=""
+accepted_receipt=""
 cleanup() {
     local result="$?"
     set +e
@@ -92,6 +93,7 @@ cleanup() {
         printf 'ROLLBACK;\n\\q\n' >"$snapshot_input" 2>/dev/null || true
     fi
     [ -z "$snapshot_pid" ] || wait "$snapshot_pid" 2>/dev/null || true
+    [ -z "$accepted_receipt" ] || rm -f -- "$accepted_receipt"
     rm -rf "$stage"
     exit "$result"
 }
@@ -242,6 +244,19 @@ fi
 [ "$response" = "ACCEPTED:$job_id:$archive_hash" ] \
     || { echo "The replication acknowledgement was invalid." >&2; exit 22; }
 update_operation_stage verifying
+accepted_receipt="$(mktemp "$MP_ROOT/runtime/ha-last-accepted-bundle.XXXXXX")"
+jq -n --arg bundle "$job_id" --arg sha256 "$archive_hash" \
+    --arg source "$HA_NODE_ID" --arg target "$HA_PEER_NODE_ID" \
+    --arg accepted "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson generation "$generation" \
+    '{format:"mp-opt-ha-sender-acceptance-v1",bundle_id:$bundle,sha256:$sha256,
+      source_node_id:$source,target_node_id:$target,generation:$generation,
+      accepted_at:$accepted}' > "$accepted_receipt"
+chmod 0600 "$accepted_receipt"
+sync -f "$accepted_receipt" 2>/dev/null || { rm -f "$accepted_receipt"; exit 1; }
+mv "$accepted_receipt" "$MP_ROOT/runtime/ha-last-accepted-bundle.json"
+accepted_receipt=""
+sync -f "$MP_ROOT/runtime" 2>/dev/null || exit 1
 printf 'MP_SENDER_TIMING capture_ms=%s transfer_round_trip_ms=%s\n' \
     "$((capture_completed_ms - sender_started_ms))" \
     "$((transfer_completed_ms - capture_completed_ms))" >&2
