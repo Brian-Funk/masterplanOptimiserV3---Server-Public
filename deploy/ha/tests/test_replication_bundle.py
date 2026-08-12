@@ -509,6 +509,7 @@ class ReplicationBundleTests(unittest.TestCase):
         database_health = receiver.index("HA_RECEIVER_DATABASE_HEALTH_FAILED")
         caddy_running = receiver.index("HA_RECEIVER_CADDY_NOT_RUNNING")
         caddy_validation = receiver.index("HA_RECEIVER_CADDY_VALIDATION_FAILED")
+        caddy_execution = receiver.index("HA_RECEIVER_CADDY_EXECUTION_FAILED")
         backend_health = receiver.index("HA_RECEIVER_BACKEND_HEALTH_FAILED")
         receiver_receipt = receiver.index(
             'install -m 0600 "$stage/receiver.json" "$MP_ROOT/runtime/ha-receiver.json"'
@@ -521,6 +522,7 @@ class ReplicationBundleTests(unittest.TestCase):
             database_health,
             caddy_running,
             caddy_validation,
+            caddy_execution,
             backend_health,
         ):
             self.assertLess(boundary, receiver_receipt)
