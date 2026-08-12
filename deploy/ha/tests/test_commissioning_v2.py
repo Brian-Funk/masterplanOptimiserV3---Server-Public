@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tarfile
 import tempfile
@@ -459,8 +460,14 @@ class PairingSetupContractTests(unittest.TestCase):
         self.assertNotIn("delete cluster.pairing", WORKER)
 
     def test_witness_secrets_are_deployed_atomically_and_binding_is_repairable(self) -> None:
-        deploy = shell_function(SETUP, "mp_setup_deploy_witness")
-        repair = shell_function(SETUP, "mp_setup_repair_witness_admin_secret")
+        deploy = SETUP[
+            SETUP.index("mp_setup_deploy_witness_scoped() ("):
+            SETUP.index("\nmp_setup_deploy_witness() {", SETUP.index("mp_setup_deploy_witness_scoped() ("))
+        ]
+        repair = SETUP[
+            SETUP.index("mp_setup_repair_witness_admin_secret_scoped() ("):
+            SETUP.index("\nmp_setup_repair_witness_admin_secret() {", SETUP.index("mp_setup_repair_witness_admin_secret_scoped() ("))
+        ]
         primary = shell_function(SETUP, "mp_setup_primary_create")
         self.assertIn("--secrets-file /run/mp-opt-witness-secrets.json", deploy)
         self.assertIn("ADMIN_TOKEN:$admin", deploy)
@@ -656,14 +663,188 @@ class PairingSetupContractTests(unittest.TestCase):
         self.assertIn("application_deployed", standalone)
         self.assertIn("root_commissioning_complete", standalone)
         self.assertIn("Recovering exact deployment", reconcile)
-        self.assertIn("mp_wait_for_health 45", reconcile)
+        self.assertIn("mp_wait_for_local_health 45", reconcile)
         self.assertIn("Automatic fallback is prohibited", reconcile)
 
     def test_setup_failure_returns_to_menu_with_specific_resume_state(self) -> None:
         setup = shell_function(SETUP, "mp_setup_v2")
         self.assertIn("SETUP_ACTION_PAUSED", setup)
+        self.assertIn("failure_code", setup)
+        self.assertIn("failure_message", setup)
         self.assertIn("The exact lane and commit remain pinned", setup)
         self.assertIn('return 0', setup)
+
+    def test_signed_deployment_and_public_routing_are_separate_checkpoints(self) -> None:
+        deploy = shell_function(SETUP, "mp_setup_deploy_application")
+        verify = shell_function(SETUP, "mp_setup_verify_signed_application")
+        resume = shell_function(SETUP, "mp_setup_primary_resume")
+        standalone = shell_function(SETUP, "mp_setup_standalone")
+        self.assertIn("mp_setup_verify_signed_application", deploy)
+        self.assertIn("MP_RELEASE_COMMIT", verify)
+        self.assertIn("mp_wait_for_backend_health", verify)
+        self.assertIn("mp_wait_for_origin_tls_health", verify)
+        self.assertLess(
+            resume.index("mp_setup_state_mark application_deployed"),
+            resume.index('mp_setup_state_action "Activating public HA routing"'),
+        )
+        self.assertLess(
+            resume.index("mp_setup_state_mark witness_ready"),
+            resume.index("mp_setup_verify_public_routing"),
+        )
+        for workflow in (resume, standalone):
+            self.assertIn("public_routing_ready", workflow)
+        self.assertIn('DOMAIN="$(mp_env_get DOMAIN)"', DEPLOY)
+        self.assertIn('Deployment complete: https://${DOMAIN}', DEPLOY)
+
+    def test_dns_and_health_contracts_do_not_use_the_host_resolver_for_success(self) -> None:
+        observe = shell_function(COMMON, "mp_public_dns_observe")
+        origin = shell_function(COMMON, "mp_origin_tls_health_once")
+        public = shell_function(COMMON, "mp_public_https_get")
+        dns_wait = SETUP[SETUP.index("mp_setup_wait_for_public_routing() ("):
+                         SETUP.index("\nmp_setup_verify_public_routing", SETUP.index("mp_setup_wait_for_public_routing() ("))]
+        self.assertIn("1.1.1.1 8.8.8.8 9.9.9.9", COMMON)
+        self.assertIn("responses", observe)
+        self.assertIn('best" -lt 2', observe)
+        self.assertIn('--resolve "${domain}:443:${address}"', origin)
+        self.assertIn("mp_public_dns_observe", public)
+        self.assertIn("getent ahostsv4", dns_wait)
+        self.assertIn("diagnostic", shell_function(SETUP, "mp_setup_verify_public_routing"))
+        self.assertNotIn("getent", observe)
+        self.assertNotIn("getent", public)
+        self.assertNotIn("mp_wait_for_health", SETUP + COMMON + ACTIONS + DEPLOY)
+
+    def test_application_domain_probes_are_classified_by_central_helpers(self) -> None:
+        managed_paths = [ROOT / "manage.sh", *sorted((ROOT / "deploy").rglob("*.sh"))]
+        managed_sources = {
+            path: path.read_text(encoding="utf-8")
+            for path in managed_paths
+            if path != ROOT / "deploy" / "management" / "common.sh"
+        }
+        unclassified = re.compile(
+            r"(?<![A-Za-z0-9_])curl\s+[^\n]*(?:https://\$\{?domain|https://\$\(|/health)",
+            re.IGNORECASE,
+        )
+        for path, source in managed_sources.items():
+            self.assertIsNone(
+                unclassified.search(source),
+                f"unclassified application-domain health probe in {path}",
+            )
+        self.assertIn("mp_origin_tls_health_once", COMMON)
+        self.assertIn("mp_public_https_get", COMMON)
+
+    def test_public_routing_exposes_bounded_waiting_states(self) -> None:
+        wait = SETUP[SETUP.index("mp_setup_wait_for_public_routing() ("):
+                     SETUP.index("\nmp_setup_verify_public_routing", SETUP.index("mp_setup_wait_for_public_routing() ("))]
+        for code in (
+            "PUBLIC_DNS_PENDING",
+            "PUBLIC_DNS_QUORUM_UNAVAILABLE",
+            "PUBLIC_DNS_MISMATCH",
+            "PUBLIC_ROUTE_UNHEALTHY",
+        ):
+            self.assertIn(code, wait)
+        self.assertIn('sleep "$interval"', wait)
+        self.assertIn("trap", wait)
+
+    def test_wrangler_secret_files_have_defined_interruption_safe_cleanup(self) -> None:
+        cleanup = shell_function(COMMON, "mp_cleanup_stale_wrangler_secrets")
+        remove = shell_function(COMMON, "mp_secure_remove_file")
+        self.assertIn("wrangler-secrets", cleanup)
+        self.assertIn("[ ! -L", cleanup)
+        self.assertIn("stat -c '%u'", cleanup)
+        self.assertIn("stat -c '%a'", cleanup)
+        self.assertIn("shred -u", remove)
+        self.assertIn("mp_setup_deploy_witness_scoped() (", SETUP)
+        self.assertIn("mp_setup_repair_witness_admin_secret_scoped() (", SETUP)
+        self.assertGreaterEqual(SETUP.count("trap cleanup EXIT"), 2)
+        for signal in ("HUP", "INT", "TERM"):
+            self.assertGreaterEqual(SETUP.count(f" {signal}"), 2)
+
+    @unittest.skipIf(os.name == "nt", "POSIX resolver quorum contract")
+    def test_public_dns_quorum_ignores_a_stale_host_resolver(self) -> None:
+        script = r'''
+            set -Eeuo pipefail
+            export MP_PUBLIC_DNS_RESOLVERS="1.1.1.1 8.8.8.8 9.9.9.9"
+            source "$1/deploy/management/common.sh"
+            source "$1/deploy/management/setup_v2.sh"
+            mp_public_dns_query() {
+                case "$3:$1" in
+                    A:1.1.1.1|A:8.8.8.8) printf '%s\n' 203.0.113.10 ;;
+                    A:9.9.9.9) printf '%s\n' 198.51.100.8 ;;
+                    AAAA:*) return 0 ;;
+                    *) return 1 ;;
+                esac
+            }
+            getent() { return 2; }
+            mp_curl_resolved_address() { [ "$2" = 203.0.113.10 ]; }
+            mp_setup_state_failure() { printf 'unexpected failure: %s\n' "$*" >&2; return 1; }
+            export MP_DNS_POLL_INTERVAL_SECONDS=0
+            mp_setup_wait_for_public_routing example.test 203.0.113.10 ""
+        '''
+        result = subprocess.run(
+            ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(ROOT)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Public resolver quorum and HTTPS health are ready", result.stdout)
+
+    @unittest.skipIf(os.name == "nt", "POSIX resolver quorum contract")
+    def test_public_dns_quorum_distinguishes_conflict_and_unavailability(self) -> None:
+        script = r'''
+            set -Eeuo pipefail
+            export MP_PUBLIC_DNS_RESOLVERS="1.1.1.1 8.8.8.8 9.9.9.9"
+            source "$1/deploy/management/common.sh"
+            mp_public_dns_query() {
+                case "$1" in
+                    1.1.1.1) printf '%s\n' 203.0.113.1 ;;
+                    8.8.8.8) printf '%s\n' 203.0.113.2 ;;
+                    9.9.9.9) printf '%s\n' 203.0.113.3 ;;
+                esac
+            }
+            if mp_public_dns_observe example.test A 203.0.113.1; then exit 10; else test "$?" -eq 3; fi
+            test "$MP_PUBLIC_DNS_STATUS" = conflicting
+            mp_public_dns_query() { [ "$1" = 1.1.1.1 ] && printf '%s\n' 203.0.113.1; }
+            if mp_public_dns_observe example.test A 203.0.113.1; then exit 11; else test "$?" -eq 2; fi
+            test "$MP_PUBLIC_DNS_STATUS" = quorum-unavailable
+        '''
+        result = subprocess.run(
+            ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(ROOT)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX transient-file contract")
+    def test_stale_wrangler_cleanup_removes_only_safe_regular_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state"
+            state.mkdir()
+            safe = state / "wrangler-secrets.Abc123"
+            safe.write_text("synthetic-secret", encoding="utf-8")
+            safe.chmod(0o600)
+            target = state / "target"
+            target.write_text("keep", encoding="utf-8")
+            link = state / "wrangler-secrets.Def456"
+            script = r'''
+                set -Eeuo pipefail
+                export MP_STATE="$2"
+                source "$1/deploy/management/common.sh"
+                mp_cleanup_stale_wrangler_secrets
+                test ! -e "$2/wrangler-secrets.Abc123"
+                ln -s "$2/target" "$2/wrangler-secrets.Def456"
+                ! mp_cleanup_stale_wrangler_secrets
+                test -L "$2/wrangler-secrets.Def456"
+                test "$(cat "$2/target")" = keep
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(ROOT), str(state)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_resume_notice_explicitly_continues_and_next_action_is_current(self) -> None:
         setup = shell_function(SETUP, "mp_setup_v2")
@@ -740,16 +921,20 @@ class PairingSetupContractTests(unittest.TestCase):
             trap 'rm -rf -- "$TEST_ROOT"' EXIT
             export MP_ROOT="$PWD" MP_STATE="$TEST_ROOT/state"
             mkdir -p "$MP_STATE"
+            source deploy/management/common.sh
             source deploy/management/setup_v2.sh
             export MP_DNS_POLL_INTERVAL_SECONDS=30
             TEST_ATTEMPTS="$TEST_ROOT/attempts"
             TEST_SLEEPS="$TEST_ROOT/sleeps"
             export TEST_ATTEMPTS TEST_SLEEPS
-            dig() {
+            mp_public_dns_query() {
                 local count=0
+                if [ "$3" = AAAA ]; then return 0; fi
                 [ -s "$TEST_ATTEMPTS" ] && count="$(cat "$TEST_ATTEMPTS")"
-                count=$((count + 1))
-                printf '%s\n' "$count" > "$TEST_ATTEMPTS"
+                if [ "$1" = 1.1.1.1 ]; then
+                    count=$((count + 1))
+                    printf '%s\n' "$count" > "$TEST_ATTEMPTS"
+                fi
                 if [ "$count" -lt 3 ]; then
                     printf '203.0.113.9\n'
                 else

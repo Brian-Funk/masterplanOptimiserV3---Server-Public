@@ -60,7 +60,7 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("record_apply_failure", SUPERVISOR)
         self.assertIn("restore_verified_previous_deployment", SUPERVISOR)
         self.assertIn("preflight|build-*|peer-activation", SUPERVISOR)
-        self.assertIn("mp_wait_for_health 45", SUPERVISOR)
+        self.assertIn("mp_wait_for_local_health 45", SUPERVISOR)
 
     def test_local_tls_health_is_retried_before_recording_the_receipt(self) -> None:
         self.assertIn("for attempt in $(seq 1 30)", SUPERVISOR)
