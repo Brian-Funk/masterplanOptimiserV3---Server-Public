@@ -1231,6 +1231,7 @@ mp_setup_machine_advance_one() {
                 mp_ha_replicate_now || return 1
                 mp_setup_record_first_verified_bundle >/dev/null 2>&1 || return 1
             fi
+            mp_setup_finalize_fresh_unsigned_peer || return 1
             mp_setup_state_mark replicated
             ;;
         ha_services_activated)
@@ -3203,6 +3204,22 @@ mp_setup_record_first_verified_bundle() {
         --argjson generation "$generation" --arg accepted "$accepted_at"
 }
 
+# A fresh unsigned peer is deliberately staged before shared configuration is
+# available. The first accepted replication bundle activates that staged
+# candidate. Record the exact candidate receipt only after sender and receiver
+# have proved that they accepted the same bundle.
+mp_setup_finalize_fresh_unsigned_peer() {
+    local mode lane commit
+    mode="$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE")" || return 1
+    lane="$(jq -r '.deployment_lane // empty' "$MP_SETUP_V2_STATE")" || return 1
+    [ "$mode" = ha-primary-new ] && [ "$lane" = unsigned ] || return 0
+    commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")" || return 1
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
+    ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+        env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+        /opt/masterplan/deploy/test-deployment.sh internal-finalize-peer "$commit"
+}
+
 mp_setup_primary_resume() {
     local cluster witness token body response peer current mode pairing_expires pairing_secret join_code domain pending commit
     local public_ip public_ipv6
@@ -3334,6 +3351,10 @@ mp_setup_primary_resume() {
                 return 1
             }
         fi
+        mp_setup_finalize_fresh_unsigned_peer || {
+            ui_error "Node B accepted the first copy but could not record the exact candidate receipt."
+            return 1
+        }
         mp_setup_state_mark replicated
     fi
     if ! mp_setup_state_has ha_services_activated; then

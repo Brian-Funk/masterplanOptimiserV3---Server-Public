@@ -449,6 +449,12 @@ apply_prebuilt_candidate() {
             # replication bundle deliver shared configuration/secrets and
             # activate Backend/Caddy through the guarded receiver.
             peer_stage_prebuilt "$target" "$components" || return 1
+            if [ "$precommission_retarget" = true ]; then
+                ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+                    env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+                    /opt/masterplan/deploy/test-deployment.sh internal-repin-setup "$target" \
+                    || return 1
+            fi
             peer_staged_only=true
         else
             peer_activate "$target" "$components" "$fresh_commissioning" \
@@ -481,14 +487,9 @@ apply_prebuilt_candidate() {
     write_state "$target" "$previous" "$plan" ""
     advance_setup_campaign_pin "$target" "$previous"
     archive_accepted_candidate "$target" || return 1
-    if [ "$role" = dynamic ] && [ "$peer_ready" = true ]; then
+    if [ "$role" = dynamic ] && [ "$peer_ready" = true ] \
+        && [ "$peer_staged_only" != true ]; then
         mp_ha_replicate_now || return 1
-        if [ "$peer_staged_only" = true ]; then
-            ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
-                env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
-                /opt/masterplan/deploy/test-deployment.sh internal-finalize-peer "$target" \
-                || { ui_error "Node B accepted the first copy but could not record the exact candidate receipt."; return 1; }
-        fi
         mp_ha_refresh_witness_observations || return 1
         mp_ha_active_verification_readiness || return 1
         python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic disabled >/dev/null || return 1
@@ -662,7 +663,7 @@ ensure_optional_compose_secret_sources() {
 }
 
 compose_activate() {
-    local components="$1" fresh_commissioning="${2:-false}" domain attempt
+    local components="$1" fresh_commissioning="${2:-false}" domain attempt role routing_ready=false
     prepare_runtime_from_installed_sources
     ensure_optional_compose_secret_sources
     mp_prepare_backend_secret_permissions
@@ -698,23 +699,38 @@ compose_activate() {
         "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate caddy
     fi
     set_apply_stage public-health
-    mp_wait_for_local_health 45
+    mp_load_ha_config >/dev/null 2>&1 || true
+    role="${HA_ROLE:-standalone}"
+    if [ "$fresh_commissioning" = true ] && [ "$role" = dynamic ]; then
+        routing_ready="$(jq -r '.routing_ready // false' \
+            "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || printf false)"
+    fi
+    if [ "$fresh_commissioning" = true ] && [ "$role" = dynamic ] \
+        && [ "$routing_ready" != true ]; then
+        mp_wait_for_backend_health 45
+        mp_caddy_validate
+    else
+        mp_wait_for_local_health 45
+    fi
     domain="$(mp_env_get DOMAIN)"
     # Caddy may accept TLS a fraction of a second before a just-recreated
     # backend has bound its container address. Treat that bounded 502 window as
     # startup convergence, while still refusing to record a deployment receipt
     # unless the local TLS route becomes healthy.
-    for attempt in $(seq 1 30); do
-        if curl -fsS --max-time 10 --resolve "${domain}:443:127.0.0.1" \
-            "https://${domain}/health" >/dev/null 2>&1; then
-            break
-        fi
-        [ "$attempt" -lt 30 ] || {
-            ui_error "The exact deployment is not healthy on this node's local TLS endpoint after 30 attempts."
-            return 1
-        }
-        sleep 1
-    done
+    if [ "$fresh_commissioning" != true ] || [ "$role" != dynamic ] \
+        || [ "$routing_ready" = true ]; then
+        for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 10 --resolve "${domain}:443:127.0.0.1" \
+                "https://${domain}/health" >/dev/null 2>&1; then
+                break
+            fi
+            [ "$attempt" -lt 30 ] || {
+                ui_error "The exact deployment is not healthy on this node's local TLS endpoint after 30 attempts."
+                return 1
+            }
+            sleep 1
+        done
+    fi
     [ "$(stat -c %a "$MP_ROOT/runtime")" = 711 ] || {
         ui_error "Runtime traversal permissions were not preserved during activation."
         return 1
