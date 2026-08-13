@@ -415,7 +415,8 @@ apply_prebuilt_candidate() {
         ha_pair_transport_ready || return 1
         peer_ready=true
         for key in backend caddy postgres tools; do
-            peer_copy_image "$(jq -r --arg key "$key" '.images[$key]' <<< "$manifest")" || return 1
+            peer_copy_image "$(jq -r --arg key "$key" '.images[$key]' <<< "$manifest")" \
+                "$docker_config" || return 1
         done
         if [ "$prepare_only" = true ]; then
             peer_stage_prebuilt "$target" "$components" || return 1
@@ -740,7 +741,39 @@ reconcile_setup_campaign_pin_with_receipt() {
 }
 
 peer_copy_image() {
-    local image="$1" local_id peer_id
+    local image="$1" docker_config="${2:-}" local_id peer_id
+    if [ -n "$docker_config" ]; then
+        [[ "$image" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]] \
+            && [ -d "$docker_config" ] && [ ! -L "$docker_config" ] \
+            && [ "$(stat -c %a "$docker_config")" = 700 ] \
+            && [ -f "$docker_config/config.json" ] && [ ! -L "$docker_config/config.json" ] \
+            && [ "$(stat -c %a "$docker_config/config.json")" = 600 ] \
+            || return 1
+        tar -C "$docker_config" -cf - config.json \
+            | ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+                "set -Eeuo pipefail
+                 d=\$(mktemp -d /home/deploy/.local/state/mp-opt-server/peer-docker-config.XXXXXX)
+                 cleanup() {
+                   if test -f \"\$d/config.json\" && ! test -L \"\$d/config.json\"; then
+                     size=\$(stat -c %s \"\$d/config.json\" 2>/dev/null || printf 0)
+                     dd if=/dev/zero of=\"\$d/config.json\" bs=1 count=\"\$size\" conv=notrunc status=none 2>/dev/null || true
+                   fi
+                   rm -rf -- \"\$d\"
+                 }
+                 trap cleanup EXIT HUP INT TERM
+                 chmod 700 \"\$d\"
+                 tar -C \"\$d\" -xf -
+                 test -f \"\$d/config.json\" && ! test -L \"\$d/config.json\"
+                 chmod 600 \"\$d/config.json\"
+                 DOCKER_CONFIG=\"\$d\" docker pull '$image' >/dev/null
+                 docker image inspect '$image' >/dev/null" \
+            || return 1
+        local_id="$(docker image inspect -f '{{.Id}}' "$image")"
+        peer_id="$(ssh -T -o BatchMode=yes mp-opt-ha-peer \
+            docker image inspect -f '{{.Id}}' "$image")"
+        [ "$local_id" = "$peer_id" ]
+        return
+    fi
     docker save "$image" | gzip -1 | ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
         'gzip -d | docker load >/dev/null'
     local_id="$(docker image inspect -f '{{.Id}}' "$image")"
