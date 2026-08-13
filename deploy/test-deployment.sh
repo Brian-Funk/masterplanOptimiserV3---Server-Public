@@ -1034,6 +1034,26 @@ internal_finalize_peer() {
         mp_compose_init
         "${MP_COMPOSE[@]}" exec -T backend python -c \
             'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=5).read()' >/dev/null
+        # A candidate peer is complete only after the accepted receiver copy
+        # and its exact candidate activation are durably represented in the
+        # same checkpoint plan.  Older finalisers set state=complete after
+        # application activation alone, which made status contradictory and
+        # prevented reconciliation from filling the remaining checkpoints.
+        if ! jq -e '
+            ((.completed // []) | index("replicated") != null)
+            and ((.completed // []) | index("peer_exact_deployment") != null)
+        ' "$setup_state" >/dev/null 2>&1; then
+            temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")" || return 1
+            jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+                .completed=((.completed + ["replicated", "peer_exact_deployment"]) | unique)
+                | .updated_at=$now
+            ' "$setup_state" > "$temporary" \
+                || { rm -f "$temporary"; return 1; }
+            chmod 600 "$temporary" || { rm -f "$temporary"; return 1; }
+            sync -f "$temporary" 2>/dev/null || { rm -f "$temporary"; return 1; }
+            mv "$temporary" "$setup_state" || { rm -f "$temporary"; return 1; }
+            sync -f "$(dirname "$setup_state")" 2>/dev/null || return 1
+        fi
         return 0
     fi
     jq -e --arg target "$target" \
@@ -1046,7 +1066,7 @@ internal_finalize_peer() {
     write_state "$target" "" "$plan" ""
     temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")"
     jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '.completed=((.completed+["application_deployed"])|unique) |
+        '.completed=((.completed+["application_deployed","replicated","peer_exact_deployment"])|unique) |
          .state="complete" | .completed_at=$now | .updated_at=$now |
          .current_action="Waiting for root administration on Node A"' \
         "$setup_state" > "$temporary"
