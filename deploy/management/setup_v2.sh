@@ -1351,7 +1351,7 @@ mp_setup_machine_advance_one() {
         witness_ready)
             mp_setup_state_action "Activating public HA routing" \
                 WITNESS_ROUTING witness_ready || return 1
-            python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null \
+            mp_setup_activate_initial_witness_routing \
                 || { mp_setup_state_failure WITNESS_ROUTING_FAILED \
                     "The HA witness did not accept the routing-ready transition." || true; return 1; }
             mp_setup_state_mark witness_ready
@@ -3204,6 +3204,18 @@ mp_setup_record_first_verified_bundle() {
         --argjson generation "$generation" --arg accepted "$accepted_at"
 }
 
+# Initial deployment may take longer than the witness transition lease. Reuse
+# the normal lease-agent iteration so routing activation is preceded by a
+# fresh, authenticated health heartbeat and the local writer promotion. This
+# preserves the Worker's expired-lease guard instead of bypassing it.
+mp_setup_activate_initial_witness_routing() {
+    mp_load_ha_config || return 1
+    python3 "$MP_ROOT/deploy/ha/lease_agent.py" --once >/dev/null || return 1
+    jq -e --arg node "$HA_NODE_ID" \
+        '.holder_node_id == $node and .routing_ready == true' \
+        "$MP_ROOT/runtime/ha-control.json" >/dev/null 2>&1
+}
+
 # A fresh unsigned peer is deliberately staged before shared configuration is
 # available. The first accepted replication bundle activates that staged
 # candidate. Record the exact candidate receipt only after sender and receiver
@@ -3320,7 +3332,7 @@ mp_setup_primary_resume() {
     if ! mp_setup_state_has witness_ready; then
         mp_setup_state_action "Activating public HA routing" \
             WITNESS_ROUTING witness_ready || return 1
-        python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null \
+        mp_setup_activate_initial_witness_routing \
             || { mp_setup_state_failure WITNESS_ROUTING_FAILED "The HA witness did not accept the routing-ready transition." || true; return 1; }
         mp_setup_state_mark witness_ready
     fi
