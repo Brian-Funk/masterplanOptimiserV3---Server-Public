@@ -444,7 +444,8 @@ apply_prebuilt_candidate() {
         if [ "$prepare_only" = true ]; then
             peer_stage_prebuilt "$target" "$components" || return 1
         else
-            peer_activate "$target" "$components" "$fresh_commissioning" || return 1
+            peer_activate "$target" "$components" "$fresh_commissioning" \
+                "$precommission_retarget" || return 1
         fi
     fi
     sync_operations "$MP_TEST_CANDIDATE_OPERATIONS"
@@ -830,7 +831,8 @@ peer_stage_prebuilt() {
 }
 
 peer_activate() {
-    local target="$1" components="$2" fresh_commissioning="${3:-false}" peer_state peer_components
+    local target="$1" components="$2" fresh_commissioning="${3:-false}"
+    local precommission_retarget="${4:-false}" peer_state peer_components
     # OpenSSH joins command arguments into a remote shell command without
     # preserving the caller's argument boundaries. A space-delimited component
     # list would therefore arrive as multiple arguments and the peer command
@@ -853,6 +855,15 @@ peer_activate() {
                 "mkdir -p '$MP_TEST_HOME/peer-assets/operations' && tar -C '$MP_TEST_HOME/peer-assets/operations' -xzf -"
         scp -q "$MP_TEST_CANDIDATE_RECEIPT" \
             mp-opt-ha-peer:/tmp/mp-opt-candidate-receipt.json
+    fi
+    if [ "$precommission_retarget" = true ]; then
+        ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+            env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+            /opt/masterplan/deploy/test-deployment.sh internal-repin-setup "$target" \
+            || return 1
+    elif [ "$precommission_retarget" != false ]; then
+        ui_error "The peer pre-commission retarget flag is invalid."
+        return 1
     fi
     ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
         env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
@@ -939,7 +950,7 @@ internal_repin_setup() {
            and ((.completed // []) | index("joined") != null)
            and ((.completed // []) | index("application_deployed") == null)' \
         "$setup_state" >/dev/null || return 1
-    git -C "$MP_ROOT" fetch --no-tags --force origin "$target" >/dev/null 2>&1 \
+    git -C "$MP_ROOT" fetch --no-tags --force --deepen=256 origin "$target" >/dev/null 2>&1 \
         && [ "$(git -C "$MP_ROOT" rev-parse FETCH_HEAD 2>/dev/null || true)" = "$target" ] \
         && git -C "$MP_ROOT" merge-base --is-ancestor "$pinned" "$target" >/dev/null 2>&1 \
         || return 1
