@@ -355,9 +355,9 @@ apply_prebuilt_candidate() {
     credentials=""; docker_config=""; stage=""
     cleanup_candidate_credentials() {
         unset token username
-        [ -z "$credentials" ] || mp_secure_remove_file "$credentials" || true
-        [ -z "$stage" ] || [ ! -d "$stage" ] || rm -rf -- "$stage"
-        [ -z "$docker_config" ] || [ ! -d "$docker_config" ] || { find "$docker_config" -type f -exec sh -c \
+        [ -z "${credentials:-}" ] || mp_secure_remove_file "$credentials" || true
+        [ -z "${stage:-}" ] || [ ! -d "$stage" ] || rm -rf -- "$stage"
+        [ -z "${docker_config:-}" ] || [ ! -d "$docker_config" ] || { find "$docker_config" -type f -exec sh -c \
             'for f do size=$(stat -c %s "$f" 2>/dev/null || printf 0); dd if=/dev/zero of="$f" bs=1 count="$size" conv=notrunc status=none 2>/dev/null || true; done' sh {} +; rm -rf -- "$docker_config"; }
     }
     trap cleanup_candidate_credentials EXIT
