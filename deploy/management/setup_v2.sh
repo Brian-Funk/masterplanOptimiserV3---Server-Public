@@ -3210,6 +3210,10 @@ mp_setup_record_first_verified_bundle() {
 # preserves the Worker's expired-lease guard instead of bypassing it.
 mp_setup_activate_initial_witness_routing() {
     mp_load_ha_config || return 1
+    # Root commissioning can legitimately exceed the 90-second witness
+    # freshness window. Start only the lease observer here; replication and
+    # snapshot triggers remain disabled until ha_services_activated.
+    "$MP_ROOT/deploy/ha/install_services.sh" --commissioning || return 1
     python3 "$MP_ROOT/deploy/ha/lease_agent.py" --once >/dev/null || return 1
     jq -e --arg node "$HA_NODE_ID" \
         '.holder_node_id == $node and .routing_ready == true' \
