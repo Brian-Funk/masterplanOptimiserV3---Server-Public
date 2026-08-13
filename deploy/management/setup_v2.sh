@@ -945,8 +945,17 @@ mp_setup_machine_advance_one() {
     fi
     [ -n "$expected" ] && [ "$checkpoint" = "$expected" ] || return 65
     if [ -n "$recorded_key" ]; then
-        [ "$recorded_key" = "$idempotency_key" ] && [ "$recorded_state" = started ] \
-            || return 65
+        [ "$recorded_key" = "$idempotency_key" ] || return 65
+        if [ "$recorded_state" = completed ]; then
+            # The side effect and its durable machine receipt completed, but a
+            # crash or interruption may have happened before the setup
+            # checkpoint was written. Reconcile that proven completion instead
+            # of rejecting the exact idempotent retry forever.
+            mp_setup_state_mark_now "$checkpoint" || return 1
+            mp_setup_machine_complete_if_plan_finished "$plan" || return $?
+            return 0
+        fi
+        [ "$recorded_state" = started ] || return 65
     else
         mp_setup_state_update \
             '.machine_transitions=((.machine_transitions // {}) + {
