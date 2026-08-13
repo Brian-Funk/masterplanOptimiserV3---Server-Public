@@ -868,12 +868,29 @@ mp_prepare_backend_secret_permissions() {
 # backend identity. Refuse symlinks so a privileged ownership change cannot be
 # redirected outside the installation.
 mp_prepare_evidence_store() {
-    local evidence="$MP_ROOT/state/evidence"
+    local evidence="$MP_ROOT/state/evidence" unsafe
     if [ -e "$evidence" ] && { [ ! -d "$evidence" ] || [ -L "$evidence" ]; }; then
         printf 'Refusing unsafe evidence store path: %s\n' "$evidence" >&2
         return 1
     fi
     sudo -n install -d -o 10001 -g 10001 -m 0700 "$evidence" || return 1
+    unsafe="$(sudo -n find -P "$evidence" -xdev ! -type d ! -type f -print -quit)" \
+        || return 1
+    [ -z "$unsafe" ] || {
+        printf 'Refusing unsafe evidence store entry: %s\n' "$unsafe" >&2
+        return 1
+    }
+    # Historical one-shot initialisers and restored archives may leave nested
+    # entries owned by the host deploy identity.  Repair the complete bind
+    # source without following links; the unprivileged Backend then enforces
+    # its own 0700/0600 modes during evidence-chain verification.
+    sudo -n chown -R --no-dereference 10001:10001 -- "$evidence" || return 1
+    unsafe="$(sudo -n find -P "$evidence" -xdev ! -type d ! -type f -print -quit)" \
+        || return 1
+    [ -z "$unsafe" ] || {
+        printf 'Evidence store changed to an unsafe type during preparation: %s\n' "$unsafe" >&2
+        return 1
+    }
     sudo -n install -d -o 10001 -g 10001 -m 0700 "$evidence/public"
 }
 
