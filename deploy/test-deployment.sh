@@ -681,6 +681,10 @@ compose_activate() {
         mp_ensure_base_schema
         set_apply_stage migrations
         mp_apply_migrations
+        if [ "$fresh_commissioning" = true ]; then
+            set_apply_stage fresh-commissioning
+            mp_initialise_fresh_commissioning_state
+        fi
         set_apply_stage schema-contract
         mp_verify_database_schema_contract
     fi
