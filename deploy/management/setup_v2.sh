@@ -1403,7 +1403,18 @@ mp_setup_reconcile_unsigned_join() {
     jq -e '
         .format == "mp-opt-setup-state-v2"
         and (.mode | IN("ha-join","replace-node"))
-        and .deployment_lane == "unsigned" and .state == "in_progress"
+        and .deployment_lane == "unsigned"
+        and (
+            .state == "in_progress"
+            or (
+                .state == "complete"
+                and (
+                    ((.completed // []) | index("application_deployed") == null)
+                    or ((.completed // []) | index("replicated") == null)
+                    or ((.completed // []) | index("peer_exact_deployment") == null)
+                )
+            )
+        )
         and ((.completed // []) | index("joined") != null)
     ' "$MP_SETUP_V2_STATE" >/dev/null 2>&1 || return 0
     [ -s "$receiver" ] || return 0
