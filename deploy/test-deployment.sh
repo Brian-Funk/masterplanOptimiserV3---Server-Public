@@ -314,6 +314,29 @@ apply_prebuilt_candidate() {
     local credentials username token docker_config stage manifest identity="${MP_TEST_RECOVERY_IDENTITY_FILE:-}"
     local previous role peer_ready=false image key plan components snapshot="" automatic=false
     require_test_policy
+    # Capture the protected registry document before any snapshot, Docker, or
+    # database helper runs. Those helpers may legitimately inherit and consume
+    # stdin, so deferring this read makes an established candidate transition
+    # fail after its rollback snapshot has already been created.
+    credentials=""; docker_config=""; stage=""
+    cleanup_candidate_credentials() {
+        unset token username
+        [ -z "${credentials:-}" ] || mp_secure_remove_file "$credentials" || true
+        [ -z "${stage:-}" ] || [ ! -d "$stage" ] || rm -rf -- "$stage"
+        [ -z "${docker_config:-}" ] || [ ! -d "$docker_config" ] || { find "$docker_config" -type f -exec sh -c \
+            'for f do size=$(stat -c %s "$f" 2>/dev/null || printf 0); dd if=/dev/zero of="$f" bs=1 count="$size" conv=notrunc status=none 2>/dev/null || true; done' sh {} +; rm -rf -- "$docker_config"; }
+    }
+    trap cleanup_candidate_credentials EXIT
+    credentials="$(mktemp "$MP_TEST_CANDIDATE_DIR/registry-input.XXXXXX")" || return 1
+    head -c 8193 > "$credentials" || return 1
+    [ "$(stat -c %s "$credentials")" -le 8192 ] \
+        && jq -e 'type=="object" and (keys|sort)==["token","username"]
+            and (.username|type=="string" and length>=1 and length<=255)
+            and (.token|type=="string" and length>=1 and length<=4096)' \
+            "$credentials" >/dev/null 2>&1 \
+        || return 2
+    username="$(jq -r .username "$credentials")"; token="$(jq -r .token "$credentials")"
+    mp_secure_remove_file "$credentials"; credentials=""
     if [ "$fresh_commissioning" = true ]; then
         if [ "$precommission_retarget" = true ]; then
             require_precommission_retarget_database "$target" || return 1
@@ -352,24 +375,6 @@ apply_prebuilt_candidate() {
         chmod 600 "$MP_TEST_CANDIDATE_LIFECYCLE"
         sync -f "$MP_TEST_CANDIDATE_LIFECYCLE" 2>/dev/null || return 1
     fi
-    credentials=""; docker_config=""; stage=""
-    cleanup_candidate_credentials() {
-        unset token username
-        [ -z "${credentials:-}" ] || mp_secure_remove_file "$credentials" || true
-        [ -z "${stage:-}" ] || [ ! -d "$stage" ] || rm -rf -- "$stage"
-        [ -z "${docker_config:-}" ] || [ ! -d "$docker_config" ] || { find "$docker_config" -type f -exec sh -c \
-            'for f do size=$(stat -c %s "$f" 2>/dev/null || printf 0); dd if=/dev/zero of="$f" bs=1 count="$size" conv=notrunc status=none 2>/dev/null || true; done' sh {} +; rm -rf -- "$docker_config"; }
-    }
-    trap cleanup_candidate_credentials EXIT
-    credentials="$(mktemp "$MP_TEST_CANDIDATE_DIR/registry-input.XXXXXX")" || return 1
-    head -c 8193 > "$credentials" || return 1
-    [ "$(stat -c %s "$credentials")" -le 8192 ] \
-        && jq -e 'type=="object" and (keys|sort)==["token","username"]
-            and (.username|type=="string" and length>=1 and length<=255)
-            and (.token|type=="string" and length>=1 and length<=4096)' \
-            "$credentials" >/dev/null 2>&1 \
-        || { mp_secure_remove_file "$credentials"; return 2; }
-    username="$(jq -r .username "$credentials")"; token="$(jq -r .token "$credentials")"
     docker_config="$(mktemp -d "$MP_TEST_CANDIDATE_DIR/docker-config.XXXXXX")" || return 1
     printf '%s' "$token" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
         --username "$username" --password-stdin >/dev/null || return 1
