@@ -685,7 +685,8 @@ compose_activate() {
         mp_apply_migrations
         if [ "$fresh_commissioning" = true ] \
             && { [ "$precommission_retarget" != true ] \
-                || ! mp_setup_state_has application_deployed; }; then
+                || ! jq -e '((.completed // []) | index("application_deployed") != null)' \
+                    "${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" >/dev/null 2>&1; }; then
             set_apply_stage fresh-commissioning
             mp_initialise_fresh_commissioning_state
         fi
