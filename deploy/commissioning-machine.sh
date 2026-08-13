@@ -738,6 +738,15 @@ mp_machine_deployment_action() {
         signed-rollback) mp_rollback_signed_exact "$tag" "$commit" >"$log" 2>&1 || status=$? ;;
         candidate-precommission-retry|candidate-advance|candidate-rollback)
             [ "$policy" = test ] || status=65
+            if [ "$status" -eq 0 ] && [ "$action" = candidate-advance ]; then
+                # Browser recovery stores the public AGE recipient in the
+                # database before root commissioning is complete.  A targeted
+                # debug candidate at a later browser step still needs the
+                # normal snapshot-backed lifecycle, so synchronise that public
+                # value into host custody before matching the supplied private
+                # identity.  No private material leaves the machine input.
+                mp_setup_sync_commissioning_recipient || status=$?
+            fi
             if [ "$status" -eq 0 ] && [ "$action" != candidate-precommission-retry ]; then
                 recovery_identity="$(mp_setup_machine_identity_file \
                     "$(jq -r .values.recovery_identity "$input")")" || status=$?
