@@ -823,7 +823,7 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 source "$SCRIPT_ROOT/deploy/management/snapshots.sh"
                 mp_require_commands() { :; }
                 docker() {
-                    case "$1 $2" in
+                    case "$1 ${2:-}" in
                         "info "|"ps -a") return 0 ;;
                         "volume inspect"|"network inspect") return 1 ;;
                         *) return 1 ;;

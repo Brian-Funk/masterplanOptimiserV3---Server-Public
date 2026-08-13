@@ -488,6 +488,17 @@ esac
         self.assertIn("first-copy receiver receipt is invalid", result.stderr)
         self.assertEqual(state["state"], "in_progress")
 
+    @unittest.skipIf(os.name == "nt", "the executable shell contract runs in Linux CI")
+    def test_stale_receiver_from_another_cluster_cannot_complete_join(self) -> None:
+        receiver = self.receiver()
+        receiver["cluster_id"] = "mp-opt-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        result, state = self.run_reconciliation(
+            ("db", "backend", "caddy"), receiver=receiver
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(state["state"], "in_progress")
+        self.assertNotIn("replicated", state["completed"])
+
 
 class PairingSetupContractTests(unittest.TestCase):
 
@@ -667,16 +678,6 @@ class PairingSetupContractTests(unittest.TestCase):
             primary_resume.index("mp_ha_replicate_now"),
         )
 
-    @unittest.skipIf(os.name == "nt", "the executable shell contract runs in Linux CI")
-    def test_stale_receiver_from_another_cluster_cannot_complete_join(self) -> None:
-        receiver = self.receiver()
-        receiver["cluster_id"] = "mp-opt-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-        result, state = self.run_reconciliation(
-            ("db", "backend", "caddy"), receiver=receiver
-        )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(state["state"], "in_progress")
-        self.assertNotIn("replicated", state["completed"])
         self.assertLess(
             primary_resume.index("mp_setup_state_mark replicated"),
             primary_resume.index("ha_services_activated"),
