@@ -668,8 +668,6 @@ mp_machine_deployment_action() {
     local recovery_identity="" policy
     [ -s "$MP_SETUP_V2_STATE" ] || return 65
     mp_setup_validate_state_contract "$MP_SETUP_V2_STATE" || return $?
-    jq -e '((.completed // []) | index("application_deployed") != null)' \
-        "$MP_SETUP_V2_STATE" >/dev/null || return 65
     mp_machine_require_local_owner || return 77
     input="$(mktemp "$MP_STATE/setup-machine-input.XXXXXX")" || return 1
     MP_MACHINE_INPUT_FILE="$input"; chmod 600 "$input"
@@ -704,6 +702,10 @@ mp_machine_deployment_action() {
             "$input" >/dev/null 2>&1 || return 64
     action="$(jq -r .action "$input")"; tag="$(jq -r '.tag // empty' "$input")"; commit="$(jq -r .commit "$input")"
     idempotency_key="$(jq -r .idempotency_key "$input")"
+    if [ "$action" != candidate-precommission-retry ]; then
+        jq -e '((.completed // []) | index("application_deployed") != null)' \
+            "$MP_SETUP_V2_STATE" >/dev/null || return 65
+    fi
     receipt_file="$MP_STATE/setup-deployment-lifecycle.jsonl"
     mp_machine_validate_regular_file "$receipt_file" 600 || return 77
     if [ -s "$receipt_file" ]; then
