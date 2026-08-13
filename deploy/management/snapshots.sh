@@ -256,10 +256,10 @@ mp_snapshot_create() {
     # startup. Refuse substituted paths and validate the exact owner/mode both
     # before and after creation.
     if [ -e "$MP_SNAPSHOTS" ] || [ -L "$MP_SNAPSHOTS" ]; then
-        mp_validate_private_directory_metadata "$MP_SNAPSHOTS" "$(id -u)" 700 || return 1
+        mp_validate_private_directory_metadata "$MP_SNAPSHOTS" "$(id -u):$(id -g)" 700 || return 1
     else
         mkdir -m 0700 -- "$MP_SNAPSHOTS" || return 1
-        mp_validate_private_directory_metadata "$MP_SNAPSHOTS" "$(id -u)" 700 || return 1
+        mp_validate_private_directory_metadata "$MP_SNAPSHOTS" "$(id -u):$(id -g)" 700 || return 1
     fi
     staging="$(mktemp -d "${MP_SNAPSHOTS}/.staging.XXXXXX")" || return 1
     chmod 700 "$staging" || { rm -rf "$staging"; return 1; }
