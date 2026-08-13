@@ -331,7 +331,7 @@ apply_prebuilt_candidate() {
     local target="$1" fresh_commissioning="$2" established="${3:-false}" source="${4:-staged}"
     local prepare_only="${5:-false}" precommission_retarget="${6:-false}"
     local credentials username token docker_config stage manifest identity="${MP_TEST_RECOVERY_IDENTITY_FILE:-}"
-    local previous role peer_ready=false image key plan components snapshot="" automatic=false
+    local previous role peer_ready=false peer_staged_only=false image key plan components snapshot="" automatic=false
     require_test_policy
     # Capture the protected registry document before any snapshot, Docker, or
     # database helper runs. Those helpers may legitimately inherit and consume
@@ -443,6 +443,13 @@ apply_prebuilt_candidate() {
         done
         if [ "$prepare_only" = true ]; then
             peer_stage_prebuilt "$target" "$components" || return 1
+        elif [ "$fresh_commissioning" = true ]; then
+            # A newly joined standby has only its local database credential.
+            # Stage exact images and assets, but let the first verified
+            # replication bundle deliver shared configuration/secrets and
+            # activate Backend/Caddy through the guarded receiver.
+            peer_stage_prebuilt "$target" "$components" || return 1
+            peer_staged_only=true
         else
             peer_activate "$target" "$components" "$fresh_commissioning" \
                 "$precommission_retarget" || return 1
@@ -476,6 +483,12 @@ apply_prebuilt_candidate() {
     archive_accepted_candidate "$target" || return 1
     if [ "$role" = dynamic ] && [ "$peer_ready" = true ]; then
         mp_ha_replicate_now || return 1
+        if [ "$peer_staged_only" = true ]; then
+            ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+                env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+                /opt/masterplan/deploy/test-deployment.sh internal-finalize-peer "$target" \
+                || { ui_error "Node B accepted the first copy but could not record the exact candidate receipt."; return 1; }
+        fi
         mp_ha_refresh_witness_observations || return 1
         mp_ha_active_verification_readiness || return 1
         python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic disabled >/dev/null || return 1
