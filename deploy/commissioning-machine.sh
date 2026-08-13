@@ -189,8 +189,7 @@ mp_machine_status() {
         progress="$(jq --argjson plan "$plan" \
             '[.completed[] as $step | select($plan | index($step) != null)] | length' \
             <<< "$state")"
-        next_checkpoint="$(jq -cn --argjson plan "$plan" --argjson setup "$state" \
-            '$plan | map(select(. as $step | ($setup.completed | index($step)) == null)) | (.[0] // null)')"
+        next_checkpoint="$(mp_machine_next_checkpoint_json)" || return $?
         if [ "$(jq -r .state <<< "$state")" = complete ]; then
             run_state=complete; recommended=$MP_MACHINE_OK
         elif jq -e '.last_failure != null and .last_failure.code != "SETUP_CANCELLED"' \
@@ -292,11 +291,24 @@ mp_machine_handoff_error() {
     exit "${3:-$MP_MACHINE_INVALID}"
 }
 
+# Derive the next actionable checkpoint from the immutable plan and completed
+# receipts.  Secret handoffs must not depend on mutable presentation fields
+# such as current_action/current_checkpoint: those fields are intentionally
+# cleared as soon as the preceding checkpoint is durably completed.
+mp_machine_next_checkpoint_json() {
+    local state plan
+    state="$(cat "$MP_SETUP_V2_STATE")" || return 1
+    plan="$(mp_setup_checkpoint_plan_json "$(jq -r .mode <<< "$state")" \
+        "$(jq -r .deployment_lane <<< "$state")")" || return 65
+    jq -cn --argjson plan "$plan" --argjson setup "$state" \
+        '$plan | map(select(. as $step | ($setup.completed | index($step)) == null)) | (.[0] // null)'
+}
+
 # Emit one existing bounded setup secret and nothing else on stdout. This is
 # for a local coordinator which immediately passes the value to a browser or
 # peer. Status, validation, events and journals never call this function.
 mp_machine_handoff() {
-    local kind="$1" status value path run_id
+    local kind="$1" status value path run_id next_checkpoint
     mp_machine_require_local_owner || return 77
     [ -s "$MP_SETUP_V2_STATE" ] || return 65
     mp_setup_validate_state_contract "$MP_SETUP_V2_STATE" || return $?
@@ -308,13 +320,13 @@ mp_machine_handoff() {
         return "$status"
     fi
     trap 'unset value; mp_setup_execution_release' EXIT
+    next_checkpoint="$(mp_machine_next_checkpoint_json)" || return $?
     case "$kind" in
         root-bootstrap)
-            jq -e '
+            jq -e --argjson next "$next_checkpoint" '
                 .state == "in_progress"
                 and (.mode | IN("standalone-new","ha-primary-new"))
-                and .current_checkpoint == "root_commissioning_complete"
-                and .current_action_code == "ROOT_COMMISSIONING"
+                and $next == "root_commissioning_complete"
                 and ((.completed // []) | index("application_deployed") != null)
                 and ((.completed // []) | index("public_routing_ready") != null)
                 and ((.completed // []) | index("root_commissioning_complete") == null)
@@ -326,11 +338,10 @@ mp_machine_handoff() {
             [[ "$value" =~ ^[A-Za-z0-9_-]{64}$ ]] || return 65
             ;;
         ha-join)
-            jq -e '
+            jq -e --argjson next "$next_checkpoint" '
                 .state == "in_progress"
                 and (.mode | IN("ha-primary-new","convert-ha","replace-primary"))
-                and .current_checkpoint == "paired"
-                and .current_action_code == "PEER_JOIN_WAIT"
+                and $next == "paired"
                 and ((.completed // []) | index("paired") == null)
             ' "$MP_SETUP_V2_STATE" >/dev/null 2>&1 || return 65
             path="$MP_SETUP_V2_PENDING_JOIN"
