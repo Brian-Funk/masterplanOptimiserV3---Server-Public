@@ -878,13 +878,21 @@ mp_setup_machine_reconcile() {
     fi
     if [[ "$mode" =~ ^(standalone-new|ha-primary-new)$ ]] \
         && mp_setup_state_has application_deployed \
-        && ! mp_setup_state_has root_commissioning_complete \
         && mp_root_bootstrap_is_disabled >/dev/null 2>&1; then
         stage="$(mp_setup_commissioning_stage 2>/dev/null || true)"
         if [ "$stage" = complete ]; then
-            mp_setup_state_mark root_commissioning_complete || return 1
-            mp_setup_state_mark recovery_recipient || return 1
-            changed=true
+            if ! mp_recovery_recipient >/dev/null 2>&1; then
+                mp_setup_sync_commissioning_recipient || return 1
+                changed=true
+            fi
+            if ! mp_setup_state_has root_commissioning_complete; then
+                mp_setup_state_mark root_commissioning_complete || return 1
+                changed=true
+            fi
+            if ! mp_setup_state_has recovery_recipient; then
+                mp_setup_state_mark recovery_recipient || return 1
+                changed=true
+            fi
         fi
     fi
     [ "$changed" = false ] || mp_setup_journal_event state.reconciled || return 1

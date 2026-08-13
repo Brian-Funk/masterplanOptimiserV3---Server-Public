@@ -90,7 +90,7 @@ cleanup() {
     local result="$?"
     set +e
     if [ -n "$snapshot_input" ]; then
-        printf 'ROLLBACK;\n\\q\n' >"$snapshot_input" 2>/dev/null || true
+        printf 'ROLLBACK;\n\\q\n' >&"$snapshot_input" 2>/dev/null || true
     fi
     [ -z "$snapshot_pid" ] || wait "$snapshot_pid" 2>/dev/null || true
     [ -z "$accepted_receipt" ] || rm -f -- "$accepted_receipt"
