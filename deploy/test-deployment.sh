@@ -139,20 +139,25 @@ require_fresh_commissioning_database() {
 }
 
 require_precommission_retarget_database() {
-    local target="$1" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" current
+    local target="$1" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" current deployed
     [ -s "$setup_state" ] || { ui_error "Fresh commissioning state is missing."; return 1; }
     current="$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)"
+    deployed=true
+    if [ -z "$current" ]; then
+        current="$(jq -r '.campaign_commit // empty' "$setup_state" 2>/dev/null || true)"
+        deployed=false
+    fi
     [[ "$current" =~ ^[0-9a-f]{40}$ ]] && [ "$current" != "$target" ] || {
         ui_error "Pre-commission retry requires a different verified candidate target."
         return 1
     }
-    jq -e --arg current "$current" \
+    jq -e --arg current "$current" --argjson deployed "$deployed" \
         '.format == "mp-opt-setup-state-v2"
          and .state == "in_progress"
          and .deployment_lane == "unsigned"
          and .campaign_commit == $current
          and (.mode == "standalone-new" or .mode == "ha-primary-new" or .mode == "ha-join")
-         and ((.completed | index("application_deployed")) != null)
+         and (((.completed | index("application_deployed")) != null) == $deployed)
          and ((.completed | index("root_commissioning_complete")) == null)' \
         "$setup_state" >/dev/null || {
             ui_error "Pre-commission retry is available only before root commissioning completes."
@@ -162,6 +167,18 @@ require_precommission_retarget_database() {
         ui_error "Recovery material exists; use the snapshot-protected candidate transition."
         return 1
     }
+    if [ "$deployed" = false ]; then
+        [ ! -s "$MP_TEST_STATE_FILE" ] || {
+            ui_error "An unsigned deployment receipt exists but is not valid for an initial-deployment retry."
+            return 1
+        }
+    fi
+    git -C "$MP_ROOT" cat-file -e "$current^{commit}" 2>/dev/null \
+        && git -C "$MP_ROOT" cat-file -e "$target^{commit}" 2>/dev/null \
+        && git -C "$MP_ROOT" merge-base --is-ancestor "$current" "$target" || {
+            ui_error "The retry target is not a descendant of the pinned commissioning commit."
+            return 1
+        }
 }
 
 assert_fresh_database_content() {
@@ -347,6 +364,10 @@ apply_prebuilt_candidate() {
     select_candidate_bundle "$target" "$source" \
         || { ui_error "The exact candidate bundle has not been staged."; return 1; }
     previous="$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)"
+    if [ "$precommission_retarget" = true ] && [ -z "$previous" ]; then
+        previous="$(jq -r '.campaign_commit // empty' \
+            "${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" 2>/dev/null || true)"
+    fi
     if [ "$established" = true ]; then
         [[ "$previous" =~ ^[0-9a-f]{40}$ ]] && [ "$previous" != "$target" ] \
             || { ui_error "An established candidate transition requires a different verified target."; return 1; }

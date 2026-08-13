@@ -565,6 +565,11 @@ mp_machine_stage_candidate() {
           (.state == "in_progress" and .campaign_commit == $commit
            and ((.completed // []) | index("application_deployed") == null))
           or
+          (.state == "in_progress" and .campaign_commit != $commit
+           and (.mode | IN("standalone-new","ha-primary-new","ha-join"))
+           and ((.completed // []) | index("application_deployed") == null)
+           and ((.completed // []) | index("root_commissioning_complete") == null))
+          or
           (((.completed // []) | index("application_deployed") != null)
            and .campaign_commit != $commit)
         )
