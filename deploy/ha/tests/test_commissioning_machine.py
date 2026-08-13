@@ -1038,6 +1038,7 @@ class CandidateBundleTests(unittest.TestCase):
         assets = {"frontend": frontend, "operations": operations, "bootstrap": bootstrap}
         manifest = {
             "format": "mp-opt-commissioning-candidate-v1", "commit": commit,
+            "platform": "linux/amd64",
             "release_eligible": False,
             "images": {name: f"ghcr.io/brian-funk/mp-opt-candidates/{name}@sha256:" + digit * 64
                        for name, digit in zip(("backend", "caddy", "postgres", "tools"), "1234")},
@@ -1047,6 +1048,7 @@ class CandidateBundleTests(unittest.TestCase):
         manifest_bytes = json.dumps(manifest).encode()
         index = {
             "format": "mp-opt-commissioning-candidate-bundle-v1", "commit": commit,
+            "platform": "linux/amd64",
             "release_eligible": False, "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
             "assets": {name: {"path": f"{name}.tar.gz" if name != "bootstrap" else "bootstrap.sh",
                               "sha256": hashlib.sha256(value).hexdigest()} for name, value in assets.items()},
@@ -1061,6 +1063,19 @@ class CandidateBundleTests(unittest.TestCase):
                 archive.writestr("bootstrap.sh", bootstrap)
             loaded, _ = candidate_bundle.load(bundle, commit)
             self.assertFalse(loaded["release_eligible"])
+
+            manifest["platform"] = "linux/arm64"
+            arm_manifest = json.dumps(manifest).encode()
+            index["platform"] = "linux/arm64"
+            index["manifest_sha256"] = hashlib.sha256(arm_manifest).hexdigest()
+            with zipfile.ZipFile(bundle, "w") as archive:
+                archive.writestr("candidate-manifest.json", arm_manifest)
+                archive.writestr("candidate-bundle-index.json", json.dumps(index))
+                archive.writestr("frontend.tar.gz", frontend)
+                archive.writestr("operations.tar.gz", operations)
+                archive.writestr("bootstrap.sh", bootstrap)
+            with self.assertRaisesRegex(ValueError, "candidate index identity mismatch"):
+                candidate_bundle.load(bundle, commit)
 
     def test_candidate_tar_rejects_prefix_substitution_and_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

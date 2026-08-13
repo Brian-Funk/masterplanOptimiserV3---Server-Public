@@ -43,9 +43,11 @@ def load(path: Path, commit: str) -> tuple[dict, dict[str, bytes]]:
                 raise ValueError("candidate bundle entry is unsafe")
         data = {name: archive.read(name) for name in FILES}
     index = object_with(json.loads(data["candidate-bundle-index.json"]),
-                        {"format", "commit", "release_eligible", "manifest_sha256", "assets"})
+                        {"format", "commit", "platform", "release_eligible",
+                         "manifest_sha256", "assets"})
     if index["format"] != "mp-opt-commissioning-candidate-bundle-v1" \
-            or index["commit"] != commit or index["release_eligible"] is not False \
+            or index["commit"] != commit or index["platform"] != "linux/amd64" \
+            or index["release_eligible"] is not False \
             or index["manifest_sha256"] != sha(data["candidate-manifest.json"]):
         raise ValueError("candidate index identity mismatch")
     index_assets = object_with(index["assets"], {"frontend", "operations", "bootstrap"})
@@ -55,11 +57,14 @@ def load(path: Path, commit: str) -> tuple[dict, dict[str, bytes]]:
         if item["path"] != filename or item["sha256"] != sha(data[filename]):
             raise ValueError("candidate index asset mismatch")
     manifest = object_with(json.loads(data["candidate-manifest.json"]),
-                           {"format", "commit", "release_eligible", "images",
+                           {"format", "commit", "platform", "release_eligible", "images",
                             "frontend", "operations", "bootstrap"})
     if manifest["format"] != "mp-opt-commissioning-candidate-v1" \
-            or manifest["commit"] != commit or manifest["release_eligible"] is not False:
+            or manifest["commit"] != commit or manifest["platform"] != "linux/amd64" \
+            or manifest["release_eligible"] is not False:
         raise ValueError("candidate manifest identity mismatch")
+    if index["platform"] != manifest["platform"]:
+        raise ValueError("candidate platform identity mismatch")
     images = object_with(manifest["images"], {"backend", "caddy", "postgres", "tools"})
     if not all(isinstance(value, str) and IMAGE.fullmatch(value) for value in images.values()):
         raise ValueError("candidate image is not digest-pinned")

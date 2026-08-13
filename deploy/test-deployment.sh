@@ -212,6 +212,8 @@ stage_candidate() {
     local target="$1" expected="$2" temporary actual manifest
     require_test_policy
     require_commit "$target"
+    [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] \
+        || { ui_error "Private commissioning candidates require linux/amd64."; return 1; }
     [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || return 2
     mkdir -p "$MP_TEST_CANDIDATE_DIR"; chmod 700 "$MP_TEST_CANDIDATE_DIR"
     temporary="$(mktemp "$MP_TEST_CANDIDATE_DIR/bundle.XXXXXX")" || return 1
