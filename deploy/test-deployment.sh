@@ -175,6 +175,8 @@ require_precommission_retarget_database() {
     fi
     git -C "$MP_ROOT" cat-file -e "$current^{commit}" 2>/dev/null \
         && git -C "$MP_ROOT" cat-file -e "$target^{commit}" 2>/dev/null \
+        && git -C "$MP_ROOT" fetch --no-tags --deepen=256 origin "$target" \
+            >/dev/null 2>&1 \
         && git -C "$MP_ROOT" merge-base --is-ancestor "$current" "$target" || {
             ui_error "The retry target is not a descendant of the pinned commissioning commit."
             return 1
