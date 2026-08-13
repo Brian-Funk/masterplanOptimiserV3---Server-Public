@@ -2991,6 +2991,31 @@ mp_setup_cleanup_legacy_load_balancer() {
 # Remove the DNS-only routing records and Durable Object state before deleting
 # the Worker itself. This action deliberately leaves the local servers and
 # databases untouched so an operator can export or wipe them separately.
+mp_setup_decommission_witness_after_secret_rotation() {
+    local witness="$1" cluster="$2" admin_token="$3" body="$4"
+    local error attempt
+    error="$(mktemp "$MP_STATE/decommission-witness-error.XXXXXX")" || return 1
+    for attempt in $(seq 1 12); do
+        if mp_setup_witness_call decommission "$witness" "$cluster" "$admin_token" "$body" \
+            >/dev/null 2>"$error"; then
+            rm -f "$error"
+            return 0
+        fi
+        # A newly written Worker secret is eventually consistent. Retry only
+        # the exact authentication-propagation response; every other provider
+        # or witness error remains immediately visible to the caller.
+        if ! grep -Eq 'remote API returned HTTP 401([^0-9]|$)' "$error"; then
+            cat "$error" >&2
+            rm -f "$error"
+            return 1
+        fi
+        [ "$attempt" -eq 12 ] || sleep 5
+    done
+    cat "$error" >&2
+    rm -f "$error"
+    return 1
+}
+
 mp_setup_decommission_cloudflare() {
     local cluster witness account_id worker_name deploy_token admin_token tools_image body
     mp_load_ha_config || return 1
@@ -3019,7 +3044,8 @@ mp_setup_decommission_cloudflare() {
         || { unset deploy_token admin_token; ui_error "The Worker administrator secret could not be rotated."; return 1; }
     body="$(mktemp "$MP_STATE/decommission-cloudflare.XXXXXX")" || return 1
     jq -n --arg cluster "$cluster" '{confirm_cluster_id:$cluster}' > "$body"
-    mp_setup_witness_call decommission "$witness" "$cluster" "$admin_token" "$body" >/dev/null \
+    mp_setup_decommission_witness_after_secret_rotation \
+        "$witness" "$cluster" "$admin_token" "$body" >/dev/null \
         || { rm -f "$body"; unset deploy_token admin_token; ui_error "The Worker did not confirm DNS and state deletion."; return 1; }
     rm -f "$body"; unset admin_token
     printf 'y\n' | docker run --rm -i -e CLOUDFLARE_API_TOKEN="$deploy_token" \
@@ -3073,7 +3099,8 @@ mp_setup_decommission_cloudflare_machine() {
                 secret put ADMIN_TOKEN --name "$worker_name" >/dev/null || return 1
         body="$(mktemp "$MP_STATE/decommission-cloudflare.XXXXXX")" || return 1
         jq -n --arg cluster "$cluster" '{confirm_cluster_id:$cluster}' > "$body"
-        mp_setup_witness_call decommission "$witness" "$cluster" "$admin_token" "$body" >/dev/null \
+        mp_setup_decommission_witness_after_secret_rotation \
+            "$witness" "$cluster" "$admin_token" "$body" >/dev/null \
             || { rm -f "$body"; unset admin_token; return 1; }
         rm -f "$body"; unset admin_token
         temporary="$(mktemp "$MP_STATE/provider-cleanup-receipt.XXXXXX")" || return 1
