@@ -78,13 +78,15 @@ mp_machine_require_local_owner() {
 }
 
 mp_machine_validate_regular_file() {
-    local path="$1" expected_mode="${2:-600}" owner
+    local path="$1" expected_mode="${2:-600}" expected_group="${3:-}" owner
     [ ! -e "$path" ] && [ ! -L "$path" ] && return 0
     [ -f "$path" ] && [ ! -L "$path" ] || return 1
     [ -d "$MP_STATE" ] || return 1
     owner="$(stat -c '%u' "$MP_STATE" 2>/dev/null)" || return 1
     [ "$(stat -c '%u' "$path" 2>/dev/null)" = "$owner" ] || return 1
-    [ "$(stat -c '%a' "$path" 2>/dev/null)" = "$expected_mode" ]
+    [ "$(stat -c '%a' "$path" 2>/dev/null)" = "$expected_mode" ] || return 1
+    [ -z "$expected_group" ] \
+        || [ "$(stat -c '%g' "$path" 2>/dev/null)" = "$expected_group" ]
 }
 
 mp_machine_validate() {
@@ -332,7 +334,7 @@ mp_machine_handoff() {
                 and ((.completed // []) | index("root_commissioning_complete") == null)
             ' "$MP_SETUP_V2_STATE" >/dev/null 2>&1 || return 65
             path="$MP_ROOT/secrets/root_bootstrap_token"
-            mp_machine_validate_regular_file "$path" 600 || return 77
+            mp_machine_validate_regular_file "$path" 640 10001 || return 77
             [ -s "$path" ] || return 66
             value="$(cat "$path")" || return 1
             [[ "$value" =~ ^[A-Za-z0-9_-]{64}$ ]] || return 65
