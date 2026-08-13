@@ -735,6 +735,10 @@ compose_activate() {
             sleep 1
         done
     fi
+    if [ "$fresh_commissioning" = true ] && [ "$role" = dynamic ] \
+        && [ "$routing_ready" = true ]; then
+        "$MP_ROOT/deploy/ha/install_services.sh" --commissioning || return 1
+    fi
     [ "$(stat -c %a "$MP_ROOT/runtime")" = 711 ] || {
         ui_error "Runtime traversal permissions were not preserved during activation."
         return 1
