@@ -138,6 +138,32 @@ require_fresh_commissioning_database() {
         || { ui_error "A different verified unsigned deployment already exists."; return 1; }
 }
 
+require_precommission_retarget_database() {
+    local target="$1" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" current
+    [ -s "$setup_state" ] || { ui_error "Fresh commissioning state is missing."; return 1; }
+    current="$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)"
+    [[ "$current" =~ ^[0-9a-f]{40}$ ]] && [ "$current" != "$target" ] || {
+        ui_error "Pre-commission retry requires a different verified candidate target."
+        return 1
+    }
+    jq -e --arg current "$current" \
+        '.format == "mp-opt-setup-state-v2"
+         and .state == "in_progress"
+         and .deployment_lane == "unsigned"
+         and .campaign_commit == $current
+         and (.mode == "standalone-new" or .mode == "ha-primary-new" or .mode == "ha-join")
+         and ((.completed | index("application_deployed")) != null)
+         and ((.completed | index("root_commissioning_complete")) == null)' \
+        "$setup_state" >/dev/null || {
+            ui_error "Pre-commission retry is available only before root commissioning completes."
+            return 1
+        }
+    [ ! -s "$MP_RECIPIENT_FILE" ] || {
+        ui_error "Recovery material exists; use the snapshot-protected candidate transition."
+        return 1
+    }
+}
+
 assert_fresh_database_content() {
     local present safe
     mp_compose_init
@@ -284,11 +310,17 @@ select_candidate_bundle() {
 
 apply_prebuilt_candidate() {
     local target="$1" fresh_commissioning="$2" established="${3:-false}" source="${4:-staged}"
-    local prepare_only="${5:-false}"
+    local prepare_only="${5:-false}" precommission_retarget="${6:-false}"
     local credentials username token docker_config stage manifest identity="${MP_TEST_RECOVERY_IDENTITY_FILE:-}"
     local previous role peer_ready=false image key plan components snapshot="" automatic=false
     require_test_policy
-    [ "$fresh_commissioning" != true ] || require_fresh_commissioning_database "$target"
+    if [ "$fresh_commissioning" = true ]; then
+        if [ "$precommission_retarget" = true ]; then
+            require_precommission_retarget_database "$target" || return 1
+        else
+            require_fresh_commissioning_database "$target" || return 1
+        fi
+    fi
     select_candidate_bundle "$target" "$source" \
         || { ui_error "The exact candidate bundle has not been staged."; return 1; }
     previous="$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)"
@@ -1252,7 +1284,7 @@ case "$command" in
         [ "$#" -eq 2 ] || { usage; exit 2; }
         stage_candidate "$1" "$2"
         ;;
-    apply-prebuilt|apply-prebuilt-established|rollback-prebuilt)
+    apply-prebuilt|apply-prebuilt-precommission|apply-prebuilt-established|rollback-prebuilt)
         [ "$#" -ge 2 ] || { usage; exit 2; }
         target="$1"; shift; fresh_commissioning=false; registry_stdin=false
         while [ "$#" -gt 0 ]; do
@@ -1266,6 +1298,10 @@ case "$command" in
         [ "$registry_stdin" = true ] || { usage; exit 2; }
         case "$command" in
             apply-prebuilt) apply_prebuilt_candidate "$target" "$fresh_commissioning" false staged ;;
+            apply-prebuilt-precommission)
+                [ "$fresh_commissioning" = false ] || { usage; exit 2; }
+                apply_prebuilt_candidate "$target" true false staged false true
+                ;;
             apply-prebuilt-established)
                 [ "$fresh_commissioning" = false ] || { usage; exit 2; }
                 apply_prebuilt_candidate "$target" false true staged

@@ -672,7 +672,7 @@ mp_machine_deployment_action() {
         && jq -e 'type == "object"
           and ((keys | sort) == ["action","commit","format","idempotency_key","tag","values"])
           and .format == "mp-opt-deployment-lifecycle-input-v1"
-          and (.action | IN("signed-upgrade","signed-rollback","candidate-advance","candidate-rollback"))
+          and (.action | IN("signed-upgrade","signed-rollback","candidate-precommission-retry","candidate-advance","candidate-rollback"))
           and (.commit | type == "string" and test("^[0-9a-f]{40}$"))
           and (.idempotency_key | type == "string"
                and test("^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"))
@@ -680,6 +680,12 @@ mp_machine_deployment_action() {
                  (.tag | type == "string"
                    and test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
                  and .values == {}
+               elif .action == "candidate-precommission-retry" then
+                 .tag == null
+                 and ((.values|keys|sort)==["registry"])
+                 and ((.values.registry|keys|sort)==["token","username"])
+                 and (.values.registry.username|type=="string" and length>=1 and length<=255)
+                 and (.values.registry.token|type=="string" and length>=1 and length<=4096)
                else
                  .tag == null
                  and ((.values|keys|sort)==["recovery_identity","registry"])
@@ -696,7 +702,7 @@ mp_machine_deployment_action() {
     if [ -s "$receipt_file" ]; then
         jq -s -e 'all(.[];
             .format == "mp-opt-deployment-lifecycle-receipt-v1"
-            and (.action | IN("signed-upgrade","signed-rollback","candidate-advance","candidate-rollback"))
+            and (.action | IN("signed-upgrade","signed-rollback","candidate-precommission-retry","candidate-advance","candidate-rollback"))
             and ((.tag == null) or (.tag | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")))
             and (.commit | test("^[0-9a-f]{40}$"))
             and (.idempotency_key | test("^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"))
@@ -728,14 +734,18 @@ mp_machine_deployment_action() {
     case "$action" in
         signed-upgrade) mp_deploy_signed_exact "$tag" "$commit" >"$log" 2>&1 || status=$? ;;
         signed-rollback) mp_rollback_signed_exact "$tag" "$commit" >"$log" 2>&1 || status=$? ;;
-        candidate-advance|candidate-rollback)
+        candidate-precommission-retry|candidate-advance|candidate-rollback)
             [ "$policy" = test ] || status=65
-            if [ "$status" -eq 0 ]; then
+            if [ "$status" -eq 0 ] && [ "$action" != candidate-precommission-retry ]; then
                 recovery_identity="$(mp_setup_machine_identity_file \
                     "$(jq -r .values.recovery_identity "$input")")" || status=$?
             fi
             if [ "$status" -eq 0 ]; then
-                if [ "$action" = candidate-advance ]; then
+                if [ "$action" = candidate-precommission-retry ]; then
+                    jq -c .values.registry "$input" \
+                        | "$MP_ROOT/deploy/test-deployment.sh" apply-prebuilt-precommission \
+                            "$commit" --registry-credentials-stdin >"$log" 2>&1 || status=$?
+                elif [ "$action" = candidate-advance ]; then
                     jq -c .values.registry "$input" \
                         | MP_TEST_RECOVERY_IDENTITY_FILE="$recovery_identity" \
                             "$MP_ROOT/deploy/test-deployment.sh" apply-prebuilt-established \
