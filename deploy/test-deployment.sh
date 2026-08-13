@@ -469,7 +469,7 @@ apply_prebuilt_candidate() {
         unset MP_TEST_CANDIDATE_OPERATIONS
         return 0
     fi
-    compose_activate "$components" "$fresh_commissioning"
+    compose_activate "$components" "$fresh_commissioning" "$precommission_retarget"
     # Initial configuration writes the first host management-audit record
     # before the fresh evidence bind source exists.  compose_activate creates
     # and validates that source, so publish the verified host tail now—before
@@ -663,7 +663,8 @@ ensure_optional_compose_secret_sources() {
 }
 
 compose_activate() {
-    local components="$1" fresh_commissioning="${2:-false}" domain attempt role routing_ready=false
+    local components="$1" fresh_commissioning="${2:-false}" precommission_retarget="${3:-false}"
+    local domain attempt role routing_ready=false
     prepare_runtime_from_installed_sources
     ensure_optional_compose_secret_sources
     mp_prepare_backend_secret_permissions
@@ -682,7 +683,9 @@ compose_activate() {
         mp_ensure_base_schema
         set_apply_stage migrations
         mp_apply_migrations
-        if [ "$fresh_commissioning" = true ]; then
+        if [ "$fresh_commissioning" = true ] \
+            && { [ "$precommission_retarget" != true ] \
+                || ! mp_setup_state_has application_deployed; }; then
             set_apply_stage fresh-commissioning
             mp_initialise_fresh_commissioning_state
         fi
