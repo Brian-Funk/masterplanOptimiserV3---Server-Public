@@ -427,6 +427,17 @@ apply_prebuilt_candidate() {
         return 0
     fi
     compose_activate "$components" "$fresh_commissioning"
+    # Initial configuration writes the first host management-audit record
+    # before the fresh evidence bind source exists.  compose_activate creates
+    # and validates that source, so publish the verified host tail now—before
+    # browser commissioning performs any evidence-bound root action.  Treat a
+    # missing bridge as a deployment failure instead of allowing controller
+    # authorisation to fail later with EvidenceUnavailable.
+    mp_audit "deploy.test" "success" "$target"
+    mp_publish_audit_head || {
+        ui_error "The verified management audit head could not be published."
+        return 1
+    }
     plan="$(jq -cn --arg target "$target" \
         '{base:"",target:$target,full:true,migrations:true,prebuilt:true,
           components:["backend","frontend","caddy","database","tools","operations"]}')"
