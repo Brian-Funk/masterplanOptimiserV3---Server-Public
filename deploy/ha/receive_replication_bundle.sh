@@ -457,10 +457,15 @@ python3 "$MP_ROOT/deploy/ha/smtp_probe.py" --root "$MP_ROOT" --node-id "$HA_NODE
 
 received_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 jq -n --arg bundle "$bundle_id" --arg hash "$expected_hash" --arg received "$received_at" \
-    --arg created "$manifest_created_at" --arg source "$HA_PEER_NODE_ID" --argjson generation "$manifest_generation" \
+    --arg created "$manifest_created_at" --arg source "$HA_PEER_NODE_ID" \
+    --arg target "$HA_NODE_ID" --arg cluster "$HA_CLUSTER_ID" --arg release "$release" \
+    --argjson generation "$manifest_generation" \
     --argjson privacy "$(jq '.privacy_assertion // null' <<< "$manifest")" \
     --argjson operations "$(jq '[.protection_operations[]?.marker | {operation_id,mutation_sequence}]' <<< "$manifest")" \
-    '{format:"mp-opt-receiver-state-v2",last_bundle_id:$bundle,last_bundle_sha256:$hash,last_received_at:$received,bundle_created_at:$created,source_node_id:$source,generation:$generation,privacy_assertion:$privacy,protection_operations:$operations}' \
+    '{format:"mp-opt-receiver-state-v2",last_bundle_id:$bundle,last_bundle_sha256:$hash,
+      last_received_at:$received,bundle_created_at:$created,source_node_id:$source,
+      target_node_id:$target,cluster_id:$cluster,release_hash:$release,
+      generation:$generation,privacy_assertion:$privacy,protection_operations:$operations}' \
     > "$stage/receiver.json"
 install -m 0600 "$stage/receiver.json" "$MP_ROOT/runtime/ha-receiver.json"
 # The old database is intentionally retained until the next successful copy;

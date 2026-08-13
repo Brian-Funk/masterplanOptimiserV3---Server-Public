@@ -369,7 +369,7 @@ mp_ha_replicate_now() {
 # copied into the terminal, audit log, or peer command line.
 mp_ha_verify_smtp_both_nodes() {
     local local_report peer_report local_ready peer_ready local_fingerprint peer_fingerprint
-    local recipient="${2:-}" correlation_id="${3:-}" send_message local_node peer_node require_delivery="${1:-optional}" delivery_sent=false
+    local recipient="${2:-}" correlation_id="${3:-}" recipient_b64 send_message local_node peer_node require_delivery="${1:-optional}" delivery_sent=false
     local -a correlation_args=()
     mp_load_ha_config || return 1
     [ -z "$correlation_id" ] || correlation_args=(--correlation-id "$correlation_id")
@@ -417,6 +417,10 @@ mp_ha_verify_smtp_both_nodes() {
                 ui_error "Enter a valid recipient email."
                 return 1
             }
+            recipient_b64="$(printf '%s' "$recipient" | base64 -w0)" || {
+                rm -f "$local_report" "$peer_report"
+                return 1
+            }
             python3 "$MP_ROOT/deploy/ha/smtp_probe.py" \
                 --root "$MP_ROOT" --node-id "$HA_NODE_ID" \
                 --output "$MP_ROOT/runtime/ha-smtp-status.json" --send-to "$recipient" \
@@ -426,7 +430,7 @@ mp_ha_verify_smtp_both_nodes() {
                 -o ClearAllForwardings=yes "$HA_PEER_SSH" \
                 python3 /opt/masterplan/deploy/ha/smtp_probe.py \
                 --root /opt/masterplan --node-id "$HA_PEER_NODE_ID" \
-                --output /opt/masterplan/runtime/ha-smtp-status.json --send-to "$recipient" \
+                --output /opt/masterplan/runtime/ha-smtp-status.json --send-to-b64 "$recipient_b64" \
                 "${correlation_args[@]}" >/dev/null \
                 || peer_ready=false
             if [ "$local_ready" = true ] && [ "$peer_ready" = true ]; then

@@ -196,7 +196,7 @@ mp_cleanup_stale_setup_transients() {
     state_real="$(readlink -f "$MP_STATE")" || return 1
     while IFS= read -r -d '' file; do
         name="$(basename "$file")"
-        [[ "$name" =~ ^(wrangler-secrets|wrangler-repair|wrangler-deploy|pair-wait|pair-state|witness-bootstrap|witness-bootstrap-error|witness-join|witness-join-error|ha-join|pair-open|configure-dns|routing-ready|decommission-cloudflare|setup-machine-input|setup-recovery-package|setup-recovery-identity|portable-last-import|provider-worker-probe|pending-witness-bootstrap|pending-local-join|pending-ha-join|pending-replacement-request|setup-state|setup-execution|setup-cancel-request|setup-deployment-lifecycle|provider-cleanup-receipt)\.[A-Za-z0-9]{6}$ ]] \
+        [[ "$name" =~ ^(wrangler-secrets|wrangler-repair|wrangler-deploy|pair-wait|pair-state|witness-bootstrap|witness-bootstrap-error|witness-join|witness-join-error|ha-join|pair-open|configure-dns|routing-ready|decommission-cloudflare|setup-machine-input|setup-recovery-package|setup-recovery-identity|portable-last-import|provider-worker-probe|pending-witness-bootstrap|pending-local-join|pending-ha-join|pending-replacement-request|setup-state|setup-execution|setup-cancel-request|setup-deployment-lifecycle|provider-cleanup-receipt|setup-full-loss-authorization|cloudflare-provider-resource|setup-smtp-delivery)\.[A-Za-z0-9]{6}$ ]] \
             || continue
         found=1
         file_parent="$(readlink -f "$(dirname "$file")")" || return 1
@@ -1536,26 +1536,57 @@ mp_append_setup_event() (
 mp_reconcile_signed_join_setup() {
     local setup_state="${MP_STATE}/setup-state-v2.json"
     local receiver_state="${MP_ROOT}/runtime/ha-receiver.json"
-    local temporary bundle hash received generation
+    local temporary bundle hash received generation receiver sender release
     [ -s "$setup_state" ] || return 0
     jq -e '
         .format == "mp-opt-setup-state-v2"
-        and .mode == "ha-join"
+        and (.mode | IN("ha-join","replace-node"))
         and .deployment_lane == "signed"
         and .state == "in_progress"
         and ((.completed // []) | index("joined") != null)
     ' "$setup_state" >/dev/null 2>&1 || return 0
     [ -s "$receiver_state" ] || return 0
-    jq -e '
+    mp_load_ha_config >/dev/null 2>&1 || return 0
+    release="$(mp_release_hash 2>/dev/null || true)"
+    [[ "$release" =~ ^[0-9a-f]{64}$ ]] || return 0
+    receiver="$(cat "$receiver_state")" || return 0
+    jq -e --arg source "$HA_PEER_NODE_ID" --arg target "$HA_NODE_ID" \
+        --arg cluster "$HA_CLUSTER_ID" --arg release "$release" '
         .format == "mp-opt-receiver-state-v2"
+        and .source_node_id == $source and .target_node_id == $target
+        and .cluster_id == $cluster and .release_hash == $release
         and (.last_bundle_id | type == "string" and length > 0)
         and (.last_bundle_sha256 | test("^[0-9a-f]{64}$"))
         and (.last_received_at | type == "string" and length > 0)
         and (.generation | type == "number" and . >= 1)
-    ' "$receiver_state" >/dev/null 2>&1 || {
+    ' <<< "$receiver" >/dev/null 2>&1 || {
         printf 'The first-copy receiver receipt is invalid; Node B remains in the waiting state.\n' >&2
         return 1
     }
+    sender="$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
+        -o ClearAllForwardings=yes "$HA_PEER_SSH" \
+        'cat /opt/masterplan/runtime/ha-last-accepted-bundle.json' 2>/dev/null)" || return 0
+    [ -n "$sender" ] || return 0
+    jq -e --arg source "$HA_PEER_NODE_ID" --arg target "$HA_NODE_ID" \
+        --arg cluster "$HA_CLUSTER_ID" --arg release "$release" '
+        .format == "mp-opt-ha-sender-acceptance-v1"
+        and .source_node_id == $source and .target_node_id == $target
+        and .cluster_id == $cluster and .release_hash == $release
+        and (.bundle_id | type == "string" and length > 0)
+        and (.sha256 | test("^[0-9a-f]{64}$"))
+        and (.generation | type == "number" and . >= 1)
+        and (.accepted_at | type == "string" and length > 0)
+    ' <<< "$sender" >/dev/null 2>&1 || {
+        printf 'The first-copy sender receipt is invalid; Node B remains in the waiting state.\n' >&2
+        return 1
+    }
+    [ "$(jq -r .bundle_id <<< "$sender")" = "$(jq -r .last_bundle_id <<< "$receiver")" ] \
+        && [ "$(jq -r .sha256 <<< "$sender")" = "$(jq -r .last_bundle_sha256 <<< "$receiver")" ] \
+        && [ "$(jq -r .generation <<< "$sender")" = "$(jq -r .generation <<< "$receiver")" ] \
+        || {
+            printf 'The first-copy sender and receiver receipts disagree; Node B remains in the waiting state.\n' >&2
+            return 1
+        }
     mp_compose_init
     for service in db backend caddy; do
         "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx "$service" \
@@ -1566,10 +1597,10 @@ mp_reconcile_signed_join_setup() {
         >/dev/null 2>&1 || return 0
     mp_caddy_validate >/dev/null 2>&1 || return 0
     mp_origin_tls_health_once || return 0
-    bundle="$(jq -r .last_bundle_id "$receiver_state")"
-    hash="$(jq -r .last_bundle_sha256 "$receiver_state")"
-    received="$(jq -r .last_received_at "$receiver_state")"
-    generation="$(jq -r .generation "$receiver_state")"
+    bundle="$(jq -r .last_bundle_id <<< "$receiver")"
+    hash="$(jq -r .last_bundle_sha256 <<< "$receiver")"
+    received="$(jq -r .last_received_at <<< "$receiver")"
+    generation="$(jq -r .generation <<< "$receiver")"
     temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")" || return 1
     jq --arg bundle "$bundle" --arg hash "$hash" --arg received "$received" \
         --argjson generation "$generation" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '

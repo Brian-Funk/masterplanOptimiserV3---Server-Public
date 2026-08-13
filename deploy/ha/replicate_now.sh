@@ -247,10 +247,12 @@ update_operation_stage verifying
 accepted_receipt="$(mktemp "$MP_ROOT/runtime/ha-last-accepted-bundle.XXXXXX")"
 jq -n --arg bundle "$job_id" --arg sha256 "$archive_hash" \
     --arg source "$HA_NODE_ID" --arg target "$HA_PEER_NODE_ID" \
+    --arg cluster "$HA_CLUSTER_ID" --arg release "$release" \
     --arg accepted "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson generation "$generation" \
     '{format:"mp-opt-ha-sender-acceptance-v1",bundle_id:$bundle,sha256:$sha256,
-      source_node_id:$source,target_node_id:$target,generation:$generation,
+      source_node_id:$source,target_node_id:$target,cluster_id:$cluster,
+      release_hash:$release,generation:$generation,
       accepted_at:$accepted}' > "$accepted_receipt"
 chmod 0600 "$accepted_receipt"
 sync -f "$accepted_receipt" 2>/dev/null || { rm -f "$accepted_receipt"; exit 1; }

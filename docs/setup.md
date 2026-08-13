@@ -16,6 +16,7 @@ VPSs. Have these values ready:
 - SMTP host, port, username, provider token, sender address and DKIM selector,
   if activation email is wanted;
 - for HA, a Cloudflare zone containing the hostname;
+- the Cloudflare account ID which owns that zone and the HA Worker;
 - a temporary Cloudflare token scoped to the account with **Workers Scripts
   Edit**, used to deploy the witness and set its secrets;
 - a long-lived token scoped to **Zone Read** and **DNS Edit** for only that
@@ -198,6 +199,22 @@ surviving active holder and `replace-node` on the blank VPS. The holder must
 prove that automatic failover is disabled before it opens the replacement
 code. Private recovery identities are consumed from protected stdin documents
 and never enter status, errors, events or receipts.
+
+Provider identity is also fail-closed. HA commissioning records the exact
+Cloudflare account, Worker name, Worker URL and zone in a protected local
+receipt. Cleanup must match that receipt and the coordinator's independently
+observed account, Worker and zone before Wrangler is allowed to delete the
+script. A missing or mismatched receipt requires operator recovery; cleanup
+does not derive or guess a Worker name.
+
+Full-loss recovery is accepted by the machine interface only on a verified
+blank host. A protected authorization binds the setup start, imported snapshot
+receipt and recovery recipient before configuration is installed. It permits
+deterministic resume of that one operation, but cannot authorise overwriting an
+unrelated live installation. SMTP delivery similarly records one provider-
+accepted test send for the exact idempotency key, recipient digest,
+configuration digest and correlation ID before waiting for DNS. DNS retries do
+not send the test message again.
 
 Exact deployment lifecycle operations use another stdin-only contract:
 

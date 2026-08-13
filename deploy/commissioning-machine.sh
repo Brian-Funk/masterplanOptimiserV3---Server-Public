@@ -435,6 +435,11 @@ mp_machine_start() {
     run_id="start-$(date -u +%Y%m%dT%H%M%SZ)-$$"
     if mp_setup_execution_acquire "$run_id" start; then :; else status=$?; return "$status"; fi
     trap 'mp_setup_execution_release' EXIT
+    if [ "$mode" = full-restore ] && ! mp_snapshot_full_loss_host_is_blank; then
+        mp_setup_execution_release
+        trap - EXIT
+        return 65
+    fi
     mp_setup_state_begin "$mode"
     status=$?
     mp_setup_execution_release
@@ -498,7 +503,8 @@ mp_machine_read_advance_input() {
             and ((.values.ipv6 == null) or (.values.ipv6 | type == "string" and length <= 45))
           elif .checkpoint == "witness_bootstrap" then
             (((.values | keys) == ["old_peer_powered_off"] and .values.old_peer_powered_off == true)
-             or (((.values | keys - ["cloudflare_deploy_token","cloudflare_dns_token","ipv4","ipv6"]) | length == 0)
+             or (((.values | keys - ["cloudflare_account_id","cloudflare_deploy_token","cloudflare_dns_token","ipv4","ipv6"]) | length == 0)
+                  and (.values.cloudflare_account_id | type == "string" and test("^[0-9a-f]{32}$"))
                  and (.values.cloudflare_deploy_token | type == "string" and length >= 32 and length <= 4096)
                  and (.values.cloudflare_dns_token | type == "string" and length >= 32 and length <= 4096)
                  and (.values.ipv4 | type == "string" and length <= 45)
@@ -515,10 +521,9 @@ mp_machine_read_advance_input() {
              or (((.values | keys - ["correlation_id","dkim_selector","test_recipient"]) | length == 0)
                  and (.values.dkim_selector | type == "string"
                       and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$"))
-                 and (.values.test_recipient | type == "string"
-                      and length >= 3 and length <= 320)
-                 and ((.values.correlation_id == null)
-                      or (.values.correlation_id | type == "string" and test("^[0-9a-f]{32}$")))))
+                  and (.values.test_recipient | type == "string"
+                       and length >= 3 and length <= 320)
+                  and (.values.correlation_id | type == "string" and test("^[0-9a-f]{32}$"))))
           elif .checkpoint == "recovery_recipient" then
             ((.values | keys) == ["recipient"])
             and (.values.recipient | type == "string" and test("^age1[0-9a-z]+$"))
@@ -766,23 +771,30 @@ mp_machine_deployment_action() {
 }
 
 mp_machine_cleanup_provider() {
-    local input run_id log output status=0 token
+    local input run_id log output status=0 token account worker zone
     [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)" = test ] || return 77
     input="$(mktemp "$MP_STATE/setup-machine-input.XXXXXX")" || return 1
     MP_MACHINE_INPUT_FILE="$input"; chmod 600 "$input"
     trap 'mp_secure_remove_file "${MP_MACHINE_INPUT_FILE:-}"; mp_setup_execution_release' EXIT
     head -c 8193 > "$input" || return 1
     [ "$(stat -c %s "$input")" -le 8192 ] \
-        && jq -e 'type=="object" and (keys|sort)==["deploy_token","format"]
+        && jq -e 'type=="object" and (keys|sort)==["account_id","deploy_token","format","worker_name","zone_id"]
           and .format=="mp-opt-provider-cleanup-input-v1"
-          and (.deploy_token|type=="string" and length>=32 and length<=4096)' \
+          and (.account_id|type=="string" and test("^[0-9a-f]{32}$"))
+          and (.deploy_token|type=="string" and length>=32 and length<=4096)
+          and (.worker_name|type=="string" and test("^[a-z0-9][a-z0-9-]{0,62}$"))
+          and (.zone_id|type=="string" and test("^[A-Za-z0-9_-]{8,128}$"))' \
             "$input" >/dev/null 2>&1 || return 64
     token="$(jq -r .deploy_token "$input")"
+    account="$(jq -r .account_id "$input")"
+    worker="$(jq -r .worker_name "$input")"
+    zone="$(jq -r .zone_id "$input")"
     run_id="cleanup-provider-$(date -u +%Y%m%dT%H%M%SZ)-$$"
     mp_setup_execution_acquire "$run_id" cleanup-provider || return $?
     mkdir -p "$MP_STATE/setup-machine-logs"; chmod 700 "$MP_STATE/setup-machine-logs"
     log="$MP_STATE/setup-machine-logs/${run_id}.log"; : > "$log"; chmod 600 "$log"
-    output="$(mp_setup_decommission_cloudflare_machine "$token" 2>"$log")" || status=$?
+    output="$(mp_setup_decommission_cloudflare_machine "$token" "$account" "$worker" "$zone" \
+        2>"$log")" || status=$?
     unset token; mp_secure_remove_file "$input"; MP_MACHINE_INPUT_FILE=""
     mp_setup_execution_release; trap - EXIT
     [ "$status" -eq 0 ] || return "$status"

@@ -15,6 +15,137 @@ MP_SETUP_V2_EXECUTION_LOCK="${MP_SETUP_V2_EXECUTION_LOCK:-$MP_STATE/setup-execut
 MP_SETUP_V2_EXECUTION_STATE="${MP_SETUP_V2_EXECUTION_STATE:-$MP_STATE/setup-execution.json}"
 MP_SETUP_V2_CANCEL_REQUEST="${MP_SETUP_V2_CANCEL_REQUEST:-$MP_STATE/setup-cancel-request.json}"
 MP_SETUP_V2_ARTIFACTS="${MP_SETUP_V2_ARTIFACTS:-$MP_STATE/setup-artifacts}"
+MP_SETUP_V2_FULL_LOSS_AUTH="${MP_SETUP_V2_FULL_LOSS_AUTH:-$MP_STATE/setup-full-loss-authorization.json}"
+MP_SETUP_V2_PROVIDER_RESOURCE="${MP_SETUP_V2_PROVIDER_RESOURCE:-$MP_STATE/cloudflare-provider-resource.json}"
+
+mp_setup_record_cloudflare_resource() {
+    local cluster="$1" account="$2" worker="$3" witness="$4" zone="$5" domain="$6" temporary host
+    [[ "$cluster" =~ ^mp-opt-[0-9a-f-]{36}$ ]] || return 65
+    [[ "$account" =~ ^[0-9a-f]{32}$ ]] || return 65
+    [[ "$worker" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || return 65
+    [[ "$witness" =~ ^https://[^[:space:]]+\.workers\.dev/?$ ]] || return 65
+    [[ "$zone" =~ ^[A-Za-z0-9_-]{8,128}$ ]] || return 65
+    mp_validate_hostname "$domain" || return 65
+    host="${witness#https://}"; host="${host%/}"
+    [ "${host%%.*}" = "$worker" ] || return 65
+    if [ -e "$MP_SETUP_V2_PROVIDER_RESOURCE" ] || [ -L "$MP_SETUP_V2_PROVIDER_RESOURCE" ]; then
+        [ -f "$MP_SETUP_V2_PROVIDER_RESOURCE" ] && [ ! -L "$MP_SETUP_V2_PROVIDER_RESOURCE" ] \
+            && [ "$(stat -c '%u:%a' "$MP_SETUP_V2_PROVIDER_RESOURCE" 2>/dev/null)" = "$(id -u):600" ] \
+            || return 77
+        jq -e --arg cluster "$cluster" --arg account "$account" --arg worker "$worker" --arg witness "${witness%/}" \
+            --arg zone "$zone" --arg domain "$domain" '
+            .format == "mp-opt-cloudflare-provider-resource-v1"
+            and .cluster_id == $cluster and .account_id == $account and .worker_name == $worker
+            and .witness_url == $witness and .zone_id == $zone and .domain == $domain
+        ' "$MP_SETUP_V2_PROVIDER_RESOURCE" >/dev/null 2>&1 || return 65
+        return 0
+    fi
+    temporary="$(mktemp "$MP_STATE/cloudflare-provider-resource.XXXXXX")" || return 1
+    jq -n --arg cluster "$cluster" --arg account "$account" --arg worker "$worker" --arg witness "${witness%/}" \
+        --arg zone "$zone" --arg domain "$domain" \
+        --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        {format:"mp-opt-cloudflare-provider-resource-v1",cluster_id:$cluster,account_id:$account,
+         worker_name:$worker,witness_url:$witness,zone_id:$zone,domain:$domain,
+         recorded_at:$at}
+    ' > "$temporary" \
+        && chmod 600 "$temporary" && sync -f "$temporary" 2>/dev/null \
+        && mv "$temporary" "$MP_SETUP_V2_PROVIDER_RESOURCE" \
+        && sync -f "$MP_STATE" 2>/dev/null \
+        || { rm -f "$temporary"; return 1; }
+}
+
+mp_setup_load_cloudflare_resource() {
+    local cluster="$1" witness="$2" domain="$3"
+    [ -f "$MP_SETUP_V2_PROVIDER_RESOURCE" ] && [ ! -L "$MP_SETUP_V2_PROVIDER_RESOURCE" ] \
+        && [ "$(stat -c '%u:%a' "$MP_SETUP_V2_PROVIDER_RESOURCE" 2>/dev/null)" = "$(id -u):600" ] \
+        || return 65
+    jq -e --arg cluster "$cluster" --arg witness "${witness%/}" --arg domain "$domain" '
+        .format == "mp-opt-cloudflare-provider-resource-v1"
+        and .cluster_id == $cluster and .witness_url == $witness and .domain == $domain
+        and (.account_id | test("^[0-9a-f]{32}$"))
+        and (.worker_name | test("^[a-z0-9][a-z0-9-]{0,62}$"))
+        and (.zone_id | test("^[A-Za-z0-9_-]{8,128}$"))
+        and (.recorded_at | type == "string" and length > 0)
+    ' "$MP_SETUP_V2_PROVIDER_RESOURCE" >/dev/null 2>&1 || return 65
+    [ "$(jq -r .worker_name "$MP_SETUP_V2_PROVIDER_RESOURCE")" \
+        = "$(printf '%s' "${witness#https://}" | cut -d. -f1)" ] || return 65
+}
+
+mp_setup_validate_full_loss_restore_authorization() {
+    local snapshot_path="$1" authorization_id="$2" required_state="${3:-any}"
+    local receipt_hash recipient setup_started
+    [ -f "$MP_SETUP_V2_FULL_LOSS_AUTH" ] && [ ! -L "$MP_SETUP_V2_FULL_LOSS_AUTH" ] \
+        && [ "$(stat -c '%u:%a' "$MP_SETUP_V2_FULL_LOSS_AUTH" 2>/dev/null)" = "$(id -u):600" ] \
+        || return 65
+    jq -e '.mode == "full-restore" and .state == "in_progress"
+        and ((.completed // []) | index("imported") != null)' \
+        "$MP_SETUP_V2_STATE" >/dev/null 2>&1 || return 65
+    [ -f "$snapshot_path/receipt.json" ] && [ ! -L "$snapshot_path/receipt.json" ] || return 65
+    receipt_hash="$(sha256sum "$snapshot_path/receipt.json" | awk '{print $1}')" || return 1
+    recipient="$(jq -er '.encryption.recipient | select(test("^age1[0-9a-z]+$"))' \
+        "$snapshot_path/receipt.json")" || return 65
+    setup_started="$(jq -r '.started_at // empty' "$MP_SETUP_V2_STATE")"
+    jq -e --arg authorization "$authorization_id" --arg receipt "$receipt_hash" \
+        --arg recipient "$recipient" --arg started "$setup_started" --arg required "$required_state" '
+        .format == "mp-opt-full-loss-authorization-v1"
+        and .authorization_id == $authorization
+        and .setup_started_at == $started
+        and .snapshot_receipt_sha256 == $receipt
+        and .recovery_recipient == $recipient
+        and (.state | IN("authorized","installing"))
+        and (if $required == "installing" then .state == "installing" else true end)
+    ' "$MP_SETUP_V2_FULL_LOSS_AUTH" >/dev/null 2>&1
+}
+
+mp_setup_prepare_full_loss_restore_authorization() {
+    local snapshot_path="$1" receipt_hash recipient setup_started authorization temporary
+    if [ -e "$MP_SETUP_V2_FULL_LOSS_AUTH" ] || [ -L "$MP_SETUP_V2_FULL_LOSS_AUTH" ]; then
+        authorization="$(jq -r '.authorization_id // empty' "$MP_SETUP_V2_FULL_LOSS_AUTH" 2>/dev/null || true)"
+        mp_setup_validate_full_loss_restore_authorization "$snapshot_path" "$authorization" any \
+            || return 65
+        printf '%s\n' "$authorization"
+        return 0
+    fi
+    mp_snapshot_full_loss_host_is_blank || return 65
+    receipt_hash="$(sha256sum "$snapshot_path/receipt.json" | awk '{print $1}')" || return 1
+    recipient="$(jq -er '.encryption.recipient | select(test("^age1[0-9a-z]+$"))' \
+        "$snapshot_path/receipt.json")" || return 65
+    setup_started="$(jq -r '.started_at // empty' "$MP_SETUP_V2_STATE")"
+    [ -n "$setup_started" ] || return 65
+    authorization="$(cat /proc/sys/kernel/random/uuid)"
+    temporary="$(mktemp "$MP_STATE/setup-full-loss-authorization.XXXXXX")" || return 1
+    jq -n --arg authorization "$authorization" --arg receipt "$receipt_hash" \
+        --arg recipient "$recipient" --arg started "$setup_started" \
+        --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        {format:"mp-opt-full-loss-authorization-v1",authorization_id:$authorization,
+         setup_started_at:$started,snapshot_receipt_sha256:$receipt,
+         recovery_recipient:$recipient,state:"authorized",blank_verified_at:$at}
+    ' > "$temporary" \
+        && chmod 600 "$temporary" && sync -f "$temporary" 2>/dev/null \
+        && mv "$temporary" "$MP_SETUP_V2_FULL_LOSS_AUTH" \
+        && sync -f "$MP_STATE" 2>/dev/null \
+        || { rm -f "$temporary"; return 1; }
+    printf '%s\n' "$authorization"
+}
+
+mp_setup_mark_full_loss_restore_started() {
+    local snapshot_path="$1" authorization_id="$2" temporary
+    mp_setup_validate_full_loss_restore_authorization \
+        "$snapshot_path" "$authorization_id" any || return 65
+    if [ "$(jq -r .state "$MP_SETUP_V2_FULL_LOSS_AUTH")" = installing ]; then
+        mp_snapshot_full_loss_host_is_blank
+        return $?
+    fi
+    mp_snapshot_full_loss_host_is_blank || return 65
+    temporary="$(mktemp "$MP_STATE/setup-full-loss-authorization.XXXXXX")" || return 1
+    jq --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '.state="installing" | .installation_started_at=$at' \
+        "$MP_SETUP_V2_FULL_LOSS_AUTH" > "$temporary" \
+        && chmod 600 "$temporary" && sync -f "$temporary" 2>/dev/null \
+        && mv "$temporary" "$MP_SETUP_V2_FULL_LOSS_AUTH" \
+        && sync -f "$MP_STATE" 2>/dev/null \
+        || { rm -f "$temporary"; return 1; }
+}
 
 # One host-local lease serialises the graphical TUI and the private test
 # coordinator. The metadata is diagnostic only; flock remains authoritative.
@@ -340,7 +471,8 @@ mp_setup_state_clear_completed() {
     [ "$(jq -r '.state // empty' "$MP_SETUP_V2_STATE")" = complete ] || return 0
     rm -f "$MP_SETUP_V2_STATE" "$MP_SETUP_V2_PENDING_JOIN" \
         "$MP_SETUP_V2_PENDING_BOOTSTRAP" "$MP_SETUP_V2_PENDING_LOCAL_JOIN" \
-        "$MP_SETUP_V2_PENDING_REPLACEMENT" "$MP_SETUP_V2_IMPORT_RECEIPT"
+        "$MP_SETUP_V2_PENDING_REPLACEMENT" "$MP_SETUP_V2_IMPORT_RECEIPT" \
+        "$MP_SETUP_V2_FULL_LOSS_AUTH"
 }
 
 mp_setup_machine_identity_file() {
@@ -960,7 +1092,8 @@ mp_setup_machine_advance_one() {
             MP_SETUP_WITNESS_ADMIN_TOKEN="$(jq -r .admin_token "$MP_SETUP_V2_PENDING_BOOTSTRAP")"
             if [ "$(jq -r .state "$MP_SETUP_V2_PENDING_BOOTSTRAP")" = planned ]; then
                 mp_setup_deploy_witness_machine "$(jq -r .domain "$MP_SETUP_V2_PENDING_BOOTSTRAP")" \
-                    "$cluster_id" "$(jq -r .values.cloudflare_deploy_token "$input_file")" \
+                    "$cluster_id" "$(jq -r .values.cloudflare_account_id "$input_file")" \
+                    "$(jq -r .values.cloudflare_deploy_token "$input_file")" \
                     "$(jq -r .values.cloudflare_dns_token "$input_file")" \
                     "$MP_SETUP_WITNESS_ADMIN_TOKEN" || return 1
                 bootstrap_tmp="$(mktemp "$MP_STATE/pending-witness-bootstrap.XXXXXX")" || return 1
@@ -1185,7 +1318,7 @@ mp_setup_machine_advance_one() {
             mp_setup_state_mark imported
             ;;
         restored)
-            local restore_identity imported_snapshot
+            local restore_identity imported_snapshot restore_authorization
             imported_snapshot="$(jq -er '.snapshot_path | select(type == "string")' \
                 "$MP_SETUP_V2_IMPORT_RECEIPT")" || return 65
             case "$(readlink -f "$imported_snapshot")" in
@@ -1194,7 +1327,12 @@ mp_setup_machine_advance_one() {
             esac
             restore_identity="$(mp_setup_machine_identity_file \
                 "$(jq -r .values.recovery_identity "$input_file")")" || return $?
-            mp_snapshot_restore_full_loss "$imported_snapshot" "$restore_identity" true || {
+            restore_authorization="$(mp_setup_prepare_full_loss_restore_authorization \
+                "$imported_snapshot")" || {
+                    mp_secure_remove_file "$restore_identity"; return 65;
+                }
+            mp_snapshot_restore_full_loss "$imported_snapshot" "$restore_identity" \
+                "$restore_authorization" || {
                 mp_secure_remove_file "$restore_identity"; return 1;
             }
             mp_secure_remove_file "$restore_identity"
@@ -1732,7 +1870,7 @@ mp_setup_witness_call() {
 }
 
 mp_setup_repair_witness_admin_secret_scoped() (
-    local cluster_id="$1" admin_token="$2" deploy_token tools_image worker_name secrets_file="" output=""
+    local cluster_id="$1" admin_token="$2" deploy_token tools_image worker_name account_id secrets_file="" output=""
     cleanup() {
         mp_secure_remove_file "$secrets_file" || true
         [ -z "$output" ] || rm -f -- "$output"
@@ -1748,13 +1886,24 @@ mp_setup_repair_witness_admin_secret_scoped() (
     tools_image="$(sed -n 's/^MP_TOOLS_IMAGE=//p' "$MP_ROOT/.release.env" | head -1)"
     [[ "$tools_image" =~ ^ghcr\.io/brian-funk/masterplanoptimiserv3---server/tools@sha256:[0-9a-f]{64}$ ]] \
         || { ui_error "The signed release does not contain the commissioning tools image."; return 1; }
-    worker_name="mp-opt-ha-$(tr -cd 'a-z0-9' <<< "${cluster_id:0:12}")"
+    [ -f "$MP_SETUP_V2_PROVIDER_RESOURCE" ] && [ ! -L "$MP_SETUP_V2_PROVIDER_RESOURCE" ] \
+        && [ "$(stat -c '%u:%a' "$MP_SETUP_V2_PROVIDER_RESOURCE" 2>/dev/null)" = "$(id -u):600" ] \
+        && jq -e --arg cluster "$cluster_id" '
+            .format == "mp-opt-cloudflare-provider-resource-v1"
+            and .cluster_id == $cluster
+            and (.account_id | test("^[0-9a-f]{32}$"))
+            and (.worker_name | test("^[a-z0-9][a-z0-9-]{0,62}$"))
+        ' "$MP_SETUP_V2_PROVIDER_RESOURCE" >/dev/null 2>&1 \
+        || { ui_error "The exact Cloudflare Worker identity is unavailable; the administrator secret was not changed."; return 1; }
+    worker_name="$(jq -r .worker_name "$MP_SETUP_V2_PROVIDER_RESOURCE")"
+    account_id="$(jq -r .account_id "$MP_SETUP_V2_PROVIDER_RESOURCE")"
     secrets_file="$(mktemp "$MP_STATE/wrangler-secrets.XXXXXX")" || return 1
     output="$(mktemp "$MP_STATE/wrangler-repair.XXXXXX")" || return 1
     jq -n --arg admin "$admin_token" '{ADMIN_TOKEN:$admin}' > "$secrets_file" \
         && chmod 600 "$secrets_file" || return 1
     docker run --rm \
         -e CLOUDFLARE_API_TOKEN="$deploy_token" \
+        -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
         -v "$MP_ROOT/infra/cloudflare-ha-witness:/worker:ro" \
         -v "$secrets_file:/run/mp-opt-witness-secrets.json:ro" \
         "$tools_image" deploy /worker/src/index.ts --config /worker/wrangler.toml \
@@ -1772,7 +1921,7 @@ mp_setup_repair_witness_admin_secret() {
 
 mp_setup_deploy_witness_scoped() (
     local domain="$1" cluster_id="$2" admin_token="${3:-}" deploy_token dns_token worker_name tools_image
-    local output="" witness zone_id secrets_file=""
+    local output="" witness zone_id account_id secrets_file=""
     cleanup() {
         mp_secure_remove_file "$secrets_file" || true
         [ -z "$output" ] || rm -f -- "$output"
@@ -1784,8 +1933,11 @@ mp_setup_deploy_witness_scoped() (
     trap 'exit 143' TERM
     deploy_token="$(ui_password "Cloudflare" "Temporary Worker deployment API token")" || return 1
     dns_token="$(ui_password "Cloudflare" "Long-lived zone-scoped DNS Edit + Zone Read API token")" || return 1
+    account_id="$(ui_input "Cloudflare account" "Cloudflare account ID (32 lowercase hexadecimal characters)")" || return 1
     [ "${#deploy_token}" -ge 32 ] && [ "${#dns_token}" -ge 32 ] \
         || { ui_error "Both Cloudflare tokens appear incomplete."; return 1; }
+    [[ "$account_id" =~ ^[0-9a-f]{32}$ ]] \
+        || { ui_error "Enter the exact Cloudflare account ID."; return 1; }
     tools_image="$(sed -n 's/^MP_TOOLS_IMAGE=//p' "$MP_ROOT/.release.env" | head -1)"
     [[ "$tools_image" =~ ^ghcr\.io/brian-funk/masterplanoptimiserv3---server/tools@sha256:[0-9a-f]{64}$ ]] \
         || { unset deploy_token dns_token; ui_error "The signed release does not contain the commissioning tools image."; return 1; }
@@ -1801,6 +1953,7 @@ mp_setup_deploy_witness_scoped() (
         && chmod 600 "$secrets_file" || return 1
     docker run --rm \
         -e CLOUDFLARE_API_TOKEN="$deploy_token" \
+        -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
         -v "$MP_ROOT/infra/cloudflare-ha-witness:/worker:ro" \
         -v "$secrets_file:/run/mp-opt-witness-secrets.json:ro" \
         "$tools_image" deploy /worker/src/index.ts --config /worker/wrangler.toml \
@@ -1812,7 +1965,10 @@ mp_setup_deploy_witness_scoped() (
     [[ "$witness" =~ ^https://[^[:space:]]+\.workers\.dev/?$ ]] \
         || { ui_error "The deployed Worker URL is invalid."; return 1; }
     jq -cn --arg witness "${witness%/}" --arg zone "$zone_id" --arg admin "$admin_token" \
-        '{witness_url:$witness,zone_id:$zone,admin_token:$admin}'
+        --arg account "$account_id" \
+        --arg worker "$worker_name" \
+        '{witness_url:$witness,zone_id:$zone,admin_token:$admin,
+          account_id:$account,worker_name:$worker}'
 )
 
 mp_setup_deploy_witness() {
@@ -1823,20 +1979,24 @@ mp_setup_deploy_witness() {
     MP_SETUP_WITNESS_URL="$(jq -r .witness_url <<< "$result")"
     MP_SETUP_ZONE_ID="$(jq -r .zone_id <<< "$result")"
     MP_SETUP_WITNESS_ADMIN_TOKEN="$(jq -r .admin_token <<< "$result")"
+    mp_setup_record_cloudflare_resource "$cluster_id" "$(jq -r .account_id <<< "$result")" \
+        "$(jq -r .worker_name <<< "$result")" \
+        "$MP_SETUP_WITNESS_URL" "$MP_SETUP_ZONE_ID" "$domain" || return 1
     export MP_SETUP_WITNESS_URL MP_SETUP_ZONE_ID MP_SETUP_WITNESS_ADMIN_TOKEN
     unset result
 }
 
 mp_setup_deploy_witness_machine() {
-    local domain="$1" cluster_id="$2" deploy_token="$3" dns_token="$4"
-    local admin_token="${5:-}" worker_name tools_image output="" witness zone_id secrets_file=""
+    local domain="$1" cluster_id="$2" account_id="$3" deploy_token="$4" dns_token="$5"
+    local admin_token="${6:-}" worker_name tools_image output="" witness zone_id secrets_file=""
     cleanup() {
         mp_secure_remove_file "$secrets_file" || true
         [ -z "$output" ] || rm -f -- "$output"
         unset deploy_token dns_token admin_token
     }
     trap cleanup EXIT
-    [ "${#deploy_token}" -ge 32 ] && [ "${#dns_token}" -ge 32 ] || return 65
+    [[ "$account_id" =~ ^[0-9a-f]{32}$ ]] \
+        && [ "${#deploy_token}" -ge 32 ] && [ "${#dns_token}" -ge 32 ] || return 65
     tools_image="$(sed -n 's/^MP_TOOLS_IMAGE=//p' "$MP_ROOT/.release.env" | head -1)"
     [[ "$tools_image" =~ ^ghcr\.io/brian-funk/masterplanoptimiserv3---server/tools@sha256:[0-9a-f]{64}$ ]] \
         || return 65
@@ -1850,6 +2010,7 @@ mp_setup_deploy_witness_machine() {
         '{ADMIN_TOKEN:$admin,CLOUDFLARE_DNS_API_TOKEN:$dns}' > "$secrets_file" \
         && chmod 600 "$secrets_file" || return 1
     CLOUDFLARE_API_TOKEN="$deploy_token" docker run --rm -e CLOUDFLARE_API_TOKEN \
+        -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
         -v "$MP_ROOT/infra/cloudflare-ha-witness:/worker:ro" \
         -v "$secrets_file:/run/mp-opt-witness-secrets.json:ro" \
         "$tools_image" deploy /worker/src/index.ts --config /worker/wrangler.toml \
@@ -1859,6 +2020,8 @@ mp_setup_deploy_witness_machine() {
     [[ "$witness" =~ ^https://[^[:space:]]+\.workers\.dev/?$ ]] || return 1
     MP_SETUP_WITNESS_URL="${witness%/}"; MP_SETUP_ZONE_ID="$zone_id"
     MP_SETUP_WITNESS_ADMIN_TOKEN="$admin_token"
+    mp_setup_record_cloudflare_resource "$cluster_id" "$account_id" "$worker_name" \
+        "$MP_SETUP_WITNESS_URL" "$MP_SETUP_ZONE_ID" "$domain" || return 1
     export MP_SETUP_WITNESS_URL MP_SETUP_ZONE_ID MP_SETUP_WITNESS_ADMIN_TOKEN
     cleanup
     trap - EXIT
@@ -1899,8 +2062,85 @@ mp_setup_verify_smtp_and_dns() {
 # Machine equivalent of the SMTP checkpoint. All values arrive through the
 # bounded 0600 commissioning-input file; none are persisted in setup state or
 # events. Missing public DNS is a retryable wait, not an interactive prompt.
+mp_setup_smtp_delivery_fingerprint() {
+    local token_hash
+    [ -f "$MP_ROOT/.env" ] && [ ! -L "$MP_ROOT/.env" ] \
+        && [ -f "$MP_ROOT/secrets/smtp_token" ] && [ ! -L "$MP_ROOT/secrets/smtp_token" ] \
+        || return 1
+    token_hash="$(sha256sum "$MP_ROOT/secrets/smtp_token" | awk '{print $1}')" || return 1
+    {
+        grep -E '^SMTP_(HOST|PORT|USERNAME|SECURITY|FROM_EMAIL|FROM_NAME|REPLY_TO|TIMEOUT_SECONDS)=' \
+            "$MP_ROOT/.env" || true
+        printf 'SMTP_TOKEN_SHA256=%s\n' "$token_hash"
+    } | sha256sum | awk '{print $1}'
+}
+
+mp_setup_smtp_delivery_receipt() {
+    local idempotency_key="$1" recipient="$2" correlation_id="$3" operation="${4:-read}"
+    local key_hash recipient_hash configuration_hash topology receipt temporary state
+    [[ "$idempotency_key" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$ ]] || return 65
+    [[ "$correlation_id" =~ ^[0-9a-f]{32}$ ]] || return 65
+    key_hash="$(printf '%s' "$idempotency_key" | sha256sum | awk '{print $1}')" || return 1
+    recipient_hash="$(printf '%s' "$recipient" | sha256sum | awk '{print $1}')" || return 1
+    configuration_hash="$(mp_setup_smtp_delivery_fingerprint)" || return 1
+    topology="$(mp_ha_role 2>/dev/null || printf standalone)"
+    receipt="$MP_STATE/setup-smtp-delivery-${key_hash}.json"
+    if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+        [ -f "$receipt" ] && [ ! -L "$receipt" ] \
+            && [ "$(stat -c '%u:%a' "$receipt" 2>/dev/null)" = "$(id -u):600" ] \
+            || return 77
+        jq -e --arg key "$key_hash" --arg recipient "$recipient_hash" \
+            --arg correlation "$correlation_id" --arg configuration "$configuration_hash" \
+            --arg topology "$topology" '
+            .format == "mp-opt-setup-smtp-delivery-receipt-v1"
+            and .idempotency_key_sha256 == $key
+            and .recipient_sha256 == $recipient
+            and .correlation_id == $correlation
+            and .configuration_sha256 == $configuration
+            and .topology == $topology
+            and (.state | IN("prepared","accepted"))
+            and (.provider_accepted | type == "boolean")
+            and (if .state == "accepted" then
+                .provider_accepted == true
+                and (.accepted_at | type == "string" and length > 0)
+              else .provider_accepted == false and .accepted_at == null end)
+        ' "$receipt" >/dev/null 2>&1 || return 65
+        state="$(jq -r .state "$receipt")"
+        case "$operation:$state" in
+            read:accepted|accept:accepted) return 0 ;;
+            read:prepared|prepare:prepared) return 20 ;;
+            accept:prepared)
+                temporary="$(mktemp "$MP_STATE/setup-smtp-delivery.XXXXXX")" || return 1
+                jq --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+                    .state="accepted" | .provider_accepted=true | .accepted_at=$at
+                ' "$receipt" > "$temporary" \
+                    && chmod 600 "$temporary" && sync -f "$temporary" 2>/dev/null \
+                    && mv "$temporary" "$receipt" && sync -f "$MP_STATE" 2>/dev/null \
+                    || { rm -f "$temporary"; return 1; }
+                return 0
+                ;;
+            *) return 65 ;;
+        esac
+    fi
+    [ "$operation" = prepare ] || return 10
+    temporary="$(mktemp "$MP_STATE/setup-smtp-delivery.XXXXXX")" || return 1
+    jq -n --arg key "$key_hash" --arg recipient "$recipient_hash" \
+        --arg correlation "$correlation_id" --arg configuration "$configuration_hash" \
+        --arg topology "$topology" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        {format:"mp-opt-setup-smtp-delivery-receipt-v1",
+         idempotency_key_sha256:$key,recipient_sha256:$recipient,
+         correlation_id:$correlation,configuration_sha256:$configuration,
+         topology:$topology,state:"prepared",provider_accepted:false,
+         prepared_at:$at,accepted_at:null}
+    ' > "$temporary" \
+        && chmod 600 "$temporary" && sync -f "$temporary" 2>/dev/null \
+        && mv "$temporary" "$receipt" && sync -f "$MP_STATE" 2>/dev/null \
+        || { rm -f "$temporary"; return 1; }
+}
+
 mp_setup_verify_smtp_and_dns_machine() {
     local selector="$1" recipient="$2" correlation_id="${3:-}" from_email domain spf dmarc dkim
+    local receipt_status=0
     [ -n "$(mp_env_get SMTP_HOST 2>/dev/null || true)" ] || {
         [ -z "$selector" ] && [ -z "$recipient" ]
         return $?
@@ -1908,11 +2148,24 @@ mp_setup_verify_smtp_and_dns_machine() {
     mp_require_commands dig || return 1
     [[ "$selector" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || return 65
     mp_validate_email_address "$recipient" || return 65
-    [ -z "$correlation_id" ] || [[ "$correlation_id" =~ ^[0-9a-f]{32}$ ]] || return 65
-    if [ "$(mp_ha_role 2>/dev/null || printf standalone)" = dynamic ]; then
-        mp_ha_verify_smtp_both_nodes required "$recipient" "$correlation_id" || return 1
-    else
-        mp_send_smtp_test_to "$recipient" "$correlation_id" || return 1
+    [[ "$correlation_id" =~ ^[0-9a-f]{32}$ ]] || return 65
+    mp_setup_smtp_delivery_receipt "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
+        "$recipient" "$correlation_id" read || receipt_status=$?
+    if [ "$receipt_status" -ne 0 ]; then
+        # A prepared receipt means the process may have died after the provider
+        # accepted the message but before local acknowledgement was durable.
+        # Never resend automatically from that ambiguous boundary.
+        [ "$receipt_status" -ne 20 ] || return 20
+        [ "$receipt_status" -eq 10 ] || return "$receipt_status"
+        mp_setup_smtp_delivery_receipt "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
+            "$recipient" "$correlation_id" prepare || return 1
+        if [ "$(mp_ha_role 2>/dev/null || printf standalone)" = dynamic ]; then
+            mp_ha_verify_smtp_both_nodes required "$recipient" "$correlation_id" || return 1
+        else
+            mp_send_smtp_test_to "$recipient" "$correlation_id" || return 1
+        fi
+        mp_setup_smtp_delivery_receipt "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
+            "$recipient" "$correlation_id" accept || return 1
     fi
     from_email="$(mp_env_get SMTP_FROM_EMAIL)" || return 1
     domain="${from_email##*@}"
@@ -2585,7 +2838,7 @@ mp_setup_replace_standby() {
 # load balancer is disabled by the operator and retained for seven days as a
 # rollback aid; deletion is a separate, explicit checkpoint.
 mp_setup_migrate_legacy_load_balancer() {
-    local domain cluster witness node_token worker_name deploy_token dns_token admin_token tools_image
+    local domain cluster witness node_token worker_name account_id deploy_token dns_token admin_token tools_image
     local zone_id node_a_ip node_b_ip body retirement eligible direct_ready origin secret_list identifiers
     mp_load_ha_config || return 1
     [ "$HA_ROLE" = dynamic ] || { ui_error "This action requires an existing HA cluster."; return 1; }
@@ -2601,27 +2854,35 @@ mp_setup_migrate_legacy_load_balancer() {
         || { ui_error "Enter the exact Cloudflare Worker name."; return 1; }
     deploy_token="$(ui_password "Cloudflare migration" "Temporary Worker deployment API token")" || return 1
     dns_token="$(ui_password "Cloudflare migration" "Long-lived zone-scoped DNS Edit + Zone Read token")" || return 1
+    account_id="$(ui_input "Cloudflare migration" "Cloudflare account ID")" || return 1
     [ "${#deploy_token}" -ge 32 ] && [ "${#dns_token}" -ge 32 ] \
         || { ui_error "Both Cloudflare tokens appear incomplete."; return 1; }
+    [[ "$account_id" =~ ^[0-9a-f]{32}$ ]] \
+        || { ui_error "Enter the exact Cloudflare account ID."; return 1; }
     tools_image="$(sed -n 's/^MP_TOOLS_IMAGE=//p' "$MP_ROOT/.release.env" | head -1)"
     [[ "$tools_image" =~ ^ghcr\.io/brian-funk/masterplanoptimiserv3---server/tools@sha256:[0-9a-f]{64}$ ]] \
         || { unset deploy_token dns_token; ui_error "The signed release does not contain the commissioning tools image."; return 1; }
     admin_token="$(mp_random_secret)"
     docker run --rm -e CLOUDFLARE_API_TOKEN="$deploy_token" \
+        -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
         -v "$MP_ROOT/infra/cloudflare-ha-witness:/worker:ro" \
         "$tools_image" deploy /worker/src/index.ts --config /worker/wrangler.toml --name "$worker_name" \
         >/dev/null \
         || { unset deploy_token dns_token admin_token; ui_error "The Worker could not be upgraded safely."; return 1; }
     printf '%s' "$admin_token" \
         | docker run --rm -i -e CLOUDFLARE_API_TOKEN="$deploy_token" \
+            -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
             "$tools_image" secret put ADMIN_TOKEN --name "$worker_name" >/dev/null \
         || { unset deploy_token dns_token admin_token; ui_error "The Worker administrator secret could not be rotated."; return 1; }
     printf '%s' "$dns_token" \
         | docker run --rm -i -e CLOUDFLARE_API_TOKEN="$deploy_token" \
+            -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
             "$tools_image" secret put CLOUDFLARE_DNS_API_TOKEN --name "$worker_name" >/dev/null \
         || { unset deploy_token dns_token admin_token; ui_error "The Worker DNS secret could not be installed."; return 1; }
     zone_id="$(printf '%s' "$dns_token" | python3 "$MP_ROOT/deploy/ha/commission_api.py" zone-id "$domain")" \
         || { unset deploy_token dns_token admin_token; return 1; }
+    mp_setup_record_cloudflare_resource "$cluster" "$account_id" "$worker_name" "$witness" \
+        "$zone_id" "$domain" || { unset deploy_token dns_token admin_token; return 1; }
     node_a_ip="$(ui_input "Direct routing" "Node A public IPv4 address")" || return 1
     node_b_ip="$(ui_input "Direct routing" "Node B public IPv4 address")" || return 1
     python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1]); ipaddress.IPv4Address(sys.argv[2])' \
@@ -2635,11 +2896,13 @@ mp_setup_migrate_legacy_load_balancer() {
     mp_setup_witness_call configure-dns "$witness" "$cluster" "$admin_token" "$body" >/dev/null \
         || { rm -f "$body"; unset admin_token; return 1; }
     secret_list="$(docker run --rm -e CLOUDFLARE_API_TOKEN="$deploy_token" \
+        -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
         "$tools_image" secret list --name "$worker_name")" \
         || { rm -f "$body"; unset deploy_token dns_token admin_token; ui_error "The Worker secret inventory could not be verified."; return 1; }
     if grep -q 'CLOUDFLARE_API_TOKEN' <<< "$secret_list"; then
         printf 'y\n' \
             | docker run --rm -i -e CLOUDFLARE_API_TOKEN="$deploy_token" \
+                -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
                 "$tools_image" secret delete CLOUDFLARE_API_TOKEN --name "$worker_name" >/dev/null \
             || { rm -f "$body"; unset deploy_token dns_token admin_token secret_list; ui_error "The obsolete broad Cloudflare secret could not be removed from the Worker."; return 1; }
     fi
@@ -2720,7 +2983,7 @@ mp_setup_cleanup_legacy_load_balancer() {
 # the Worker itself. This action deliberately leaves the local servers and
 # databases untouched so an operator can export or wipe them separately.
 mp_setup_decommission_cloudflare() {
-    local cluster witness worker_name deploy_token admin_token tools_image body
+    local cluster witness account_id worker_name deploy_token admin_token tools_image body
     mp_load_ha_config || return 1
     [ "$HA_ROLE" = dynamic ] \
         || { ui_error "Cloudflare decommissioning is available only for an HA pair."; return 1; }
@@ -2729,7 +2992,10 @@ mp_setup_decommission_cloudflare() {
         "This removes the public A and AAAA records, ACME challenge records, Worker state and Worker. It does not erase either VPS." \
         "DECOMMISSION HA CLOUDFLARE" || return 0
     cluster="$HA_CLUSTER_ID"; witness="$HA_WITNESS_URL"
-    worker_name="mp-opt-ha-$(tr -cd 'a-z0-9' <<< "${cluster:0:12}")"
+    mp_setup_load_cloudflare_resource "$cluster" "$witness" "$(mp_env_get DOMAIN)" \
+        || { ui_error "The exact Cloudflare Worker identity is not recorded on this node. Refusing provider deletion; recover the protected provider-resource receipt first."; return 1; }
+    worker_name="$(jq -r .worker_name "$MP_SETUP_V2_PROVIDER_RESOURCE")"
+    account_id="$(jq -r .account_id "$MP_SETUP_V2_PROVIDER_RESOURCE")"
     deploy_token="$(ui_password "Cloudflare" "Temporary Worker deployment API token")" || return 1
     [ "${#deploy_token}" -ge 32 ] \
         || { unset deploy_token; ui_error "The Cloudflare token appears incomplete."; return 1; }
@@ -2739,6 +3005,7 @@ mp_setup_decommission_cloudflare() {
     admin_token="$(mp_random_secret)"
     printf '%s' "$admin_token" \
         | docker run --rm -i -e CLOUDFLARE_API_TOKEN="$deploy_token" \
+            -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
             "$tools_image" secret put ADMIN_TOKEN --name "$worker_name" >/dev/null \
         || { unset deploy_token admin_token; ui_error "The Worker administrator secret could not be rotated."; return 1; }
     body="$(mktemp "$MP_STATE/decommission-cloudflare.XXXXXX")" || return 1
@@ -2747,6 +3014,7 @@ mp_setup_decommission_cloudflare() {
         || { rm -f "$body"; unset deploy_token admin_token; ui_error "The Worker did not confirm DNS and state deletion."; return 1; }
     rm -f "$body"; unset admin_token
     printf 'y\n' | docker run --rm -i -e CLOUDFLARE_API_TOKEN="$deploy_token" \
+        -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
         "$tools_image" delete --name "$worker_name" >/dev/null \
         || { unset deploy_token; ui_error "Worker state was erased, but the Worker deployment still needs manual deletion."; return 1; }
     unset deploy_token
@@ -2755,22 +3023,31 @@ mp_setup_decommission_cloudflare() {
 }
 
 mp_setup_decommission_cloudflare_machine() {
-    local deploy_token="$1" cluster witness worker_name admin_token tools_image body receipt probe
+    local deploy_token="$1" expected_account="$2" expected_worker="$3" expected_zone="$4"
+    local cluster witness account_id worker_name zone_id admin_token tools_image body receipt probe
     local worker_present=false reconciled=false temporary
     [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)" = test ] || return 77
     mp_load_ha_config || return 1
     [ "$HA_ROLE" = dynamic ] || return 65
     [ "${#deploy_token}" -ge 32 ] || return 65
     cluster="$HA_CLUSTER_ID"; witness="$HA_WITNESS_URL"
-    worker_name="mp-opt-ha-$(tr -cd 'a-z0-9' <<< "${cluster:0:12}")"
+    mp_setup_load_cloudflare_resource "$cluster" "$witness" "$(mp_env_get DOMAIN)" || return 65
+    worker_name="$(jq -r .worker_name "$MP_SETUP_V2_PROVIDER_RESOURCE")"
+    account_id="$(jq -r .account_id "$MP_SETUP_V2_PROVIDER_RESOURCE")"
+    zone_id="$(jq -r .zone_id "$MP_SETUP_V2_PROVIDER_RESOURCE")"
+    [ "$account_id" = "$expected_account" ] && [ "$worker_name" = "$expected_worker" ] \
+        && [ "$zone_id" = "$expected_zone" ] \
+        || return 65
     receipt="$MP_STATE/provider-cleanup-${cluster}.json"
     if [ -e "$receipt" ] || [ -L "$receipt" ]; then
         [ -f "$receipt" ] && [ ! -L "$receipt" ] \
             && [ "$(stat -c '%u:%a' "$receipt" 2>/dev/null)" = "$(id -u):600" ] \
             || return 77
-        jq -e --arg cluster "$cluster" --arg worker "$worker_name" '
+        jq -e --arg cluster "$cluster" --arg account "$account_id" --arg worker "$worker_name" \
+            --arg witness "$witness" --arg zone "$zone_id" '
             .format == "mp-opt-provider-cleanup-receipt-v1"
-            and .cluster_id == $cluster and .worker_name == $worker
+            and .cluster_id == $cluster and .account_id == $account and .worker_name == $worker
+            and .witness_url == $witness and .zone_id == $zone
             and .witness_state_deleted == true
             and (.worker_deleted | type == "boolean")
             and (.witness_state_deleted_at | type == "string" and length > 0)
@@ -2782,7 +3059,8 @@ mp_setup_decommission_cloudflare_machine() {
     if [ ! -s "$receipt" ]; then
         admin_token="$(mp_random_secret)"
         printf '%s' "$admin_token" | CLOUDFLARE_API_TOKEN="$deploy_token" \
-            docker run --rm -i -e CLOUDFLARE_API_TOKEN "$tools_image" \
+            docker run --rm -i -e CLOUDFLARE_API_TOKEN \
+                -e CLOUDFLARE_ACCOUNT_ID="$account_id" "$tools_image" \
                 secret put ADMIN_TOKEN --name "$worker_name" >/dev/null || return 1
         body="$(mktemp "$MP_STATE/decommission-cloudflare.XXXXXX")" || return 1
         jq -n --arg cluster "$cluster" '{confirm_cluster_id:$cluster}' > "$body"
@@ -2790,10 +3068,12 @@ mp_setup_decommission_cloudflare_machine() {
             || { rm -f "$body"; unset admin_token; return 1; }
         rm -f "$body"; unset admin_token
         temporary="$(mktemp "$MP_STATE/provider-cleanup-receipt.XXXXXX")" || return 1
-        jq -n --arg cluster "$cluster" --arg worker "$worker_name" \
+        jq -n --arg cluster "$cluster" --arg account "$account_id" --arg worker "$worker_name" \
+            --arg witness "$witness" --arg zone "$zone_id" \
             --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{format:"mp-opt-provider-cleanup-receipt-v1",cluster_id:$cluster,
-              worker_name:$worker,witness_state_deleted:true,worker_deleted:false,
+        '{format:"mp-opt-provider-cleanup-receipt-v1",cluster_id:$cluster,account_id:$account,
+              worker_name:$worker,witness_url:$witness,zone_id:$zone,
+              witness_state_deleted:true,worker_deleted:false,
               witness_state_deleted_at:$at}' > "$temporary" \
             && chmod 600 "$temporary" && sync -f "$temporary" 2>/dev/null \
             && mv "$temporary" "$receipt" \
@@ -2807,7 +3087,8 @@ mp_setup_decommission_cloudflare_machine() {
         # cause an unexamined second destructive request.
         probe="$(mktemp "$MP_STATE/provider-worker-probe.XXXXXX")" || return 1
         if CLOUDFLARE_API_TOKEN="$deploy_token" docker run --rm \
-            -e CLOUDFLARE_API_TOKEN "$tools_image" deployments list \
+            -e CLOUDFLARE_API_TOKEN -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
+            "$tools_image" deployments list \
             --name "$worker_name" > /dev/null 2> "$probe"; then
             worker_present=true
         elif grep -Eqi '(not[ -]?found|does not exist|10090)' "$probe"; then
@@ -2819,7 +3100,8 @@ mp_setup_decommission_cloudflare_machine() {
         rm -f "$probe"
         if [ "$worker_present" = true ]; then
             printf 'y\n' | CLOUDFLARE_API_TOKEN="$deploy_token" docker run --rm -i \
-                -e CLOUDFLARE_API_TOKEN "$tools_image" delete --name "$worker_name" >/dev/null \
+                -e CLOUDFLARE_API_TOKEN -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
+                "$tools_image" delete --name "$worker_name" >/dev/null \
                 || return 1
         fi
         temporary="$(mktemp "$MP_STATE/provider-cleanup-receipt.XXXXXX")" || return 1
@@ -2832,7 +3114,7 @@ mp_setup_decommission_cloudflare_machine() {
         sync -f "$MP_STATE" 2>/dev/null || return 1
     fi
     unset deploy_token
-    jq '{format,cluster_id,worker_name,witness_state_deleted,worker_deleted,
+    jq '{format,cluster_id,account_id,worker_name,witness_url,zone_id,witness_state_deleted,worker_deleted,
          witness_state_deleted_at,worker_deleted_at,
          worker_deletion_reconciled:(.worker_deletion_reconciled // false)}' "$receipt"
 }
@@ -2842,24 +3124,30 @@ mp_setup_decommission_cloudflare_machine() {
 # after acknowledgement resumable without sending a second full copy.
 mp_setup_record_first_verified_bundle() {
     local sender_file="$MP_ROOT/runtime/ha-last-accepted-bundle.json"
-    local sender receiver bundle sha256 generation accepted_at
+    local sender receiver bundle sha256 generation accepted_at release
     mp_load_ha_config || return 1
+    release="$(mp_release_hash)" || return 1
     [ -s "$sender_file" ] && [ -f "$sender_file" ] && [ ! -L "$sender_file" ] \
         || return 1
     sender="$(cat "$sender_file")" || return 1
     receiver="$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
         -o ClearAllForwardings=yes "$HA_PEER_SSH" \
         'cat /opt/masterplan/runtime/ha-receiver.json' 2>/dev/null)" || return 1
-    jq -e --arg source "$HA_NODE_ID" --arg target "$HA_PEER_NODE_ID" '
+    jq -e --arg source "$HA_NODE_ID" --arg target "$HA_PEER_NODE_ID" \
+        --arg cluster "$HA_CLUSTER_ID" --arg release "$release" '
         .format == "mp-opt-ha-sender-acceptance-v1"
         and .source_node_id == $source and .target_node_id == $target
+        and .cluster_id == $cluster and .release_hash == $release
         and (.bundle_id | type == "string" and length > 0)
         and (.sha256 | test("^[0-9a-f]{64}$"))
         and (.generation | type == "number" and . >= 1)
         and (.accepted_at | type == "string" and length > 0)
     ' <<< "$sender" >/dev/null || return 1
-    jq -e --arg source "$HA_NODE_ID" '
+    jq -e --arg source "$HA_NODE_ID" --arg target "$HA_PEER_NODE_ID" \
+        --arg cluster "$HA_CLUSTER_ID" --arg release "$release" '
         .format == "mp-opt-receiver-state-v2" and .source_node_id == $source
+        and .target_node_id == $target
+        and .cluster_id == $cluster and .release_hash == $release
         and (.last_bundle_id | type == "string" and length > 0)
         and (.last_bundle_sha256 | test("^[0-9a-f]{64}$"))
         and (.generation | type == "number" and . >= 1)

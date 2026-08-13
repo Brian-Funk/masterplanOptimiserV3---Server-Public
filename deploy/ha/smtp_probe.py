@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 from datetime import datetime, timezone
 from email.message import EmailMessage
 import hashlib
@@ -66,8 +68,17 @@ def main() -> int:
     parser.add_argument("--node-id", default=os.getenv("HA_NODE_ID", "unknown"))
     parser.add_argument("--output", type=Path)
     parser.add_argument("--send-to")
+    parser.add_argument("--send-to-b64")
     parser.add_argument("--correlation-id")
     args = parser.parse_args()
+    if args.send_to and args.send_to_b64:
+        parser.error("choose only one SMTP recipient input")
+    if args.send_to_b64:
+        try:
+            raw_recipient = base64.b64decode(args.send_to_b64, validate=True)
+            args.send_to = raw_recipient.decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError):
+            parser.error("the encoded SMTP recipient is invalid")
     observed = datetime.now(timezone.utc).isoformat()
     document: dict[str, object] = {
         "format": "mp-opt-smtp-probe-v1", "node_id": args.node_id,

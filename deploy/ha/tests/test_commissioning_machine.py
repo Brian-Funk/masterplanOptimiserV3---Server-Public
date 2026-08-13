@@ -688,12 +688,31 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 "tools@sha256:" + "a" * 64 + "\n",
                 encoding="ascii",
             )
+            (root / ".env").write_text("DOMAIN=e2e.mp-opt.net\n", encoding="ascii")
             cluster = "mp-opt-12345678-1234-4234-8234-123456789abc"
+            worker = "mp-opt-ha-mpopt12345"
+            witness = f"https://{worker}.synthetic.workers.dev"
+            zone = "zone_12345678"
+            provider = state / "cloudflare-provider-resource.json"
+            provider.write_text(json.dumps({
+                "format": "mp-opt-cloudflare-provider-resource-v1",
+                "cluster_id": cluster,
+                "account_id": "a" * 32,
+                "worker_name": worker,
+                "witness_url": witness,
+                "zone_id": zone,
+                "domain": "e2e.mp-opt.net",
+                "recorded_at": "2026-08-12T09:00:00Z",
+            }), encoding="utf-8")
+            provider.chmod(0o600)
             receipt = state / f"provider-cleanup-{cluster}.json"
             receipt.write_text(json.dumps({
                 "format": "mp-opt-provider-cleanup-receipt-v1",
                 "cluster_id": cluster,
-                "worker_name": "mp-opt-ha-mpopt12345",
+                "account_id": "a" * 32,
+                "worker_name": worker,
+                "witness_url": witness,
+                "zone_id": zone,
                 "witness_state_deleted": True,
                 "worker_deleted": False,
                 "witness_state_deleted_at": "2026-08-12T10:00:00Z",
@@ -708,7 +727,7 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 mp_load_ha_config() {
                     HA_ROLE=dynamic
                     HA_CLUSTER_ID=mp-opt-12345678-1234-4234-8234-123456789abc
-                    HA_WITNESS_URL=https://synthetic.workers.dev
+                    HA_WITNESS_URL=https://mp-opt-ha-mpopt12345.synthetic.workers.dev
                 }
                 docker() {
                     printf '%s\n' "$*" >> "$CALLS"
@@ -719,7 +738,10 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                     esac
                 }
                 result="$(mp_setup_decommission_cloudflare_machine \
-                    0123456789abcdef0123456789abcdef)"
+                    0123456789abcdef0123456789abcdef \
+                    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+                    mp-opt-ha-mpopt12345 \
+                    zone_12345678)"
                 jq -e '.worker_deleted == true and .worker_deletion_reconciled == true' \
                     <<< "$result" >/dev/null
                 ! grep -q ' delete ' "$CALLS"
@@ -727,6 +749,93 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             result = subprocess.run(
                 ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(ROOT),
                  str(root), str(state), str(policy), str(calls)],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_smtp_dns_retry_reuses_one_durable_delivery_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            root = directory / "root"
+            state = directory / "state"
+            (root / "secrets").mkdir(parents=True, mode=0o700)
+            state.mkdir(mode=0o700)
+            (root / ".env").write_text(
+                "SMTP_HOST=smtp.example.test\nSMTP_PORT=587\nSMTP_USERNAME=test\n"
+                "SMTP_SECURITY=starttls\nSMTP_FROM_EMAIL=sender@example.test\n"
+                "SMTP_FROM_NAME=MP-OPT\n",
+                encoding="utf-8",
+            )
+            (root / "secrets/smtp_token").write_text("synthetic-token", encoding="utf-8")
+            (root / ".env").chmod(0o600)
+            (root / "secrets/smtp_token").chmod(0o600)
+            count = directory / "send-count"
+            script = r'''
+                set -Eeuo pipefail
+                export MP_ROOT="$1" MP_STATE="$2" SCRIPT_ROOT="$3" SEND_COUNT="$4"
+                source "$SCRIPT_ROOT/deploy/management/common.sh"
+                source "$SCRIPT_ROOT/deploy/management/setup_v2.sh"
+                mp_require_commands() { :; }
+                mp_validate_email_address() { :; }
+                mp_ha_role() { printf standalone; }
+                mp_send_smtp_test_to() {
+                    local count=0
+                    [ ! -s "$SEND_COUNT" ] || count="$(cat "$SEND_COUNT")"
+                    printf '%s' "$((count + 1))" > "$SEND_COUNT"
+                }
+                mp_public_dns_consensus() { :; }
+                export MP_SETUP_MACHINE_IDEMPOTENCY_KEY=run-smtp-0001
+                set +e
+                mp_setup_verify_smtp_and_dns_machine selector recipient@example.test \
+                    0123456789abcdef0123456789abcdef
+                first=$?
+                mp_setup_verify_smtp_and_dns_machine selector recipient@example.test \
+                    0123456789abcdef0123456789abcdef
+                second=$?
+                set -e
+                [ "$first" -eq 10 ] && [ "$second" -eq 10 ]
+                [ "$(cat "$SEND_COUNT")" -eq 1 ]
+                receipt="$(find "$MP_STATE" -name 'setup-smtp-delivery-*.json' -type f)"
+                jq -e '.provider_accepted == true
+                    and .state == "accepted"
+                    and .correlation_id == "0123456789abcdef0123456789abcdef"' \
+                    "$receipt" >/dev/null
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(root),
+                 str(state), str(ROOT), str(count)],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_full_loss_blank_contract_rejects_live_application_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            root = directory / "root"
+            state = directory / "state"
+            ha = directory / "ha"
+            root.mkdir(mode=0o700); state.mkdir(mode=0o700); ha.mkdir(mode=0o700)
+            script = r'''
+                set -Eeuo pipefail
+                export MP_ROOT="$1" MP_STATE="$2" MP_HA_HOME="$3"
+                export MP_HA_CONFIG="$3/node.env" SCRIPT_ROOT="$4"
+                source "$SCRIPT_ROOT/deploy/management/common.sh"
+                source "$SCRIPT_ROOT/deploy/management/snapshots.sh"
+                mp_require_commands() { :; }
+                docker() {
+                    case "$1 $2" in
+                        "info "|"ps -a") return 0 ;;
+                        "volume inspect"|"network inspect") return 1 ;;
+                        *) return 1 ;;
+                    esac
+                }
+                mp_snapshot_full_loss_host_is_blank
+                printf 'DOMAIN=live.example.test\n' > "$MP_ROOT/.env"
+                ! mp_snapshot_full_loss_host_is_blank
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(root),
+                 str(state), str(ha), str(ROOT)],
                 text=True, capture_output=True, check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -826,6 +935,11 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
 
     def test_provider_cleanup_replay_never_deletes_twice(self) -> None:
         replay = SETUP[SETUP.index("mp_setup_decommission_cloudflare_machine()") :]
+        self.assertIn("mp_setup_load_cloudflare_resource", replay)
+        self.assertNotIn('worker_name="mp-opt-ha-$(tr', replay)
+        self.assertIn('"$account_id" = "$expected_account"', replay)
+        self.assertIn('"$worker_name" = "$expected_worker"', replay)
+        self.assertIn('"$zone_id" = "$expected_zone"', replay)
         deleted_guard = replay.index("! jq -e '.worker_deleted == true'")
         read_only_probe = replay.index("deployments list", deleted_guard)
         delete_call = replay.index('delete --name "$worker_name"', read_only_probe)
@@ -867,6 +981,31 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("mp_setup_join_node_machine", SETUP)
         self.assertIn("mp_setup_verify_smtp_and_dns_machine", SETUP)
         self.assertIn("WITNESS_ROUTING witness_ready", SETUP)
+
+    def test_security_sensitive_commissioning_receipts_are_bound_and_replay_safe(self) -> None:
+        machine = MACHINE.read_text(encoding="utf-8")
+        snapshots = (ROOT / "deploy/management/snapshots.sh").read_text(encoding="utf-8")
+        smtp = SETUP[SETUP.index("mp_setup_smtp_delivery_receipt()") :]
+        restore = SETUP[SETUP.index("mp_setup_prepare_full_loss_restore_authorization()") :]
+        self.assertIn("mp_snapshot_full_loss_host_is_blank", machine)
+        self.assertIn("mp-opt-full-loss-authorization-v1", restore)
+        self.assertIn("snapshot_receipt_sha256", restore)
+        self.assertIn("setup_started_at", restore)
+        self.assertIn("mp_setup_mark_full_loss_restore_started", snapshots)
+        self.assertNotIn('mp_snapshot_restore_full_loss "$imported_snapshot" "$restore_identity" true', SETUP)
+        self.assertIn("mp-opt-setup-smtp-delivery-receipt-v1", smtp)
+        self.assertIn("idempotency_key_sha256", smtp)
+        self.assertIn("configuration_sha256", smtp)
+        self.assertIn('read:prepared|prepare:prepared) return 20', smtp)
+        self.assertIn('state:"prepared",provider_accepted:false', smtp)
+        self.assertLess(smtp.index("mp_setup_smtp_delivery_receipt"), smtp.index("mp_public_dns_consensus"))
+        cleanup_schema = machine[machine.index("mp_machine_cleanup_provider()") :]
+        for field in ("account_id", "worker_name", "zone_id"):
+            self.assertIn(field, cleanup_schema)
+        ha = (ROOT / "deploy/management/ha.sh").read_text(encoding="utf-8")
+        peer_send = ha[ha.index("ssh -T", ha.index("--send-to")) :]
+        self.assertIn('--send-to-b64 "$recipient_b64"', peer_send)
+        self.assertNotIn('--send-to "$recipient"', peer_send)
 
     def test_candidate_contract_matches_private_build_wrapper(self) -> None:
         source = (ROOT / "deploy/candidate_bundle.py").read_text(encoding="utf-8")

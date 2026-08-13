@@ -368,6 +368,18 @@ class SignedJoinReconciliationTests(unittest.TestCase):
                 (runtime / "ha-receiver.json").write_text(
                     json.dumps(receiver), encoding="utf-8"
                 )
+            sender_file = root / "sender.json"
+            sender_file.write_text(json.dumps({
+                "format": "mp-opt-ha-sender-acceptance-v1",
+                "bundle_id": "bundle-first-copy",
+                "sha256": "a" * 64,
+                "source_node_id": "node-a",
+                "target_node_id": "node-b",
+                "cluster_id": "mp-opt-12345678-1234-4234-8234-123456789abc",
+                "release_hash": "b" * 64,
+                "generation": 1,
+                "accepted_at": "2026-08-11T18:00:01Z",
+            }), encoding="utf-8")
             services_file = root / "services.txt"
             services_file.write_text("\n".join(services) + "\n", encoding="utf-8")
             docker = bin_dir / "docker"
@@ -394,6 +406,7 @@ esac
                 "MP_HA_HOME": str(root / "ha"),
                 "MP_DEPLOYMENT_POLICY_FILE": str(root / "deployment-policy"),
                 "FAKE_SERVICES": str(services_file),
+                "FAKE_SENDER": str(sender_file),
                 "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
             }
             result = subprocess.run(
@@ -401,6 +414,11 @@ esac
                     "bash",
                     "-c",
                     'source "$COMMON_PATH"; '
+                    'mp_load_ha_config() { HA_NODE_ID=node-b; HA_PEER_NODE_ID=node-a; '
+                    'HA_CLUSTER_ID=mp-opt-12345678-1234-4234-8234-123456789abc; '
+                    'HA_PEER_SSH=mp-opt-ha-peer; }; '
+                    'mp_release_hash() { printf "%s\\n" "$(printf b%.0s {1..64})"; }; '
+                    'ssh() { cat "$FAKE_SENDER"; }; '
                     'mp_origin_tls_health_once() { return 0; }; '
                     'mp_reconcile_signed_join_setup',
                 ],
@@ -420,6 +438,9 @@ esac
             "last_bundle_sha256": "a" * 64,
             "last_received_at": "2026-08-11T18:00:00Z",
             "source_node_id": "node-a",
+            "target_node_id": "node-b",
+            "cluster_id": "mp-opt-12345678-1234-4234-8234-123456789abc",
+            "release_hash": "b" * 64,
             "generation": 1,
             "protection_operations": [],
         }
@@ -542,6 +563,10 @@ class PairingSetupContractTests(unittest.TestCase):
         self.assertIn("resume_installed=true", snapshots)
         self.assertIn('cmp -s "$payload/config/.env" "$MP_ROOT/.env"', snapshots)
         self.assertIn("docker volume inspect masterplan_pgdata", snapshots)
+        self.assertIn("mp_snapshot_full_loss_host_is_blank", snapshots)
+        self.assertIn("mp_setup_prepare_full_loss_restore_authorization", SETUP)
+        self.assertIn("mp-opt-full-loss-authorization-v1", SETUP)
+        self.assertNotIn('mp_snapshot_restore_full_loss "$imported_snapshot" "$restore_identity" true', SETUP)
 
     def test_commission_menu_is_contextual_at_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -641,6 +666,17 @@ class PairingSetupContractTests(unittest.TestCase):
             primary_resume.index("mp_setup_register_root_passkey"),
             primary_resume.index("mp_ha_replicate_now"),
         )
+
+    @unittest.skipIf(os.name == "nt", "the executable shell contract runs in Linux CI")
+    def test_stale_receiver_from_another_cluster_cannot_complete_join(self) -> None:
+        receiver = self.receiver()
+        receiver["cluster_id"] = "mp-opt-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        result, state = self.run_reconciliation(
+            ("db", "backend", "caddy"), receiver=receiver
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(state["state"], "in_progress")
+        self.assertNotIn("replicated", state["completed"])
         self.assertLess(
             primary_resume.index("mp_setup_state_mark replicated"),
             primary_resume.index("ha_services_activated"),
