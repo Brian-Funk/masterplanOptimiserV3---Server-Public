@@ -830,6 +830,16 @@ mp_setup_machine_reconcile() {
     mp_setup_validate_state_contract "$MP_SETUP_V2_STATE" || return $?
     state="$(jq -r .state "$MP_SETUP_V2_STATE")"
     if [ "$state" = complete ]; then
+        mode="$(jq -r .mode "$MP_SETUP_V2_STATE")"
+        lane="$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")"
+        # A historical candidate peer finaliser could set state=complete after
+        # activation while omitting its already-proven replication and exact
+        # deployment checkpoints.  Repair that contradiction from the guarded
+        # receiver/current-deployment receipts before taking the generic
+        # completed-state fast path.
+        if [[ "$mode" =~ ^(ha-join|replace-node)$ ]] && [ "$lane" = unsigned ]; then
+            mp_setup_reconcile_unsigned_join || return 1
+        fi
         if jq -e '.current_action != null or .current_action_code != null
             or .current_checkpoint != null or .action_started_at != null
             or .last_failure != null' "$MP_SETUP_V2_STATE" >/dev/null; then
