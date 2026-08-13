@@ -1073,6 +1073,10 @@ mp_prepare_runtime_permissions() {
     # bind mount; signatures prevent a readable file from being trusted after
     # modification.
     chmod 0755 "$compliance_receipt_dir" || return 1
+    # Container activation and read-only reconciliation both enter through
+    # this authoritative contract. Keep existing secret mounts readable by
+    # the fixed Backend identity even if a prior ceremony replaced a file.
+    [ ! -d "$MP_ROOT/secrets" ] || mp_prepare_backend_secret_permissions || return 1
 }
 
 # Validate the host side of the runtime permission contract without changing
