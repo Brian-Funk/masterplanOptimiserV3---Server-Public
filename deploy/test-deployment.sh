@@ -157,7 +157,7 @@ require_precommission_retarget_database() {
          and .deployment_lane == "unsigned"
          and .campaign_commit == $current
          and (.mode == "standalone-new" or .mode == "ha-primary-new" or .mode == "ha-join")
-         and (((.completed | index("application_deployed")) != null) == $deployed)
+         and ($deployed or ((.completed | index("application_deployed")) == null))
          and ((.completed | index("root_commissioning_complete")) == null)' \
         "$setup_state" >/dev/null || {
             ui_error "Pre-commission retry is available only before root commissioning completes."
