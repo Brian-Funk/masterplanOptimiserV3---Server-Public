@@ -331,7 +331,8 @@ apply_prebuilt_candidate() {
     local target="$1" fresh_commissioning="$2" established="${3:-false}" source="${4:-staged}"
     local prepare_only="${5:-false}" precommission_retarget="${6:-false}"
     local credentials username token docker_config stage manifest identity="${MP_TEST_RECOVERY_IDENTITY_FILE:-}"
-    local previous role peer_ready=false peer_staged_only=false image key plan components snapshot="" automatic=false
+    local previous role peer_ready=false peer_staged_only=false pending_first_copy=false
+    local image key plan components snapshot="" automatic=false
     require_test_policy
     # Capture the protected registry document before any snapshot, Docker, or
     # database helper runs. Those helpers may legitimately inherit and consume
@@ -386,17 +387,30 @@ apply_prebuilt_candidate() {
             ui_error "The prior exact candidate bundle is unavailable; transition stopped before mutation."
             return 1
         }
-        snapshot="$(mp_snapshot_create full "candidate-before-${target:0:12}")" || return 1
-        mp_snapshot_verify_path "$snapshot" "$identity" || {
-            ui_error "The candidate rollback snapshot did not deep-verify."
-            return 1
-        }
-        jq -n --arg previous "$previous" --arg target "$target" --arg snapshot "$snapshot" \
-            --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{format:"mp-opt-candidate-lifecycle-v1",state:"prepared",previous:$previous,
-              target:$target,snapshot:$snapshot,prepared_at:$at}' > "$MP_TEST_CANDIDATE_LIFECYCLE"
-        chmod 600 "$MP_TEST_CANDIDATE_LIFECYCLE"
-        sync -f "$MP_TEST_CANDIDATE_LIFECYCLE" 2>/dev/null || return 1
+        if jq -e --arg previous "$previous" --arg target "$target" '
+                .format=="mp-opt-candidate-lifecycle-v1" and .state=="prepared"
+                and .previous==$previous and .target==$target
+                and (.snapshot|type=="string" and length>0)
+            ' "$MP_TEST_CANDIDATE_LIFECYCLE" >/dev/null 2>&1; then
+            snapshot="$(jq -r .snapshot "$MP_TEST_CANDIDATE_LIFECYCLE")"
+            [ -d "$snapshot" ] && [ ! -L "$snapshot" ] \
+                && mp_snapshot_verify_path "$snapshot" "$identity" || {
+                ui_error "The prepared candidate rollback snapshot no longer deep-verifies."
+                return 1
+            }
+        else
+            snapshot="$(mp_snapshot_create full "candidate-before-${target:0:12}")" || return 1
+            mp_snapshot_verify_path "$snapshot" "$identity" || {
+                ui_error "The candidate rollback snapshot did not deep-verify."
+                return 1
+            }
+            jq -n --arg previous "$previous" --arg target "$target" --arg snapshot "$snapshot" \
+                --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                '{format:"mp-opt-candidate-lifecycle-v1",state:"prepared",previous:$previous,
+                  target:$target,snapshot:$snapshot,prepared_at:$at}' > "$MP_TEST_CANDIDATE_LIFECYCLE"
+            chmod 600 "$MP_TEST_CANDIDATE_LIFECYCLE"
+            sync -f "$MP_TEST_CANDIDATE_LIFECYCLE" 2>/dev/null || return 1
+        fi
     fi
     docker_config="$(mktemp -d "$MP_TEST_CANDIDATE_DIR/docker-config.XXXXXX")" || return 1
     printf '%s' "$token" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
@@ -436,6 +450,13 @@ apply_prebuilt_candidate() {
     export MP_TEST_CANDIDATE_OPERATIONS="$stage/operations"
     if [ "$role" = dynamic ] && ha_pairing_complete; then
         ha_pair_transport_ready || return 1
+        if jq -e '
+                .state=="in_progress" and .mode=="ha-primary-new"
+                and ((.completed // []) | index("paired") != null)
+                and ((.completed // []) | index("replicated") == null)
+            ' "${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" >/dev/null 2>&1; then
+            pending_first_copy=true
+        fi
         peer_ready=true
         for key in backend caddy postgres tools; do
             peer_copy_image "$(jq -r --arg key "$key" '.images[$key]' <<< "$manifest")" \
@@ -443,13 +464,13 @@ apply_prebuilt_candidate() {
         done
         if [ "$prepare_only" = true ]; then
             peer_stage_prebuilt "$target" "$components" || return 1
-        elif [ "$fresh_commissioning" = true ]; then
+        elif [ "$fresh_commissioning" = true ] || [ "$pending_first_copy" = true ]; then
             # A newly joined standby has only its local database credential.
             # Stage exact images and assets, but let the first verified
             # replication bundle deliver shared configuration/secrets and
             # activate Backend/Caddy through the guarded receiver.
             peer_stage_prebuilt "$target" "$components" || return 1
-            if [ "$precommission_retarget" = true ]; then
+            if [ "$precommission_retarget" = true ] || [ "$pending_first_copy" = true ]; then
                 ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
                     env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
                     /opt/masterplan/deploy/test-deployment.sh internal-repin-setup "$target" \

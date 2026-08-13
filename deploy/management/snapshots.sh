@@ -304,7 +304,13 @@ mp_snapshot_create() {
             ;;
     esac
     if [ "$backend_was_running" = true ]; then
-        "${MP_COMPOSE[@]}" up -d --no-deps backend >/dev/null || capture_ok=false
+        # Reassert the fixed unprivileged Backend read contract immediately
+        # before remounting protected files after a safety snapshot.
+        if ! mp_prepare_backend_secret_permissions; then
+            capture_ok=false
+        else
+            "${MP_COMPOSE[@]}" up -d --no-deps backend >/dev/null || capture_ok=false
+        fi
     fi
     if [ "$capture_ok" != true ]; then
         rm -rf "$staging"
