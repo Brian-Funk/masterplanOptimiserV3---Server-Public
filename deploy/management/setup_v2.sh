@@ -3122,12 +3122,11 @@ mp_setup_decommission_cloudflare_machine() {
         # observes the exact Worker first, so a lost acknowledgement can never
         # cause an unexamined second destructive request.
         probe="$(mktemp "$MP_STATE/provider-worker-probe.XXXXXX")" || return 1
-        if CLOUDFLARE_API_TOKEN="$deploy_token" docker run --rm \
-            -e CLOUDFLARE_API_TOKEN -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
-            "$tools_image" deployments list \
-            --name "$worker_name" > /dev/null 2> "$probe"; then
+        if printf '%s' "$deploy_token" \
+            | python3 "$MP_ROOT/deploy/ha/cloudflare_worker_script.py" \
+                observe "$account_id" "$worker_name" > /dev/null 2> "$probe"; then
             worker_present=true
-        elif grep -Eqi '(not[ -]?found|does not exist|10090)' "$probe"; then
+        elif [ "${PIPESTATUS[1]}" -eq 4 ]; then
             reconciled=true
         else
             rm -f "$probe"
@@ -3135,9 +3134,9 @@ mp_setup_decommission_cloudflare_machine() {
         fi
         rm -f "$probe"
         if [ "$worker_present" = true ]; then
-            printf 'y\n' | CLOUDFLARE_API_TOKEN="$deploy_token" docker run --rm -i \
-                -e CLOUDFLARE_API_TOKEN -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
-                "$tools_image" delete --name "$worker_name" >/dev/null \
+            printf '%s' "$deploy_token" \
+                | python3 "$MP_ROOT/deploy/ha/cloudflare_worker_script.py" \
+                    delete "$account_id" "$worker_name" >/dev/null \
                 || return 1
         fi
         temporary="$(mktemp "$MP_STATE/provider-cleanup-receipt.XXXXXX")" || return 1
