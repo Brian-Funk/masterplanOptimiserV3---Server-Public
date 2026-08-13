@@ -512,11 +512,40 @@ mp_snapshot_verify_extracted() {
 # deliberately ignores node-local HA, Compose override and host-Caddy files:
 # the recovered server starts as a safe standalone node and can commission a
 # new peer only after local origin health has passed.
+mp_snapshot_full_loss_host_is_blank() {
+    mp_require_commands docker || return 1
+    docker info >/dev/null 2>&1 || return 1
+    [ ! -e "$MP_ROOT/.env" ] && [ ! -L "$MP_ROOT/.env" ] || return 1
+    if [ -e "$MP_ROOT/secrets" ] || [ -L "$MP_ROOT/secrets" ]; then
+        [ -d "$MP_ROOT/secrets" ] && [ ! -L "$MP_ROOT/secrets" ] || return 1
+        ! find "$MP_ROOT/secrets" -maxdepth 1 -type f -size +0c -print -quit | grep -q . \
+            || return 1
+    fi
+    [ ! -e "$MP_HA_CONFIG" ] && [ ! -L "$MP_HA_CONFIG" ] || return 1
+    ! docker ps -a --format '{{.Names}}' \
+        | grep -Eq '^masterplan-(backend|caddy|db)-1$' || return 1
+    ! docker volume inspect masterplan_pgdata >/dev/null 2>&1 || return 1
+    ! docker network inspect masterplan_default >/dev/null 2>&1 || return 1
+    [ "$(mp_ha_role 2>/dev/null || printf standalone)" = standalone ]
+}
+
 mp_snapshot_restore_full_loss() {
-    local snapshot_path="$1" expected_recipient identity temporary payload
-    local installed=false resume_installed=false
+    local snapshot_path="$1" supplied_identity="${2:-}" machine_authorization="${3:-}"
+    local expected_recipient identity temporary payload
+    local operation_owned=false resume_installed=false machine_mode=false
     mp_require_commands age jq sha256sum diff docker || return 1
+    if [ -n "$machine_authorization" ]; then
+        declare -F mp_setup_validate_full_loss_restore_authorization >/dev/null \
+            && mp_setup_validate_full_loss_restore_authorization \
+                "$snapshot_path" "$machine_authorization" any || return 65
+        machine_mode=true
+    fi
     if [ -e "$MP_ROOT/.env" ]; then
+        if [ "$machine_mode" = true ]; then
+            mp_setup_validate_full_loss_restore_authorization \
+                "$snapshot_path" "$machine_authorization" installing || return 65
+            operation_owned=true
+        fi
         resume_installed=true
     else
         if [ -d "$MP_ROOT/secrets" ] \
@@ -538,8 +567,18 @@ mp_snapshot_restore_full_loss() {
     expected_recipient="$(jq -er '.encryption.recipient | select(test("^age1[0-9a-z]+$"))' \
         "$snapshot_path/receipt.json")" \
         || { ui_error "The snapshot receipt has no valid public recovery recipient."; return 1; }
-    identity="$(mp_prompt_identity_for_recipient "$expected_recipient" "the imported full snapshot")" \
-        || return 1
+    if [ -n "$supplied_identity" ]; then
+        [ "$machine_mode" = true ] || return 64
+        [ -f "$supplied_identity" ] && [ ! -L "$supplied_identity" ] \
+            && [ "$(stat -c '%a' "$supplied_identity" 2>/dev/null)" = 600 ] \
+            || return 65
+        identity="$supplied_identity"
+        [ "$(mp_identity_recipient "$identity" 2>/dev/null || true)" = "$expected_recipient" ] \
+            || return 65
+    else
+        identity="$(mp_prompt_identity_for_recipient "$expected_recipient" "the imported full snapshot")" \
+            || return 1
+    fi
     temporary="$(mktemp -d "$MP_SNAPSHOTS/.full-loss.XXXXXX")" || {
         mp_remove_identity_file "$identity"; return 1;
     }
@@ -567,16 +606,24 @@ mp_snapshot_restore_full_loss() {
             ui_error "The partial local configuration does not exactly match the recorded recovery snapshot. Nothing was overwritten."
             return 1
         fi
-        installed=true
         ui_message "Resume recovery" "The protected shared configuration matches the imported snapshot exactly. Database restoration will restart from its clean restore boundary."
     else
-        if ! ui_require_phrase "Recover blank server" \
+        if [ "$machine_mode" != true ] && ! ui_require_phrase "Recover blank server" \
             "This installs the verified shared configuration and database as a standalone server. Old HA identity, TLS topology, sessions, and one-time ceremonies are not restored." \
             "RECOVER BLANK SERVER"; then
             rm -rf "$temporary"
             return 1
         fi
 
+        if [ "$machine_mode" = true ]; then
+            mp_snapshot_full_loss_host_is_blank \
+                && mp_setup_mark_full_loss_restore_started \
+                    "$snapshot_path" "$machine_authorization" || {
+                    rm -rf "$temporary"
+                    ui_error "The blank-host recovery authorization is no longer valid. Nothing was restored."
+                    return 1
+                }
+        fi
         # Install only shared configuration. Node-local topology is
         # intentionally rebuilt later rather than replayed from the old VPS.
         cp -a "$payload/config/.env" "$MP_ROOT/.env" || { rm -rf "$temporary"; return 1; }
@@ -586,7 +633,7 @@ mp_snapshot_restore_full_loss() {
             && find "$MP_ROOT/secrets" -maxdepth 1 -type f -exec chmod 600 {} + \
             && mp_store_recovery_recipient_local "$expected_recipient" \
             || { rm -f "$MP_ROOT/.env"; rm -rf "$MP_ROOT/secrets" "$temporary"; return 1; }
-        installed=true
+        operation_owned=true
     fi
     rm -f "$MP_ROOT/infra/docker-compose.override.yml"
     if "$MP_ROOT/deploy/deploy.sh" --no-pull \
@@ -602,7 +649,7 @@ mp_snapshot_restore_full_loss() {
             return 0
         fi
     fi
-    if [ "$installed" = true ]; then
+    if [ "$operation_owned" = true ]; then
         mp_compose_init 2>/dev/null || true
         "${MP_COMPOSE[@]}" down -v >/dev/null 2>&1 || true
         rm -f "$MP_ROOT/.env" "$MP_RECIPIENT_FILE"

@@ -70,7 +70,13 @@ def test_management_entry_point_is_branded_menu_only():
     assert "Logs" in entry
     assert "Maintenance and diagnostics" in entry
     assert "High availability" in entry
-    assert "${1:-}" not in entry
+    setup_dispatch = entry.index('if [ "${1:-}" = setup ]; then')
+    tty_guard = entry.index("mp_require_interactive_terminal")
+    assert setup_dispatch < entry.index('source "$MP_ROOT/deploy/management/common.sh"')
+    assert setup_dispatch < tty_guard
+    assert 'exec bash "$MP_ROOT/deploy/commissioning-machine.sh" "$@"' in entry
+    assert 'if [ "${1:-}" =' in entry
+    assert entry.count('if [ "${1:-}" =') == 1
     assert 'readlink -f "${BASH_SOURCE[0]}"' in entry
     assert 'MP_MENU_CANCEL_LABEL="Exit"' in entry
     assert 'ui_confirm "Exit MP-OPT_SERVER"' in entry

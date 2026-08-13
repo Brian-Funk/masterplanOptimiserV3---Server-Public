@@ -444,6 +444,7 @@ class ReplicationBundleTests(unittest.TestCase):
 
     def test_sender_persists_acceptance_before_reporting_success(self) -> None:
         sender = (HA_DIR / "replicate_now.sh").read_text(encoding="utf-8")
+        receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(encoding="utf-8")
         acknowledgement = sender.index(
             '[ "$response" = "ACCEPTED:$job_id:$archive_hash" ]'
         )
@@ -456,6 +457,9 @@ class ReplicationBundleTests(unittest.TestCase):
         self.assertLess(acknowledgement, receipt)
         self.assertLess(receipt, durable_move)
         self.assertLess(durable_move, output)
+        for field in ("cluster_id", "release_hash", "target_node_id"):
+            self.assertIn(field, sender)
+            self.assertIn(field, receiver)
 
     def test_receiver_waits_for_a_cold_database_before_staging(self) -> None:
         receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(
