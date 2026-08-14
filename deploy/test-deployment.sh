@@ -1085,9 +1085,17 @@ prepare_initial_peer() {
         fi
         docker image inspect "$image" >/dev/null 2>&1 \
             || { ui_error "Verified image ${image} is missing."; return 1; }
-        peer_copy_image "$image" "$docker_config"
+        peer_copy_image "$image" "$docker_config" || return 1
     done
-    scp -q "$MP_TEST_ENV" mp-opt-ha-peer:/tmp/mp-opt-test-deployment.env
+    scp -q "$MP_TEST_ENV" mp-opt-ha-peer:/tmp/mp-opt-test-deployment.env || return 1
+    if [ -s "$MP_TEST_CANDIDATE_RECEIPT" ] \
+        && [ "$(jq -r '.commit // empty' "$MP_TEST_CANDIDATE_RECEIPT")" = "$target" ]; then
+        scp -q "$MP_TEST_CANDIDATE_RECEIPT" \
+            mp-opt-ha-peer:/tmp/mp-opt-candidate-receipt.json || return 1
+    else
+        ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+            'rm -f /tmp/mp-opt-candidate-receipt.json' || return 1
+    fi
     # A conversion can advance through operations-only commits. Generated
     # frontend output is therefore not guaranteed to exist in the temporary
     # source checkout, while the verified active deployment always carries the
@@ -1098,11 +1106,18 @@ prepare_initial_peer() {
         || { ui_error "The verified active frontend assets are unavailable for initial peer preparation."; return 1; }
     tar -C "$MP_ROOT" -czf - web/out runtime/frontend-csp.caddy \
         | ssh -T -o BatchMode=yes mp-opt-ha-peer \
-            "rm -rf '$MP_TEST_HOME/peer-assets' && mkdir -p '$MP_TEST_HOME/peer-assets' && tar -C '$MP_TEST_HOME/peer-assets' -xzf -"
+            "rm -rf '$MP_TEST_HOME/peer-assets' && mkdir -p '$MP_TEST_HOME/peer-assets' && tar -C '$MP_TEST_HOME/peer-assets' -xzf -" \
+        || return 1
     ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
         env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
         /opt/masterplan/deploy/test-deployment.sh internal-prepare-peer "$target" \
         || status=$?
+    if [ "$status" -eq 0 ]; then
+        ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+            env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+            /opt/masterplan/deploy/test-deployment.sh internal-verify-peer-identity "$target" \
+            || status=$?
+    fi
     cleanup_initial_peer_credentials
     trap - EXIT HUP INT TERM
     return "$status"
@@ -1118,19 +1133,84 @@ internal_prepare_peer() {
          and ((.completed // []) | index("application_deployed") == null)
          and .campaign_commit == $target' "$setup_state" >/dev/null \
         || { ui_error "Node B is not in an exact joined or replacement pre-activation state."; return 1; }
+    [ -s /tmp/mp-opt-test-deployment.env ] \
+        && [ "$(sed -n 's/^MP_TEST_COMMIT=//p' /tmp/mp-opt-test-deployment.env | head -1)" = "$target" ] \
+        || { ui_error "The transferred peer environment does not match the exact target."; return 1; }
+    if grep -Eq '^MP_(BACKEND|CADDY|POSTGRES|TOOLS)_IMAGE=.*@sha256:[0-9a-f]{64}$' \
+        /tmp/mp-opt-test-deployment.env; then
+        [ -s /tmp/mp-opt-candidate-receipt.json ] \
+            && [ "$(jq -r '.commit // empty' /tmp/mp-opt-candidate-receipt.json)" = "$target" ] \
+            || { ui_error "The digest-addressed peer environment has no matching candidate receipt."; return 1; }
+    fi
     mp_lock
     trap 'mp_unlock' EXIT
     prepare_source "$target"
-    install -m 0600 /tmp/mp-opt-test-deployment.env "$MP_TEST_ENV"
-    rm -f /tmp/mp-opt-test-deployment.env
     sync_operations "$MP_TEST_SOURCE"
     sync_frontend "$MP_TEST_HOME/peer-assets"
+    install -m 0600 /tmp/mp-opt-test-deployment.env "$MP_TEST_ENV" || return 1
+    rm -f /tmp/mp-opt-test-deployment.env
+    if [ -s /tmp/mp-opt-candidate-receipt.json ]; then
+        mkdir -p "$MP_TEST_CANDIDATE_DIR" || return 1
+        chmod 700 "$MP_TEST_CANDIDATE_DIR" || return 1
+        install -m 0600 /tmp/mp-opt-candidate-receipt.json "$MP_TEST_CANDIDATE_RECEIPT" \
+            || return 1
+        rm -f /tmp/mp-opt-candidate-receipt.json
+    fi
     ensure_optional_compose_secret_sources
     mp_prepare_backend_secret_permissions
     mp_compose_init
     mp_compose_validate
+    sync -f "$MP_TEST_ENV" 2>/dev/null || return 1
+    sync -f "$MP_ROOT" 2>/dev/null || return 1
     mp_unlock
     trap - EXIT
+}
+
+verify_exact_test_environment() {
+    local target="$1" short key value candidate manifest_key expected
+    short="${target:0:12}"
+    [ "$(sed -n 's/^MP_TEST_COMMIT=//p' "$MP_TEST_ENV" 2>/dev/null | head -1)" = "$target" ] \
+        || return 1
+    candidate="$MP_TEST_CANDIDATE_RECEIPT"
+    for key in MP_BACKEND_IMAGE MP_CADDY_IMAGE MP_POSTGRES_IMAGE MP_TOOLS_IMAGE; do
+        value="$(sed -n "s/^${key}=//p" "$MP_TEST_ENV" | head -1)"
+        if [ -s "$candidate" ] \
+            && [ "$(jq -r '.commit // empty' "$candidate")" = "$target" ]; then
+            case "$key" in
+                MP_BACKEND_IMAGE) manifest_key=backend ;;
+                MP_CADDY_IMAGE) manifest_key=caddy ;;
+                MP_POSTGRES_IMAGE) manifest_key=postgres ;;
+                MP_TOOLS_IMAGE) manifest_key=tools ;;
+            esac
+            expected="$(jq -r --arg key "$manifest_key" '.manifest.images[$key] // empty' "$candidate")"
+            [ "$value" = "$expected" ] && [[ "$value" =~ @sha256:[0-9a-f]{64}$ ]] \
+                || return 1
+        else
+            [[ "$value" =~ ^masterplan-(backend|caddy|postgres|tools):test-${short}$ ]] \
+                || return 1
+        fi
+        docker image inspect "$value" >/dev/null 2>&1 || return 1
+    done
+}
+
+internal_verify_peer_identity() {
+    local target="$1" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
+    require_test_policy
+    [[ "$target" =~ ^[0-9a-f]{40}$ ]] || return 1
+    jq -e --arg target "$target" '
+        (.mode | IN("ha-join","replace-node"))
+        and .deployment_lane == "unsigned"
+        and .campaign_commit == $target
+        and ((.completed // []) | index("joined") != null)
+        and (
+          (.state == "in_progress" and ((.completed // []) | index("application_deployed") == null))
+          or
+          (.state == "complete" and ((.completed // []) | index("application_deployed") != null))
+        )
+    ' "$setup_state" >/dev/null \
+        || { ui_error "The peer setup state is not bound to the exact candidate identity."; return 1; }
+    verify_exact_test_environment "$target" >/dev/null 2>&1 \
+        || { ui_error "The peer has not activated the exact candidate identity required for replication."; return 1; }
 }
 
 internal_repin_setup() {
@@ -1697,6 +1777,7 @@ case "$command" in
         prepare_initial_peer "$target" "$registry_credentials_stdin"
         ;;
     internal-prepare-peer) [ "$#" -eq 1 ] || exit 2; internal_prepare_peer "$1" ;;
+    internal-verify-peer-identity) [ "$#" -eq 1 ] || exit 2; internal_verify_peer_identity "$1" ;;
     internal-repin-setup) [ "$#" -eq 1 ] || exit 2; internal_repin_setup "$1" ;;
     internal-repin-pending-peer) [ "$#" -eq 1 ] || exit 2; internal_repin_pending_peer "$1" ;;
     internal-finalize-peer) [ "$#" -eq 1 ] || exit 2; internal_finalize_peer "$1" ;;

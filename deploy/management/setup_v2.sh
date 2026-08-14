@@ -665,7 +665,13 @@ mp_setup_machine_open_replacement() {
         || { rm -f "$pending"; return 1; }
     rm -f "$MP_SETUP_V2_PENDING_REPLACEMENT"; unset pair
     mp_setup_state_mark witness_bootstrap
-    mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed
+    # Signed replacement reuses the already-qualified local release. An
+    # unsigned replacement cannot claim this checkpoint until the exact
+    # candidate identity has also been installed and verified on Node B after
+    # pairing.
+    [ "$lane" != signed ] \
+        || mp_setup_state_has application_deployed \
+        || mp_setup_state_mark application_deployed
     mp_setup_state_action "Waiting for replacement node join" PEER_JOIN_WAIT paired
 }
 
@@ -1319,6 +1325,11 @@ mp_setup_machine_advance_one() {
                 fi
                 mp_setup_state_action "Replicating complete application state to Node B" \
                     FIRST_BUNDLE_TRANSFER replicated || return 1
+                mp_setup_verify_unsigned_peer_identity || {
+                    mp_setup_state_failure PEER_CANDIDATE_IDENTITY_MISMATCH \
+                        "Node B is not bound to the exact candidate identity, so no replication bundle was sent." || true
+                    return 1
+                }
                 mp_ha_replicate_now || return 1
                 mp_setup_record_first_verified_bundle >/dev/null 2>&1 || return 1
             fi
@@ -3011,7 +3022,7 @@ mp_setup_replace_standby() {
         '.deployment_lane=$lane | .campaign_commit=(if $commit == "" then null else $commit end)' \
         --arg lane "$lane" --arg commit "$campaign" || return 1
     mp_setup_state_mark witness_bootstrap
-    mp_setup_state_mark application_deployed
+    [ "$lane" != signed ] || mp_setup_state_mark application_deployed
     rm -f "$MP_SETUP_V2_PENDING_REPLACEMENT"
     join_code="$(python3 "$MP_ROOT/deploy/ha/pairing.py" encode < "$MP_SETUP_V2_PENDING_JOIN")" || return 1
     ui_copyable_terminal_text "Replacement node join code" "$join_code" \
@@ -3403,6 +3414,22 @@ mp_setup_activate_initial_witness_routing() {
         "$MP_ROOT/runtime/ha-control.json" >/dev/null 2>&1
 }
 
+# Prove the receiver's active candidate identity immediately before an initial
+# unsigned copy. The receiver must not infer this from a staged bundle alone:
+# its release hash is derived from the installed deployment environment.
+mp_setup_verify_unsigned_peer_identity() {
+    local mode lane commit
+    mode="$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE")" || return 1
+    lane="$(jq -r '.deployment_lane // empty' "$MP_SETUP_V2_STATE")" || return 1
+    [[ "$mode" =~ ^(ha-primary-new|convert-ha|replace-primary)$ ]] \
+        && [ "$lane" = unsigned ] || return 0
+    commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")" || return 1
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
+    ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+        env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+        /opt/masterplan/deploy/test-deployment.sh internal-verify-peer-identity "$commit"
+}
+
 # A fresh or replacement unsigned peer is deliberately staged before shared
 # configuration is available. The first accepted replication bundle activates
 # that staged candidate. Record the exact candidate receipt only after sender
@@ -3509,7 +3536,11 @@ mp_setup_primary_resume() {
         if [ "$mode" = convert-ha ] && [ -f "$MP_ROOT/infra/docker-compose.override.yml" ]; then
             mp_ha_convert_host_caddy || return 1
         fi
-        if [ "$mode" = convert-ha ] \
+        if [ "$mode" = replace-primary ] \
+            && [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ]; then
+            prepare_initial_peer "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")" \
+                || { ui_error "Node B could not install and verify the exact candidate identity."; return 1; }
+        elif [ "$mode" = convert-ha ] \
             && [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ]; then
             mp_setup_activate_converted_unsigned_pair || return 1
         else
@@ -3544,6 +3575,11 @@ mp_setup_primary_resume() {
         mp_setup_state_action "Replicating complete application state to Node B" \
             FIRST_BUNDLE_TRANSFER replicated || return 1
         if ! mp_setup_record_first_verified_bundle; then
+            mp_setup_verify_unsigned_peer_identity || {
+                mp_setup_state_failure PEER_CANDIDATE_IDENTITY_MISMATCH \
+                    "Node B is not bound to the exact candidate identity, so no replication bundle was sent." || true
+                return 1
+            }
             mp_ha_replicate_now || return 1
             mp_setup_record_first_verified_bundle || {
                 mp_setup_state_failure FIRST_BUNDLE_RECEIPT_MISMATCH \

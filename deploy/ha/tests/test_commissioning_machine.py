@@ -1071,6 +1071,21 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
             replacement.index('prepare-peer "$commit"'),
             replacement.index("mp_setup_state_mark application_deployed"),
         )
+        opening = SETUP[SETUP.index("mp_setup_machine_open_replacement()") :]
+        opening = opening[: opening.index("mp_setup_checkpoint_plan_json()")]
+        self.assertIn('[ "$lane" != signed ]', opening)
+        self.assertNotIn(
+            'mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed',
+            opening,
+        )
+
+        replicated = advance[advance.index("        replicated)") :]
+        replicated = replicated[: replicated.index("        ha_services_activated)")]
+        self.assertLess(
+            replicated.index("mp_setup_verify_unsigned_peer_identity"),
+            replicated.index("mp_ha_replicate_now"),
+        )
+        self.assertIn("PEER_CANDIDATE_IDENTITY_MISMATCH", replicated)
 
     def test_operations_only_debug_retry_does_not_recreate_services_before_first_copy(self) -> None:
         deployment = (ROOT / "deploy/test-deployment.sh").read_text(encoding="utf-8")

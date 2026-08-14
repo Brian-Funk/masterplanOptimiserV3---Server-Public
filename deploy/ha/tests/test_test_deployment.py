@@ -187,6 +187,8 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         )[0]
         self.assertIn('[ -d "$MP_ROOT/web/out" ]', initial)
         self.assertIn('tar -C "$MP_ROOT" -czf - web/out runtime/frontend-csp.caddy', initial)
+        self.assertIn('mp-opt-candidate-receipt.json', initial)
+        self.assertIn('internal-verify-peer-identity "$target"', initial)
         self.assertNotIn('tar -C "$MP_TEST_SOURCE" -czf - web/out', initial)
 
     def test_initial_candidate_preparation_accepts_a_blank_replacement_peer(self) -> None:
@@ -197,6 +199,14 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn('index("joined") != null', prepare)
         self.assertIn('index("application_deployed") == null', prepare)
         self.assertIn('install -m 0600 /tmp/mp-opt-test-deployment.env', prepare)
+        self.assertIn('install -m 0600 /tmp/mp-opt-candidate-receipt.json', prepare)
+        self.assertIn('sync -f "$MP_TEST_ENV"', prepare)
+
+        verify = SUPERVISOR.split("internal_verify_peer_identity()", 1)[1].split(
+            "internal_repin_setup()", 1
+        )[0]
+        self.assertIn('verify_exact_test_environment "$target"', verify)
+        self.assertIn('(.mode | IN("ha-join","replace-node"))', verify)
 
     def test_peer_activation_repins_only_an_incomplete_join_and_propagates_failure(self) -> None:
         activate = SUPERVISOR.split("peer_activate()", 1)[1].split(
