@@ -706,7 +706,14 @@ mp_machine_deployment_action() {
             "$input" >/dev/null 2>&1 || return 64
     action="$(jq -r .action "$input")"; tag="$(jq -r '.tag // empty' "$input")"; commit="$(jq -r .commit "$input")"
     idempotency_key="$(jq -r .idempotency_key "$input")"
-    if [ "$action" != candidate-precommission-retry ]; then
+    # Signed lifecycle actions operate on a setup journal that has already
+    # recorded application_deployed.  A snapshot-backed candidate update or
+    # rollback can also be needed while an
+    # established standalone installation is inside conversion and the new
+    # conversion journal has not reached that checkpoint yet.  In that case
+    # the recovery-recipient/private-identity proof below is the authoritative
+    # established-state guard.
+    if [[ "$action" =~ ^signed- ]]; then
         jq -e '((.completed // []) | index("application_deployed") != null)' \
             "$MP_SETUP_V2_STATE" >/dev/null || return 65
     fi
@@ -749,13 +756,15 @@ mp_machine_deployment_action() {
         signed-rollback) mp_rollback_signed_exact "$tag" "$commit" >"$log" 2>&1 || status=$? ;;
         candidate-precommission-retry|candidate-advance|candidate-rollback)
             [ "$policy" = test ] || status=65
-            if [ "$status" -eq 0 ] && [ "$action" = candidate-advance ]; then
+            if [ "$status" -eq 0 ] && [ "$action" != candidate-precommission-retry ]; then
                 # Browser recovery stores the public AGE recipient in the
                 # database before root commissioning is complete.  A targeted
                 # debug candidate at a later browser step still needs the
                 # normal snapshot-backed lifecycle, so synchronise that public
                 # value into host custody before matching the supplied private
-                # identity.  No private material leaves the machine input.
+                # identity.  This also proves that a mid-conversion candidate
+                # advance or rollback is operating on established application
+                # state.  No private material leaves the machine input.
                 mp_setup_sync_commissioning_recipient || status=$?
             fi
             if [ "$status" -eq 0 ] && [ "$action" != candidate-precommission-retry ]; then

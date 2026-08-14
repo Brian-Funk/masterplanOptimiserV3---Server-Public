@@ -932,6 +932,10 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertLess(rollback.index("apply_prebuilt_candidate"), rollback.index("mp_snapshot_apply"))
         self.assertLess(rollback.index("mp_snapshot_apply"), rollback.index("mp_ha_replicate_now"))
         self.assertNotIn("recovery_identity:$", source)
+        lifecycle = source[source.index("mp_machine_deployment_action()") :]
+        self.assertIn('if [[ "$action" =~ ^signed- ]]', lifecycle)
+        self.assertIn('[ "$action" != candidate-precommission-retry ]', lifecycle)
+        self.assertIn("mp_setup_sync_commissioning_recipient", lifecycle)
 
     def test_provider_cleanup_replay_never_deletes_twice(self) -> None:
         replay = SETUP[SETUP.index("mp_setup_decommission_cloudflare_machine()") :]
