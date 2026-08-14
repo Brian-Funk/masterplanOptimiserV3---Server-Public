@@ -3403,15 +3403,16 @@ mp_setup_activate_initial_witness_routing() {
         "$MP_ROOT/runtime/ha-control.json" >/dev/null 2>&1
 }
 
-# A fresh unsigned peer is deliberately staged before shared configuration is
-# available. The first accepted replication bundle activates that staged
-# candidate. Record the exact candidate receipt only after sender and receiver
-# have proved that they accepted the same bundle.
+# A fresh or replacement unsigned peer is deliberately staged before shared
+# configuration is available. The first accepted replication bundle activates
+# that staged candidate. Record the exact candidate receipt only after sender
+# and receiver have proved that they accepted the same bundle.
 mp_setup_finalize_fresh_unsigned_peer() {
     local mode lane commit
     mode="$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE")" || return 1
     lane="$(jq -r '.deployment_lane // empty' "$MP_SETUP_V2_STATE")" || return 1
-    [ "$mode" = ha-primary-new ] && [ "$lane" = unsigned ] || return 0
+    [[ "$mode" =~ ^(ha-primary-new|replace-primary)$ ]] \
+        && [ "$lane" = unsigned ] || return 0
     commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")" || return 1
     [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
     ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \

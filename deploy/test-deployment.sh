@@ -1162,7 +1162,8 @@ internal_finalize_peer() {
     local target="$1" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" plan temporary
     require_test_policy
     if jq -e --arg target "$target" \
-        '.state == "complete" and .mode == "ha-join" and .campaign_commit == $target
+        '.state == "complete" and (.mode | IN("ha-join","replace-node"))
+         and .campaign_commit == $target
          and ((.completed // []) | index("application_deployed") != null)' \
         "$setup_state" >/dev/null 2>&1 \
         && [ "$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)" = "$target" ]; then
@@ -1192,7 +1193,8 @@ internal_finalize_peer() {
         return 0
     fi
     jq -e --arg target "$target" \
-        '.state == "in_progress" and .mode == "ha-join" and .campaign_commit == $target
+        '.state == "in_progress" and (.mode | IN("ha-join","replace-node"))
+         and .campaign_commit == $target
          and ((.completed // []) | index("joined") != null)' "$setup_state" >/dev/null || return 1
     mp_compose_init
     "${MP_COMPOSE[@]}" exec -T backend python -c \

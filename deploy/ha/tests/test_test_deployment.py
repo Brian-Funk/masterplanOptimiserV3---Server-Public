@@ -176,6 +176,7 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         finalize = SUPERVISOR.split("internal_finalize_peer()", 1)[1].split(
             "internal_activate()", 1
         )[0]
+        self.assertIn('(.mode | IN("ha-join","replace-node"))', finalize)
         for operation in (repin, finalize):
             self.assertIn('.state == "complete"', operation)
             self.assertIn('index("application_deployed") != null', operation)
@@ -196,6 +197,19 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn('index("joined") != null', prepare)
         self.assertIn('index("application_deployed") == null', prepare)
         self.assertIn('install -m 0600 /tmp/mp-opt-test-deployment.env', prepare)
+
+    def test_replacement_peer_is_finalised_after_the_first_accepted_bundle(self) -> None:
+        setup = (ROOT / "deploy/management/setup_v2.sh").read_text(encoding="utf-8")
+        finalise = setup.split("mp_setup_finalize_fresh_unsigned_peer()", 1)[1].split(
+            "mp_setup_primary_resume()", 1
+        )[0]
+        self.assertIn('^(ha-primary-new|replace-primary)$', finalise)
+        self.assertIn('internal-finalize-peer "$commit"', finalise)
+        replicated = setup.split("replicated)", 1)[1].split("ha_services_activated)", 1)[0]
+        self.assertLess(
+            replicated.index("mp_setup_finalize_fresh_unsigned_peer"),
+            replicated.index("mp_setup_state_mark replicated"),
+        )
 
     def test_paired_pre_activation_updates_are_operations_only(self) -> None:
         apply = SUPERVISOR.split("apply_commit()", 1)[1].split("restore_signed()", 1)[0]
