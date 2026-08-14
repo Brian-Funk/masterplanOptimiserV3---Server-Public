@@ -1757,7 +1757,7 @@ mp_setup_reconcile_primary_campaign_pin() {
 }
 
 mp_setup_activate_converted_unsigned_pair() {
-    local registry_credentials="${1:-}" commit
+    local registry_credentials="${1:-}" commit generation
     [ -z "$registry_credentials" ] || [ "$registry_credentials" = --registry-credentials-stdin ] \
         || { ui_error "The candidate peer registry-credential mode is invalid."; return 1; }
     mp_setup_state_action "Preparing exact images for Node B" \
@@ -1765,6 +1765,18 @@ mp_setup_activate_converted_unsigned_pair() {
     commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
     [ "$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)" = "$commit" ] \
         || { ui_error "Node A's verified deployment receipt does not match the reconciled campaign pin."; return 1; }
+    # A fresh standalone database deliberately has no HA ownership row.  Once
+    # the witness has authorised Node A as the initial holder, establish that
+    # same writer identity before capturing any first-copy bundle.  The
+    # promotion helper is idempotent: a retry with the exact generation is a
+    # no-op, while a conflicting witness/database identity is rejected.
+    mp_setup_state_action "Establishing initial HA writer identity" \
+        HA_WRITER_ESTABLISHING application_deployed || return 1
+    generation="$(jq -r '.generation // 0' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
+    [[ "$generation" =~ ^[1-9][0-9]*$ ]] \
+        || { ui_error "The witness did not provide a valid initial writer generation."; return 1; }
+    "$MP_ROOT/deploy/ha/promote_local.sh" "$generation" \
+        || { ui_error "Node A could not establish the witness-authorised database writer identity."; return 1; }
     # Accept the exact image representation already verified for this campaign:
     # legacy local test tags or the current private, digest-pinned candidate
     # references.  The shared verifier binds every value to the staged
