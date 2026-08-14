@@ -972,6 +972,20 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("return 20", machine)
         self.assertIn("mp_setup_deploy_witness_machine", machine)
 
+    def test_precommission_retarget_does_not_initialise_ha_database_early(self) -> None:
+        deployment = (ROOT / "deploy/test-deployment.sh").read_text(encoding="utf-8")
+        sync = deployment.index('sync_operations "$MP_TEST_CANDIDATE_OPERATIONS"')
+        retarget = deployment.index('if [ "$precommission_retarget" = true ]', sync)
+        pin = deployment.index('advance_setup_campaign_pin "$target" "$previous"', retarget)
+        returned = deployment.index("return 0", pin)
+        activation = deployment.index(
+            'compose_activate "$components" "$fresh_commissioning" "$precommission_retarget"',
+            returned,
+        )
+        self.assertLess(retarget, pin)
+        self.assertLess(pin, returned)
+        self.assertLess(returned, activation)
+
     def test_recovery_machine_contracts_and_stale_cleanup_are_present(self) -> None:
         source = MACHINE.read_text(encoding="utf-8")
         for value in (

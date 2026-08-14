@@ -490,6 +490,22 @@ apply_prebuilt_candidate() {
         unset MP_TEST_CANDIDATE_OPERATIONS
         return 0
     fi
+    if [ "$precommission_retarget" = true ] \
+        && ! jq -e '((.completed // []) | index("application_deployed") != null)' \
+            "${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" >/dev/null 2>&1; then
+        # Before the first application deployment there is no database or
+        # service state to upgrade.  In fresh HA, writer ownership is also not
+        # established until after the witness checkpoint.  Retarget only the
+        # exact campaign pin and installed operations here; the ordinary
+        # application_deployed transition will later initialise the database
+        # and activate the same staged bundle under the normal commissioning
+        # invariants.
+        advance_setup_campaign_pin "$target" "$previous" || return 1
+        rm -rf -- "$stage"
+        cleanup_candidate_credentials; trap - EXIT
+        unset MP_TEST_CANDIDATE_OPERATIONS
+        return 0
+    fi
     compose_activate "$components" "$fresh_commissioning" "$precommission_retarget"
     # Initial configuration writes the first host management-audit record
     # before the fresh evidence bind source exists.  compose_activate creates
