@@ -1072,6 +1072,35 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
             replacement.index("mp_setup_state_mark application_deployed"),
         )
 
+    def test_operations_only_debug_retry_does_not_recreate_services_before_first_copy(self) -> None:
+        deployment = (ROOT / "deploy/test-deployment.sh").read_text(encoding="utf-8")
+        sync = deployment.index('sync_operations "$MP_TEST_CANDIDATE_OPERATIONS"')
+        retry = deployment[deployment.index('if [ "$commissioning_retry" = true ]', sync) :]
+        retry = retry[: retry.index('if [ "$precommission_retarget" = true ]')]
+        self.assertIn('.components == ["operations"]', deployment)
+        self.assertIn('IN("ha-primary-new","convert-ha","replace-primary")', deployment)
+        self.assertIn('index("replicated") == null', deployment)
+        self.assertIn('internal-repin-setup "$target"', retry)
+        self.assertIn('write_state "$target" "$previous" "$plan" ""', retry)
+        self.assertIn('advance_setup_campaign_pin "$target" "$previous"', retry)
+        self.assertNotIn("compose_activate", retry)
+        self.assertNotIn("mp_snapshot_create", retry)
+
+    def test_replacement_peer_repin_and_stage_are_operations_scoped(self) -> None:
+        deployment = (ROOT / "deploy/test-deployment.sh").read_text(encoding="utf-8")
+        peer_stage = deployment[deployment.index("peer_stage_prebuilt()") :]
+        peer_stage = peer_stage[: peer_stage.index("peer_activate()")]
+        repin = deployment[deployment.index("internal_repin_setup()") :]
+        repin = repin[: repin.index("internal_finalize_peer()")]
+        internal_stage = deployment[deployment.index("internal_stage_prebuilt()") :]
+        internal_stage = internal_stage[: internal_stage.index("deploy_witness()")]
+        self.assertIn('grep -qw frontend <<< "$components"', peer_stage)
+        self.assertIn('IN("ha-join","replace-node")', repin)
+        self.assertIn('[ "$pinned" = "$target" ]', repin)
+        self.assertIn('grep -qw operations <<< "$components"', internal_stage)
+        self.assertIn('grep -qw frontend <<< "$components"', internal_stage)
+        self.assertIn("mp_compose_validate", internal_stage)
+
 
 class CandidateBundleTests(unittest.TestCase):
     def tar_payload(self, name: str, payload: bytes) -> bytes:

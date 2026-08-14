@@ -333,6 +333,8 @@ apply_prebuilt_candidate() {
     local credentials username token docker_config stage manifest identity="${MP_TEST_RECOVERY_IDENTITY_FILE:-}"
     local previous role peer_ready=false peer_staged_only=false pending_first_copy=false
     local image key plan components snapshot="" automatic=false
+    local change_plan="" commissioning_retry=false source_prepared=false
+    local setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
     require_test_policy
     # Capture the protected registry document before any snapshot, Docker, or
     # database helper runs. Those helpers may legitimately inherit and consume
@@ -374,10 +376,6 @@ apply_prebuilt_candidate() {
     if [ "$established" = true ]; then
         [[ "$previous" =~ ^[0-9a-f]{40}$ ]] && [ "$previous" != "$target" ] \
             || { ui_error "An established candidate transition requires a different verified target."; return 1; }
-        [ -f "$identity" ] && [ ! -L "$identity" ] && [ "$(stat -c %a "$identity")" = 600 ] \
-            || { ui_error "A protected recovery identity is required for candidate transition rollback."; return 1; }
-        [ "$(mp_identity_recipient "$identity" 2>/dev/null || true)" = "$(mp_recovery_recipient 2>/dev/null || true)" ] \
-            || { ui_error "The recovery identity does not match this deployment."; return 1; }
         [ -d "$MP_TEST_ACCEPTED_CANDIDATES/$previous" ] \
             && [ ! -L "$MP_TEST_ACCEPTED_CANDIDATES/$previous" ] \
             && [ -f "$MP_TEST_ACCEPTED_CANDIDATES/$previous/bundle.zip" ] \
@@ -387,7 +385,34 @@ apply_prebuilt_candidate() {
             ui_error "The prior exact candidate bundle is unavailable; transition stopped before mutation."
             return 1
         }
-        if jq -e --arg previous "$previous" --arg target "$target" '
+        prepare_source "$target"
+        source_prepared=true
+        change_plan="$(create_plan "$target")" || return 1
+        # A failed commissioning run may need an operations-only repair after
+        # pairing but before the first verified copy. Recreating PostgreSQL or
+        # either application service at that boundary is unnecessary and
+        # unsafe: the exact running image digests have not changed, and the
+        # first bundle has not established the replacement peer. Permit only
+        # the narrowly proven operations-only diff here.
+        if jq -e '
+                .state == "in_progress"
+                and (.mode | IN("ha-primary-new","convert-ha","replace-primary"))
+                and .deployment_lane == "unsigned"
+                and ((.completed // []) | index("paired") != null)
+                and ((.completed // []) | index("replicated") == null)
+            ' "$setup_state" >/dev/null 2>&1 \
+            && jq -e '
+                .migrations == false and .components == ["operations"]
+            ' <<< "$change_plan" >/dev/null 2>&1; then
+            commissioning_retry=true
+        fi
+        if [ "$commissioning_retry" != true ]; then
+            [ -f "$identity" ] && [ ! -L "$identity" ] && [ "$(stat -c %a "$identity")" = 600 ] \
+                || { ui_error "A protected recovery identity is required for candidate transition rollback."; return 1; }
+            [ "$(mp_identity_recipient "$identity" 2>/dev/null || true)" = "$(mp_recovery_recipient 2>/dev/null || true)" ] \
+                || { ui_error "The recovery identity does not match this deployment."; return 1; }
+        fi
+        if [ "$commissioning_retry" != true ] && jq -e --arg previous "$previous" --arg target "$target" '
                 .format=="mp-opt-candidate-lifecycle-v1" and .state=="prepared"
                 and .previous==$previous and .target==$target
                 and (.snapshot|type=="string" and length>0)
@@ -398,7 +423,7 @@ apply_prebuilt_candidate() {
                 ui_error "The prepared candidate rollback snapshot no longer deep-verifies."
                 return 1
             }
-        else
+        elif [ "$commissioning_retry" != true ]; then
             snapshot="$(mp_snapshot_create full "candidate-before-${target:0:12}")" || return 1
             mp_snapshot_verify_path "$snapshot" "$identity" || {
                 ui_error "The candidate rollback snapshot did not deep-verify."
@@ -424,14 +449,19 @@ apply_prebuilt_candidate() {
         image="$(jq -r --arg key "$key" '.images[$key]' <<< "$manifest")"
         DOCKER_CONFIG="$docker_config" docker pull "$image" >/dev/null || return 1
     done
-    prepare_source "$target"
+    [ "$source_prepared" = true ] || prepare_source "$target"
     rm -rf "$MP_TEST_SOURCE/web/out" "$MP_TEST_SOURCE/runtime/frontend-csp.caddy"
     cp -a "$stage/frontend/web/out" "$MP_TEST_SOURCE/web/out"
     mkdir -p "$MP_TEST_SOURCE/runtime"
     cp -a "$stage/frontend/runtime/frontend-csp.caddy" "$MP_TEST_SOURCE/runtime/frontend-csp.caddy"
     # Git proves the commit object; the independently hashed release-shaped
     # operations archive is what gets installed and executed.
-    components="backend frontend caddy database tools operations"
+    if [ "$commissioning_retry" = true ]; then
+        components="operations"
+        plan="$change_plan"
+    else
+        components="backend frontend caddy database tools operations"
+    fi
     cp -a "$MP_TEST_ENV" "$MP_TEST_STATE_DIR/next.env" 2>/dev/null || : > "$MP_TEST_STATE_DIR/next.env"
     chmod 600 "$MP_TEST_STATE_DIR/next.env"
     env_set "$MP_TEST_STATE_DIR/next.env" MP_TEST_COMMIT "$target"
@@ -451,7 +481,7 @@ apply_prebuilt_candidate() {
     if [ "$role" = dynamic ] && ha_pairing_complete; then
         ha_pair_transport_ready || return 1
         if jq -e '
-                .state=="in_progress" and (.mode | IN("ha-primary-new","convert-ha"))
+                .state=="in_progress" and (.mode | IN("ha-primary-new","convert-ha","replace-primary"))
                 and ((.completed // []) | index("paired") != null)
                 and ((.completed // []) | index("replicated") == null)
             ' "${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" >/dev/null 2>&1; then
@@ -483,8 +513,25 @@ apply_prebuilt_candidate() {
         fi
     fi
     sync_operations "$MP_TEST_CANDIDATE_OPERATIONS"
-    sync_frontend "$MP_TEST_SOURCE"
+    [ "$commissioning_retry" = true ] || sync_frontend "$MP_TEST_SOURCE"
     if [ "$prepare_only" = true ]; then
+        rm -rf -- "$stage"
+        cleanup_candidate_credentials; trap - EXIT
+        unset MP_TEST_CANDIDATE_OPERATIONS
+        return 0
+    fi
+    if [ "$commissioning_retry" = true ]; then
+        [ "$role" = dynamic ] && [ "$peer_ready" = true ] && [ "$peer_staged_only" = true ] \
+            || { ui_error "The operations-only commissioning retry lost its paired-peer boundary."; return 1; }
+        ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+            env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+            /opt/masterplan/deploy/test-deployment.sh internal-repin-setup "$target" \
+            || return 1
+        write_state "$target" "$previous" "$plan" ""
+        advance_setup_campaign_pin "$target" "$previous"
+        archive_accepted_candidate "$target" || return 1
+        mp_audit "deploy.test.commissioning-retry" "success" "$target"
+        mp_publish_audit_head || return 1
         rm -rf -- "$stage"
         cleanup_candidate_credentials; trap - EXIT
         unset MP_TEST_CANDIDATE_OPERATIONS
@@ -899,10 +946,15 @@ peer_stage_prebuilt() {
     local target="$1" components="$2"
     [[ "$target" =~ ^[0-9a-f]{40}$ ]] || return 1
     scp -q "$MP_TEST_ENV" mp-opt-ha-peer:/tmp/mp-opt-test-deployment.env || return 1
-    tar -C "$MP_TEST_SOURCE" -czf - web/out runtime/frontend-csp.caddy \
-        | ssh -T -o BatchMode=yes mp-opt-ha-peer \
-            "rm -rf '$MP_TEST_HOME/peer-assets' && mkdir -p '$MP_TEST_HOME/peer-assets' && tar -C '$MP_TEST_HOME/peer-assets' -xzf -" \
+    ssh -T -o BatchMode=yes mp-opt-ha-peer \
+        "rm -rf '$MP_TEST_HOME/peer-assets' && mkdir -p '$MP_TEST_HOME/peer-assets'" \
         || return 1
+    if grep -qw frontend <<< "$components"; then
+        tar -C "$MP_TEST_SOURCE" -czf - web/out runtime/frontend-csp.caddy \
+            | ssh -T -o BatchMode=yes mp-opt-ha-peer \
+                "tar -C '$MP_TEST_HOME/peer-assets' -xzf -" \
+            || return 1
+    fi
     tar -C "$MP_TEST_CANDIDATE_OPERATIONS" -czf - \
         deploy infra manage.sh configure-production.sh \
         | ssh -T -o BatchMode=yes mp-opt-ha-peer \
@@ -1075,7 +1127,7 @@ internal_repin_setup() {
     require_test_policy
     [[ "$target" =~ ^[0-9a-f]{40}$ ]] || return 1
     if jq -e --arg target "$target" \
-        '.state == "complete" and .mode == "ha-join" and .deployment_lane == "unsigned"
+        '.state == "complete" and (.mode | IN("ha-join","replace-node")) and .deployment_lane == "unsigned"
          and .campaign_commit == $target
          and ((.completed // []) | index("application_deployed") != null)' \
         "$setup_state" >/dev/null 2>&1 \
@@ -1083,7 +1135,15 @@ internal_repin_setup() {
         return 0
     fi
     pinned="$(jq -r '.campaign_commit // empty' "$setup_state" 2>/dev/null || true)"
-    jq -e '.state == "in_progress" and .mode == "ha-join" and .deployment_lane == "unsigned"
+    if [ "$pinned" = "$target" ] && jq -e '
+           .state == "in_progress" and (.mode | IN("ha-join","replace-node"))
+           and .deployment_lane == "unsigned"
+           and ((.completed // []) | index("joined") != null)
+           and ((.completed // []) | index("application_deployed") == null)'
+           "$setup_state" >/dev/null 2>&1; then
+        return 0
+    fi
+    jq -e '.state == "in_progress" and (.mode | IN("ha-join","replace-node")) and .deployment_lane == "unsigned"
            and ((.completed // []) | index("joined") != null)
            and ((.completed // []) | index("application_deployed") == null)' \
         "$setup_state" >/dev/null || return 1
@@ -1239,8 +1299,16 @@ internal_stage_prebuilt() {
     mkdir -p "$MP_TEST_CANDIDATE_DIR"; chmod 700 "$MP_TEST_CANDIDATE_DIR"
     install -m 0600 /tmp/mp-opt-candidate-receipt.json "$MP_TEST_CANDIDATE_RECEIPT" || return 1
     rm -f /tmp/mp-opt-test-deployment.env /tmp/mp-opt-candidate-receipt.json
-    sync_operations "$MP_TEST_HOME/peer-assets/operations" || return 1
-    sync_frontend "$MP_TEST_HOME/peer-assets" || return 1
+    if grep -qw operations <<< "$components"; then
+        sync_operations "$MP_TEST_HOME/peer-assets/operations" || return 1
+    fi
+    if grep -qw frontend <<< "$components"; then
+        sync_frontend "$MP_TEST_HOME/peer-assets" || return 1
+    fi
+    ensure_optional_compose_secret_sources
+    mp_prepare_backend_secret_permissions
+    mp_compose_init
+    mp_compose_validate
     sync -f "$MP_ROOT" 2>/dev/null || true
 }
 

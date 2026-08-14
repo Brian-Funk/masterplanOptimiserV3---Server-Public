@@ -34,11 +34,11 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn('peer_copy_image "$image" "$docker_config"', prepare)
         self.assertIn('--registry-credentials-stdin', SUPERVISOR)
 
-    def test_candidate_advance_stages_converting_peer_until_first_copy(self) -> None:
+    def test_candidate_advance_stages_new_converting_or_replacement_peer_until_first_copy(self) -> None:
         apply = SUPERVISOR.split("apply_prebuilt_candidate()", 1)[1].split(
             "rollback_prebuilt_candidate()", 1
         )[0]
-        self.assertIn('(.mode | IN("ha-primary-new","convert-ha"))', apply)
+        self.assertIn('(.mode | IN("ha-primary-new","convert-ha","replace-primary"))', apply)
         self.assertIn('index("replicated") == null', apply)
         self.assertIn('peer_stage_prebuilt "$target" "$components"', apply)
         self.assertIn('internal-repin-setup "$target"', apply)
