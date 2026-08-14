@@ -507,6 +507,7 @@ apply_prebuilt_candidate() {
         return 0
     fi
     compose_activate "$components" "$fresh_commissioning" "$precommission_retarget"
+    set_apply_stage deployment-receipt
     # Initial configuration writes the first host management-audit record
     # before the fresh evidence bind source exists.  compose_activate creates
     # and validates that source, so publish the verified host tail now—before
@@ -748,8 +749,15 @@ compose_activate() {
     fi
     if [ "$fresh_commissioning" = true ] && [ "$role" = dynamic ] \
         && [ "$routing_ready" != true ]; then
-        mp_wait_for_backend_health 45
-        mp_wait_for_caddy_validation 30
+        mp_wait_for_backend_health 45 || {
+            printf 'Candidate activation did not obtain Backend health within the bounded startup window.\n' >&2
+            return 1
+        }
+        mp_wait_for_caddy_validation 30 || {
+            printf 'Candidate activation Caddy validation failed: %s\n' \
+                "${MP_CADDY_FAILURE_CODE:-CADDY_VALIDATION_UNKNOWN}" >&2
+            return 1
+        }
     else
         mp_wait_for_local_health 45
     fi

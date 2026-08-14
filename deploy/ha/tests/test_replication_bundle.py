@@ -582,6 +582,34 @@ class ReplicationBundleTests(unittest.TestCase):
             helper.index("CADDY_CONFIGURATION_INVALID"), helper.index("sleep 1")
         )
 
+    def test_caddy_topology_probe_failure_is_retryable_execution_failure(self) -> None:
+        common = (ROOT / "deploy" / "management" / "common.sh").read_text(
+            encoding="utf-8"
+        )
+        mode = common[common.index("mp_caddy_mode()") :]
+        mode = mode[: mode.index("\n}\n") + 3]
+        validation = common[common.index("mp_caddy_validate()") :]
+        validation = validation[: validation.index("\n}\n") + 3]
+        self.assertIn("services=", mode)
+        self.assertIn("status=0", mode)
+        self.assertIn("indeterminate", mode)
+        self.assertLess(mode.index("systemctl"), mode.index('elif [ "$status" -ne 0 ]'))
+        self.assertIn("indeterminate)", validation)
+        self.assertIn("CADDY_EXECUTION_FAILED", validation)
+
+    def test_candidate_activation_records_public_health_failure_stage(self) -> None:
+        deployment = (ROOT / "deploy" / "test-deployment.sh").read_text(
+            encoding="utf-8"
+        )
+        setup = (ROOT / "deploy" / "management" / "setup_v2.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Candidate activation did not obtain Backend health", deployment)
+        self.assertIn("Candidate activation Caddy validation failed", deployment)
+        self.assertIn("set_apply_stage deployment-receipt", deployment)
+        self.assertIn("UNSIGNED_CANDIDATE_", setup)
+        self.assertIn("test-deployments/current-stage", setup)
+
     def test_recent_caddy_start_and_reload_paths_use_bounded_validation(self) -> None:
         expected = {
             ROOT / "deploy" / "test-deployment.sh": "mp_wait_for_caddy_validation 30",

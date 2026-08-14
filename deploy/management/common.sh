@@ -1199,13 +1199,23 @@ mp_build_frontend_container() {
 
 # Print the active reverse-proxy topology without changing service state.
 mp_caddy_mode() {
-    mp_compose_init
-    if "${MP_COMPOSE[@]}" config --services 2>/dev/null | grep -Fxq caddy; then
+    local services status=0
+    if mp_compose_init; then
+        services="$("${MP_COMPOSE[@]}" config --services 2>/dev/null)" || status=$?
+    else
+        status=1
+    fi
+    if [ "$status" -eq 0 ] && grep -Fxq caddy <<< "$services"; then
         printf 'container\n'
     elif command -v systemctl >/dev/null 2>&1 \
         && systemctl cat caddy >/dev/null 2>&1 \
         && [ -f "$MP_HOST_CADDYFILE" ]; then
         printf 'host\n'
+    elif [ "$status" -ne 0 ]; then
+        # Docker/Compose can briefly reject an exec immediately after a
+        # recreate. That is an execution failure, not proof that this
+        # installation has no managed Caddy topology.
+        printf 'indeterminate\n'
     else
         printf 'unavailable\n'
     fi
@@ -1251,6 +1261,11 @@ mp_caddy_validate() {
                 MP_CADDY_FAILURE_MESSAGE="Caddy rejected the active host configuration."
                 return 22
             fi
+            ;;
+        indeterminate)
+            MP_CADDY_FAILURE_CODE=CADDY_EXECUTION_FAILED
+            MP_CADDY_FAILURE_MESSAGE="Docker Compose could not resolve the active Caddy topology."
+            return 21
             ;;
         *)
             MP_CADDY_FAILURE_CODE=CADDY_TOPOLOGY_UNAVAILABLE

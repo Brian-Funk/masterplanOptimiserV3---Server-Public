@@ -1272,10 +1272,21 @@ mp_setup_machine_advance_one() {
                 && [ -s "$MP_STATE/test-deployments/candidate/receipt.json" ]; then
                 [ "$(jq -r '.commit // empty' "$MP_STATE/test-deployments/candidate/receipt.json")" \
                     = "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")" ] || return 65
-                jq -c '.values.registry' "$input_file" \
+                if ! jq -c '.values.registry' "$input_file" \
                     | "$MP_ROOT/deploy/test-deployment.sh" apply-prebuilt \
                         "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")" \
-                        --fresh-commissioning --registry-credentials-stdin || return 1
+                        --fresh-commissioning --registry-credentials-stdin; then
+                    local failed_stage failure_code
+                    failed_stage="$(tr -cd 'a-z0-9-' \
+                        < "$MP_STATE/test-deployments/current-stage" 2>/dev/null \
+                        | head -c 32)"
+                    [ -n "$failed_stage" ] || failed_stage=unknown
+                    failure_code="UNSIGNED_CANDIDATE_$(tr 'a-z-' 'A-Z_' <<< "$failed_stage")_FAILED"
+                    mp_setup_state_failure "$failure_code" \
+                        "The exact candidate deployment stopped during ${failed_stage}. Resume will reuse its idempotency key and authoritative facts." \
+                        || true
+                    return 1
+                fi
             else
                 mp_setup_deploy_application || return 1
             fi
