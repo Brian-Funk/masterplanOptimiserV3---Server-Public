@@ -825,7 +825,7 @@ mp_setup_validate_pending_witness_bootstrap() {
 # receipts. It never prompts, deploys, changes provider state, or invents a
 # completed human acknowledgement.
 mp_setup_machine_reconcile() {
-    local state mode lane stage changed=false
+    local state mode lane stage previous_bundle current_bundle changed=false
     [ -s "$MP_SETUP_V2_STATE" ] || return 10
     mp_setup_validate_state_contract "$MP_SETUP_V2_STATE" || return $?
     state="$(jq -r .state "$MP_SETUP_V2_STATE")"
@@ -839,6 +839,18 @@ mp_setup_machine_reconcile() {
         # completed-state fast path.
         if [[ "$mode" =~ ^(ha-join|replace-node)$ ]] && [ "$lane" = unsigned ]; then
             mp_setup_reconcile_unsigned_join || return 1
+        fi
+        # Replication continues after commissioning completes.  If a newer
+        # accepted bundle is durably acknowledged by both nodes, refresh the
+        # primary setup snapshot before taking the completed-state fast path.
+        if [[ "$mode" =~ ^(ha-primary-new|convert-ha|replace-primary)$ ]] \
+            && mp_setup_state_has paired; then
+            previous_bundle="$(jq -c '.first_verified_bundle // null' "$MP_SETUP_V2_STATE")"
+            if mp_load_ha_config >/dev/null 2>&1 \
+                && mp_setup_record_first_verified_bundle >/dev/null 2>&1; then
+                current_bundle="$(jq -c '.first_verified_bundle // null' "$MP_SETUP_V2_STATE")"
+                [ "$previous_bundle" = "$current_bundle" ] || changed=true
+            fi
         fi
         if jq -e '.current_action != null or .current_action_code != null
             or .current_checkpoint != null or .action_started_at != null
@@ -3228,6 +3240,14 @@ mp_setup_record_first_verified_bundle() {
         && [ "$generation" = "$(jq -r .generation <<< "$receiver")" ] \
         || return 1
     accepted_at="$(jq -r .last_received_at <<< "$receiver")"
+    if jq -e --arg bundle "$bundle" --arg sha256 "$sha256" \
+        --argjson generation "$generation" --arg accepted "$accepted_at" '
+        .first_verified_bundle == {
+          bundle_id:$bundle,sha256:$sha256,generation:$generation,accepted_at:$accepted
+        }
+    ' "$MP_SETUP_V2_STATE" >/dev/null; then
+        return 0
+    fi
     mp_setup_state_update \
         '.first_verified_bundle={bundle_id:$bundle,sha256:$sha256,
           generation:$generation,accepted_at:$accepted}' \
