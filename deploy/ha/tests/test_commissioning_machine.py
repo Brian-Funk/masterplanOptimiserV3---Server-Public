@@ -965,6 +965,13 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn('.state="registered"', machine)
         self.assertNotIn('rm -f "$MP_SETUP_V2_PENDING_BOOTSTRAP"', machine)
 
+    def test_machine_witness_registration_retries_cloudflare_propagation(self) -> None:
+        machine = SETUP[SETUP.index('witness_bootstrap)') : SETUP.index('joined)')]
+        self.assertIn("for attempt in $(seq 1 20)", machine)
+        self.assertIn("provider error 1042", machine)
+        self.assertIn("return 20", machine)
+        self.assertIn("mp_setup_deploy_witness_machine", machine)
+
     def test_recovery_machine_contracts_and_stale_cleanup_are_present(self) -> None:
         source = MACHINE.read_text(encoding="utf-8")
         for value in (

@@ -932,6 +932,7 @@ mp_setup_machine_advance_one() {
     local smtp_enabled smtp_host smtp_port smtp_username smtp_token smtp_security
     local smtp_from_email smtp_from_name smtp_reply_to
     local cluster_id node_token pairing_secret body pending bootstrap_tmp response peer current
+    local bootstrap_error bootstrap_ok=false repair_attempted=false attempt
     local requested_tag requested_commit fault_transition="" replay_test_receipt=false
     local fault_hook_active=false hook_status=0 step_status=0
     local -a install_args
@@ -1165,8 +1166,41 @@ mp_setup_machine_advance_one() {
             mp_setup_state_action "Registering Node A with HA witness" \
                 WITNESS_REGISTERING witness_bootstrap || return 1
             if [ "$(jq -r .state "$MP_SETUP_V2_PENDING_BOOTSTRAP")" != registered ]; then
-                mp_setup_witness_call bootstrap "$MP_SETUP_WITNESS_URL" "$cluster_id" \
-                    "$MP_SETUP_WITNESS_ADMIN_TOKEN" "$body" >/dev/null || return 1
+                bootstrap_error="$(mktemp "$MP_STATE/witness-bootstrap-error.XXXXXX")" \
+                    || { rm -f "$body"; return 1; }
+                for attempt in $(seq 1 20); do
+                    : > "$bootstrap_error"
+                    if mp_setup_witness_call bootstrap "$MP_SETUP_WITNESS_URL" "$cluster_id" \
+                        "$MP_SETUP_WITNESS_ADMIN_TOKEN" "$body" \
+                        >/dev/null 2> "$bootstrap_error"; then
+                        bootstrap_ok=true
+                        break
+                    fi
+                    if [ "$repair_attempted" = false ] \
+                        && grep -Eq 'remote API returned HTTP 401([^0-9]|$)' "$bootstrap_error"; then
+                        mp_setup_deploy_witness_machine \
+                            "$(jq -r .domain "$MP_SETUP_V2_PENDING_BOOTSTRAP")" \
+                            "$cluster_id" \
+                            "$(jq -r .values.cloudflare_account_id "$input_file")" \
+                            "$(jq -r .values.cloudflare_deploy_token "$input_file")" \
+                            "$(jq -r .values.cloudflare_dns_token "$input_file")" \
+                            "$MP_SETUP_WITNESS_ADMIN_TOKEN" \
+                            || { rm -f "$body" "$bootstrap_error"; return 20; }
+                        repair_attempted=true
+                        continue
+                    fi
+                    if ! grep -Eq 'remote API returned HTTP (404|429|500|502|503|504)([^0-9]|$)|provider error 1042([^0-9]|$)' \
+                        "$bootstrap_error"; then
+                        break
+                    fi
+                    [ "$attempt" -eq 20 ] || sleep 3
+                done
+                if [ "$bootstrap_ok" != true ]; then
+                    cat "$bootstrap_error" >&2
+                    rm -f "$body" "$bootstrap_error"
+                    return 20
+                fi
+                rm -f "$bootstrap_error"
                 bootstrap_tmp="$(mktemp "$MP_STATE/pending-witness-bootstrap.XXXXXX")" || return 1
                 jq '.state="registered"' "$MP_SETUP_V2_PENDING_BOOTSTRAP" > "$bootstrap_tmp" \
                     && chmod 600 "$bootstrap_tmp" && sync -f "$bootstrap_tmp" 2>/dev/null \
@@ -2579,7 +2613,7 @@ mp_setup_primary_create() {
         repair_attempted=false
         bootstrap_error="$(mktemp "$MP_STATE/witness-bootstrap-error.XXXXXX")" \
             || { rm -f "$body"; return 1; }
-        for attempt in 1 2 3 4 5; do
+        for attempt in $(seq 1 20); do
             if [ "$(jq -r .state "$MP_SETUP_V2_PENDING_BOOTSTRAP")" = registered ]; then
                 bootstrap_ok=true
                 break
@@ -2598,7 +2632,11 @@ mp_setup_primary_create() {
                 repair_attempted=true
                 continue
             fi
-            [ "$attempt" -eq 5 ] || sleep 2
+            if ! grep -Eq 'remote API returned HTTP (404|429|500|502|503|504)([^0-9]|$)|provider error 1042([^0-9]|$)' \
+                "$bootstrap_error"; then
+                break
+            fi
+            [ "$attempt" -eq 20 ] || sleep 3
         done
         [ "$bootstrap_ok" = true ] \
             || { ui_text_file "Worker registration failed" "$bootstrap_error"; \
