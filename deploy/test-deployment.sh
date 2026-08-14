@@ -939,8 +939,38 @@ peer_activate() {
 }
 
 prepare_initial_peer() {
-    local target="$1" key image manifest_key expected short
+    local target="$1" registry_credentials_stdin="${2:-false}"
+    local key image manifest_key expected short credentials="" username="" token="" docker_config="" status=0
     require_test_policy
+    [ "$registry_credentials_stdin" = false ] || [ "$registry_credentials_stdin" = true ] \
+        || { ui_error "The peer registry-credential mode is invalid."; return 2; }
+    cleanup_initial_peer_credentials() {
+        unset token username credentials
+        if [ -n "${docker_config:-}" ] && [ -d "$docker_config" ] && [ ! -L "$docker_config" ]; then
+            find "$docker_config" -type f -exec sh -c \
+                'for f do size=$(stat -c %s "$f" 2>/dev/null || printf 0); dd if=/dev/zero of="$f" bs=1 count="$size" conv=notrunc status=none 2>/dev/null || true; done' sh {} +
+            rm -rf -- "$docker_config"
+        fi
+    }
+    trap cleanup_initial_peer_credentials EXIT HUP INT TERM
+    if [ "$registry_credentials_stdin" = true ]; then
+        credentials="$(head -c 8193)" || return 1
+        [ "${#credentials}" -le 8192 ] \
+            && jq -e 'type=="object" and (keys|sort)==["token","username"]
+                and (.username|type=="string" and length>=1 and length<=255)
+                and (.token|type=="string" and length>=1 and length<=4096)' \
+                <<< "$credentials" >/dev/null 2>&1 \
+            || { ui_error "The peer registry credentials are malformed."; return 2; }
+        username="$(jq -r .username <<< "$credentials")"
+        token="$(jq -r .token <<< "$credentials")"
+        credentials=""
+        docker_config="$(mktemp -d "$MP_TEST_CANDIDATE_DIR/peer-docker-config.XXXXXX")" \
+            || return 1
+        chmod 700 "$docker_config"
+        printf '%s' "$token" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
+            --username "$username" --password-stdin >/dev/null || return 1
+        unset token username
+    fi
     [ "$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)" = "$target" ] \
         || { ui_error "The local verified deployment receipt does not match the requested peer preparation."; return 1; }
     mp_load_ha_config
@@ -968,7 +998,7 @@ prepare_initial_peer() {
         fi
         docker image inspect "$image" >/dev/null 2>&1 \
             || { ui_error "Verified image ${image} is missing."; return 1; }
-        peer_copy_image "$image"
+        peer_copy_image "$image" "$docker_config"
     done
     scp -q "$MP_TEST_ENV" mp-opt-ha-peer:/tmp/mp-opt-test-deployment.env
     # A conversion can advance through operations-only commits. Generated
@@ -984,7 +1014,11 @@ prepare_initial_peer() {
             "rm -rf '$MP_TEST_HOME/peer-assets' && mkdir -p '$MP_TEST_HOME/peer-assets' && tar -C '$MP_TEST_HOME/peer-assets' -xzf -"
     ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
         env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
-        /opt/masterplan/deploy/test-deployment.sh internal-prepare-peer "$target"
+        /opt/masterplan/deploy/test-deployment.sh internal-prepare-peer "$target" \
+        || status=$?
+    cleanup_initial_peer_credentials
+    trap - EXIT HUP INT TERM
+    return "$status"
 }
 
 internal_prepare_peer() {
@@ -1530,7 +1564,16 @@ case "$command" in
     rollback) [ "$#" -eq 0 ] || { usage; exit 2; }; rollback ;;
     restore-signed) [ "$#" -eq 0 ] || { usage; exit 2; }; restore_signed ;;
     status) [ "$#" -eq 0 ] || { usage; exit 2; }; status ;;
-    prepare-peer) [ "$#" -eq 1 ] || exit 2; prepare_initial_peer "$1" ;;
+    prepare-peer)
+        [ "$#" -ge 1 ] && [ "$#" -le 2 ] || exit 2
+        target="$1"; shift
+        registry_credentials_stdin=false
+        if [ "$#" -eq 1 ]; then
+            [ "$1" = --registry-credentials-stdin ] || exit 2
+            registry_credentials_stdin=true
+        fi
+        prepare_initial_peer "$target" "$registry_credentials_stdin"
+        ;;
     internal-prepare-peer) [ "$#" -eq 1 ] || exit 2; internal_prepare_peer "$1" ;;
     internal-repin-setup) [ "$#" -eq 1 ] || exit 2; internal_repin_setup "$1" ;;
     internal-finalize-peer) [ "$#" -eq 1 ] || exit 2; internal_finalize_peer "$1" ;;

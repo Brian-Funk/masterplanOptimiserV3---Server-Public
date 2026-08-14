@@ -30,6 +30,9 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn('@sha256:[0-9a-f]{64}$', prepare)
         self.assertIn('test-${short}', prepare)
         self.assertIn('docker image inspect "$image"', prepare)
+        self.assertIn('docker login ghcr.io', prepare)
+        self.assertIn('peer_copy_image "$image" "$docker_config"', prepare)
+        self.assertIn('--registry-credentials-stdin', SUPERVISOR)
 
     def test_snapshot_free_apply_is_confined_to_fresh_root_only_commissioning(self) -> None:
         self.assertIn("--fresh-commissioning", SUPERVISOR)
