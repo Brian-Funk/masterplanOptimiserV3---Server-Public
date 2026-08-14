@@ -260,6 +260,8 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
         self.assertIn('chmod 1733 "$request_dir"', runtime)
         self.assertIn('chmod 1733 "$compliance_request_dir"', runtime)
         self.assertIn('chmod 0755 "$compliance_receipt_dir"', runtime)
+        self.assertIn('[ -e "$MP_ROOT/state/evidence" ] || [ -L "$MP_ROOT/state/evidence" ]', runtime)
+        self.assertIn("mp_prepare_evidence_store || return 1", runtime)
         self.assertNotIn('install -d -m 0700 "$MP_ROOT/runtime/ha-requests"', INSTALL_SERVICES_SOURCE)
         self.assertGreaterEqual(
             INSTALL_SERVICES_SOURCE.count("mp_prepare_runtime_permissions"),
@@ -327,6 +329,21 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
         self.assertIn("mp_origin_tls_health_once", validation)
         self.assertIn("local installation remains valid", validation)
         self.assertNotIn("mp_public_https_get /health >/dev/null; then printf 'healthy\\n'; else", validation)
+
+    def test_replication_preflights_backend_evidence_access(self) -> None:
+        permission_prepare = REPLICATION_SOURCE.index("mp_prepare_runtime_permissions")
+        evidence_presence = REPLICATION_SOURCE.index("The evidence store is missing or unsafe.")
+        effective_access = REPLICATION_SOURCE.index(
+            "The Backend identity cannot read the protected evidence store."
+        )
+        archive = REPLICATION_SOURCE.index("exec -T backend tar -C /evidence -cf - .")
+        bounded_capture = REPLICATION_SOURCE.index(
+            "The protected evidence store could not be captured for replication."
+        )
+        self.assertLess(permission_prepare, evidence_presence)
+        self.assertLess(evidence_presence, effective_access)
+        self.assertLess(effective_access, archive)
+        self.assertLess(archive, bounded_capture)
 
     def test_caddy_validation_distinguishes_service_exec_and_configuration_failures(self) -> None:
         validation = function_body(COMMON_SOURCE, "mp_caddy_validate")

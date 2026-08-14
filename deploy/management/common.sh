@@ -1096,6 +1096,15 @@ mp_prepare_runtime_permissions() {
     # this authoritative contract. Keep existing secret mounts readable by
     # the fixed Backend identity even if a prior ceremony replaced a file.
     [ ! -d "$MP_ROOT/secrets" ] || mp_prepare_backend_secret_permissions || return 1
+    # Evidence is a shared host/container runtime boundary too. Snapshot,
+    # recovery, and interrupted candidate paths can replace the bind source;
+    # never leave a pre-existing store owned by the host deploy identity when
+    # the fixed Backend UID is the only identity permitted to traverse it.
+    # Do not initialise Evidence early merely because another runtime path is
+    # prepared: ordinary deployment owns first creation and key setup.
+    if [ -e "$MP_ROOT/state/evidence" ] || [ -L "$MP_ROOT/state/evidence" ]; then
+        mp_prepare_evidence_store || return 1
+    fi
 }
 
 # Validate the host side of the runtime permission contract without changing
