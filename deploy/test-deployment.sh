@@ -451,7 +451,7 @@ apply_prebuilt_candidate() {
     if [ "$role" = dynamic ] && ha_pairing_complete; then
         ha_pair_transport_ready || return 1
         if jq -e '
-                .state=="in_progress" and .mode=="ha-primary-new"
+                .state=="in_progress" and (.mode | IN("ha-primary-new","convert-ha"))
                 and ((.completed // []) | index("paired") != null)
                 and ((.completed // []) | index("replicated") == null)
             ' "${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" >/dev/null 2>&1; then
