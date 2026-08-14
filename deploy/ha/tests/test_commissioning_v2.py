@@ -59,6 +59,8 @@ class PairingCodeTests(unittest.TestCase):
     def test_converted_unsigned_pair_is_prepared_routed_replicated_then_finalised(self) -> None:
         reconcile = shell_function(SETUP, "mp_setup_reconcile_primary_campaign_pin")
         activate = shell_function(SETUP, "mp_setup_activate_converted_unsigned_pair")
+        establish = shell_function(SETUP, "mp_setup_establish_initial_writer_identity")
+        machine = shell_function(SETUP, "mp_setup_machine_advance_one")
         resume = shell_function(SETUP, "mp_setup_primary_resume")
         self.assertIn("merge-base --is-ancestor", reconcile)
         self.assertIn(".campaign_commit=$commit", reconcile)
@@ -67,9 +69,20 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn('mp_setup_verify_exact_environment "$commit"', activate)
         self.assertNotIn('^masterplan-(backend|caddy|postgres|tools):test-', activate)
         self.assertIn('HA_WRITER_ESTABLISHING', activate)
-        self.assertIn('promote_local.sh" "$generation"', activate)
-        self.assertLess(activate.index('promote_local.sh'), activate.index('prepare-peer'))
+        self.assertIn('promote_local.sh" "$generation"', establish)
+        self.assertIn('mp_setup_establish_initial_writer_identity', activate)
+        self.assertLess(
+            activate.index('mp_setup_establish_initial_writer_identity'),
+            activate.index('prepare-peer'),
+        )
         self.assertLess(activate.index("prepare-peer"), activate.index("install_services.sh"))
+        replicated = machine.split('replicated)', 1)[1].split('ha_services_activated)', 1)[0]
+        self.assertIn('[ "$mode" = convert-ha ]', replicated)
+        self.assertIn('mp_setup_establish_initial_writer_identity', replicated)
+        self.assertLess(
+            replicated.index('mp_setup_establish_initial_writer_identity'),
+            replicated.index('mp_ha_replicate_now'),
+        )
         self.assertIn('mp_setup_state_action "Preparing exact images for Node B"', activate)
         self.assertIn('mp_setup_state_action "Installing Node A HA services"', activate)
         self.assertIn('mp_setup_state_action "Activating HA routing"', activate)
