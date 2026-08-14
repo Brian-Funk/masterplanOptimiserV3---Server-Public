@@ -1003,9 +1003,20 @@ peer_activate() {
         ui_error "The peer pre-commission retarget flag is invalid."
         return 1
     fi
+    # A replacement peer can accept its first bundle before a subsequent
+    # targeted debug candidate reaches this established-deployment path. Its
+    # setup journal is still in-progress even though the receiver and services
+    # are healthy. Re-pin only that narrowly proven pending peer before the
+    # activation receipt is written; complete peers remain untouched here.
     ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
         env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
-        /opt/masterplan/deploy/test-deployment.sh internal-activate "$target" "$peer_components" "$fresh_commissioning"
+        /opt/masterplan/deploy/test-deployment.sh internal-repin-pending-peer "$target" \
+        || return 1
+    ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+        env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+        /opt/masterplan/deploy/test-deployment.sh internal-activate \
+            "$target" "$peer_components" "$fresh_commissioning" \
+        || return 1
     peer_state="$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
         env MP_ROOT=/opt/masterplan \
         /opt/masterplan/deploy/test-deployment.sh status 2>/dev/null)" \
@@ -1156,6 +1167,22 @@ internal_repin_setup() {
         '.campaign_commit=$commit | .updated_at=$now | .current_action="Waiting for pinned images from Node A"' \
         "$setup_state" > "$temporary"
     chmod 600 "$temporary"; mv "$temporary" "$setup_state"
+}
+
+internal_repin_pending_peer() {
+    local target="$1" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
+    require_test_policy
+    [[ "$target" =~ ^[0-9a-f]{40}$ ]] || return 1
+    if jq -e '
+        .state == "in_progress" and (.mode | IN("ha-join","replace-node"))
+        and .deployment_lane == "unsigned"
+        and ((.completed // []) | index("joined") != null)
+        and ((.completed // []) | index("application_deployed") == null)
+    ' "$setup_state" >/dev/null 2>&1; then
+        internal_repin_setup "$target"
+    else
+        return 0
+    fi
 }
 
 internal_finalize_peer() {
@@ -1671,6 +1698,7 @@ case "$command" in
         ;;
     internal-prepare-peer) [ "$#" -eq 1 ] || exit 2; internal_prepare_peer "$1" ;;
     internal-repin-setup) [ "$#" -eq 1 ] || exit 2; internal_repin_setup "$1" ;;
+    internal-repin-pending-peer) [ "$#" -eq 1 ] || exit 2; internal_repin_pending_peer "$1" ;;
     internal-finalize-peer) [ "$#" -eq 1 ] || exit 2; internal_finalize_peer "$1" ;;
     internal-stage-prebuilt) [ "$#" -eq 2 ] || exit 2; internal_stage_prebuilt "$1" "$2" ;;
     internal-activate) [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || exit 2; internal_activate "$1" "$2" "${3:-false}" ;;

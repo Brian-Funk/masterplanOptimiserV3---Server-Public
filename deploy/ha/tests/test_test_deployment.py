@@ -198,6 +198,22 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn('index("application_deployed") == null', prepare)
         self.assertIn('install -m 0600 /tmp/mp-opt-test-deployment.env', prepare)
 
+    def test_peer_activation_repins_only_an_incomplete_join_and_propagates_failure(self) -> None:
+        activate = SUPERVISOR.split("peer_activate()", 1)[1].split(
+            "prepare_initial_peer()", 1
+        )[0]
+        pending = SUPERVISOR.split("internal_repin_pending_peer()", 1)[1].split(
+            "internal_finalize_peer()", 1
+        )[0]
+        self.assertIn('internal-repin-pending-peer "$target"', activate)
+        self.assertIn('internal-activate', activate)
+        self.assertGreaterEqual(activate.count("|| return 1"), 3)
+        self.assertIn('(.mode | IN("ha-join","replace-node"))', pending)
+        self.assertIn('index("joined") != null', pending)
+        self.assertIn('index("application_deployed") == null', pending)
+        self.assertIn('internal_repin_setup "$target"', pending)
+        self.assertIn("else\n        return 0", pending)
+
     def test_replacement_peer_is_finalised_after_the_first_accepted_bundle(self) -> None:
         setup = (ROOT / "deploy/management/setup_v2.sh").read_text(encoding="utf-8")
         finalise = setup.split("mp_setup_finalize_fresh_unsigned_peer()", 1)[1].split(
