@@ -749,7 +749,7 @@ compose_activate() {
     if [ "$fresh_commissioning" = true ] && [ "$role" = dynamic ] \
         && [ "$routing_ready" != true ]; then
         mp_wait_for_backend_health 45
-        mp_caddy_validate
+        mp_wait_for_caddy_validation 30
     else
         mp_wait_for_local_health 45
     fi

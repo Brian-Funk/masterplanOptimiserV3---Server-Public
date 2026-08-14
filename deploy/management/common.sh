@@ -1261,6 +1261,36 @@ mp_caddy_validate() {
     return 0
 }
 
+# Wait through Docker's bounded create/start/exec convergence window without
+# hiding a deterministic configuration error.  Compose can report a newly
+# started container as running immediately before docker exec or inspect sees
+# the replacement identity; a one-shot validation at that boundary made fresh
+# peer activation nondeterministic.
+mp_wait_for_caddy_validation() {
+    local timeout="${1:-30}" deadline rc=20
+    [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || return 2
+    deadline=$((SECONDS + timeout))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if mp_caddy_validate; then
+            return 0
+        else
+            rc=$?
+        fi
+        case "${MP_CADDY_FAILURE_CODE:-}" in
+            CADDY_CONFIGURATION_INVALID|CADDY_TOPOLOGY_UNAVAILABLE)
+                return "$rc"
+                ;;
+            CADDY_CONTAINER_UNAVAILABLE|CADDY_SERVICE_UNAVAILABLE|CADDY_EXECUTION_FAILED)
+                sleep 1
+                ;;
+            *)
+                return "$rc"
+                ;;
+        esac
+    done
+    return "$rc"
+}
+
 # Require several consecutive healthy observations before commissioning stores
 # a local-service checkpoint. This prevents a transient container recreation or
 # lease transition from being mistaken for a durable deployment result.
@@ -1271,7 +1301,7 @@ mp_wait_for_stable_local_services() {
     while [ "$SECONDS" -lt "$deadline" ]; do
         if mp_wait_for_database 1 >/dev/null 2>&1 \
             && mp_wait_for_backend_health 1 \
-            && mp_caddy_validate >/dev/null 2>&1 \
+            && mp_wait_for_caddy_validation 3 >/dev/null 2>&1 \
             && mp_origin_tls_health_once; then
             successes=$((successes + 1))
             [ "$successes" -ge "$required" ] && return 0

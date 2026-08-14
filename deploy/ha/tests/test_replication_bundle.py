@@ -564,6 +564,34 @@ class ReplicationBundleTests(unittest.TestCase):
         )
         self.assertNotIn("services_to_recreate=(backend)", receiver)
 
+    def test_receiver_waits_through_caddy_start_convergence(self) -> None:
+        receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        common = (ROOT / "deploy" / "management" / "common.sh").read_text(
+            encoding="utf-8"
+        )
+        helper = common[common.index("mp_wait_for_caddy_validation()") :]
+        helper = helper[: helper.index("\n}\n") + 3]
+        self.assertIn("mp_wait_for_caddy_validation 30", receiver)
+        self.assertIn("CADDY_CONTAINER_UNAVAILABLE", helper)
+        self.assertIn("CADDY_EXECUTION_FAILED", helper)
+        self.assertIn("sleep 1", helper)
+        self.assertIn("CADDY_CONFIGURATION_INVALID", helper)
+        self.assertLess(
+            helper.index("CADDY_CONFIGURATION_INVALID"), helper.index("sleep 1")
+        )
+
+    def test_recent_caddy_start_and_reload_paths_use_bounded_validation(self) -> None:
+        expected = {
+            ROOT / "deploy" / "test-deployment.sh": "mp_wait_for_caddy_validation 30",
+            ROOT / "deploy" / "management" / "setup_v2.sh": "mp_wait_for_caddy_validation 30",
+            ROOT / "deploy" / "management" / "actions.sh": "mp_wait_for_caddy_validation 30",
+        }
+        for path, marker in expected.items():
+            with self.subTest(path=path.name):
+                self.assertIn(marker, path.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

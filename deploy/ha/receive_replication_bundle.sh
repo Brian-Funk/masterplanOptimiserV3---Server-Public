@@ -425,11 +425,7 @@ if ! "${MP_COMPOSE[@]}" exec -T db pg_isready -U masterplan -d masterplan >/dev/
     echo "HA_RECEIVER_DATABASE_HEALTH_FAILED: the replicated database is unavailable after activation." >&2
     exit 1
 fi
-if ! "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx caddy; then
-    echo "HA_RECEIVER_CADDY_NOT_RUNNING: the reverse proxy is not running after activation." >&2
-    exit 1
-fi
-if ! mp_caddy_validate; then
+if ! mp_wait_for_caddy_validation 30; then
     case "${MP_CADDY_FAILURE_CODE:-}" in
         CADDY_CONTAINER_UNAVAILABLE|CADDY_SERVICE_UNAVAILABLE)
             echo "HA_RECEIVER_CADDY_NOT_RUNNING: the reverse proxy became unavailable during validation." >&2

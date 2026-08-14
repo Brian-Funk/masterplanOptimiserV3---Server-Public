@@ -1674,7 +1674,7 @@ mp_setup_verify_signed_application() {
     MP_SIGNED_DEPLOYMENT_FAILURE_CODE=LOCAL_BACKEND_UNHEALTHY
     MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE="The signed Backend container is running, but its local health endpoint is unavailable."
     mp_wait_for_backend_health 1 || return 3
-    if ! mp_caddy_validate >/dev/null 2>&1; then
+    if ! mp_wait_for_caddy_validation 30 >/dev/null 2>&1; then
         MP_SIGNED_DEPLOYMENT_FAILURE_CODE="${MP_CADDY_FAILURE_CODE:-CADDY_VALIDATION_FAILED}"
         MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE="${MP_CADDY_FAILURE_MESSAGE:-The signed Caddy service could not be validated.}"
         return 4
