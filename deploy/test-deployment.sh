@@ -1049,11 +1049,12 @@ internal_prepare_peer() {
     local target="$1" setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
     require_test_policy
     jq -e --arg target "$target" \
-        '.state == "in_progress" and .mode == "ha-join" and .deployment_lane == "unsigned"
+        '.state == "in_progress" and (.mode | IN("ha-join","replace-node"))
+         and .deployment_lane == "unsigned"
          and ((.completed // []) | index("joined") != null)
          and ((.completed // []) | index("application_deployed") == null)
          and .campaign_commit == $target' "$setup_state" >/dev/null \
-        || { ui_error "Node B is not in the exact joined pre-activation state."; return 1; }
+        || { ui_error "Node B is not in an exact joined or replacement pre-activation state."; return 1; }
     mp_lock
     trap 'mp_unlock' EXIT
     prepare_source "$target"

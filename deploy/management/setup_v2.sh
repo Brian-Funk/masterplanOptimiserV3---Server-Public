@@ -1262,6 +1262,14 @@ mp_setup_machine_advance_one() {
                 mp_wait_for_stable_local_services 2 1 >/dev/null 2>&1 || return 10
                 mp_setup_state_mark application_deployed
             elif [ "$mode" = replace-primary ]; then
+                if [ "$lane" = unsigned ]; then
+                    commit="$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")"
+                    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 65
+                    jq -c '.values.registry' "$input_file" \
+                        | "$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit" \
+                            --registry-credentials-stdin \
+                        || return 1
+                fi
                 mp_setup_state_mark application_deployed
             elif [ "$mode" = convert-ha ] && [ "$lane" = unsigned ]; then
                 mp_setup_activate_converted_unsigned_pair \

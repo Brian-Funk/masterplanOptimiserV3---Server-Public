@@ -1059,6 +1059,19 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn('index("application_deployed") == null', stage)
         self.assertIn('index("root_commissioning_complete") == null', stage)
 
+    def test_unsigned_replacement_prepares_exact_peer_before_first_copy(self) -> None:
+        advance = SETUP[SETUP.index("mp_setup_machine_advance_one()") :]
+        replacement = advance[advance.index('elif [ "$mode" = replace-primary ]') :]
+        replacement = replacement[: replacement.index('elif [ "$mode" = convert-ha ]')]
+        self.assertIn('[ "$lane" = unsigned ]', replacement)
+        self.assertIn('jq -c \'.values.registry\'', replacement)
+        self.assertIn('prepare-peer "$commit"', replacement)
+        self.assertIn('--registry-credentials-stdin', replacement)
+        self.assertLess(
+            replacement.index('prepare-peer "$commit"'),
+            replacement.index("mp_setup_state_mark application_deployed"),
+        )
+
 
 class CandidateBundleTests(unittest.TestCase):
     def tar_payload(self, name: str, payload: bytes) -> bytes:

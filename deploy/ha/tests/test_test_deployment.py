@@ -188,6 +188,15 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn('tar -C "$MP_ROOT" -czf - web/out runtime/frontend-csp.caddy', initial)
         self.assertNotIn('tar -C "$MP_TEST_SOURCE" -czf - web/out', initial)
 
+    def test_initial_candidate_preparation_accepts_a_blank_replacement_peer(self) -> None:
+        prepare = SUPERVISOR.split("internal_prepare_peer()", 1)[1].split(
+            "internal_repin_setup()", 1
+        )[0]
+        self.assertIn('(.mode | IN("ha-join","replace-node"))', prepare)
+        self.assertIn('index("joined") != null', prepare)
+        self.assertIn('index("application_deployed") == null', prepare)
+        self.assertIn('install -m 0600 /tmp/mp-opt-test-deployment.env', prepare)
+
     def test_paired_pre_activation_updates_are_operations_only(self) -> None:
         apply = SUPERVISOR.split("apply_commit()", 1)[1].split("restore_signed()", 1)[0]
         self.assertIn("pre_activation_pair=true", apply)
