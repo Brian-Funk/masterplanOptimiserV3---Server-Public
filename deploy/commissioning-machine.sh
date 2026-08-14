@@ -424,6 +424,8 @@ mp_machine_start() {
     policy="$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)"
     case "$policy" in production) expected_lane=signed ;; test) expected_lane=unsigned ;; *) return 65 ;; esac
     [ "$lane" = "$expected_lane" ] || return 65
+    mp_machine_require_local_owner || return 77
+    mp_initialise_paths || return 77
     if [ -s "$MP_SETUP_V2_STATE" ]; then
         mp_setup_validate_state_contract "$MP_SETUP_V2_STATE" || return $?
         if [ "$(jq -r .state "$MP_SETUP_V2_STATE")" = complete ] \
@@ -444,7 +446,6 @@ mp_machine_start() {
             || return 65
         return 0
     fi
-    mp_machine_require_local_owner || return 77
     run_id="start-$(date -u +%Y%m%dT%H%M%SZ)-$$"
     if mp_setup_execution_acquire "$run_id" start; then :; else status=$?; return "$status"; fi
     trap 'mp_setup_execution_release' EXIT
@@ -842,8 +843,9 @@ mp_machine_cleanup_provider() {
 
 mp_machine_advance_command() {
     local input_file run_id status=0 log
-    [ -s "$MP_SETUP_V2_STATE" ] || return 65
     mp_machine_require_local_owner || return 77
+    mp_initialise_paths || return 77
+    [ -s "$MP_SETUP_V2_STATE" ] || return 65
     input_file="$(mktemp "$MP_STATE/setup-machine-input.XXXXXX")" || return 1
     chmod 600 "$input_file"
     MP_MACHINE_INPUT_FILE="$input_file"

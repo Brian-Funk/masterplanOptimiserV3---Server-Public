@@ -159,10 +159,28 @@ mp_queue_ha_replication() {
 
 # Initialise protected operator-owned working directories.
 mp_initialise_paths() {
+    local path owner
     umask 077
-    mkdir -p "$MP_HOME" "$MP_STATE" "$MP_SNAPSHOTS"
-    chmod 700 "$MP_HOME" "$MP_STATE" "$MP_SNAPSHOTS"
-    touch "$MP_AUDIT_FILE" "$MP_LOCK_FILE"
+    owner="$(id -u):$(id -g)"
+    for path in "$MP_HOME" "$MP_STATE" "$MP_SNAPSHOTS"; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            [ -d "$path" ] && [ ! -L "$path" ] \
+                && [ "$(stat -c '%u:%g' "$path" 2>/dev/null)" = "$owner" ] \
+                || return 1
+        else
+            mkdir -- "$path" || return 1
+        fi
+        chmod 700 -- "$path" || return 1
+    done
+    for path in "$MP_AUDIT_FILE" "$MP_LOCK_FILE"; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            [ -f "$path" ] && [ ! -L "$path" ] \
+                && [ "$(stat -c '%u:%g' "$path" 2>/dev/null)" = "$owner" ] \
+                || return 1
+        else
+            : > "$path" || return 1
+        fi
+    done
     chmod 600 "$MP_AUDIT_FILE" "$MP_LOCK_FILE"
     mp_cleanup_stale_setup_transients
 }
