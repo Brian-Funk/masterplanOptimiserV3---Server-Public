@@ -1264,9 +1264,8 @@ mp_setup_machine_advance_one() {
             elif [ "$mode" = replace-primary ]; then
                 mp_setup_state_mark application_deployed
             elif [ "$mode" = convert-ha ] && [ "$lane" = unsigned ]; then
-                jq -c '.values.registry' "$input_file" \
-                    | mp_setup_activate_converted_unsigned_pair --registry-credentials-stdin \
-                    || return 1
+                mp_setup_activate_converted_unsigned_pair \
+                    --registry-credentials-file "$input_file" || return 1
                 mp_setup_state_mark application_deployed
             elif [ "$lane" = unsigned ] \
                 && [ -s "$MP_STATE/test-deployments/candidate/receipt.json" ]; then
@@ -1846,9 +1845,23 @@ mp_setup_establish_initial_writer_identity() {
 }
 
 mp_setup_activate_converted_unsigned_pair() {
-    local registry_credentials="${1:-}" commit
-    [ -z "$registry_credentials" ] || [ "$registry_credentials" = --registry-credentials-stdin ] \
-        || { ui_error "The candidate peer registry-credential mode is invalid."; return 1; }
+    local registry_credentials="${1:-}" registry_input="${2:-}" commit
+    if [ -n "$registry_credentials" ]; then
+        [ "$registry_credentials" = --registry-credentials-file ] \
+            && [ -n "$registry_input" ] && [ -f "$registry_input" ] \
+            && [ ! -L "$registry_input" ] \
+            && [ "$(stat -c %u "$registry_input")" = "$(id -u)" ] \
+            && [ "$(stat -c %a "$registry_input")" = 600 ] \
+            && jq -e '.values.registry | type == "object"
+                and ((keys | sort) == ["token","username"])
+                and (.username | type == "string" and length >= 1 and length <= 255)
+                and (.token | type == "string" and length >= 1 and length <= 4096)' \
+                "$registry_input" >/dev/null 2>&1 \
+            || { ui_error "The candidate peer registry credentials are unavailable or unsafe."; return 1; }
+    else
+        [ -z "$registry_input" ] \
+            || { ui_error "The candidate peer registry-credential mode is invalid."; return 1; }
+    fi
     mp_setup_state_action "Preparing exact images for Node B" \
         PEER_IMAGES_PREPARING application_deployed || return 1
     commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
@@ -1868,9 +1881,10 @@ mp_setup_activate_converted_unsigned_pair() {
     # candidate receipt and proves that the local image exists before anything
     # is copied to Node B.
     mp_setup_verify_exact_environment "$commit" || return 1
-    if [ "$registry_credentials" = --registry-credentials-stdin ]; then
-        "$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit" \
-            --registry-credentials-stdin || return 1
+    if [ "$registry_credentials" = --registry-credentials-file ]; then
+        jq -c '.values.registry' "$registry_input" \
+            | "$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit" \
+                --registry-credentials-stdin || return 1
     else
         "$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit" || return 1
     fi

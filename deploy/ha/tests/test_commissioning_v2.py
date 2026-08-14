@@ -65,7 +65,14 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn("merge-base --is-ancestor", reconcile)
         self.assertIn(".campaign_commit=$commit", reconcile)
         self.assertIn('test-deployment.sh" prepare-peer', activate)
-        self.assertIn('--registry-credentials-stdin', activate)
+        self.assertIn('--registry-credentials-file', activate)
+        self.assertIn('[ ! -L "$registry_input" ]', activate)
+        self.assertIn('stat -c %u "$registry_input"', activate)
+        self.assertIn('stat -c %a "$registry_input"', activate)
+        self.assertLess(
+            activate.index('mp_setup_establish_initial_writer_identity'),
+            activate.index("jq -c '.values.registry'"),
+        )
         self.assertIn('mp_setup_verify_exact_environment "$commit"', activate)
         self.assertNotIn('^masterplan-(backend|caddy|postgres|tools):test-', activate)
         self.assertIn('HA_WRITER_ESTABLISHING', activate)
