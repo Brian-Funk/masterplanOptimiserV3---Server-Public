@@ -879,10 +879,12 @@ mp_setup_machine_reconcile() {
         fi
     fi
     if [[ "$mode" =~ ^(ha-primary-new|convert-ha|replace-primary)$ ]] \
-        && mp_setup_state_has paired && ! mp_setup_state_has replicated; then
+        && mp_setup_state_has paired; then
         if mp_load_ha_config >/dev/null 2>&1 \
             && mp_setup_record_first_verified_bundle >/dev/null 2>&1; then
-            mp_setup_state_mark replicated || return 1
+            if ! mp_setup_state_has replicated; then
+                mp_setup_state_mark replicated || return 1
+            fi
             changed=true
         fi
     fi
