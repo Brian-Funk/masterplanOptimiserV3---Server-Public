@@ -935,7 +935,7 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         lifecycle = source[source.index("mp_machine_deployment_action()") :]
         self.assertIn('if [[ "$action" =~ ^signed- ]]', lifecycle)
         self.assertIn('[ "$action" != candidate-precommission-retry ]', lifecycle)
-        self.assertIn("mp_setup_sync_commissioning_recipient", lifecycle)
+        self.assertIn("mp_setup_ensure_commissioning_recipient_current", lifecycle)
 
     def test_provider_cleanup_replay_never_deletes_twice(self) -> None:
         replay = SETUP[SETUP.index("mp_setup_decommission_cloudflare_machine()") :]

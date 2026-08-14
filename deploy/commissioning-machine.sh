@@ -765,7 +765,7 @@ mp_machine_deployment_action() {
                 # identity.  This also proves that a mid-conversion candidate
                 # advance or rollback is operating on established application
                 # state.  No private material leaves the machine input.
-                mp_setup_sync_commissioning_recipient || status=$?
+                mp_setup_ensure_commissioning_recipient_current || status=$?
             fi
             if [ "$status" -eq 0 ] && [ "$action" != candidate-precommission-retry ]; then
                 recovery_identity="$(mp_setup_machine_identity_file \

@@ -268,6 +268,12 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn('"$filter | .updated_at=\\$now"', state_update)
         self.assertNotIn('"$filter | .updated_at=$now"', state_update)
 
+    def test_candidate_debug_recipient_verification_does_not_require_an_ha_rewrite(self) -> None:
+        ensure = shell_function(SETUP, "mp_setup_ensure_commissioning_recipient_current")
+        self.assertIn("root_recovery_recipient", ensure)
+        self.assertIn('mp_recovery_recipient 2>/dev/null', ensure)
+        self.assertIn('[ "$current" = "$recipient" ] || mp_setup_sync_commissioning_recipient', ensure)
+
     @unittest.skipIf(os.name == "nt", "POSIX shell state contract")
     def test_state_update_executes_and_atomically_replaces_the_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

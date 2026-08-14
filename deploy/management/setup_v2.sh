@@ -1568,6 +1568,20 @@ mp_setup_sync_commissioning_recipient() {
     fi
 }
 
+# Prove that host custody already matches the authoritative application value
+# without requiring an active HA lease merely to repeat an identical write.
+# A missing or different value still goes through the full standalone/HA sync
+# path above, including the active-holder and peer transaction guards.
+mp_setup_ensure_commissioning_recipient_current() {
+    local recipient current
+    mp_compose_init || return 1
+    recipient="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d masterplan -Atqc \
+        "SELECT value FROM server_settings WHERE key='root_recovery_recipient'" 2>/dev/null || true)"
+    [[ "$recipient" =~ ^age1[0-9a-z]+$ ]] || return 1
+    current="$(mp_recovery_recipient 2>/dev/null || true)"
+    [ "$current" = "$recipient" ] || mp_setup_sync_commissioning_recipient
+}
+
 mp_setup_wait_for_root_commissioning() (
     local interval attempt=1 stage label action retired=0
     interval="${MP_ROOT_PASSKEY_POLL_INTERVAL_SECONDS:-5}"
