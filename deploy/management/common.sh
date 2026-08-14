@@ -989,6 +989,7 @@ mp_root_bootstrap_is_disabled() {
     [ -f "$MP_ROOT/.env" ] || return 1
     mp_compose_init || return 1
     "${MP_COMPOSE[@]}" up -d db >/dev/null 2>&1 || return 1
+    mp_wait_for_database 30 || return 1
     disabled="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d masterplan -Atqc \
         "SELECT
             EXISTS (
@@ -1519,12 +1520,28 @@ mp_wait_for_public_health() {
     return 1
 }
 
-# Wait until PostgreSQL accepts connections for the application role.
+# Return success only for the final PostgreSQL server owned by container PID 1.
+# The official image starts a temporary bootstrap server while initialising an
+# empty volume.  That server can answer pg_isready immediately before the
+# entrypoint deliberately shuts it down, so accepting pg_isready alone creates
+# a race for fresh commissioning, restore, and first-copy activation.
+mp_database_runtime_ready() {
+    mp_compose_init
+    "${MP_COMPOSE[@]}" exec -T db sh -c \
+        '[ "$(cat /proc/1/comm 2>/dev/null)" = postgres ]' \
+        >/dev/null 2>&1 \
+        && "${MP_COMPOSE[@]}" exec -T db \
+            pg_isready -U masterplan -d masterplan >/dev/null 2>&1
+}
+
+# Wait until the final PostgreSQL process accepts connections for the
+# application role.  This is safe for both fresh and already-initialised
+# volumes and centralises the readiness contract for every management path.
 mp_wait_for_database() {
     local attempts="${1:-30}"
     mp_compose_init
     for _ in $(seq 1 "$attempts"); do
-        if "${MP_COMPOSE[@]}" exec -T db pg_isready -U masterplan -d masterplan >/dev/null 2>&1; then
+        if mp_database_runtime_ready; then
             return 0
         fi
         sleep 2

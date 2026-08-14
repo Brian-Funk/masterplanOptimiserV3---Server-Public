@@ -117,6 +117,7 @@ mp_snapshot_dump_database() {
     chmod 700 "$payload/database" || return 1
     mp_compose_init
     "${MP_COMPOSE[@]}" up -d db >/dev/null || return 1
+    mp_wait_for_database 30 || return 1
     "${MP_COMPOSE[@]}" exec -T db pg_dump \
         -U masterplan -d masterplan -Fc > "$payload/database/masterplan.dump" || return 1
     chmod 600 "$payload/database/masterplan.dump" || return 1
@@ -842,6 +843,7 @@ mp_snapshot_restore_database() {
     mp_compose_init
     "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
     "${MP_COMPOSE[@]}" up -d db >/dev/null || return 1
+    mp_wait_for_database 30 || return 1
     "${MP_COMPOSE[@]}" exec -T db dropdb --if-exists --force -U masterplan masterplan || return 1
     "${MP_COMPOSE[@]}" exec -T db createdb -U masterplan masterplan || return 1
     "${MP_COMPOSE[@]}" exec -T db pg_restore \

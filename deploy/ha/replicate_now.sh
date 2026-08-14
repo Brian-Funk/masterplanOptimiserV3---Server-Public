@@ -104,6 +104,8 @@ chmod -R go-rwx "$stage"
 
 mp_compose_init
 "${MP_COMPOSE[@]}" up -d db >/dev/null
+mp_wait_for_database 30 \
+    || { echo "The final local database process did not become ready for replication." >&2; exit 1; }
 mp_retire_root_bootstrap_secret
 
 # Hold the same PostgreSQL advisory lock used by every evidence mutation and

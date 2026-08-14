@@ -29,6 +29,8 @@ holder="$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json")"
 
 mp_compose_init
 "${MP_COMPOSE[@]}" up -d db >/dev/null
+mp_wait_for_database 30 \
+    || { echo "The final local database process did not become ready for promotion." >&2; exit 1; }
 current_generation="$("${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U masterplan -d masterplan -Atqc \
     "SELECT generation::text || ':' || active_node_id FROM ha_cluster_state WHERE id = 1" 2>/dev/null || true)"
 ownership_changed=false

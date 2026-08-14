@@ -664,7 +664,8 @@ mp_wipe_database() {
     new_token="$(mp_random_secret)"
     mp_compose_init
     "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
-    if ! "${MP_COMPOSE[@]}" exec -T db dropdb --if-exists --force -U masterplan masterplan \
+    if ! mp_wait_for_database 30 \
+        || ! "${MP_COMPOSE[@]}" exec -T db dropdb --if-exists --force -U masterplan masterplan \
         || ! "${MP_COMPOSE[@]}" exec -T db createdb -U masterplan masterplan; then
         unset new_token
         mp_guard_rollback "Database recreation failed."

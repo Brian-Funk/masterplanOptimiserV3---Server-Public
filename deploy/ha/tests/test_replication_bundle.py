@@ -470,7 +470,34 @@ class ReplicationBundleTests(unittest.TestCase):
         first_drop = receiver.index('exec -T db dropdb', database_start)
         self.assertLess(database_start, database_ready)
         self.assertLess(database_ready, first_drop)
-        self.assertIn("The replication peer database did not become ready.", receiver)
+        self.assertIn("The replication peer final database process did not become ready.", receiver)
+
+    def test_database_readiness_rejects_the_temporary_entrypoint_server(self) -> None:
+        common = (ROOT / "deploy" / "management" / "common.sh").read_text(
+            encoding="utf-8"
+        )
+        helper = common[common.index("mp_database_runtime_ready()") :]
+        helper = helper[: helper.index("\n}\n") + 3]
+        self.assertIn("/proc/1/comm", helper)
+        self.assertIn("= postgres", helper)
+        self.assertIn("pg_isready -U masterplan -d masterplan", helper)
+
+    def test_database_mutation_paths_wait_for_the_final_server(self) -> None:
+        cases = (
+            (HA_DIR / "replicate_now.sh", 'up -d db', "mp_wait_for_database 30", "mp_retire_root_bootstrap_secret"),
+            (HA_DIR / "promote_local.sh", 'up -d db', "mp_wait_for_database 30", "current_generation="),
+            (ROOT / "deploy" / "management" / "snapshots.sh", "mp_snapshot_dump_database()", "mp_wait_for_database 30", "exec -T db pg_dump"),
+            (ROOT / "deploy" / "management" / "snapshots.sh", "mp_snapshot_restore_database()", "mp_wait_for_database 30", "exec -T db dropdb"),
+            (ROOT / "deploy" / "management" / "actions.sh", "mp_wipe_database()", "mp_wait_for_database 30", "exec -T db dropdb"),
+        )
+        for path, start_marker, ready_marker, mutation_marker in cases:
+            with self.subTest(path=path.name, start=start_marker):
+                source = path.read_text(encoding="utf-8")
+                start = source.index(start_marker)
+                ready = source.index(ready_marker, start)
+                mutation = source.index(mutation_marker, ready)
+                self.assertLess(start, ready)
+                self.assertLess(ready, mutation)
 
     def test_receiver_expands_bound_marker_values_from_psql_stdin(self) -> None:
         receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(
