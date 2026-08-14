@@ -1022,6 +1022,18 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("--registry-credentials-stdin", deployment)
         self.assertIn("setup-machine-logs", machine)
 
+    def test_candidate_staging_supports_every_machine_lifecycle_before_activation(self) -> None:
+        machine = MACHINE.read_text(encoding="utf-8")
+        stage = machine[machine.index("mp_machine_stage_candidate()") :]
+        stage = stage[: stage.index("mp_machine_stage_migration_snapshot()")]
+        for mode in (
+            "standalone-new", "ha-primary-new", "ha-join", "convert-ha",
+            "replace-primary", "replace-node", "full-restore",
+        ):
+            self.assertIn(f'"{mode}"', stage)
+        self.assertIn('index("application_deployed") == null', stage)
+        self.assertIn('index("root_commissioning_complete") == null', stage)
+
 
 class CandidateBundleTests(unittest.TestCase):
     def tar_payload(self, name: str, payload: bytes) -> bytes:
