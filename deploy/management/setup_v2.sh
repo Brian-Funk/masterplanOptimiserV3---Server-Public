@@ -1811,6 +1811,20 @@ mp_setup_establish_initial_writer_identity() {
     mp_load_ha_config || return 1
     generation="$(jq -r '.generation // 0' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
     holder="$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
+    # A standalone-to-HA conversion installs the node identity before it
+    # installs the long-running HA services.  There is therefore no lease
+    # agent yet to materialise the witness's bootstrap decision locally.  Ask
+    # the real lease agent for exactly one authenticated observation before
+    # deciding whether promotion is authorised.  The helper writes the same
+    # atomic control receipt used by the service and promotes only when the
+    # witness still names this node as the initial holder.
+    if ! [[ "$generation" =~ ^[1-9][0-9]*$ ]] || [ "$holder" != "$HA_NODE_ID" ]; then
+        MP_ROOT="$MP_ROOT" MP_HA_HOME="$MP_HA_HOME" \
+            python3 "$MP_ROOT/deploy/ha/lease_agent.py" --once \
+            || { ui_error "The initial witness observation could not be established."; return 1; }
+        generation="$(jq -r '.generation // 0' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
+        holder="$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
+    fi
     [[ "$generation" =~ ^[1-9][0-9]*$ ]] && [ "$holder" = "$HA_NODE_ID" ] \
         || { ui_error "The witness did not authorise this node as the initial database writer."; return 1; }
     "$MP_ROOT/deploy/ha/promote_local.sh" "$generation" \

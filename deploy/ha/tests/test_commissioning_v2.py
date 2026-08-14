@@ -69,6 +69,11 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn('mp_setup_verify_exact_environment "$commit"', activate)
         self.assertNotIn('^masterplan-(backend|caddy|postgres|tools):test-', activate)
         self.assertIn('HA_WRITER_ESTABLISHING', activate)
+        self.assertIn('lease_agent.py" --once', establish)
+        self.assertLess(
+            establish.index('lease_agent.py" --once'),
+            establish.index('promote_local.sh" "$generation"'),
+        )
         self.assertIn('promote_local.sh" "$generation"', establish)
         self.assertIn('mp_setup_establish_initial_writer_identity', activate)
         self.assertLess(
