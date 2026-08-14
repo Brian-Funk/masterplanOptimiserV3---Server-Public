@@ -939,7 +939,7 @@ peer_activate() {
 }
 
 prepare_initial_peer() {
-    local target="$1" key image
+    local target="$1" key image manifest_key expected short
     require_test_policy
     [ "$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)" = "$target" ] \
         || { ui_error "The local verified deployment receipt does not match the requested peer preparation."; return 1; }
@@ -947,11 +947,27 @@ prepare_initial_peer() {
     [ "$HA_ROLE" = dynamic ] && ha_pairing_complete && ha_pair_transport_ready \
         || { ui_error "The verified HA peer transport is not ready for initial preparation."; return 1; }
     prepare_source "$target"
+    short="${target:0:12}"
     for key in MP_BACKEND_IMAGE MP_CADDY_IMAGE MP_POSTGRES_IMAGE MP_TOOLS_IMAGE; do
         image="$(sed -n "s/^${key}=//p" "$MP_TEST_ENV" | head -1)"
-        [[ "$image" =~ ^masterplan-(backend|caddy|postgres|tools):test-[0-9a-f]{12}$ ]] \
-            && docker image inspect "$image" >/dev/null 2>&1 \
-            || { ui_error "${key} is not a verified local test image."; return 1; }
+        if [ -s "$MP_TEST_CANDIDATE_RECEIPT" ] \
+            && [ "$(jq -r '.commit // empty' "$MP_TEST_CANDIDATE_RECEIPT")" = "$target" ]; then
+            case "$key" in
+                MP_BACKEND_IMAGE) manifest_key=backend ;;
+                MP_CADDY_IMAGE) manifest_key=caddy ;;
+                MP_POSTGRES_IMAGE) manifest_key=postgres ;;
+                MP_TOOLS_IMAGE) manifest_key=tools ;;
+            esac
+            expected="$(jq -r --arg key "$manifest_key" \
+                '.manifest.images[$key] // empty' "$MP_TEST_CANDIDATE_RECEIPT")"
+            [ "$image" = "$expected" ] && [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] \
+                || { ui_error "${key} does not match the staged candidate digest."; return 1; }
+        else
+            [[ "$image" =~ ^masterplan-(backend|caddy|postgres|tools):test-${short}$ ]] \
+                || { ui_error "${key} is not pinned to test-${short}."; return 1; }
+        fi
+        docker image inspect "$image" >/dev/null 2>&1 \
+            || { ui_error "Verified image ${image} is missing."; return 1; }
         peer_copy_image "$image"
     done
     scp -q "$MP_TEST_ENV" mp-opt-ha-peer:/tmp/mp-opt-test-deployment.env

@@ -63,6 +63,8 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn("merge-base --is-ancestor", reconcile)
         self.assertIn(".campaign_commit=$commit", reconcile)
         self.assertIn('test-deployment.sh" prepare-peer', activate)
+        self.assertIn('mp_setup_verify_exact_environment "$commit"', activate)
+        self.assertNotIn('^masterplan-(backend|caddy|postgres|tools):test-', activate)
         self.assertLess(activate.index("prepare-peer"), activate.index("install_services.sh"))
         self.assertIn('mp_setup_state_action "Preparing exact images for Node B"', activate)
         self.assertIn('mp_setup_state_action "Installing Node A HA services"', activate)

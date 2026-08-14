@@ -21,6 +21,16 @@ SUPERVISOR = (ROOT / "deploy" / "test-deployment.sh").read_text(encoding="utf-8"
 
 
 class TestDeploymentPlannerTests(unittest.TestCase):
+    def test_initial_peer_accepts_only_receipt_bound_digest_images_or_legacy_tags(self) -> None:
+        prepare = SUPERVISOR.split("prepare_initial_peer()", 1)[1].split(
+            "internal_prepare_peer()", 1
+        )[0]
+        self.assertIn('MP_TEST_CANDIDATE_RECEIPT', prepare)
+        self.assertIn(".manifest.images[$key] // empty", prepare)
+        self.assertIn('@sha256:[0-9a-f]{64}$', prepare)
+        self.assertIn('test-${short}', prepare)
+        self.assertIn('docker image inspect "$image"', prepare)
+
     def test_snapshot_free_apply_is_confined_to_fresh_root_only_commissioning(self) -> None:
         self.assertIn("--fresh-commissioning", SUPERVISOR)
         self.assertIn("require_fresh_commissioning_database", SUPERVISOR)

@@ -1755,18 +1755,18 @@ mp_setup_reconcile_primary_campaign_pin() {
 }
 
 mp_setup_activate_converted_unsigned_pair() {
-    local commit key image
+    local commit
     mp_setup_state_action "Preparing exact images for Node B" \
         PEER_IMAGES_PREPARING application_deployed || return 1
     commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
     [ "$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)" = "$commit" ] \
         || { ui_error "Node A's verified deployment receipt does not match the reconciled campaign pin."; return 1; }
-    for key in MP_BACKEND_IMAGE MP_CADDY_IMAGE MP_POSTGRES_IMAGE MP_TOOLS_IMAGE; do
-        image="$(sed -n "s/^${key}=//p" "$MP_ROOT/.test-deployment.env" | head -1)"
-        [[ "$image" =~ ^masterplan-(backend|caddy|postgres|tools):test-[0-9a-f]{12}$ ]] \
-            && docker image inspect "$image" >/dev/null 2>&1 \
-            || { ui_error "${key} is unavailable for the verified converted deployment."; return 1; }
-    done
+    # Accept the exact image representation already verified for this campaign:
+    # legacy local test tags or the current private, digest-pinned candidate
+    # references.  The shared verifier binds every value to the staged
+    # candidate receipt and proves that the local image exists before anything
+    # is copied to Node B.
+    mp_setup_verify_exact_environment "$commit" || return 1
     "$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit" || return 1
     mp_setup_state_action "Installing Node A HA services" \
         HA_SERVICES_INSTALLING application_deployed || return 1
