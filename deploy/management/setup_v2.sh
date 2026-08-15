@@ -909,6 +909,15 @@ mp_setup_machine_reconcile() {
     if [[ "$mode" =~ ^(standalone-new|ha-primary-new)$ ]] \
         && mp_setup_state_has application_deployed \
         && mp_root_bootstrap_is_disabled >/dev/null 2>&1; then
+        # Browser commissioning disables bootstrap in the database before the
+        # machine controller can observe its completion receipt. Retire the
+        # host-side bearer value at that reconciliation boundary, just as the
+        # interactive polling path does. Replication and snapshot workers are
+        # deliberately validation-only, so advancing the setup checkpoint
+        # while this file is still populated would leave the installation in
+        # a state those workers must reject.
+        mp_retire_root_bootstrap_secret || return 1
+        mp_validate_retired_root_bootstrap_secret_existing_runtime || return 1
         stage="$(mp_setup_commissioning_stage 2>/dev/null || true)"
         if [ "$stage" = complete ]; then
             if ! mp_recovery_recipient >/dev/null 2>&1; then

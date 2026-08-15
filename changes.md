@@ -18,6 +18,9 @@ working under the restricted systemd identities used in production.
 - Report permission and retired-bootstrap failures with bounded causes, and
   allow an affected durable mutation to be retried after its runtime contract
   is healthy.
+- Retire and verify the temporary root-bootstrap bearer value when automated
+  browser commissioning is reconciled, before the first HA copy or snapshot is
+  allowed to run.
 
 ### Scheduled recovery snapshots
 
