@@ -1090,7 +1090,9 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         restored_schema = restored_schema[: restored_schema.index("else (.values")]
         self.assertIn('["candidate_commit","recovery_identity","registry"]', restored_schema)
         self.assertIn(".values.candidate_commit", restored_schema)
-        self.assertIn(".campaign_commit = $commit", restored)
+        self.assertIn(
+            "mp_setup_state_update '.campaign_commit = $commit'", restored
+        )
 
     def test_unsigned_replacement_prepares_exact_peer_before_first_copy(self) -> None:
         advance = SETUP[SETUP.index("mp_setup_machine_advance_one()") :]

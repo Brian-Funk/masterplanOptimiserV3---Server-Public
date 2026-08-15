@@ -1453,8 +1453,8 @@ mp_setup_machine_advance_one() {
                 # Only the independently verified staged bundle may retarget
                 # a pending development recovery. Commit the new exact SHA
                 # after runtime preparation and before restoring data.
-                mp_setup_state_update --arg commit "$commit" \
-                    '.campaign_commit = $commit' || return 1
+                mp_setup_state_update '.campaign_commit = $commit' \
+                    --arg commit "$commit" || return 1
             else
                 jq -e '(.values | keys) == ["recovery_identity"]' \
                     "$input_file" >/dev/null || return 65
