@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -95,9 +96,12 @@ class TestDeploymentPlannerTests(unittest.TestCase):
             "deploy_witness()", 1
         )[0]
         self.assertIn('peer_components="${components// /,}"', SUPERVISOR)
-        self.assertIn(
-            'internal-activate "$target" "$peer_components" "$fresh_commissioning"',
+        self.assertRegex(
             SUPERVISOR,
+            re.compile(
+                r'internal-activate\s+\\?\s*"\$target"\s+'
+                r'"\$peer_components"\s+"\$fresh_commissioning"'
+            ),
         )
         self.assertIn('components="${component_token//,/ }"', SUPERVISOR)
         self.assertIn('component_token="${component_token// /,}"', peer_activate)

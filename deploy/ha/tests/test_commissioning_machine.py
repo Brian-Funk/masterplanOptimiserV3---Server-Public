@@ -175,10 +175,27 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             token = "Z" * 64
             token_file = test_secrets / "root_bootstrap_token"
             token_file.write_text(token, encoding="ascii")
-            token_file.chmod(0o600)
+            token_file.chmod(0o640)
+            if os.geteuid() == 0:
+                os.chown(token_file, -1, 10001)
+            else:
+                group_change = subprocess.run(
+                    ["sudo", "-n", "chgrp", "10001", str(token_file)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if group_change.returncode != 0:
+                    self.skipTest("setting the backend-readable fixture group requires sudo")
             environment["MP_ROOT"] = str(test_root)
+            preflight = self.invoke(environment, "status", "--json")
+            self.assertEqual(preflight.returncode, 10, preflight.stderr)
             handoff = self.invoke(environment, "handoff", "--kind", "root-bootstrap")
-            self.assertEqual(handoff.returncode, 0, handoff.stderr)
+            self.assertEqual(
+                handoff.returncode,
+                0,
+                preflight.stdout + "\n" + handoff.stderr,
+            )
             self.assertEqual(handoff.stdout, token + "\n")
             status = self.invoke(environment, "status", "--json")
             self.assertNotIn(token, status.stdout)
@@ -693,18 +710,6 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             worker = "mp-opt-ha-mpopt12345"
             witness = f"https://{worker}.synthetic.workers.dev"
             zone = "zone_12345678"
-            provider = state / "cloudflare-provider-resource.json"
-            provider.write_text(json.dumps({
-                "format": "mp-opt-cloudflare-provider-resource-v1",
-                "cluster_id": cluster,
-                "account_id": "a" * 32,
-                "worker_name": worker,
-                "witness_url": witness,
-                "zone_id": zone,
-                "domain": "e2e.mp-opt.net",
-                "recorded_at": "2026-08-12T09:00:00Z",
-            }), encoding="utf-8")
-            provider.chmod(0o600)
             receipt = state / f"provider-cleanup-{cluster}.json"
             receipt.write_text(json.dumps({
                 "format": "mp-opt-provider-cleanup-receipt-v1",
@@ -718,7 +723,7 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 "witness_state_deleted_at": "2026-08-12T10:00:00Z",
             }), encoding="utf-8")
             receipt.chmod(0o600)
-            calls = directory / "docker-calls"
+            calls = directory / "provider-calls"
             script = r'''
                 set -Eeuo pipefail
                 export MP_ROOT="$2" MP_STATE="$3" MP_DEPLOYMENT_POLICY_FILE="$4" CALLS="$5"
@@ -729,12 +734,18 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                     HA_CLUSTER_ID=mp-opt-12345678-1234-4234-8234-123456789abc
                     HA_WITNESS_URL=https://mp-opt-ha-mpopt12345.synthetic.workers.dev
                 }
-                docker() {
+                mp_setup_record_cloudflare_resource \
+                    mp-opt-12345678-1234-4234-8234-123456789abc \
+                    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+                    mp-opt-ha-mpopt12345 \
+                    https://mp-opt-ha-mpopt12345.synthetic.workers.dev \
+                    zone_12345678 e2e.mp-opt.net
+                python3() {
                     printf '%s\n' "$*" >> "$CALLS"
                     case "$*" in
-                        *"deployments list"*) printf 'Worker not found\n' >&2; return 1 ;;
-                        *" delete "*) return 99 ;;
-                        *) return 0 ;;
+                        *"cloudflare_worker_script.py observe "*) return 4 ;;
+                        *"cloudflare_worker_script.py delete "*) return 99 ;;
+                        *) command python3 "$@" ;;
                     esac
                 }
                 result="$(mp_setup_decommission_cloudflare_machine \
@@ -945,13 +956,13 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn('"$worker_name" = "$expected_worker"', replay)
         self.assertIn('"$zone_id" = "$expected_zone"', replay)
         deleted_guard = replay.index("! jq -e '.worker_deleted == true'")
-        read_only_probe = replay.index("deployments list", deleted_guard)
-        delete_call = replay.index('delete --name "$worker_name"', read_only_probe)
+        read_only_probe = replay.index('observe "$account_id" "$worker_name"', deleted_guard)
+        delete_call = replay.index('delete "$account_id" "$worker_name"', read_only_probe)
         receipt_move = replay.index('mv "$temporary" "$receipt"', delete_call)
         self.assertLess(deleted_guard, read_only_probe)
         self.assertLess(read_only_probe, delete_call)
         self.assertLess(delete_call, receipt_move)
-        self.assertIn("not[ -]?found", replay)
+        self.assertIn('PIPESTATUS[1]}" -eq 4', replay)
         self.assertIn("worker_deletion_reconciled", replay)
 
     def test_machine_checkpoint_and_transition_receipt_are_one_atomic_update(self) -> None:

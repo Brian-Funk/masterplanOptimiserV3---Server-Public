@@ -465,6 +465,7 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
                 export MP_ROOT={shlex.quote(str(ROOT))}
                 source "$MP_ROOT/deploy/management/snapshots.sh"
                 mp_compose_init() {{ MP_COMPOSE=(fake_compose); }}
+                mp_wait_for_database() {{ return 0; }}
                 fake_compose() {{
                     case "$*" in
                         "up -d db") return 0 ;;
