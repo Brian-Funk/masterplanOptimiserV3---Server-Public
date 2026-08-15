@@ -1063,6 +1063,7 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         machine = MACHINE.read_text(encoding="utf-8")
         deployment = (ROOT / "deploy/test-deployment.sh").read_text(encoding="utf-8")
         deploy = (ROOT / "deploy/deploy.sh").read_text(encoding="utf-8")
+        snapshots = (ROOT / "deploy/management/snapshots.sh").read_text(encoding="utf-8")
         restored = SETUP[SETUP.index("        restored)") :]
         restored = restored[: restored.index("        witness_ready)")]
         self.assertIn("prepare-full-loss-restore-prebuilt", restored)
@@ -1094,6 +1095,14 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
             deploy.index('if [ -s "$MP_AUDIT_FILE" ]; then'),
             deploy.index("mp_publish_audit_head"),
         )
+        evidence_restore = snapshots[snapshots.index("mp_snapshot_restore_evidence()") :]
+        evidence_restore = evidence_restore[: evidence_restore.index("mp_snapshot_guard_privacy_actions()")]
+        self.assertIn('[ -d "$MP_ROOT/state" ] && [ ! -L "$MP_ROOT/state" ]', evidence_restore)
+        self.assertIn(
+            'sudo -n install -d -o "$(id -u)" -g "$(id -g)" -m 0700 "$stage"',
+            evidence_restore,
+        )
+        self.assertNotIn('mkdir -m 0700 "$stage"', evidence_restore)
         restored_schema = machine[machine.index('elif .checkpoint == "restored"') :]
         restored_schema = restored_schema[: restored_schema.index("else (.values")]
         self.assertIn('["candidate_commit","recovery_identity","registry"]', restored_schema)

@@ -964,8 +964,14 @@ mp_snapshot_restore_evidence() {
         && [ -s "$payload/evidence/public/instance_signing_key.pub" ] || return 1
     stage="$MP_ROOT/state/.evidence.restore.$$"
     old="$MP_ROOT/state/.evidence.restore-old.$$"
+    [ -d "$MP_ROOT/state" ] && [ ! -L "$MP_ROOT/state" ] || return 1
     [ ! -e "$stage" ] && [ ! -e "$old" ] || return 1
-    mkdir -m 0700 "$stage" || return 1
+    # The evidence bind source is deliberately owned by backend UID 10001,
+    # while its parent remains host-managed. A genuinely blank replacement
+    # host therefore cannot create a sibling staging directory as the deploy
+    # account. Create only this bounded non-symlink path through sudo, then
+    # return ownership to the current host operator for archive validation.
+    sudo -n install -d -o "$(id -u)" -g "$(id -g)" -m 0700 "$stage" || return 1
     cp -a "$payload/evidence/." "$stage/" || { rm -rf "$stage"; return 1; }
     find "$stage" -type l -print -quit | grep -q . && { rm -rf "$stage"; return 1; }
     find "$stage" ! -type f ! -type d -print -quit | grep -q . \
