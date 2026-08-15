@@ -55,6 +55,41 @@ import witness_control  # noqa: E402
 
 
 class LeaseFencingTests(unittest.TestCase):
+    def test_once_reports_transient_witness_failure_as_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            control = Path(directory) / "ha-control.json"
+            with (
+                patch.object(sys, "argv", ["lease_agent.py", "--once"]),
+                patch.object(lease_agent, "CONTROL_PATH", control),
+                patch.object(lease_agent, "read_config", return_value={}),
+                patch.object(
+                    lease_agent,
+                    "one_iteration",
+                    side_effect=lease_agent.LeaseAuthorityUnavailable("temporarily unavailable"),
+                ),
+                redirect_stdout(io.StringIO()),
+                patch("sys.stderr", new=io.StringIO()),
+            ):
+                self.assertEqual(lease_agent.main(), 10)
+            state = json.loads(control.read_text(encoding="utf-8"))
+            self.assertEqual(state["error_type"], "LeaseAuthorityUnavailable")
+
+    def test_once_keeps_witness_rejection_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            control = Path(directory) / "ha-control.json"
+            with (
+                patch.object(sys, "argv", ["lease_agent.py", "--once"]),
+                patch.object(lease_agent, "CONTROL_PATH", control),
+                patch.object(lease_agent, "read_config", return_value={}),
+                patch.object(
+                    lease_agent,
+                    "one_iteration",
+                    side_effect=lease_agent.LeaseAuthorityRejected("rejected"),
+                ),
+                patch("sys.stderr", new=io.StringIO()),
+            ):
+                self.assertEqual(lease_agent.main(), 1)
+
     def test_handoff_cli_persists_the_authoritative_transition_immediately(self) -> None:
         config = {
             "HA_NODE_ID": "node-a",

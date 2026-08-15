@@ -946,9 +946,11 @@ mp_validate_protected_file_modes() {
 }
 
 # Build the exact production Compose command, including the local override.
-mp_compose_init() {
+# Callers that may repair runtime permissions use mp_compose_init. The lease
+# service runs with NoNewPrivileges and therefore uses the validation-only
+# variant after service installation has established the authoritative modes.
+mp_compose_build_command() {
     mp_load_ha_config || return 1
-    mp_prepare_runtime_permissions || return 1
     MP_COMPOSE=(
         docker compose
         --env-file "$MP_ROOT/.env"
@@ -973,6 +975,16 @@ mp_compose_init() {
     if [ -f "$MP_ROOT/infra/docker-compose.override.yml" ]; then
         MP_COMPOSE+=(-f "$MP_ROOT/infra/docker-compose.override.yml")
     fi
+}
+
+mp_compose_init() {
+    mp_prepare_runtime_permissions || return 1
+    mp_compose_build_command
+}
+
+mp_compose_init_existing_runtime() {
+    mp_validate_action_profile_permissions ha || return 1
+    mp_compose_build_command
 }
 
 # Validate the complete production Compose model without displaying secrets.

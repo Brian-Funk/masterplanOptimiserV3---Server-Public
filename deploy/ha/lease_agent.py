@@ -23,6 +23,14 @@ SMTP_STATUS_PATH = ROOT / "runtime/ha-smtp-status.json"
 CONNECTION_DRAIN_PATH = ROOT / "runtime/ha-connection-drain.json"
 
 
+class LeaseAuthorityUnavailable(RuntimeError):
+    """The witness could not be reached and the exact action may be retried."""
+
+
+class LeaseAuthorityRejected(RuntimeError):
+    """The witness returned a non-retryable response to an authenticated action."""
+
+
 def read_config() -> dict[str, str]:
     allowed = {
         "HA_MODE", "HA_NODE_ID", "HA_CLUSTER_ID", "HA_PEER_NODE_ID",
@@ -67,8 +75,12 @@ def post(config: dict[str, str], action: str, payload: dict) -> dict:
     try:
         with request.urlopen(req, timeout=5) as response:
             raw = response.read(65537)
-    except (error.HTTPError, error.URLError, TimeoutError, OSError) as exc:
-        raise RuntimeError("The HA lease authority is unavailable") from exc
+    except error.HTTPError as exc:
+        if exc.code in {408, 425, 429} or exc.code >= 500:
+            raise LeaseAuthorityUnavailable("The HA lease authority is temporarily unavailable") from exc
+        raise LeaseAuthorityRejected("The HA lease authority rejected the authenticated action") from exc
+    except (error.URLError, TimeoutError, OSError) as exc:
+        raise LeaseAuthorityUnavailable("The HA lease authority is temporarily unavailable") from exc
     if len(raw) > 65536:
         raise RuntimeError("The HA lease response was too large")
     result = json.loads(raw)
@@ -273,7 +285,7 @@ def main() -> int:
             atomic_json(CONTROL_PATH, previous)
             if once:
                 print(str(exc), file=sys.stderr)
-                return 1
+                return 10 if isinstance(exc, LeaseAuthorityUnavailable) else 1
         if once:
             return 0
         time.sleep(15)

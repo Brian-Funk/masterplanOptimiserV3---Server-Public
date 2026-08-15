@@ -27,7 +27,10 @@ control_generation="$(jq -r '.generation // 0' "$MP_ROOT/runtime/ha-control.json
 holder="$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json")"
 [ "$control_generation" = "$generation" ] && [ "$holder" = "$HA_NODE_ID" ] || exit 1
 
-mp_compose_init
+# The lease agent is intentionally sandboxed with NoNewPrivileges. Service
+# installation already established the shared permission contract, so this
+# path validates it without attempting sudo-based repair.
+mp_compose_init_existing_runtime
 "${MP_COMPOSE[@]}" up -d db >/dev/null
 mp_wait_for_database 30 \
     || { echo "The final local database process did not become ready for promotion." >&2; exit 1; }

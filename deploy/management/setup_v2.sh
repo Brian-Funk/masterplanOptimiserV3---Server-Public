@@ -1475,9 +1475,18 @@ mp_setup_machine_advance_one() {
         witness_ready)
             mp_setup_state_action "Activating public HA routing" \
                 WITNESS_ROUTING witness_ready || return 1
-            mp_setup_activate_initial_witness_routing \
-                || { mp_setup_state_failure WITNESS_ROUTING_FAILED \
-                    "The HA witness did not accept the routing-ready transition." || true; return 1; }
+            if mp_setup_activate_initial_witness_routing; then
+                :
+            else
+                step_status=$?
+                # Network/provider availability is an ordinary wait. Leave
+                # the exact transition started so the machine controller and
+                # TUI resume it without a false terminal failure.
+                [ "$step_status" -eq 10 ] && return 10
+                mp_setup_state_failure WITNESS_ROUTING_FAILED \
+                    "The HA witness did not accept the routing-ready transition." || true
+                return 1
+            fi
             mp_setup_state_mark witness_ready
             ;;
         root_commissioning_complete)
@@ -3591,8 +3600,15 @@ mp_setup_primary_resume() {
     if ! mp_setup_state_has witness_ready; then
         mp_setup_state_action "Activating public HA routing" \
             WITNESS_ROUTING witness_ready || return 1
-        mp_setup_activate_initial_witness_routing \
-            || { mp_setup_state_failure WITNESS_ROUTING_FAILED "The HA witness did not accept the routing-ready transition." || true; return 1; }
+        if mp_setup_activate_initial_witness_routing; then
+            :
+        else
+            status=$?
+            [ "$status" -eq 10 ] && return 10
+            mp_setup_state_failure WITNESS_ROUTING_FAILED \
+                "The HA witness did not accept the routing-ready transition." || true
+            return 1
+        fi
         mp_setup_state_mark witness_ready
     fi
     if ! mp_setup_state_has public_routing_ready; then

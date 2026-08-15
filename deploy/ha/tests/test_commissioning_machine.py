@@ -1007,6 +1007,15 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("mp_setup_verify_smtp_and_dns_machine", SETUP)
         self.assertIn("WITNESS_ROUTING witness_ready", SETUP)
 
+    def test_witness_transport_unavailability_remains_retryable(self) -> None:
+        machine_case = SETUP[SETUP.index("        witness_ready)") :]
+        machine_case = machine_case[: machine_case.index("        root_commissioning_complete)")]
+        self.assertIn('[ "$step_status" -eq 10 ] && return 10', machine_case)
+        self.assertLess(
+            machine_case.index('[ "$step_status" -eq 10 ] && return 10'),
+            machine_case.index("mp_setup_state_failure WITNESS_ROUTING_FAILED"),
+        )
+
     def test_security_sensitive_commissioning_receipts_are_bound_and_replay_safe(self) -> None:
         machine = MACHINE.read_text(encoding="utf-8")
         snapshots = (ROOT / "deploy/management/snapshots.sh").read_text(encoding="utf-8")
