@@ -861,6 +861,9 @@ def retry_ha_protection_operation(
         "replication_queue_unsafe",
         "replication_queue_not_writable",
         "replication_queue_atomic_write_failed",
+        "runtime_contract_invalid",
+        "root_bootstrap_contract_invalid",
+        "capture_failed",
     }
     retryable_operations = {
         "publisher-secret-create",
