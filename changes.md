@@ -1,5 +1,46 @@
 # Changes
 
+## 3.9.9 — 15 August 2026
+
+This patch release makes commissioning and recovery resumable through the same
+bounded operations used by the interactive TUI, and qualifies fresh two-node
+setup against exact development artifacts before a release is created.
+
+### Deterministic commissioning interface
+
+- Add a root-local structured commissioning interface with versioned status,
+  event, plan, advance, reconciliation, cancellation and protected handoff
+  contracts.
+- Keep the TUI and automation on the same commissioning engine, execution
+  lease, durable checkpoints and authoritative deployment receipts.
+- Accept exact digest-addressed candidate bundles whose four images and
+  frontend, operations and bootstrap assets are bound to one Server commit.
+- Keep candidate artifacts explicitly ineligible for release and leave
+  automatic failover disabled throughout commissioning qualification.
+
+### HA setup and recovery reliability
+
+- Reconcile fresh-primary and joining-peer state from exact deployment,
+  witness, lease and first-copy receipts without repeating completed work.
+- Preserve required evidence, secret and runtime custody while activating a
+  blank standby, replacing a failed peer, converting standalone service to HA
+  or staging a full-loss recovery.
+- Make witness creation and secret rotation safely retryable, including the
+  interval where provider state exists but the local checkpoint is missing.
+- Distinguish bounded provider, service, replication and recovery failures so
+  an interrupted operation resumes at the step that actually needs attention.
+
+### Safer validation and cleanup
+
+- Validate machine-supplied commissioning values before they reach remote
+  management or provider operations, and bind provider cleanup to exact
+  run-attributed resources and durable receipts.
+- Enforce protected ownership and modes for bootstrap, snapshot, evidence,
+  recovery and replication state before every relevant action.
+- Add test-policy-only interruption hooks at real commissioning boundaries
+  without enabling them in signed production operation.
+- Refresh the `nanoid` security override and the generated third-party notices.
+
 ## 3.9.8 — 12 August 2026
 
 This patch release makes two-node commissioning report the step that actually
