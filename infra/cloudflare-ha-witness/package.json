@@ -11,7 +11,7 @@
     "check": "npm run test:unit && wrangler deploy --dry-run --outdir .wrangler/dry-run"
   },
   "dependencies": {
-    "wrangler": "^4.118.0"
+    "wrangler": "^4.122.0"
   },
   "devDependencies": {
     "typescript": "^7.0.2"
