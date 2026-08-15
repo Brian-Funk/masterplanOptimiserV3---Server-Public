@@ -48,6 +48,8 @@ Usage:
       --registry-credentials-stdin
   deploy/test-deployment.sh apply-prebuilt-established COMMIT
       --registry-credentials-stdin
+  deploy/test-deployment.sh prepare-full-loss-restore-prebuilt COMMIT
+      --registry-credentials-stdin
   deploy/test-deployment.sh rollback-prebuilt COMMIT
       --registry-credentials-stdin
   deploy/test-deployment.sh rollback
@@ -721,6 +723,96 @@ sync_frontend() {
     rm -rf "$MP_ROOT/web/out"
     mv "$MP_ROOT/web/.out.test-next" "$MP_ROOT/web/out"
     install -m 0644 "$source/runtime/frontend-csp.caddy" "$MP_ROOT/runtime/frontend-csp.caddy"
+}
+
+# Install only the exact candidate runtime material required by blank-host
+# recovery.  Full-loss restore must remain blank until the encrypted package
+# has passed its own authorization checks, so this boundary deliberately does
+# not create a database, start a container, or write a deployment receipt.
+prepare_prebuilt_full_loss_restore() {
+    local target="$1" credentials="" docker_config="" stage="" manifest=""
+    local username token key image setup_state next_env
+    require_test_policy
+    require_commit "$target"
+    setup_state="${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}"
+    jq -e --arg target "$target" '
+        .format == "mp-opt-setup-state-v2"
+        and .mode == "full-restore"
+        and .state == "in_progress"
+        and .deployment_lane == "unsigned"
+        and .campaign_commit == $target
+        and ((.completed // []) | index("imported") != null)
+        and ((.completed // []) | index("restored") == null)
+    ' "$setup_state" >/dev/null 2>&1 || {
+        ui_error "Candidate recovery preparation is valid only after the exact package import and before restore."
+        return 1
+    }
+    select_candidate_bundle "$target" staged || {
+        ui_error "The exact candidate bundle is unavailable for full-loss recovery."
+        return 1
+    }
+    cleanup_full_loss_candidate() {
+        unset token username
+        [ -z "${credentials:-}" ] || mp_secure_remove_file "$credentials" || true
+        [ -z "${stage:-}" ] || [ ! -d "$stage" ] || rm -rf -- "$stage"
+        [ -z "${docker_config:-}" ] || [ ! -d "$docker_config" ] || {
+            find "$docker_config" -type f -exec sh -c '
+                for f do
+                    size=$(stat -c %s "$f" 2>/dev/null || printf 0)
+                    dd if=/dev/zero of="$f" bs=1 count="$size" conv=notrunc status=none 2>/dev/null || true
+                done
+            ' sh {} +
+            rm -rf -- "$docker_config"
+        }
+    }
+    trap cleanup_full_loss_candidate EXIT
+    credentials="$(mktemp "$MP_TEST_CANDIDATE_DIR/registry-input.XXXXXX")" || return 1
+    chmod 600 "$credentials"
+    head -c 8193 > "$credentials" || return 1
+    [ "$(stat -c %s "$credentials")" -le 8192 ] \
+        && jq -e 'type=="object" and (keys|sort)==["token","username"]
+            and (.username|type=="string" and length>=1 and length<=255)
+            and (.token|type=="string" and length>=1 and length<=4096)' \
+            "$credentials" >/dev/null 2>&1 \
+        || return 2
+    username="$(jq -r .username "$credentials")"
+    token="$(jq -r .token "$credentials")"
+    mp_secure_remove_file "$credentials"; credentials=""
+
+    docker_config="$(mktemp -d "$MP_TEST_CANDIDATE_DIR/docker-config.XXXXXX")" || return 1
+    printf '%s' "$token" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
+        --username "$username" --password-stdin >/dev/null || return 1
+    unset token username
+    stage="$(mktemp -d "$MP_TEST_CANDIDATE_DIR/extracted.XXXXXX")" || return 1
+    manifest="$(python3 "$MP_ROOT/deploy/candidate_bundle.py" extract \
+        --bundle "$MP_TEST_CANDIDATE_DIR/bundle.zip" --commit "$target" --output "$stage")" \
+        || return 1
+    for key in backend caddy postgres tools; do
+        image="$(jq -r --arg key "$key" '.images[$key]' <<< "$manifest")"
+        DOCKER_CONFIG="$docker_config" docker pull "$image" >/dev/null || return 1
+    done
+
+    # Operations and frontend come from the independently hash-verified
+    # candidate archive.  The Compose override records only digest-addressed
+    # images from that same manifest.
+    sync_operations "$stage/operations"
+    sync_frontend "$stage/frontend"
+    next_env="$MP_TEST_STATE_DIR/full-loss-next.env"
+    : > "$next_env"; chmod 600 "$next_env"
+    env_set "$next_env" MP_TEST_COMMIT "$target"
+    env_set "$next_env" MP_BACKEND_IMAGE "$(jq -r .images.backend <<< "$manifest")"
+    env_set "$next_env" MP_CADDY_IMAGE "$(jq -r .images.caddy <<< "$manifest")"
+    env_set "$next_env" MP_POSTGRES_IMAGE "$(jq -r .images.postgres <<< "$manifest")"
+    env_set "$next_env" MP_TOOLS_IMAGE "$(jq -r .images.tools <<< "$manifest")"
+    install -m 0600 "$next_env" "$MP_TEST_ENV"
+    rm -f "$next_env"
+    sync -f "$MP_TEST_ENV" 2>/dev/null || return 1
+    sync -f "$MP_ROOT" 2>/dev/null || return 1
+    verify_exact_test_environment "$target" || {
+        ui_error "The exact candidate recovery runtime did not verify before restore."
+        return 1
+    }
+    cleanup_full_loss_candidate; trap - EXIT
 }
 
 prepare_runtime_from_installed_sources() {
@@ -1708,6 +1800,11 @@ case "$command" in
     stage-candidate)
         [ "$#" -eq 2 ] || { usage; exit 2; }
         stage_candidate "$1" "$2"
+        ;;
+    prepare-full-loss-restore-prebuilt)
+        [ "$#" -eq 2 ] && [ "${2:-}" = --registry-credentials-stdin ] \
+            || { usage; exit 2; }
+        prepare_prebuilt_full_loss_restore "$1"
         ;;
     apply-prebuilt|apply-prebuilt-precommission|apply-prebuilt-established|rollback-prebuilt)
         [ "$#" -ge 2 ] || { usage; exit 2; }

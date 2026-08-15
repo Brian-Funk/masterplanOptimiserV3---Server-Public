@@ -550,7 +550,12 @@ mp_machine_read_advance_input() {
             ((.values | keys) == ["package_sha256"])
             and (.values.package_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
           elif .checkpoint == "restored" then
-            ((.values | keys) == ["recovery_identity"])
+            (((.values | keys) == ["recovery_identity"])
+             or (((.values | keys | sort) == ["recovery_identity","registry"])
+                 and (.values.registry | type == "object")
+                 and ((.values.registry | keys | sort) == ["token","username"])
+                 and (.values.registry.username | type == "string" and length >= 1 and length <= 255)
+                 and (.values.registry.token | type == "string" and length >= 1 and length <= 4096)))
             and (.values.recovery_identity | type == "string" and length >= 40 and length <= 4096)
           else (.values | length == 0) end)
     ' "$target" >/dev/null 2>&1 || return 64

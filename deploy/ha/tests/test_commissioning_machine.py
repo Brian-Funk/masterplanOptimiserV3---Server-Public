@@ -1059,6 +1059,36 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn('index("application_deployed") == null', stage)
         self.assertIn('index("root_commissioning_complete") == null', stage)
 
+    def test_candidate_full_loss_restore_prepares_exact_runtime_before_data_restore(self) -> None:
+        machine = MACHINE.read_text(encoding="utf-8")
+        deployment = (ROOT / "deploy/test-deployment.sh").read_text(encoding="utf-8")
+        deploy = (ROOT / "deploy/deploy.sh").read_text(encoding="utf-8")
+        restored = SETUP[SETUP.index("        restored)") :]
+        restored = restored[: restored.index("        witness_ready)")]
+        self.assertIn("prepare-full-loss-restore-prebuilt", restored)
+        self.assertLess(
+            restored.index("prepare-full-loss-restore-prebuilt"),
+            restored.index("mp_snapshot_restore_full_loss"),
+        )
+        helper = deployment[deployment.index("prepare_prebuilt_full_loss_restore()") :]
+        helper = helper[: helper.index("prepare_runtime_from_installed_sources()")]
+        for contract in (
+            'mode == "full-restore"', 'index("imported") != null',
+            'index("restored") == null', "candidate_bundle.py", "docker pull",
+            'sync_operations "$stage/operations"', 'sync_frontend "$stage/frontend"',
+            'verify_exact_test_environment "$target"',
+        ):
+            self.assertIn(contract, helper)
+        self.assertNotIn("docker compose", helper)
+        self.assertIn('[ -f "$REPO_DIR/.test-deployment.env" ]', deploy)
+        self.assertLess(
+            deploy.index('[ -f "$REPO_DIR/.test-deployment.env" ]'),
+            deploy.index('[ -f "$REPO_DIR/.release.env" ]'),
+        )
+        restored_schema = machine[machine.index('elif .checkpoint == "restored"') :]
+        restored_schema = restored_schema[: restored_schema.index("else (.values")]
+        self.assertIn('["recovery_identity","registry"]', restored_schema)
+
     def test_unsigned_replacement_prepares_exact_peer_before_first_copy(self) -> None:
         advance = SETUP[SETUP.index("mp_setup_machine_advance_one()") :]
         replacement = advance[advance.index('elif [ "$mode" = replace-primary ]') :]

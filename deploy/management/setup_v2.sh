@@ -1435,13 +1435,25 @@ mp_setup_machine_advance_one() {
             mp_setup_state_mark imported
             ;;
         restored)
-            local restore_identity imported_snapshot restore_authorization
+            local restore_identity imported_snapshot restore_authorization commit
             imported_snapshot="$(jq -er '.snapshot_path | select(type == "string")' \
                 "$MP_SETUP_V2_IMPORT_RECEIPT")" || return 65
             case "$(readlink -f "$imported_snapshot")" in
                 "$(readlink -f "$MP_SNAPSHOTS")"/*) ;;
                 *) return 65 ;;
             esac
+            if [ "$lane" = unsigned ]; then
+                commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
+                [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 65
+                jq -c '.values.registry' "$input_file" \
+                    | "$MP_ROOT/deploy/test-deployment.sh" \
+                        prepare-full-loss-restore-prebuilt "$commit" \
+                        --registry-credentials-stdin \
+                    || return 1
+            else
+                jq -e '(.values | keys) == ["recovery_identity"]' \
+                    "$input_file" >/dev/null || return 65
+            fi
             restore_identity="$(mp_setup_machine_identity_file \
                 "$(jq -r .values.recovery_identity "$input_file")")" || return $?
             restore_authorization="$(mp_setup_prepare_full_loss_restore_authorization \

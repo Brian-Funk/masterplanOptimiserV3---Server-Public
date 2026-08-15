@@ -197,7 +197,20 @@ fi
 
 # ── 3. Build frontend (static export) ───────────────────────
 mp_prepare_runtime_permissions
-if [ -f "$REPO_DIR/.release.env" ]; then
+if [ -f "$REPO_DIR/.test-deployment.env" ]; then
+    [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || true)" = test ] \
+        || { echo "  ERROR: Unsigned deployment assets exist outside test policy."; exit 1; }
+    candidate_commit="$(sed -n 's/^MP_TEST_COMMIT=//p' "$REPO_DIR/.test-deployment.env" | head -1)"
+    [[ "$candidate_commit" =~ ^[0-9a-f]{40}$ ]] \
+        || { echo "  ERROR: Candidate frontend identity is invalid."; exit 1; }
+    [ -s "$MP_STATE/test-deployments/candidate/receipt.json" ] \
+        && [ "$(jq -r '.commit // empty' "$MP_STATE/test-deployments/candidate/receipt.json")" = "$candidate_commit" ] \
+        || { echo "  ERROR: Candidate frontend has no matching verified bundle receipt."; exit 1; }
+    echo "[3/5] Using the verified candidate frontend from ${candidate_commit:0:12}..."
+    test -s "$REPO_DIR/web/out/index.html" \
+        && test -s "$REPO_DIR/runtime/frontend-csp.caddy" \
+        || { echo "  ERROR: Candidate frontend assets are incomplete. Restage the exact bundle."; exit 1; }
+elif [ -f "$REPO_DIR/.release.env" ]; then
     echo "[3/5] Using the verified frontend from $(grep -m1 '^MP_RELEASE_TAG=' .release.env | cut -d= -f2-)..."
     test -s "$REPO_DIR/web/out/index.html" \
         && test -s "$REPO_DIR/runtime/frontend-csp.caddy" \
