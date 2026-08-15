@@ -117,6 +117,7 @@ mp_snapshot_dump_database() {
     chmod 700 "$payload/database" || return 1
     mp_compose_init
     "${MP_COMPOSE[@]}" up -d db >/dev/null || return 1
+    mp_wait_for_database 30 || return 1
     "${MP_COMPOSE[@]}" exec -T db pg_dump \
         -U masterplan -d masterplan -Fc > "$payload/database/masterplan.dump" || return 1
     chmod 600 "$payload/database/masterplan.dump" || return 1
@@ -250,6 +251,17 @@ mp_snapshot_create() {
         # failures added later that do not remember to call mp_unlock.
         trap 'if [ "${owns_lock:-false}" = true ]; then mp_unlock; fi' RETURN
     fi
+    # A guarded laboratory reset deliberately removes snapshot state. The
+    # first snapshot-backed candidate retry must therefore be able to
+    # re-establish this host-private root without relying on a prior TUI
+    # startup. Refuse substituted paths and validate the exact owner/mode both
+    # before and after creation.
+    if [ -e "$MP_SNAPSHOTS" ] || [ -L "$MP_SNAPSHOTS" ]; then
+        mp_validate_private_directory_metadata "$MP_SNAPSHOTS" "$(id -u):$(id -g)" 700 || return 1
+    else
+        mkdir -m 0700 -- "$MP_SNAPSHOTS" || return 1
+        mp_validate_private_directory_metadata "$MP_SNAPSHOTS" "$(id -u):$(id -g)" 700 || return 1
+    fi
     staging="$(mktemp -d "${MP_SNAPSHOTS}/.staging.XXXXXX")" || return 1
     chmod 700 "$staging" || { rm -rf "$staging"; return 1; }
     timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -293,7 +305,14 @@ mp_snapshot_create() {
             ;;
     esac
     if [ "$backend_was_running" = true ]; then
-        "${MP_COMPOSE[@]}" up -d --no-deps backend >/dev/null || capture_ok=false
+        # Reassert the fixed unprivileged Backend read contract immediately
+        # before remounting protected files after a safety snapshot.
+        if ! mp_prepare_backend_secret_permissions \
+            || ! mp_prepare_evidence_store; then
+            capture_ok=false
+        else
+            "${MP_COMPOSE[@]}" up -d --no-deps backend >/dev/null || capture_ok=false
+        fi
     fi
     if [ "$capture_ok" != true ]; then
         rm -rf "$staging"
@@ -824,6 +843,7 @@ mp_snapshot_restore_database() {
     mp_compose_init
     "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
     "${MP_COMPOSE[@]}" up -d db >/dev/null || return 1
+    mp_wait_for_database 30 || return 1
     "${MP_COMPOSE[@]}" exec -T db dropdb --if-exists --force -U masterplan masterplan || return 1
     "${MP_COMPOSE[@]}" exec -T db createdb -U masterplan masterplan || return 1
     "${MP_COMPOSE[@]}" exec -T db pg_restore \
@@ -944,8 +964,14 @@ mp_snapshot_restore_evidence() {
         && [ -s "$payload/evidence/public/instance_signing_key.pub" ] || return 1
     stage="$MP_ROOT/state/.evidence.restore.$$"
     old="$MP_ROOT/state/.evidence.restore-old.$$"
+    [ -d "$MP_ROOT/state" ] && [ ! -L "$MP_ROOT/state" ] || return 1
     [ ! -e "$stage" ] && [ ! -e "$old" ] || return 1
-    mkdir -m 0700 "$stage" || return 1
+    # The evidence bind source is deliberately owned by backend UID 10001,
+    # while its parent remains host-managed. A genuinely blank replacement
+    # host therefore cannot create a sibling staging directory as the deploy
+    # account. Create only this bounded non-symlink path through sudo, then
+    # return ownership to the current host operator for archive validation.
+    sudo -n install -d -o "$(id -u)" -g "$(id -g)" -m 0700 "$stage" || return 1
     cp -a "$payload/evidence/." "$stage/" || { rm -rf "$stage"; return 1; }
     find "$stage" -type l -print -quit | grep -q . && { rm -rf "$stage"; return 1; }
     find "$stage" ! -type f ! -type d -print -quit | grep -q . \

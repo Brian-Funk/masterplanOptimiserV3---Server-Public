@@ -175,10 +175,27 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             token = "Z" * 64
             token_file = test_secrets / "root_bootstrap_token"
             token_file.write_text(token, encoding="ascii")
-            token_file.chmod(0o600)
+            token_file.chmod(0o640)
+            if os.geteuid() == 0:
+                os.chown(token_file, -1, 10001)
+            else:
+                group_change = subprocess.run(
+                    ["sudo", "-n", "chgrp", "10001", str(token_file)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if group_change.returncode != 0:
+                    self.skipTest("setting the backend-readable fixture group requires sudo")
             environment["MP_ROOT"] = str(test_root)
+            preflight = self.invoke(environment, "status", "--json")
+            self.assertEqual(preflight.returncode, 10, preflight.stderr)
             handoff = self.invoke(environment, "handoff", "--kind", "root-bootstrap")
-            self.assertEqual(handoff.returncode, 0, handoff.stderr)
+            self.assertEqual(
+                handoff.returncode,
+                0,
+                preflight.stdout + "\n" + handoff.stderr,
+            )
             self.assertEqual(handoff.stdout, token + "\n")
             status = self.invoke(environment, "status", "--json")
             self.assertNotIn(token, status.stdout)
@@ -693,18 +710,6 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             worker = "mp-opt-ha-mpopt12345"
             witness = f"https://{worker}.synthetic.workers.dev"
             zone = "zone_12345678"
-            provider = state / "cloudflare-provider-resource.json"
-            provider.write_text(json.dumps({
-                "format": "mp-opt-cloudflare-provider-resource-v1",
-                "cluster_id": cluster,
-                "account_id": "a" * 32,
-                "worker_name": worker,
-                "witness_url": witness,
-                "zone_id": zone,
-                "domain": "e2e.mp-opt.net",
-                "recorded_at": "2026-08-12T09:00:00Z",
-            }), encoding="utf-8")
-            provider.chmod(0o600)
             receipt = state / f"provider-cleanup-{cluster}.json"
             receipt.write_text(json.dumps({
                 "format": "mp-opt-provider-cleanup-receipt-v1",
@@ -718,7 +723,7 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 "witness_state_deleted_at": "2026-08-12T10:00:00Z",
             }), encoding="utf-8")
             receipt.chmod(0o600)
-            calls = directory / "docker-calls"
+            calls = directory / "provider-calls"
             script = r'''
                 set -Eeuo pipefail
                 export MP_ROOT="$2" MP_STATE="$3" MP_DEPLOYMENT_POLICY_FILE="$4" CALLS="$5"
@@ -729,12 +734,18 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                     HA_CLUSTER_ID=mp-opt-12345678-1234-4234-8234-123456789abc
                     HA_WITNESS_URL=https://mp-opt-ha-mpopt12345.synthetic.workers.dev
                 }
-                docker() {
+                mp_setup_record_cloudflare_resource \
+                    mp-opt-12345678-1234-4234-8234-123456789abc \
+                    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+                    mp-opt-ha-mpopt12345 \
+                    https://mp-opt-ha-mpopt12345.synthetic.workers.dev \
+                    zone_12345678 e2e.mp-opt.net
+                python3() {
                     printf '%s\n' "$*" >> "$CALLS"
                     case "$*" in
-                        *"deployments list"*) printf 'Worker not found\n' >&2; return 1 ;;
-                        *" delete "*) return 99 ;;
-                        *) return 0 ;;
+                        *"cloudflare_worker_script.py observe "*) return 4 ;;
+                        *"cloudflare_worker_script.py delete "*) return 99 ;;
+                        *) command python3 "$@" ;;
                     esac
                 }
                 result="$(mp_setup_decommission_cloudflare_machine \
@@ -932,6 +943,10 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertLess(rollback.index("apply_prebuilt_candidate"), rollback.index("mp_snapshot_apply"))
         self.assertLess(rollback.index("mp_snapshot_apply"), rollback.index("mp_ha_replicate_now"))
         self.assertNotIn("recovery_identity:$", source)
+        lifecycle = source[source.index("mp_machine_deployment_action()") :]
+        self.assertIn('if [[ "$action" =~ ^signed- ]]', lifecycle)
+        self.assertIn('[ "$action" != candidate-precommission-retry ]', lifecycle)
+        self.assertIn("mp_setup_ensure_commissioning_recipient_current", lifecycle)
 
     def test_provider_cleanup_replay_never_deletes_twice(self) -> None:
         replay = SETUP[SETUP.index("mp_setup_decommission_cloudflare_machine()") :]
@@ -941,13 +956,13 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn('"$worker_name" = "$expected_worker"', replay)
         self.assertIn('"$zone_id" = "$expected_zone"', replay)
         deleted_guard = replay.index("! jq -e '.worker_deleted == true'")
-        read_only_probe = replay.index("deployments list", deleted_guard)
-        delete_call = replay.index('delete --name "$worker_name"', read_only_probe)
+        read_only_probe = replay.index('observe "$account_id" "$worker_name"', deleted_guard)
+        delete_call = replay.index('delete "$account_id" "$worker_name"', read_only_probe)
         receipt_move = replay.index('mv "$temporary" "$receipt"', delete_call)
         self.assertLess(deleted_guard, read_only_probe)
         self.assertLess(read_only_probe, delete_call)
         self.assertLess(delete_call, receipt_move)
-        self.assertIn("not[ -]?found", replay)
+        self.assertIn('PIPESTATUS[1]}" -eq 4', replay)
         self.assertIn("worker_deletion_reconciled", replay)
 
     def test_machine_checkpoint_and_transition_receipt_are_one_atomic_update(self) -> None:
@@ -965,6 +980,27 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn('.state="registered"', machine)
         self.assertNotIn('rm -f "$MP_SETUP_V2_PENDING_BOOTSTRAP"', machine)
 
+    def test_machine_witness_registration_retries_cloudflare_propagation(self) -> None:
+        machine = SETUP[SETUP.index('witness_bootstrap)') : SETUP.index('joined)')]
+        self.assertIn("for attempt in $(seq 1 20)", machine)
+        self.assertIn("provider error 1042", machine)
+        self.assertIn("return 20", machine)
+        self.assertIn("mp_setup_deploy_witness_machine", machine)
+
+    def test_precommission_retarget_does_not_initialise_ha_database_early(self) -> None:
+        deployment = (ROOT / "deploy/test-deployment.sh").read_text(encoding="utf-8")
+        sync = deployment.index('sync_operations "$MP_TEST_CANDIDATE_OPERATIONS"')
+        retarget = deployment.index('if [ "$precommission_retarget" = true ]', sync)
+        pin = deployment.index('advance_setup_campaign_pin "$target" "$previous"', retarget)
+        returned = deployment.index("return 0", pin)
+        activation = deployment.index(
+            'compose_activate "$components" "$fresh_commissioning" "$precommission_retarget"',
+            returned,
+        )
+        self.assertLess(retarget, pin)
+        self.assertLess(pin, returned)
+        self.assertLess(returned, activation)
+
     def test_recovery_machine_contracts_and_stale_cleanup_are_present(self) -> None:
         source = MACHINE.read_text(encoding="utf-8")
         for value in (
@@ -981,6 +1017,15 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("mp_setup_join_node_machine", SETUP)
         self.assertIn("mp_setup_verify_smtp_and_dns_machine", SETUP)
         self.assertIn("WITNESS_ROUTING witness_ready", SETUP)
+
+    def test_witness_transport_unavailability_remains_retryable(self) -> None:
+        machine_case = SETUP[SETUP.index("        witness_ready)") :]
+        machine_case = machine_case[: machine_case.index("        root_commissioning_complete)")]
+        self.assertIn('[ "$step_status" -eq 10 ] && return 10', machine_case)
+        self.assertLess(
+            machine_case.index('[ "$step_status" -eq 10 ] && return 10'),
+            machine_case.index("mp_setup_state_failure WITNESS_ROUTING_FAILED"),
+        )
 
     def test_security_sensitive_commissioning_receipts_are_bound_and_replay_safe(self) -> None:
         machine = MACHINE.read_text(encoding="utf-8")
@@ -1021,6 +1066,127 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("apply-prebuilt", deployment)
         self.assertIn("--registry-credentials-stdin", deployment)
         self.assertIn("setup-machine-logs", machine)
+
+    def test_candidate_staging_supports_every_machine_lifecycle_before_activation(self) -> None:
+        machine = MACHINE.read_text(encoding="utf-8")
+        stage = machine[machine.index("mp_machine_stage_candidate()") :]
+        stage = stage[: stage.index("mp_machine_stage_migration_snapshot()")]
+        for mode in (
+            "standalone-new", "ha-primary-new", "ha-join", "convert-ha",
+            "replace-primary", "replace-node", "full-restore",
+        ):
+            self.assertIn(f'"{mode}"', stage)
+        self.assertIn('index("application_deployed") == null', stage)
+        self.assertIn('index("root_commissioning_complete") == null', stage)
+
+    def test_candidate_full_loss_restore_prepares_exact_runtime_before_data_restore(self) -> None:
+        machine = MACHINE.read_text(encoding="utf-8")
+        deployment = (ROOT / "deploy/test-deployment.sh").read_text(encoding="utf-8")
+        deploy = (ROOT / "deploy/deploy.sh").read_text(encoding="utf-8")
+        snapshots = (ROOT / "deploy/management/snapshots.sh").read_text(encoding="utf-8")
+        restored = SETUP[SETUP.index("        restored)") :]
+        restored = restored[: restored.index("        witness_ready)")]
+        self.assertIn("prepare-full-loss-restore-prebuilt", restored)
+        self.assertLess(
+            restored.index("prepare-full-loss-restore-prebuilt"),
+            restored.index("mp_snapshot_restore_full_loss"),
+        )
+        helper = deployment[deployment.index("prepare_prebuilt_full_loss_restore()") :]
+        helper = helper[: helper.index("prepare_runtime_from_installed_sources()")]
+        for contract in (
+            'mode == "full-restore"', 'index("imported") != null',
+            'index("restored") == null', "candidate_bundle.py", "docker pull",
+            'sync_operations "$stage/operations"', 'sync_frontend "$stage/frontend"',
+            'verify_exact_test_environment "$target"',
+        ):
+            self.assertIn(contract, helper)
+        self.assertNotIn("and .campaign_commit == $target", helper)
+        self.assertNotIn("docker compose", helper)
+        self.assertIn('[ -f "$REPO_DIR/.test-deployment.env" ]', deploy)
+        self.assertLess(
+            deploy.index('[ -f "$REPO_DIR/.test-deployment.env" ]'),
+            deploy.index('[ -f "$REPO_DIR/.release.env" ]'),
+        )
+        self.assertIn('if [ "$USING_CANDIDATE" -eq 1 ]; then', deploy)
+        self.assertIn("up -d --no-build --pull never", deploy)
+        self.assertIn('if [ -s "$MP_AUDIT_FILE" ]; then', deploy)
+        self.assertIn("mp_publish_audit_head", deploy)
+        self.assertLess(
+            deploy.index('if [ -s "$MP_AUDIT_FILE" ]; then'),
+            deploy.index("mp_publish_audit_head"),
+        )
+        evidence_restore = snapshots[snapshots.index("mp_snapshot_restore_evidence()") :]
+        evidence_restore = evidence_restore[: evidence_restore.index("mp_snapshot_guard_privacy_actions()")]
+        self.assertIn('[ -d "$MP_ROOT/state" ] && [ ! -L "$MP_ROOT/state" ]', evidence_restore)
+        self.assertIn(
+            'sudo -n install -d -o "$(id -u)" -g "$(id -g)" -m 0700 "$stage"',
+            evidence_restore,
+        )
+        self.assertNotIn('mkdir -m 0700 "$stage"', evidence_restore)
+        restored_schema = machine[machine.index('elif .checkpoint == "restored"') :]
+        restored_schema = restored_schema[: restored_schema.index("else (.values")]
+        self.assertIn('["candidate_commit","recovery_identity","registry"]', restored_schema)
+        self.assertIn(".values.candidate_commit", restored_schema)
+        self.assertIn(
+            "mp_setup_state_update '.campaign_commit = $commit'", restored
+        )
+
+    def test_unsigned_replacement_prepares_exact_peer_before_first_copy(self) -> None:
+        advance = SETUP[SETUP.index("mp_setup_machine_advance_one()") :]
+        replacement = advance[advance.index('elif [ "$mode" = replace-primary ]') :]
+        replacement = replacement[: replacement.index('elif [ "$mode" = convert-ha ]')]
+        self.assertIn('[ "$lane" = unsigned ]', replacement)
+        self.assertIn('jq -c \'.values.registry\'', replacement)
+        self.assertIn('prepare-peer "$commit"', replacement)
+        self.assertIn('--registry-credentials-stdin', replacement)
+        self.assertLess(
+            replacement.index('prepare-peer "$commit"'),
+            replacement.index("mp_setup_state_mark application_deployed"),
+        )
+        opening = SETUP[SETUP.index("mp_setup_machine_open_replacement()") :]
+        opening = opening[: opening.index("mp_setup_checkpoint_plan_json()")]
+        self.assertIn('[ "$lane" != signed ]', opening)
+        self.assertNotIn(
+            'mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed',
+            opening,
+        )
+
+        replicated = advance[advance.index("        replicated)") :]
+        replicated = replicated[: replicated.index("        ha_services_activated)")]
+        self.assertLess(
+            replicated.index("mp_setup_verify_unsigned_peer_identity"),
+            replicated.index("mp_ha_replicate_now"),
+        )
+        self.assertIn("PEER_CANDIDATE_IDENTITY_MISMATCH", replicated)
+
+    def test_operations_only_debug_retry_does_not_recreate_services_before_first_copy(self) -> None:
+        deployment = (ROOT / "deploy/test-deployment.sh").read_text(encoding="utf-8")
+        sync = deployment.index('sync_operations "$MP_TEST_CANDIDATE_OPERATIONS"')
+        retry = deployment[deployment.index('if [ "$commissioning_retry" = true ]', sync) :]
+        retry = retry[: retry.index('if [ "$precommission_retarget" = true ]')]
+        self.assertIn('.components == ["operations"]', deployment)
+        self.assertIn('IN("ha-primary-new","convert-ha","replace-primary")', deployment)
+        self.assertIn('index("replicated") == null', deployment)
+        self.assertIn('internal-repin-setup "$target"', retry)
+        self.assertIn('write_state "$target" "$previous" "$plan" ""', retry)
+        self.assertIn('advance_setup_campaign_pin "$target" "$previous"', retry)
+        self.assertNotIn("compose_activate", retry)
+        self.assertNotIn("mp_snapshot_create", retry)
+
+    def test_replacement_peer_repin_and_stage_are_operations_scoped(self) -> None:
+        deployment = (ROOT / "deploy/test-deployment.sh").read_text(encoding="utf-8")
+        peer_stage = deployment[deployment.index("peer_stage_prebuilt()") :]
+        peer_stage = peer_stage[: peer_stage.index("peer_activate()")]
+        repin = deployment[deployment.index("internal_repin_setup()") :]
+        repin = repin[: repin.index("internal_finalize_peer()")]
+        internal_stage = deployment[deployment.index("internal_stage_prebuilt()") :]
+        internal_stage = internal_stage[: internal_stage.index("deploy_witness()")]
+        self.assertIn('grep -qw frontend <<< "$components"', peer_stage)
+        self.assertIn('IN("ha-join","replace-node")', repin)
+        self.assertIn('[ "$pinned" = "$target" ]', repin)
+        self.assertIn('grep -qw operations <<< "$components"', internal_stage)
+        self.assertIn('grep -qw frontend <<< "$components"', internal_stage)
+        self.assertIn("mp_compose_validate", internal_stage)
 
 
 class CandidateBundleTests(unittest.TestCase):

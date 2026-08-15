@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,28 @@ SUPERVISOR = (ROOT / "deploy" / "test-deployment.sh").read_text(encoding="utf-8"
 
 
 class TestDeploymentPlannerTests(unittest.TestCase):
+    def test_initial_peer_accepts_only_receipt_bound_digest_images_or_legacy_tags(self) -> None:
+        prepare = SUPERVISOR.split("prepare_initial_peer()", 1)[1].split(
+            "internal_prepare_peer()", 1
+        )[0]
+        self.assertIn('MP_TEST_CANDIDATE_RECEIPT', prepare)
+        self.assertIn(".manifest.images[$key] // empty", prepare)
+        self.assertIn('@sha256:[0-9a-f]{64}$', prepare)
+        self.assertIn('test-${short}', prepare)
+        self.assertIn('docker image inspect "$image"', prepare)
+        self.assertIn('docker login ghcr.io', prepare)
+        self.assertIn('peer_copy_image "$image" "$docker_config"', prepare)
+        self.assertIn('--registry-credentials-stdin', SUPERVISOR)
+
+    def test_candidate_advance_stages_new_converting_or_replacement_peer_until_first_copy(self) -> None:
+        apply = SUPERVISOR.split("apply_prebuilt_candidate()", 1)[1].split(
+            "rollback_prebuilt_candidate()", 1
+        )[0]
+        self.assertIn('(.mode | IN("ha-primary-new","convert-ha","replace-primary"))', apply)
+        self.assertIn('index("replicated") == null', apply)
+        self.assertIn('peer_stage_prebuilt "$target" "$components"', apply)
+        self.assertIn('internal-repin-setup "$target"', apply)
+
     def test_snapshot_free_apply_is_confined_to_fresh_root_only_commissioning(self) -> None:
         self.assertIn("--fresh-commissioning", SUPERVISOR)
         self.assertIn("require_fresh_commissioning_database", SUPERVISOR)
@@ -73,9 +96,12 @@ class TestDeploymentPlannerTests(unittest.TestCase):
             "deploy_witness()", 1
         )[0]
         self.assertIn('peer_components="${components// /,}"', SUPERVISOR)
-        self.assertIn(
-            'internal-activate "$target" "$peer_components" "$fresh_commissioning"',
+        self.assertRegex(
             SUPERVISOR,
+            re.compile(
+                r'internal-activate\s+\\?\s*"\$target"\s+'
+                r'"\$peer_components"\s+"\$fresh_commissioning"'
+            ),
         )
         self.assertIn('components="${component_token//,/ }"', SUPERVISOR)
         self.assertIn('component_token="${component_token// /,}"', peer_activate)
@@ -154,6 +180,7 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         finalize = SUPERVISOR.split("internal_finalize_peer()", 1)[1].split(
             "internal_activate()", 1
         )[0]
+        self.assertIn('(.mode | IN("ha-join","replace-node"))', finalize)
         for operation in (repin, finalize):
             self.assertIn('.state == "complete"', operation)
             self.assertIn('index("application_deployed") != null', operation)
@@ -164,7 +191,76 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         )[0]
         self.assertIn('[ -d "$MP_ROOT/web/out" ]', initial)
         self.assertIn('tar -C "$MP_ROOT" -czf - web/out runtime/frontend-csp.caddy', initial)
+        self.assertIn('mp-opt-candidate-receipt.json', initial)
+        self.assertIn('internal-verify-peer-identity "$target"', initial)
         self.assertNotIn('tar -C "$MP_TEST_SOURCE" -czf - web/out', initial)
+
+    def test_initial_candidate_preparation_accepts_a_blank_replacement_peer(self) -> None:
+        prepare = SUPERVISOR.split("internal_prepare_peer()", 1)[1].split(
+            "internal_repin_setup()", 1
+        )[0]
+        self.assertIn('(.mode | IN("ha-join","replace-node"))', prepare)
+        self.assertIn('index("joined") != null', prepare)
+        self.assertIn('index("application_deployed") == null', prepare)
+        self.assertIn('install -m 0600 /tmp/mp-opt-test-deployment.env', prepare)
+        self.assertIn('install -m 0600 /tmp/mp-opt-candidate-receipt.json', prepare)
+        self.assertIn('sync -f "$MP_TEST_ENV"', prepare)
+
+        verify = SUPERVISOR.split("internal_verify_peer_identity()", 1)[1].split(
+            "internal_repin_setup()", 1
+        )[0]
+        self.assertIn('verify_exact_test_environment "$target"', verify)
+        self.assertIn('(.mode | IN("ha-join","replace-node"))', verify)
+
+        environment = SUPERVISOR.split("verify_exact_test_environment()", 1)[1].split(
+            "internal_verify_peer_identity()", 1
+        )[0]
+        self.assertIn('$MP_ROOT/web/out/index.html', environment)
+        self.assertIn('$MP_ROOT/runtime/frontend-csp.caddy', environment)
+
+    def test_operations_only_peer_staging_preserves_frontend_assets(self) -> None:
+        stage = SUPERVISOR.split("peer_stage_prebuilt()", 1)[1].split(
+            "peer_activate()", 1
+        )[0]
+        self.assertNotIn("rm -rf '$MP_TEST_HOME/peer-assets'", stage)
+        self.assertIn("rm -rf '$MP_TEST_HOME/peer-assets/web'", stage)
+        self.assertIn("rm -rf '$MP_TEST_HOME/peer-assets/operations'", stage)
+
+        setup = (ROOT / "deploy/management/setup_v2.sh").read_text(encoding="utf-8")
+        repair = setup.split(
+            "mp_setup_prepare_unsigned_replacement_peer_if_needed()", 1
+        )[1].split("mp_setup_finalize_fresh_unsigned_peer()", 1)[0]
+        self.assertIn('"$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit"', repair)
+        self.assertNotIn('prepare_initial_peer "$commit"', repair)
+
+    def test_peer_activation_repins_only_an_incomplete_join_and_propagates_failure(self) -> None:
+        activate = SUPERVISOR.split("peer_activate()", 1)[1].split(
+            "prepare_initial_peer()", 1
+        )[0]
+        pending = SUPERVISOR.split("internal_repin_pending_peer()", 1)[1].split(
+            "internal_finalize_peer()", 1
+        )[0]
+        self.assertIn('internal-repin-pending-peer "$target"', activate)
+        self.assertIn('internal-activate', activate)
+        self.assertGreaterEqual(activate.count("|| return 1"), 3)
+        self.assertIn('(.mode | IN("ha-join","replace-node"))', pending)
+        self.assertIn('index("joined") != null', pending)
+        self.assertIn('index("application_deployed") == null', pending)
+        self.assertIn('internal_repin_setup "$target"', pending)
+        self.assertIn("else\n        return 0", pending)
+
+    def test_replacement_peer_is_finalised_after_the_first_accepted_bundle(self) -> None:
+        setup = (ROOT / "deploy/management/setup_v2.sh").read_text(encoding="utf-8")
+        finalise = setup.split("mp_setup_finalize_fresh_unsigned_peer()", 1)[1].split(
+            "mp_setup_primary_resume()", 1
+        )[0]
+        self.assertIn('^(ha-primary-new|replace-primary)$', finalise)
+        self.assertIn('internal-finalize-peer "$commit"', finalise)
+        replicated = setup.split("replicated)", 1)[1].split("ha_services_activated)", 1)[0]
+        self.assertLess(
+            replicated.index("mp_setup_finalize_fresh_unsigned_peer"),
+            replicated.index("mp_setup_state_mark replicated"),
+        )
 
     def test_paired_pre_activation_updates_are_operations_only(self) -> None:
         apply = SUPERVISOR.split("apply_commit()", 1)[1].split("restore_signed()", 1)[0]

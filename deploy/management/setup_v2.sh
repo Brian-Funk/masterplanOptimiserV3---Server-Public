@@ -665,7 +665,13 @@ mp_setup_machine_open_replacement() {
         || { rm -f "$pending"; return 1; }
     rm -f "$MP_SETUP_V2_PENDING_REPLACEMENT"; unset pair
     mp_setup_state_mark witness_bootstrap
-    mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed
+    # Signed replacement reuses the already-qualified local release. An
+    # unsigned replacement cannot claim this checkpoint until the exact
+    # candidate identity has also been installed and verified on Node B after
+    # pairing.
+    [ "$lane" != signed ] \
+        || mp_setup_state_has application_deployed \
+        || mp_setup_state_mark application_deployed
     mp_setup_state_action "Waiting for replacement node join" PEER_JOIN_WAIT paired
 }
 
@@ -825,11 +831,33 @@ mp_setup_validate_pending_witness_bootstrap() {
 # receipts. It never prompts, deploys, changes provider state, or invents a
 # completed human acknowledgement.
 mp_setup_machine_reconcile() {
-    local state mode lane stage changed=false
+    local state mode lane stage previous_bundle current_bundle changed=false
     [ -s "$MP_SETUP_V2_STATE" ] || return 10
     mp_setup_validate_state_contract "$MP_SETUP_V2_STATE" || return $?
     state="$(jq -r .state "$MP_SETUP_V2_STATE")"
     if [ "$state" = complete ]; then
+        mode="$(jq -r .mode "$MP_SETUP_V2_STATE")"
+        lane="$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")"
+        # A historical candidate peer finaliser could set state=complete after
+        # activation while omitting its already-proven replication and exact
+        # deployment checkpoints.  Repair that contradiction from the guarded
+        # receiver/current-deployment receipts before taking the generic
+        # completed-state fast path.
+        if [[ "$mode" =~ ^(ha-join|replace-node)$ ]] && [ "$lane" = unsigned ]; then
+            mp_setup_reconcile_unsigned_join || return 1
+        fi
+        # Replication continues after commissioning completes.  If a newer
+        # accepted bundle is durably acknowledged by both nodes, refresh the
+        # primary setup snapshot before taking the completed-state fast path.
+        if [[ "$mode" =~ ^(ha-primary-new|convert-ha|replace-primary)$ ]] \
+            && mp_setup_state_has paired; then
+            previous_bundle="$(jq -c '.first_verified_bundle // null' "$MP_SETUP_V2_STATE")"
+            if mp_load_ha_config >/dev/null 2>&1 \
+                && mp_setup_record_first_verified_bundle >/dev/null 2>&1; then
+                current_bundle="$(jq -c '.first_verified_bundle // null' "$MP_SETUP_V2_STATE")"
+                [ "$previous_bundle" = "$current_bundle" ] || changed=true
+            fi
+        fi
         if jq -e '.current_action != null or .current_action_code != null
             or .current_checkpoint != null or .action_started_at != null
             or .last_failure != null' "$MP_SETUP_V2_STATE" >/dev/null; then
@@ -869,22 +897,32 @@ mp_setup_machine_reconcile() {
         fi
     fi
     if [[ "$mode" =~ ^(ha-primary-new|convert-ha|replace-primary)$ ]] \
-        && mp_setup_state_has paired && ! mp_setup_state_has replicated; then
+        && mp_setup_state_has paired; then
         if mp_load_ha_config >/dev/null 2>&1 \
             && mp_setup_record_first_verified_bundle >/dev/null 2>&1; then
-            mp_setup_state_mark replicated || return 1
+            if ! mp_setup_state_has replicated; then
+                mp_setup_state_mark replicated || return 1
+            fi
             changed=true
         fi
     fi
     if [[ "$mode" =~ ^(standalone-new|ha-primary-new)$ ]] \
         && mp_setup_state_has application_deployed \
-        && ! mp_setup_state_has root_commissioning_complete \
         && mp_root_bootstrap_is_disabled >/dev/null 2>&1; then
         stage="$(mp_setup_commissioning_stage 2>/dev/null || true)"
         if [ "$stage" = complete ]; then
-            mp_setup_state_mark root_commissioning_complete || return 1
-            mp_setup_state_mark recovery_recipient || return 1
-            changed=true
+            if ! mp_recovery_recipient >/dev/null 2>&1; then
+                mp_setup_sync_commissioning_recipient || return 1
+                changed=true
+            fi
+            if ! mp_setup_state_has root_commissioning_complete; then
+                mp_setup_state_mark root_commissioning_complete || return 1
+                changed=true
+            fi
+            if ! mp_setup_state_has recovery_recipient; then
+                mp_setup_state_mark recovery_recipient || return 1
+                changed=true
+            fi
         fi
     fi
     [ "$changed" = false ] || mp_setup_journal_event state.reconciled || return 1
@@ -900,6 +938,7 @@ mp_setup_machine_advance_one() {
     local smtp_enabled smtp_host smtp_port smtp_username smtp_token smtp_security
     local smtp_from_email smtp_from_name smtp_reply_to
     local cluster_id node_token pairing_secret body pending bootstrap_tmp response peer current
+    local bootstrap_error bootstrap_ok=false repair_attempted=false attempt
     local requested_tag requested_commit fault_transition="" replay_test_receipt=false
     local fault_hook_active=false hook_status=0 step_status=0
     local -a install_args
@@ -945,8 +984,17 @@ mp_setup_machine_advance_one() {
     fi
     [ -n "$expected" ] && [ "$checkpoint" = "$expected" ] || return 65
     if [ -n "$recorded_key" ]; then
-        [ "$recorded_key" = "$idempotency_key" ] && [ "$recorded_state" = started ] \
-            || return 65
+        [ "$recorded_key" = "$idempotency_key" ] || return 65
+        if [ "$recorded_state" = completed ]; then
+            # The side effect and its durable machine receipt completed, but a
+            # crash or interruption may have happened before the setup
+            # checkpoint was written. Reconcile that proven completion instead
+            # of rejecting the exact idempotent retry forever.
+            mp_setup_state_mark_now "$checkpoint" || return 1
+            mp_setup_machine_complete_if_plan_finished "$plan" || return $?
+            return 0
+        fi
+        [ "$recorded_state" = started ] || return 65
     else
         mp_setup_state_update \
             '.machine_transitions=((.machine_transitions // {}) + {
@@ -1124,8 +1172,41 @@ mp_setup_machine_advance_one() {
             mp_setup_state_action "Registering Node A with HA witness" \
                 WITNESS_REGISTERING witness_bootstrap || return 1
             if [ "$(jq -r .state "$MP_SETUP_V2_PENDING_BOOTSTRAP")" != registered ]; then
-                mp_setup_witness_call bootstrap "$MP_SETUP_WITNESS_URL" "$cluster_id" \
-                    "$MP_SETUP_WITNESS_ADMIN_TOKEN" "$body" >/dev/null || return 1
+                bootstrap_error="$(mktemp "$MP_STATE/witness-bootstrap-error.XXXXXX")" \
+                    || { rm -f "$body"; return 1; }
+                for attempt in $(seq 1 20); do
+                    : > "$bootstrap_error"
+                    if mp_setup_witness_call bootstrap "$MP_SETUP_WITNESS_URL" "$cluster_id" \
+                        "$MP_SETUP_WITNESS_ADMIN_TOKEN" "$body" \
+                        >/dev/null 2> "$bootstrap_error"; then
+                        bootstrap_ok=true
+                        break
+                    fi
+                    if [ "$repair_attempted" = false ] \
+                        && grep -Eq 'remote API returned HTTP 401([^0-9]|$)' "$bootstrap_error"; then
+                        mp_setup_deploy_witness_machine \
+                            "$(jq -r .domain "$MP_SETUP_V2_PENDING_BOOTSTRAP")" \
+                            "$cluster_id" \
+                            "$(jq -r .values.cloudflare_account_id "$input_file")" \
+                            "$(jq -r .values.cloudflare_deploy_token "$input_file")" \
+                            "$(jq -r .values.cloudflare_dns_token "$input_file")" \
+                            "$MP_SETUP_WITNESS_ADMIN_TOKEN" \
+                            || { rm -f "$body" "$bootstrap_error"; return 20; }
+                        repair_attempted=true
+                        continue
+                    fi
+                    if ! grep -Eq 'remote API returned HTTP (404|429|500|502|503|504)([^0-9]|$)|provider error 1042([^0-9]|$)' \
+                        "$bootstrap_error"; then
+                        break
+                    fi
+                    [ "$attempt" -eq 20 ] || sleep 3
+                done
+                if [ "$bootstrap_ok" != true ]; then
+                    cat "$bootstrap_error" >&2
+                    rm -f "$body" "$bootstrap_error"
+                    return 20
+                fi
+                rm -f "$bootstrap_error"
                 bootstrap_tmp="$(mktemp "$MP_STATE/pending-witness-bootstrap.XXXXXX")" || return 1
                 jq '.state="registered"' "$MP_SETUP_V2_PENDING_BOOTSTRAP" > "$bootstrap_tmp" \
                     && chmod 600 "$bootstrap_tmp" && sync -f "$bootstrap_tmp" 2>/dev/null \
@@ -1187,18 +1268,38 @@ mp_setup_machine_advance_one() {
                 mp_wait_for_stable_local_services 2 1 >/dev/null 2>&1 || return 10
                 mp_setup_state_mark application_deployed
             elif [ "$mode" = replace-primary ]; then
+                if [ "$lane" = unsigned ]; then
+                    commit="$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")"
+                    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 65
+                    jq -c '.values.registry' "$input_file" \
+                        | "$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit" \
+                            --registry-credentials-stdin \
+                        || return 1
+                fi
                 mp_setup_state_mark application_deployed
             elif [ "$mode" = convert-ha ] && [ "$lane" = unsigned ]; then
-                mp_setup_activate_converted_unsigned_pair || return 1
+                mp_setup_activate_converted_unsigned_pair \
+                    --registry-credentials-file "$input_file" || return 1
                 mp_setup_state_mark application_deployed
             elif [ "$lane" = unsigned ] \
                 && [ -s "$MP_STATE/test-deployments/candidate/receipt.json" ]; then
                 [ "$(jq -r '.commit // empty' "$MP_STATE/test-deployments/candidate/receipt.json")" \
                     = "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")" ] || return 65
-                jq -c '.values.registry' "$input_file" \
+                if ! jq -c '.values.registry' "$input_file" \
                     | "$MP_ROOT/deploy/test-deployment.sh" apply-prebuilt \
                         "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")" \
-                        --fresh-commissioning --registry-credentials-stdin || return 1
+                        --fresh-commissioning --registry-credentials-stdin; then
+                    local failed_stage failure_code
+                    failed_stage="$(tr -cd 'a-z0-9-' \
+                        < "$MP_STATE/test-deployments/current-stage" 2>/dev/null \
+                        | head -c 32)"
+                    [ -n "$failed_stage" ] || failed_stage=unknown
+                    failure_code="UNSIGNED_CANDIDATE_$(tr 'a-z-' 'A-Z_' <<< "$failed_stage")_FAILED"
+                    mp_setup_state_failure "$failure_code" \
+                        "The exact candidate deployment stopped during ${failed_stage}. Resume will reuse its idempotency key and authoritative facts." \
+                        || true
+                    return 1
+                fi
             else
                 mp_setup_deploy_application || return 1
             fi
@@ -1217,11 +1318,27 @@ mp_setup_machine_advance_one() {
             ;;
         replicated)
             if ! mp_setup_record_first_verified_bundle >/dev/null 2>&1; then
+                if [ "$mode" = convert-ha ]; then
+                    mp_setup_state_action "Verifying initial HA writer identity" \
+                        HA_WRITER_ESTABLISHING replicated || return 1
+                    mp_setup_establish_initial_writer_identity || return 1
+                fi
                 mp_setup_state_action "Replicating complete application state to Node B" \
                     FIRST_BUNDLE_TRANSFER replicated || return 1
+                mp_setup_prepare_unsigned_replacement_peer_if_needed || {
+                    mp_setup_state_failure PEER_CANDIDATE_PREPARATION_FAILED \
+                        "Node B could not reinstall and verify the exact candidate runtime assets, so no replication bundle was sent." || true
+                    return 1
+                }
+                mp_setup_verify_unsigned_peer_identity || {
+                    mp_setup_state_failure PEER_CANDIDATE_IDENTITY_MISMATCH \
+                        "Node B is not bound to the exact candidate identity, so no replication bundle was sent." || true
+                    return 1
+                }
                 mp_ha_replicate_now || return 1
                 mp_setup_record_first_verified_bundle >/dev/null 2>&1 || return 1
             fi
+            mp_setup_finalize_fresh_unsigned_peer || return 1
             mp_setup_state_mark replicated
             ;;
         ha_services_activated)
@@ -1318,13 +1435,30 @@ mp_setup_machine_advance_one() {
             mp_setup_state_mark imported
             ;;
         restored)
-            local restore_identity imported_snapshot restore_authorization
+            local restore_identity imported_snapshot restore_authorization commit
             imported_snapshot="$(jq -er '.snapshot_path | select(type == "string")' \
                 "$MP_SETUP_V2_IMPORT_RECEIPT")" || return 65
             case "$(readlink -f "$imported_snapshot")" in
                 "$(readlink -f "$MP_SNAPSHOTS")"/*) ;;
                 *) return 65 ;;
             esac
+            if [ "$lane" = unsigned ]; then
+                commit="$(jq -r '.values.candidate_commit // empty' "$input_file")"
+                [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 65
+                jq -c '.values.registry' "$input_file" \
+                    | "$MP_ROOT/deploy/test-deployment.sh" \
+                        prepare-full-loss-restore-prebuilt "$commit" \
+                        --registry-credentials-stdin \
+                    || return 1
+                # Only the independently verified staged bundle may retarget
+                # a pending development recovery. Commit the new exact SHA
+                # after runtime preparation and before restoring data.
+                mp_setup_state_update '.campaign_commit = $commit' \
+                    --arg commit "$commit" || return 1
+            else
+                jq -e '(.values | keys) == ["recovery_identity"]' \
+                    "$input_file" >/dev/null || return 65
+            fi
             restore_identity="$(mp_setup_machine_identity_file \
                 "$(jq -r .values.recovery_identity "$input_file")")" || return $?
             restore_authorization="$(mp_setup_prepare_full_loss_restore_authorization \
@@ -1341,9 +1475,18 @@ mp_setup_machine_advance_one() {
         witness_ready)
             mp_setup_state_action "Activating public HA routing" \
                 WITNESS_ROUTING witness_ready || return 1
-            python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null \
-                || { mp_setup_state_failure WITNESS_ROUTING_FAILED \
-                    "The HA witness did not accept the routing-ready transition." || true; return 1; }
+            if mp_setup_activate_initial_witness_routing; then
+                :
+            else
+                step_status=$?
+                # Network/provider availability is an ordinary wait. Leave
+                # the exact transition started so the machine controller and
+                # TUI resume it without a false terminal failure.
+                [ "$step_status" -eq 10 ] && return 10
+                mp_setup_state_failure WITNESS_ROUTING_FAILED \
+                    "The HA witness did not accept the routing-ready transition." || true
+                return 1
+            fi
             mp_setup_state_mark witness_ready
             ;;
         root_commissioning_complete)
@@ -1385,7 +1528,18 @@ mp_setup_reconcile_unsigned_join() {
     jq -e '
         .format == "mp-opt-setup-state-v2"
         and (.mode | IN("ha-join","replace-node"))
-        and .deployment_lane == "unsigned" and .state == "in_progress"
+        and .deployment_lane == "unsigned"
+        and (
+            .state == "in_progress"
+            or (
+                .state == "complete"
+                and (
+                    ((.completed // []) | index("application_deployed") == null)
+                    or ((.completed // []) | index("replicated") == null)
+                    or ((.completed // []) | index("peer_exact_deployment") == null)
+                )
+            )
+        )
         and ((.completed // []) | index("joined") != null)
     ' "$MP_SETUP_V2_STATE" >/dev/null 2>&1 || return 0
     [ -s "$receiver" ] || return 0
@@ -1461,6 +1615,20 @@ mp_setup_sync_commissioning_recipient() {
     else
         mp_store_recovery_recipient_local "$recipient"
     fi
+}
+
+# Prove that host custody already matches the authoritative application value
+# without requiring an active HA lease merely to repeat an identical write.
+# A missing or different value still goes through the full standalone/HA sync
+# path above, including the active-holder and peer transaction guards.
+mp_setup_ensure_commissioning_recipient_current() {
+    local recipient current
+    mp_compose_init || return 1
+    recipient="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d masterplan -Atqc \
+        "SELECT value FROM server_settings WHERE key='root_recovery_recipient'" 2>/dev/null || true)"
+    [[ "$recipient" =~ ^age1[0-9a-z]+$ ]] || return 1
+    current="$(mp_recovery_recipient 2>/dev/null || true)"
+    [ "$current" = "$recipient" ] || mp_setup_sync_commissioning_recipient
 }
 
 mp_setup_wait_for_root_commissioning() (
@@ -1580,7 +1748,7 @@ mp_setup_verify_signed_application() {
     MP_SIGNED_DEPLOYMENT_FAILURE_CODE=LOCAL_BACKEND_UNHEALTHY
     MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE="The signed Backend container is running, but its local health endpoint is unavailable."
     mp_wait_for_backend_health 1 || return 3
-    if ! mp_caddy_validate >/dev/null 2>&1; then
+    if ! mp_wait_for_caddy_validation 30 >/dev/null 2>&1; then
         MP_SIGNED_DEPLOYMENT_FAILURE_CODE="${MP_CADDY_FAILURE_CODE:-CADDY_VALIDATION_FAILED}"
         MP_SIGNED_DEPLOYMENT_FAILURE_MESSAGE="${MP_CADDY_FAILURE_MESSAGE:-The signed Caddy service could not be validated.}"
         return 4
@@ -1701,20 +1869,75 @@ mp_setup_reconcile_primary_campaign_pin() {
     fi
 }
 
+mp_setup_establish_initial_writer_identity() {
+    local generation holder
+    mp_load_ha_config || return 1
+    generation="$(jq -r '.generation // 0' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
+    holder="$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
+    # A standalone-to-HA conversion installs the node identity before it
+    # installs the long-running HA services.  There is therefore no lease
+    # agent yet to materialise the witness's bootstrap decision locally.  Ask
+    # the real lease agent for exactly one authenticated observation before
+    # deciding whether promotion is authorised.  The helper writes the same
+    # atomic control receipt used by the service and promotes only when the
+    # witness still names this node as the initial holder.
+    if ! [[ "$generation" =~ ^[1-9][0-9]*$ ]] || [ "$holder" != "$HA_NODE_ID" ]; then
+        MP_ROOT="$MP_ROOT" MP_HA_HOME="$MP_HA_HOME" \
+            python3 "$MP_ROOT/deploy/ha/lease_agent.py" --once \
+            || { ui_error "The initial witness observation could not be established."; return 1; }
+        generation="$(jq -r '.generation // 0' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
+        holder="$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
+    fi
+    [[ "$generation" =~ ^[1-9][0-9]*$ ]] && [ "$holder" = "$HA_NODE_ID" ] \
+        || { ui_error "The witness did not authorise this node as the initial database writer."; return 1; }
+    "$MP_ROOT/deploy/ha/promote_local.sh" "$generation" \
+        || { ui_error "Node A could not establish the witness-authorised database writer identity."; return 1; }
+}
+
 mp_setup_activate_converted_unsigned_pair() {
-    local commit key image
+    local registry_credentials="${1:-}" registry_input="${2:-}" commit
+    if [ -n "$registry_credentials" ]; then
+        [ "$registry_credentials" = --registry-credentials-file ] \
+            && [ -n "$registry_input" ] && [ -f "$registry_input" ] \
+            && [ ! -L "$registry_input" ] \
+            && [ "$(stat -c %u "$registry_input")" = "$(id -u)" ] \
+            && [ "$(stat -c %a "$registry_input")" = 600 ] \
+            && jq -e '.values.registry | type == "object"
+                and ((keys | sort) == ["token","username"])
+                and (.username | type == "string" and length >= 1 and length <= 255)
+                and (.token | type == "string" and length >= 1 and length <= 4096)' \
+                "$registry_input" >/dev/null 2>&1 \
+            || { ui_error "The candidate peer registry credentials are unavailable or unsafe."; return 1; }
+    else
+        [ -z "$registry_input" ] \
+            || { ui_error "The candidate peer registry-credential mode is invalid."; return 1; }
+    fi
     mp_setup_state_action "Preparing exact images for Node B" \
         PEER_IMAGES_PREPARING application_deployed || return 1
     commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
     [ "$(jq -r '.current_commit // empty' "$MP_STATE/test-deployments/current.json" 2>/dev/null || true)" = "$commit" ] \
         || { ui_error "Node A's verified deployment receipt does not match the reconciled campaign pin."; return 1; }
-    for key in MP_BACKEND_IMAGE MP_CADDY_IMAGE MP_POSTGRES_IMAGE MP_TOOLS_IMAGE; do
-        image="$(sed -n "s/^${key}=//p" "$MP_ROOT/.test-deployment.env" | head -1)"
-        [[ "$image" =~ ^masterplan-(backend|caddy|postgres|tools):test-[0-9a-f]{12}$ ]] \
-            && docker image inspect "$image" >/dev/null 2>&1 \
-            || { ui_error "${key} is unavailable for the verified converted deployment."; return 1; }
-    done
-    "$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit" || return 1
+    # A fresh standalone database deliberately has no HA ownership row.  Once
+    # the witness has authorised Node A as the initial holder, establish that
+    # same writer identity before capturing any first-copy bundle.  The
+    # promotion helper is idempotent: a retry with the exact generation is a
+    # no-op, while a conflicting witness/database identity is rejected.
+    mp_setup_state_action "Establishing initial HA writer identity" \
+        HA_WRITER_ESTABLISHING application_deployed || return 1
+    mp_setup_establish_initial_writer_identity || return 1
+    # Accept the exact image representation already verified for this campaign:
+    # legacy local test tags or the current private, digest-pinned candidate
+    # references.  The shared verifier binds every value to the staged
+    # candidate receipt and proves that the local image exists before anything
+    # is copied to Node B.
+    mp_setup_verify_exact_environment "$commit" || return 1
+    if [ "$registry_credentials" = --registry-credentials-file ]; then
+        jq -c '.values.registry' "$registry_input" \
+            | "$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit" \
+                --registry-credentials-stdin || return 1
+    else
+        "$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit" || return 1
+    fi
     mp_setup_state_action "Installing Node A HA services" \
         HA_SERVICES_INSTALLING application_deployed || return 1
     "$MP_ROOT/deploy/ha/install_services.sh" || return 1
@@ -2493,7 +2716,7 @@ mp_setup_primary_create() {
         repair_attempted=false
         bootstrap_error="$(mktemp "$MP_STATE/witness-bootstrap-error.XXXXXX")" \
             || { rm -f "$body"; return 1; }
-        for attempt in 1 2 3 4 5; do
+        for attempt in $(seq 1 20); do
             if [ "$(jq -r .state "$MP_SETUP_V2_PENDING_BOOTSTRAP")" = registered ]; then
                 bootstrap_ok=true
                 break
@@ -2512,7 +2735,11 @@ mp_setup_primary_create() {
                 repair_attempted=true
                 continue
             fi
-            [ "$attempt" -eq 5 ] || sleep 2
+            if ! grep -Eq 'remote API returned HTTP (404|429|500|502|503|504)([^0-9]|$)|provider error 1042([^0-9]|$)' \
+                "$bootstrap_error"; then
+                break
+            fi
+            [ "$attempt" -eq 20 ] || sleep 3
         done
         [ "$bootstrap_ok" = true ] \
             || { ui_text_file "Worker registration failed" "$bootstrap_error"; \
@@ -2826,7 +3053,7 @@ mp_setup_replace_standby() {
         '.deployment_lane=$lane | .campaign_commit=(if $commit == "" then null else $commit end)' \
         --arg lane "$lane" --arg commit "$campaign" || return 1
     mp_setup_state_mark witness_bootstrap
-    mp_setup_state_mark application_deployed
+    [ "$lane" != signed ] || mp_setup_state_mark application_deployed
     rm -f "$MP_SETUP_V2_PENDING_REPLACEMENT"
     join_code="$(python3 "$MP_ROOT/deploy/ha/pairing.py" encode < "$MP_SETUP_V2_PENDING_JOIN")" || return 1
     ui_copyable_terminal_text "Replacement node join code" "$join_code" \
@@ -2982,6 +3209,31 @@ mp_setup_cleanup_legacy_load_balancer() {
 # Remove the DNS-only routing records and Durable Object state before deleting
 # the Worker itself. This action deliberately leaves the local servers and
 # databases untouched so an operator can export or wipe them separately.
+mp_setup_decommission_witness_after_secret_rotation() {
+    local witness="$1" cluster="$2" admin_token="$3" body="$4"
+    local error attempt
+    error="$(mktemp "$MP_STATE/decommission-witness-error.XXXXXX")" || return 1
+    for attempt in $(seq 1 12); do
+        if mp_setup_witness_call decommission "$witness" "$cluster" "$admin_token" "$body" \
+            >/dev/null 2>"$error"; then
+            rm -f "$error"
+            return 0
+        fi
+        # A newly written Worker secret is eventually consistent. Retry only
+        # the exact authentication-propagation response; every other provider
+        # or witness error remains immediately visible to the caller.
+        if ! grep -Eq 'remote API returned HTTP 401([^0-9]|$)' "$error"; then
+            cat "$error" >&2
+            rm -f "$error"
+            return 1
+        fi
+        [ "$attempt" -eq 12 ] || sleep 5
+    done
+    cat "$error" >&2
+    rm -f "$error"
+    return 1
+}
+
 mp_setup_decommission_cloudflare() {
     local cluster witness account_id worker_name deploy_token admin_token tools_image body
     mp_load_ha_config || return 1
@@ -3010,7 +3262,8 @@ mp_setup_decommission_cloudflare() {
         || { unset deploy_token admin_token; ui_error "The Worker administrator secret could not be rotated."; return 1; }
     body="$(mktemp "$MP_STATE/decommission-cloudflare.XXXXXX")" || return 1
     jq -n --arg cluster "$cluster" '{confirm_cluster_id:$cluster}' > "$body"
-    mp_setup_witness_call decommission "$witness" "$cluster" "$admin_token" "$body" >/dev/null \
+    mp_setup_decommission_witness_after_secret_rotation \
+        "$witness" "$cluster" "$admin_token" "$body" >/dev/null \
         || { rm -f "$body"; unset deploy_token admin_token; ui_error "The Worker did not confirm DNS and state deletion."; return 1; }
     rm -f "$body"; unset admin_token
     printf 'y\n' | docker run --rm -i -e CLOUDFLARE_API_TOKEN="$deploy_token" \
@@ -3064,7 +3317,8 @@ mp_setup_decommission_cloudflare_machine() {
                 secret put ADMIN_TOKEN --name "$worker_name" >/dev/null || return 1
         body="$(mktemp "$MP_STATE/decommission-cloudflare.XXXXXX")" || return 1
         jq -n --arg cluster "$cluster" '{confirm_cluster_id:$cluster}' > "$body"
-        mp_setup_witness_call decommission "$witness" "$cluster" "$admin_token" "$body" >/dev/null \
+        mp_setup_decommission_witness_after_secret_rotation \
+            "$witness" "$cluster" "$admin_token" "$body" >/dev/null \
             || { rm -f "$body"; unset admin_token; return 1; }
         rm -f "$body"; unset admin_token
         temporary="$(mktemp "$MP_STATE/provider-cleanup-receipt.XXXXXX")" || return 1
@@ -3086,12 +3340,11 @@ mp_setup_decommission_cloudflare_machine() {
         # observes the exact Worker first, so a lost acknowledgement can never
         # cause an unexamined second destructive request.
         probe="$(mktemp "$MP_STATE/provider-worker-probe.XXXXXX")" || return 1
-        if CLOUDFLARE_API_TOKEN="$deploy_token" docker run --rm \
-            -e CLOUDFLARE_API_TOKEN -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
-            "$tools_image" deployments list \
-            --name "$worker_name" > /dev/null 2> "$probe"; then
+        if printf '%s' "$deploy_token" \
+            | python3 "$MP_ROOT/deploy/ha/cloudflare_worker_script.py" \
+                observe "$account_id" "$worker_name" > /dev/null 2> "$probe"; then
             worker_present=true
-        elif grep -Eqi '(not[ -]?found|does not exist|10090)' "$probe"; then
+        elif [ "${PIPESTATUS[1]}" -eq 4 ]; then
             reconciled=true
         else
             rm -f "$probe"
@@ -3099,9 +3352,9 @@ mp_setup_decommission_cloudflare_machine() {
         fi
         rm -f "$probe"
         if [ "$worker_present" = true ]; then
-            printf 'y\n' | CLOUDFLARE_API_TOKEN="$deploy_token" docker run --rm -i \
-                -e CLOUDFLARE_API_TOKEN -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
-                "$tools_image" delete --name "$worker_name" >/dev/null \
+            printf '%s' "$deploy_token" \
+                | python3 "$MP_ROOT/deploy/ha/cloudflare_worker_script.py" \
+                    delete "$account_id" "$worker_name" >/dev/null \
                 || return 1
         fi
         temporary="$(mktemp "$MP_STATE/provider-cleanup-receipt.XXXXXX")" || return 1
@@ -3161,11 +3414,86 @@ mp_setup_record_first_verified_bundle() {
         && [ "$generation" = "$(jq -r .generation <<< "$receiver")" ] \
         || return 1
     accepted_at="$(jq -r .last_received_at <<< "$receiver")"
+    if jq -e --arg bundle "$bundle" --arg sha256 "$sha256" \
+        --argjson generation "$generation" --arg accepted "$accepted_at" '
+        .first_verified_bundle == {
+          bundle_id:$bundle,sha256:$sha256,generation:$generation,accepted_at:$accepted
+        }
+    ' "$MP_SETUP_V2_STATE" >/dev/null; then
+        return 0
+    fi
     mp_setup_state_update \
         '.first_verified_bundle={bundle_id:$bundle,sha256:$sha256,
           generation:$generation,accepted_at:$accepted}' \
         --arg bundle "$bundle" --arg sha256 "$sha256" \
         --argjson generation "$generation" --arg accepted "$accepted_at"
+}
+
+# Initial deployment may take longer than the witness transition lease. Reuse
+# the normal lease-agent iteration so routing activation is preceded by a
+# fresh, authenticated health heartbeat and the local writer promotion. This
+# preserves the Worker's expired-lease guard instead of bypassing it.
+mp_setup_activate_initial_witness_routing() {
+    mp_load_ha_config || return 1
+    # Root commissioning can legitimately exceed the 90-second witness
+    # freshness window. Start only the lease observer here; replication and
+    # snapshot triggers remain disabled until ha_services_activated.
+    "$MP_ROOT/deploy/ha/install_services.sh" --commissioning || return 1
+    python3 "$MP_ROOT/deploy/ha/lease_agent.py" --once >/dev/null || return 1
+    jq -e --arg node "$HA_NODE_ID" \
+        '.holder_node_id == $node and .routing_ready == true' \
+        "$MP_ROOT/runtime/ha-control.json" >/dev/null 2>&1
+}
+
+# Prove the receiver's active candidate identity immediately before an initial
+# unsigned copy. The receiver must not infer this from a staged bundle alone:
+# its release hash is derived from the installed deployment environment.
+mp_setup_verify_unsigned_peer_identity() {
+    local mode lane commit
+    mode="$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE")" || return 1
+    lane="$(jq -r '.deployment_lane // empty' "$MP_SETUP_V2_STATE")" || return 1
+    [[ "$mode" =~ ^(ha-primary-new|convert-ha|replace-primary)$ ]] \
+        && [ "$lane" = unsigned ] || return 0
+    commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")" || return 1
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
+    ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+        env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+        /opt/masterplan/deploy/test-deployment.sh internal-verify-peer-identity "$commit"
+}
+
+# A retry may arrive after an older supervisor recorded application_deployed
+# on the surviving node before the replacement peer had received its exact
+# frontend and CSP assets. Repair that pre-copy state from the already verified
+# local candidate. No registry access is needed because candidate activation
+# has already proved and retained all four image digests on this node.
+mp_setup_prepare_unsigned_replacement_peer_if_needed() {
+    local mode lane commit
+    mode="$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE")" || return 1
+    lane="$(jq -r '.deployment_lane // empty' "$MP_SETUP_V2_STATE")" || return 1
+    [ "$mode" = replace-primary ] && [ "$lane" = unsigned ] || return 0
+    if mp_setup_verify_unsigned_peer_identity >/dev/null 2>&1; then
+        return 0
+    fi
+    commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")" || return 1
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
+    "$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit"
+}
+
+# A fresh or replacement unsigned peer is deliberately staged before shared
+# configuration is available. The first accepted replication bundle activates
+# that staged candidate. Record the exact candidate receipt only after sender
+# and receiver have proved that they accepted the same bundle.
+mp_setup_finalize_fresh_unsigned_peer() {
+    local mode lane commit
+    mode="$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE")" || return 1
+    lane="$(jq -r '.deployment_lane // empty' "$MP_SETUP_V2_STATE")" || return 1
+    [[ "$mode" =~ ^(ha-primary-new|replace-primary)$ ]] \
+        && [ "$lane" = unsigned ] || return 0
+    commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")" || return 1
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
+    ssh -T -o BatchMode=yes -o ConnectTimeout=10 mp-opt-ha-peer \
+        env MP_ROOT=/opt/masterplan MP_TEST_PEER=1 \
+        /opt/masterplan/deploy/test-deployment.sh internal-finalize-peer "$commit"
 }
 
 mp_setup_primary_resume() {
@@ -3257,7 +3585,11 @@ mp_setup_primary_resume() {
         if [ "$mode" = convert-ha ] && [ -f "$MP_ROOT/infra/docker-compose.override.yml" ]; then
             mp_ha_convert_host_caddy || return 1
         fi
-        if [ "$mode" = convert-ha ] \
+        if [ "$mode" = replace-primary ] \
+            && [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ]; then
+            prepare_initial_peer "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")" \
+                || { ui_error "Node B could not install and verify the exact candidate identity."; return 1; }
+        elif [ "$mode" = convert-ha ] \
             && [ "$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")" = unsigned ]; then
             mp_setup_activate_converted_unsigned_pair || return 1
         else
@@ -3268,8 +3600,15 @@ mp_setup_primary_resume() {
     if ! mp_setup_state_has witness_ready; then
         mp_setup_state_action "Activating public HA routing" \
             WITNESS_ROUTING witness_ready || return 1
-        python3 "$MP_ROOT/deploy/ha/witness_control.py" ready >/dev/null \
-            || { mp_setup_state_failure WITNESS_ROUTING_FAILED "The HA witness did not accept the routing-ready transition." || true; return 1; }
+        if mp_setup_activate_initial_witness_routing; then
+            :
+        else
+            status=$?
+            [ "$status" -eq 10 ] && return 10
+            mp_setup_state_failure WITNESS_ROUTING_FAILED \
+                "The HA witness did not accept the routing-ready transition." || true
+            return 1
+        fi
         mp_setup_state_mark witness_ready
     fi
     if ! mp_setup_state_has public_routing_ready; then
@@ -3292,6 +3631,16 @@ mp_setup_primary_resume() {
         mp_setup_state_action "Replicating complete application state to Node B" \
             FIRST_BUNDLE_TRANSFER replicated || return 1
         if ! mp_setup_record_first_verified_bundle; then
+            mp_setup_prepare_unsigned_replacement_peer_if_needed || {
+                mp_setup_state_failure PEER_CANDIDATE_PREPARATION_FAILED \
+                    "Node B could not reinstall and verify the exact candidate runtime assets, so no replication bundle was sent." || true
+                return 1
+            }
+            mp_setup_verify_unsigned_peer_identity || {
+                mp_setup_state_failure PEER_CANDIDATE_IDENTITY_MISMATCH \
+                    "Node B is not bound to the exact candidate identity, so no replication bundle was sent." || true
+                return 1
+            }
             mp_ha_replicate_now || return 1
             mp_setup_record_first_verified_bundle || {
                 mp_setup_state_failure FIRST_BUNDLE_RECEIPT_MISMATCH \
@@ -3299,6 +3648,10 @@ mp_setup_primary_resume() {
                 return 1
             }
         fi
+        mp_setup_finalize_fresh_unsigned_peer || {
+            ui_error "Node B accepted the first copy but could not record the exact candidate receipt."
+            return 1
+        }
         mp_setup_state_mark replicated
     fi
     if ! mp_setup_state_has ha_services_activated; then

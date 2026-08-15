@@ -78,13 +78,15 @@ mp_machine_require_local_owner() {
 }
 
 mp_machine_validate_regular_file() {
-    local path="$1" expected_mode="${2:-600}" owner
+    local path="$1" expected_mode="${2:-600}" expected_group="${3:-}" owner
     [ ! -e "$path" ] && [ ! -L "$path" ] && return 0
     [ -f "$path" ] && [ ! -L "$path" ] || return 1
     [ -d "$MP_STATE" ] || return 1
     owner="$(stat -c '%u' "$MP_STATE" 2>/dev/null)" || return 1
     [ "$(stat -c '%u' "$path" 2>/dev/null)" = "$owner" ] || return 1
-    [ "$(stat -c '%a' "$path" 2>/dev/null)" = "$expected_mode" ]
+    [ "$(stat -c '%a' "$path" 2>/dev/null)" = "$expected_mode" ] || return 1
+    [ -z "$expected_group" ] \
+        || [ "$(stat -c '%g' "$path" 2>/dev/null)" = "$expected_group" ]
 }
 
 mp_machine_validate() {
@@ -189,8 +191,7 @@ mp_machine_status() {
         progress="$(jq --argjson plan "$plan" \
             '[.completed[] as $step | select($plan | index($step) != null)] | length' \
             <<< "$state")"
-        next_checkpoint="$(jq -cn --argjson plan "$plan" --argjson setup "$state" \
-            '$plan | map(select(. as $step | ($setup.completed | index($step)) == null)) | (.[0] // null)')"
+        next_checkpoint="$(mp_machine_next_checkpoint_json)" || return $?
         if [ "$(jq -r .state <<< "$state")" = complete ]; then
             run_state=complete; recommended=$MP_MACHINE_OK
         elif jq -e '.last_failure != null and .last_failure.code != "SETUP_CANCELLED"' \
@@ -292,11 +293,24 @@ mp_machine_handoff_error() {
     exit "${3:-$MP_MACHINE_INVALID}"
 }
 
+# Derive the next actionable checkpoint from the immutable plan and completed
+# receipts.  Secret handoffs must not depend on mutable presentation fields
+# such as current_action/current_checkpoint: those fields are intentionally
+# cleared as soon as the preceding checkpoint is durably completed.
+mp_machine_next_checkpoint_json() {
+    local state plan
+    state="$(cat "$MP_SETUP_V2_STATE")" || return 1
+    plan="$(mp_setup_checkpoint_plan_json "$(jq -r .mode <<< "$state")" \
+        "$(jq -r .deployment_lane <<< "$state")")" || return 65
+    jq -cn --argjson plan "$plan" --argjson setup "$state" \
+        '$plan | map(select(. as $step | ($setup.completed | index($step)) == null)) | (.[0] // null)'
+}
+
 # Emit one existing bounded setup secret and nothing else on stdout. This is
 # for a local coordinator which immediately passes the value to a browser or
 # peer. Status, validation, events and journals never call this function.
 mp_machine_handoff() {
-    local kind="$1" status value path run_id
+    local kind="$1" status value path run_id next_checkpoint
     mp_machine_require_local_owner || return 77
     [ -s "$MP_SETUP_V2_STATE" ] || return 65
     mp_setup_validate_state_contract "$MP_SETUP_V2_STATE" || return $?
@@ -308,29 +322,28 @@ mp_machine_handoff() {
         return "$status"
     fi
     trap 'unset value; mp_setup_execution_release' EXIT
+    next_checkpoint="$(mp_machine_next_checkpoint_json)" || return $?
     case "$kind" in
         root-bootstrap)
-            jq -e '
+            jq -e --argjson next "$next_checkpoint" '
                 .state == "in_progress"
                 and (.mode | IN("standalone-new","ha-primary-new"))
-                and .current_checkpoint == "root_commissioning_complete"
-                and .current_action_code == "ROOT_COMMISSIONING"
+                and $next == "root_commissioning_complete"
                 and ((.completed // []) | index("application_deployed") != null)
                 and ((.completed // []) | index("public_routing_ready") != null)
                 and ((.completed // []) | index("root_commissioning_complete") == null)
             ' "$MP_SETUP_V2_STATE" >/dev/null 2>&1 || return 65
             path="$MP_ROOT/secrets/root_bootstrap_token"
-            mp_machine_validate_regular_file "$path" 600 || return 77
+            mp_machine_validate_regular_file "$path" 640 10001 || return 77
             [ -s "$path" ] || return 66
             value="$(cat "$path")" || return 1
             [[ "$value" =~ ^[A-Za-z0-9_-]{64}$ ]] || return 65
             ;;
         ha-join)
-            jq -e '
+            jq -e --argjson next "$next_checkpoint" '
                 .state == "in_progress"
                 and (.mode | IN("ha-primary-new","convert-ha","replace-primary"))
-                and .current_checkpoint == "paired"
-                and .current_action_code == "PEER_JOIN_WAIT"
+                and $next == "paired"
                 and ((.completed // []) | index("paired") == null)
             ' "$MP_SETUP_V2_STATE" >/dev/null 2>&1 || return 65
             path="$MP_SETUP_V2_PENDING_JOIN"
@@ -411,6 +424,8 @@ mp_machine_start() {
     policy="$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)"
     case "$policy" in production) expected_lane=signed ;; test) expected_lane=unsigned ;; *) return 65 ;; esac
     [ "$lane" = "$expected_lane" ] || return 65
+    mp_machine_require_local_owner || return 77
+    mp_initialise_paths || return 77
     if [ -s "$MP_SETUP_V2_STATE" ]; then
         mp_setup_validate_state_contract "$MP_SETUP_V2_STATE" || return $?
         if [ "$(jq -r .state "$MP_SETUP_V2_STATE")" = complete ] \
@@ -431,7 +446,6 @@ mp_machine_start() {
             || return 65
         return 0
     fi
-    mp_machine_require_local_owner || return 77
     run_id="start-$(date -u +%Y%m%dT%H%M%SZ)-$$"
     if mp_setup_execution_acquire "$run_id" start; then :; else status=$?; return "$status"; fi
     trap 'mp_setup_execution_release' EXIT
@@ -536,7 +550,13 @@ mp_machine_read_advance_input() {
             ((.values | keys) == ["package_sha256"])
             and (.values.package_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
           elif .checkpoint == "restored" then
-            ((.values | keys) == ["recovery_identity"])
+            (((.values | keys) == ["recovery_identity"])
+             or (((.values | keys | sort) == ["candidate_commit","recovery_identity","registry"])
+                 and (.values.candidate_commit | type == "string" and test("^[0-9a-f]{40}$"))
+                 and (.values.registry | type == "object")
+                 and ((.values.registry | keys | sort) == ["token","username"])
+                 and (.values.registry.username | type == "string" and length >= 1 and length <= 255)
+                 and (.values.registry.token | type == "string" and length >= 1 and length <= 4096)))
             and (.values.recovery_identity | type == "string" and length >= 40 and length <= 4096)
           else (.values | length == 0) end)
     ' "$target" >/dev/null 2>&1 || return 64
@@ -551,6 +571,14 @@ mp_machine_stage_candidate() {
         and (
           (.state == "in_progress" and .campaign_commit == $commit
            and ((.completed // []) | index("application_deployed") == null))
+          or
+          (.state == "in_progress" and .campaign_commit != $commit
+           and (.mode | IN(
+             "standalone-new","ha-primary-new","ha-join","convert-ha",
+             "replace-primary","replace-node","full-restore"
+           ))
+           and ((.completed // []) | index("application_deployed") == null)
+           and ((.completed // []) | index("root_commissioning_complete") == null))
           or
           (((.completed // []) | index("application_deployed") != null)
            and .campaign_commit != $commit)
@@ -650,8 +678,6 @@ mp_machine_deployment_action() {
     local recovery_identity="" policy
     [ -s "$MP_SETUP_V2_STATE" ] || return 65
     mp_setup_validate_state_contract "$MP_SETUP_V2_STATE" || return $?
-    jq -e '((.completed // []) | index("application_deployed") != null)' \
-        "$MP_SETUP_V2_STATE" >/dev/null || return 65
     mp_machine_require_local_owner || return 77
     input="$(mktemp "$MP_STATE/setup-machine-input.XXXXXX")" || return 1
     MP_MACHINE_INPUT_FILE="$input"; chmod 600 "$input"
@@ -661,7 +687,7 @@ mp_machine_deployment_action() {
         && jq -e 'type == "object"
           and ((keys | sort) == ["action","commit","format","idempotency_key","tag","values"])
           and .format == "mp-opt-deployment-lifecycle-input-v1"
-          and (.action | IN("signed-upgrade","signed-rollback","candidate-advance","candidate-rollback"))
+          and (.action | IN("signed-upgrade","signed-rollback","candidate-precommission-retry","candidate-advance","candidate-rollback"))
           and (.commit | type == "string" and test("^[0-9a-f]{40}$"))
           and (.idempotency_key | type == "string"
                and test("^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"))
@@ -669,6 +695,12 @@ mp_machine_deployment_action() {
                  (.tag | type == "string"
                    and test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
                  and .values == {}
+               elif .action == "candidate-precommission-retry" then
+                 .tag == null
+                 and ((.values|keys|sort)==["registry"])
+                 and ((.values.registry|keys|sort)==["token","username"])
+                 and (.values.registry.username|type=="string" and length>=1 and length<=255)
+                 and (.values.registry.token|type=="string" and length>=1 and length<=4096)
                else
                  .tag == null
                  and ((.values|keys|sort)==["recovery_identity","registry"])
@@ -680,12 +712,23 @@ mp_machine_deployment_action() {
             "$input" >/dev/null 2>&1 || return 64
     action="$(jq -r .action "$input")"; tag="$(jq -r '.tag // empty' "$input")"; commit="$(jq -r .commit "$input")"
     idempotency_key="$(jq -r .idempotency_key "$input")"
+    # Signed lifecycle actions operate on a setup journal that has already
+    # recorded application_deployed.  A snapshot-backed candidate update or
+    # rollback can also be needed while an
+    # established standalone installation is inside conversion and the new
+    # conversion journal has not reached that checkpoint yet.  In that case
+    # the recovery-recipient/private-identity proof below is the authoritative
+    # established-state guard.
+    if [[ "$action" =~ ^signed- ]]; then
+        jq -e '((.completed // []) | index("application_deployed") != null)' \
+            "$MP_SETUP_V2_STATE" >/dev/null || return 65
+    fi
     receipt_file="$MP_STATE/setup-deployment-lifecycle.jsonl"
     mp_machine_validate_regular_file "$receipt_file" 600 || return 77
     if [ -s "$receipt_file" ]; then
         jq -s -e 'all(.[];
             .format == "mp-opt-deployment-lifecycle-receipt-v1"
-            and (.action | IN("signed-upgrade","signed-rollback","candidate-advance","candidate-rollback"))
+            and (.action | IN("signed-upgrade","signed-rollback","candidate-precommission-retry","candidate-advance","candidate-rollback"))
             and ((.tag == null) or (.tag | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")))
             and (.commit | test("^[0-9a-f]{40}$"))
             and (.idempotency_key | test("^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"))
@@ -717,14 +760,29 @@ mp_machine_deployment_action() {
     case "$action" in
         signed-upgrade) mp_deploy_signed_exact "$tag" "$commit" >"$log" 2>&1 || status=$? ;;
         signed-rollback) mp_rollback_signed_exact "$tag" "$commit" >"$log" 2>&1 || status=$? ;;
-        candidate-advance|candidate-rollback)
+        candidate-precommission-retry|candidate-advance|candidate-rollback)
             [ "$policy" = test ] || status=65
-            if [ "$status" -eq 0 ]; then
+            if [ "$status" -eq 0 ] && [ "$action" != candidate-precommission-retry ]; then
+                # Browser recovery stores the public AGE recipient in the
+                # database before root commissioning is complete.  A targeted
+                # debug candidate at a later browser step still needs the
+                # normal snapshot-backed lifecycle, so synchronise that public
+                # value into host custody before matching the supplied private
+                # identity.  This also proves that a mid-conversion candidate
+                # advance or rollback is operating on established application
+                # state.  No private material leaves the machine input.
+                mp_setup_ensure_commissioning_recipient_current || status=$?
+            fi
+            if [ "$status" -eq 0 ] && [ "$action" != candidate-precommission-retry ]; then
                 recovery_identity="$(mp_setup_machine_identity_file \
                     "$(jq -r .values.recovery_identity "$input")")" || status=$?
             fi
             if [ "$status" -eq 0 ]; then
-                if [ "$action" = candidate-advance ]; then
+                if [ "$action" = candidate-precommission-retry ]; then
+                    jq -c .values.registry "$input" \
+                        | "$MP_ROOT/deploy/test-deployment.sh" apply-prebuilt-precommission \
+                            "$commit" --registry-credentials-stdin >"$log" 2>&1 || status=$?
+                elif [ "$action" = candidate-advance ]; then
                     jq -c .values.registry "$input" \
                         | MP_TEST_RECOVERY_IDENTITY_FILE="$recovery_identity" \
                             "$MP_ROOT/deploy/test-deployment.sh" apply-prebuilt-established \
@@ -803,8 +861,9 @@ mp_machine_cleanup_provider() {
 
 mp_machine_advance_command() {
     local input_file run_id status=0 log
-    [ -s "$MP_SETUP_V2_STATE" ] || return 65
     mp_machine_require_local_owner || return 77
+    mp_initialise_paths || return 77
+    [ -s "$MP_SETUP_V2_STATE" ] || return 65
     input_file="$(mktemp "$MP_STATE/setup-machine-input.XXXXXX")" || return 1
     chmod 600 "$input_file"
     MP_MACHINE_INPUT_FILE="$input_file"

@@ -59,11 +59,42 @@ class PairingCodeTests(unittest.TestCase):
     def test_converted_unsigned_pair_is_prepared_routed_replicated_then_finalised(self) -> None:
         reconcile = shell_function(SETUP, "mp_setup_reconcile_primary_campaign_pin")
         activate = shell_function(SETUP, "mp_setup_activate_converted_unsigned_pair")
+        establish = shell_function(SETUP, "mp_setup_establish_initial_writer_identity")
+        machine = shell_function(SETUP, "mp_setup_machine_advance_one")
         resume = shell_function(SETUP, "mp_setup_primary_resume")
         self.assertIn("merge-base --is-ancestor", reconcile)
         self.assertIn(".campaign_commit=$commit", reconcile)
         self.assertIn('test-deployment.sh" prepare-peer', activate)
+        self.assertIn('--registry-credentials-file', activate)
+        self.assertIn('[ ! -L "$registry_input" ]', activate)
+        self.assertIn('stat -c %u "$registry_input"', activate)
+        self.assertIn('stat -c %a "$registry_input"', activate)
+        self.assertLess(
+            activate.index('mp_setup_establish_initial_writer_identity'),
+            activate.index("jq -c '.values.registry'"),
+        )
+        self.assertIn('mp_setup_verify_exact_environment "$commit"', activate)
+        self.assertNotIn('^masterplan-(backend|caddy|postgres|tools):test-', activate)
+        self.assertIn('HA_WRITER_ESTABLISHING', activate)
+        self.assertIn('lease_agent.py" --once', establish)
+        self.assertLess(
+            establish.index('lease_agent.py" --once'),
+            establish.index('promote_local.sh" "$generation"'),
+        )
+        self.assertIn('promote_local.sh" "$generation"', establish)
+        self.assertIn('mp_setup_establish_initial_writer_identity', activate)
+        self.assertLess(
+            activate.index('mp_setup_establish_initial_writer_identity'),
+            activate.index('prepare-peer'),
+        )
         self.assertLess(activate.index("prepare-peer"), activate.index("install_services.sh"))
+        replicated = machine.split('replicated)', 1)[1].split('ha_services_activated)', 1)[0]
+        self.assertIn('[ "$mode" = convert-ha ]', replicated)
+        self.assertIn('mp_setup_establish_initial_writer_identity', replicated)
+        self.assertLess(
+            replicated.index('mp_setup_establish_initial_writer_identity'),
+            replicated.index('mp_ha_replicate_now'),
+        )
         self.assertIn('mp_setup_state_action "Preparing exact images for Node B"', activate)
         self.assertIn('mp_setup_state_action "Installing Node A HA services"', activate)
         self.assertIn('mp_setup_state_action "Activating HA routing"', activate)
@@ -243,6 +274,12 @@ class PairingCodeTests(unittest.TestCase):
         state_update = shell_function(SETUP, "mp_setup_state_update")
         self.assertIn('"$filter | .updated_at=\\$now"', state_update)
         self.assertNotIn('"$filter | .updated_at=$now"', state_update)
+
+    def test_candidate_debug_recipient_verification_does_not_require_an_ha_rewrite(self) -> None:
+        ensure = shell_function(SETUP, "mp_setup_ensure_commissioning_recipient_current")
+        self.assertIn("root_recovery_recipient", ensure)
+        self.assertIn('mp_recovery_recipient 2>/dev/null', ensure)
+        self.assertIn('[ "$current" = "$recipient" ] || mp_setup_sync_commissioning_recipient', ensure)
 
     @unittest.skipIf(os.name == "nt", "POSIX shell state contract")
     def test_state_update_executes_and_atomically_replaces_the_checkpoint(self) -> None:

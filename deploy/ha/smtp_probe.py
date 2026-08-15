@@ -56,6 +56,9 @@ def atomic_json(path: Path, document: dict) -> None:
 def classify(exc: BaseException) -> str:
     if isinstance(exc, socket.gaierror): return "dns_failed"
     if isinstance(exc, smtplib.SMTPAuthenticationError): return "authentication_failed"
+    if isinstance(exc, smtplib.SMTPSenderRefused): return "sender_rejected"
+    if isinstance(exc, smtplib.SMTPRecipientsRefused): return "recipient_rejected"
+    if isinstance(exc, smtplib.SMTPDataError): return "message_rejected"
     if isinstance(exc, ssl.SSLError): return "tls_failed"
     if isinstance(exc, (TimeoutError, socket.timeout, ConnectionError, OSError)): return "connection_failed"
     if isinstance(exc, smtplib.SMTPException): return "provider_rejected"

@@ -159,10 +159,28 @@ mp_queue_ha_replication() {
 
 # Initialise protected operator-owned working directories.
 mp_initialise_paths() {
+    local path owner
     umask 077
-    mkdir -p "$MP_HOME" "$MP_STATE" "$MP_SNAPSHOTS"
-    chmod 700 "$MP_HOME" "$MP_STATE" "$MP_SNAPSHOTS"
-    touch "$MP_AUDIT_FILE" "$MP_LOCK_FILE"
+    owner="$(id -u):$(id -g)"
+    for path in "$MP_HOME" "$MP_STATE" "$MP_SNAPSHOTS"; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            [ -d "$path" ] && [ ! -L "$path" ] \
+                && [ "$(stat -c '%u:%g' "$path" 2>/dev/null)" = "$owner" ] \
+                || return 1
+        else
+            mkdir -- "$path" || return 1
+        fi
+        chmod 700 -- "$path" || return 1
+    done
+    for path in "$MP_AUDIT_FILE" "$MP_LOCK_FILE"; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            [ -f "$path" ] && [ ! -L "$path" ] \
+                && [ "$(stat -c '%u:%g' "$path" 2>/dev/null)" = "$owner" ] \
+                || return 1
+        else
+            : > "$path" || return 1
+        fi
+    done
     chmod 600 "$MP_AUDIT_FILE" "$MP_LOCK_FILE"
     mp_cleanup_stale_setup_transients
 }
@@ -868,12 +886,29 @@ mp_prepare_backend_secret_permissions() {
 # backend identity. Refuse symlinks so a privileged ownership change cannot be
 # redirected outside the installation.
 mp_prepare_evidence_store() {
-    local evidence="$MP_ROOT/state/evidence"
+    local evidence="$MP_ROOT/state/evidence" unsafe
     if [ -e "$evidence" ] && { [ ! -d "$evidence" ] || [ -L "$evidence" ]; }; then
         printf 'Refusing unsafe evidence store path: %s\n' "$evidence" >&2
         return 1
     fi
     sudo -n install -d -o 10001 -g 10001 -m 0700 "$evidence" || return 1
+    unsafe="$(sudo -n find -P "$evidence" -xdev ! -type d ! -type f -print -quit)" \
+        || return 1
+    [ -z "$unsafe" ] || {
+        printf 'Refusing unsafe evidence store entry: %s\n' "$unsafe" >&2
+        return 1
+    }
+    # Historical one-shot initialisers and restored archives may leave nested
+    # entries owned by the host deploy identity.  Repair the complete bind
+    # source without following links; the unprivileged Backend then enforces
+    # its own 0700/0600 modes during evidence-chain verification.
+    sudo -n chown -R --no-dereference 10001:10001 -- "$evidence" || return 1
+    unsafe="$(sudo -n find -P "$evidence" -xdev ! -type d ! -type f -print -quit)" \
+        || return 1
+    [ -z "$unsafe" ] || {
+        printf 'Evidence store changed to an unsafe type during preparation: %s\n' "$unsafe" >&2
+        return 1
+    }
     sudo -n install -d -o 10001 -g 10001 -m 0700 "$evidence/public"
 }
 
@@ -911,9 +946,11 @@ mp_validate_protected_file_modes() {
 }
 
 # Build the exact production Compose command, including the local override.
-mp_compose_init() {
+# Callers that may repair runtime permissions use mp_compose_init. The lease
+# service runs with NoNewPrivileges and therefore uses the validation-only
+# variant after service installation has established the authoritative modes.
+mp_compose_build_command() {
     mp_load_ha_config || return 1
-    mp_prepare_runtime_permissions || return 1
     MP_COMPOSE=(
         docker compose
         --env-file "$MP_ROOT/.env"
@@ -940,6 +977,16 @@ mp_compose_init() {
     fi
 }
 
+mp_compose_init() {
+    mp_prepare_runtime_permissions || return 1
+    mp_compose_build_command
+}
+
+mp_compose_init_existing_runtime() {
+    mp_validate_action_profile_permissions ha || return 1
+    mp_compose_build_command
+}
+
 # Validate the complete production Compose model without displaying secrets.
 mp_compose_validate() {
     mp_compose_init
@@ -954,6 +1001,7 @@ mp_root_bootstrap_is_disabled() {
     [ -f "$MP_ROOT/.env" ] || return 1
     mp_compose_init || return 1
     "${MP_COMPOSE[@]}" up -d db >/dev/null 2>&1 || return 1
+    mp_wait_for_database 30 || return 1
     disabled="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d masterplan -Atqc \
         "SELECT
             EXISTS (
@@ -1056,6 +1104,19 @@ mp_prepare_runtime_permissions() {
     # bind mount; signatures prevent a readable file from being trusted after
     # modification.
     chmod 0755 "$compliance_receipt_dir" || return 1
+    # Container activation and read-only reconciliation both enter through
+    # this authoritative contract. Keep existing secret mounts readable by
+    # the fixed Backend identity even if a prior ceremony replaced a file.
+    [ ! -d "$MP_ROOT/secrets" ] || mp_prepare_backend_secret_permissions || return 1
+    # Evidence is a shared host/container runtime boundary too. Snapshot,
+    # recovery, and interrupted candidate paths can replace the bind source;
+    # never leave a pre-existing store owned by the host deploy identity when
+    # the fixed Backend UID is the only identity permitted to traverse it.
+    # Do not initialise Evidence early merely because another runtime path is
+    # prepared: ordinary deployment owns first creation and key setup.
+    if [ -e "$MP_ROOT/state/evidence" ] || [ -L "$MP_ROOT/state/evidence" ]; then
+        mp_prepare_evidence_store || return 1
+    fi
 }
 
 # Validate the host side of the runtime permission contract without changing
@@ -1159,13 +1220,23 @@ mp_build_frontend_container() {
 
 # Print the active reverse-proxy topology without changing service state.
 mp_caddy_mode() {
-    mp_compose_init
-    if "${MP_COMPOSE[@]}" config --services 2>/dev/null | grep -Fxq caddy; then
+    local services status=0
+    if mp_compose_init; then
+        services="$("${MP_COMPOSE[@]}" config --services 2>/dev/null)" || status=$?
+    else
+        status=1
+    fi
+    if [ "$status" -eq 0 ] && grep -Fxq caddy <<< "$services"; then
         printf 'container\n'
     elif command -v systemctl >/dev/null 2>&1 \
         && systemctl cat caddy >/dev/null 2>&1 \
         && [ -f "$MP_HOST_CADDYFILE" ]; then
         printf 'host\n'
+    elif [ "$status" -ne 0 ]; then
+        # Docker/Compose can briefly reject an exec immediately after a
+        # recreate. That is an execution failure, not proof that this
+        # installation has no managed Caddy topology.
+        printf 'indeterminate\n'
     else
         printf 'unavailable\n'
     fi
@@ -1212,6 +1283,11 @@ mp_caddy_validate() {
                 return 22
             fi
             ;;
+        indeterminate)
+            MP_CADDY_FAILURE_CODE=CADDY_EXECUTION_FAILED
+            MP_CADDY_FAILURE_MESSAGE="Docker Compose could not resolve the active Caddy topology."
+            return 21
+            ;;
         *)
             MP_CADDY_FAILURE_CODE=CADDY_TOPOLOGY_UNAVAILABLE
             MP_CADDY_FAILURE_MESSAGE="No managed Caddy topology is available."
@@ -1219,6 +1295,36 @@ mp_caddy_validate() {
             ;;
     esac
     return 0
+}
+
+# Wait through Docker's bounded create/start/exec convergence window without
+# hiding a deterministic configuration error.  Compose can report a newly
+# started container as running immediately before docker exec or inspect sees
+# the replacement identity; a one-shot validation at that boundary made fresh
+# peer activation nondeterministic.
+mp_wait_for_caddy_validation() {
+    local timeout="${1:-30}" deadline rc=20
+    [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || return 2
+    deadline=$((SECONDS + timeout))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if mp_caddy_validate; then
+            return 0
+        else
+            rc=$?
+        fi
+        case "${MP_CADDY_FAILURE_CODE:-}" in
+            CADDY_CONFIGURATION_INVALID|CADDY_TOPOLOGY_UNAVAILABLE)
+                return "$rc"
+                ;;
+            CADDY_CONTAINER_UNAVAILABLE|CADDY_SERVICE_UNAVAILABLE|CADDY_EXECUTION_FAILED)
+                sleep 1
+                ;;
+            *)
+                return "$rc"
+                ;;
+        esac
+    done
+    return "$rc"
 }
 
 # Require several consecutive healthy observations before commissioning stores
@@ -1231,7 +1337,7 @@ mp_wait_for_stable_local_services() {
     while [ "$SECONDS" -lt "$deadline" ]; do
         if mp_wait_for_database 1 >/dev/null 2>&1 \
             && mp_wait_for_backend_health 1 \
-            && mp_caddy_validate >/dev/null 2>&1 \
+            && mp_wait_for_caddy_validation 3 >/dev/null 2>&1 \
             && mp_origin_tls_health_once; then
             successes=$((successes + 1))
             [ "$successes" -ge "$required" ] && return 0
@@ -1480,12 +1586,28 @@ mp_wait_for_public_health() {
     return 1
 }
 
-# Wait until PostgreSQL accepts connections for the application role.
+# Return success only for the final PostgreSQL server owned by container PID 1.
+# The official image starts a temporary bootstrap server while initialising an
+# empty volume.  That server can answer pg_isready immediately before the
+# entrypoint deliberately shuts it down, so accepting pg_isready alone creates
+# a race for fresh commissioning, restore, and first-copy activation.
+mp_database_runtime_ready() {
+    mp_compose_init
+    "${MP_COMPOSE[@]}" exec -T db sh -c \
+        '[ "$(cat /proc/1/comm 2>/dev/null)" = postgres ]' \
+        >/dev/null 2>&1 \
+        && "${MP_COMPOSE[@]}" exec -T db \
+            pg_isready -U masterplan -d masterplan >/dev/null 2>&1
+}
+
+# Wait until the final PostgreSQL process accepts connections for the
+# application role.  This is safe for both fresh and already-initialised
+# volumes and centralises the readiness contract for every management path.
 mp_wait_for_database() {
     local attempts="${1:-30}"
     mp_compose_init
     for _ in $(seq 1 "$attempts"); do
-        if "${MP_COMPOSE[@]}" exec -T db pg_isready -U masterplan -d masterplan >/dev/null 2>&1; then
+        if mp_database_runtime_ready; then
             return 0
         fi
         sleep 2

@@ -589,7 +589,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | minimist | 1.2.8 | MIT | `web/package-lock.json` |
 | ms | 2.1.3 | MIT | `web/package-lock.json` |
 | mz | 2.7.0 | MIT | `web/package-lock.json` |
-| nanoid | 3.3.17 | MIT | `web/package-lock.json` |
+| nanoid | 3.3.18 | MIT | `web/package-lock.json` |
 | napi-postinstall | 0.3.4 | MIT | `web/package-lock.json` |
 | natural-compare | 1.4.0 | MIT | `web/package-lock.json` |
 | next | 16.2.11 | MIT | `web/package-lock.json` |

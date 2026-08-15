@@ -664,7 +664,8 @@ mp_wipe_database() {
     new_token="$(mp_random_secret)"
     mp_compose_init
     "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
-    if ! "${MP_COMPOSE[@]}" exec -T db dropdb --if-exists --force -U masterplan masterplan \
+    if ! mp_wait_for_database 30 \
+        || ! "${MP_COMPOSE[@]}" exec -T db dropdb --if-exists --force -U masterplan masterplan \
         || ! "${MP_COMPOSE[@]}" exec -T db createdb -U masterplan masterplan; then
         unset new_token
         mp_guard_rollback "Database recreation failed."
@@ -815,7 +816,7 @@ SQL
     mp_compose_init
     if ! "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend >/dev/null \
         || ! mp_caddy_reload \
-        || ! mp_caddy_validate \
+        || ! mp_wait_for_caddy_validation 30 \
         || ! mp_wait_for_local_health 45; then
         unset new_token
         mp_guard_rollback "The new domain did not become healthy."
@@ -1418,7 +1419,7 @@ mp_rebuild_frontend() {
         ui_error "The frontend was built, but Caddy could not be reloaded."
         return 1
     }
-    mp_caddy_validate || {
+    mp_wait_for_caddy_validation 30 || {
         mp_audit "frontend.rebuild" "failed" "caddy-validation"
         ui_error "The frontend was built, but Caddy validation failed."
         return 1

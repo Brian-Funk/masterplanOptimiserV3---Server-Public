@@ -948,7 +948,7 @@ def test_root_reset_is_authentication_scoped_and_domain_change_is_topology_aware
     assert 'label == old " {" && !done {sub(old, new); done=1}' in domain_body
     assert '"$MP_HOST_CADDYFILE"' in domain_body
     assert "mp_caddy_reload" in domain_body
-    assert "mp_caddy_validate" in domain_body
+    assert "mp_wait_for_caddy_validation 30" in domain_body
 
 
 def test_database_wipe_recreates_schema_then_applies_committed_migrations():

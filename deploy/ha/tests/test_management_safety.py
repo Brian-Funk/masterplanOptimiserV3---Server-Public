@@ -28,6 +28,7 @@ INSTALL_SERVICES_SOURCE = (ROOT / "deploy/ha/install_services.sh").read_text(enc
 AUTOMATIC_SNAPSHOTS_SOURCE = (ROOT / "deploy/ha/automatic_snapshots.sh").read_text(encoding="utf-8")
 REPLICATION_SERVICE_SOURCE = (ROOT / "deploy/ha/mp-opt-ha-replication.service").read_text(encoding="utf-8")
 REPLICATION_SOURCE = (ROOT / "deploy/ha/replicate_now.sh").read_text(encoding="utf-8")
+PROMOTE_SOURCE = (ROOT / "deploy/ha/promote_local.sh").read_text(encoding="utf-8")
 RECOVERY_KEY_PATH = ROOT / "deploy/ha/recovery_key_setup.py"
 PORTABLE_TOOL_PATH = ROOT / "deploy/management/portable_snapshot.py"
 SPEC = importlib.util.spec_from_file_location("recovery_key_setup", RECOVERY_KEY_PATH)
@@ -260,6 +261,8 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
         self.assertIn('chmod 1733 "$request_dir"', runtime)
         self.assertIn('chmod 1733 "$compliance_request_dir"', runtime)
         self.assertIn('chmod 0755 "$compliance_receipt_dir"', runtime)
+        self.assertIn('[ -e "$MP_ROOT/state/evidence" ] || [ -L "$MP_ROOT/state/evidence" ]', runtime)
+        self.assertIn("mp_prepare_evidence_store || return 1", runtime)
         self.assertNotIn('install -d -m 0700 "$MP_ROOT/runtime/ha-requests"', INSTALL_SERVICES_SOURCE)
         self.assertGreaterEqual(
             INSTALL_SERVICES_SOURCE.count("mp_prepare_runtime_permissions"),
@@ -290,6 +293,70 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_lease_promotion_validates_without_sudo_permission_repair(self) -> None:
+        validation_only = function_body(COMMON_SOURCE, "mp_compose_init_existing_runtime")
+        self.assertIn("mp_validate_action_profile_permissions ha", validation_only)
+        self.assertIn("mp_compose_build_command", validation_only)
+        self.assertNotIn("mp_prepare_runtime_permissions", validation_only)
+        self.assertIn("mp_compose_init_existing_runtime", PROMOTE_SOURCE)
+        self.assertNotIn("mp_compose_init\n", PROMOTE_SOURCE)
+
+    def test_validation_only_compose_init_runs_with_no_privilege_escalation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = base / "application"
+            state = base / "state"
+            ha_home = base / "ha"
+            for path in (root / "secrets", state, ha_home / "secrets"):
+                path.mkdir(parents=True, mode=0o700)
+                path.chmod(0o700)
+            ha_home.chmod(0o700)
+            runtime_modes = {
+                "ha-requests": 0o1733,
+                "ha-deferred-requests": 0o700,
+                "ha-jobs": 0o700,
+                "ha-operation-results": 0o711,
+                "compliance-requests": 0o1733,
+                "compliance-receipts": 0o755,
+            }
+            runtime = root / "runtime"
+            runtime.mkdir(mode=0o711)
+            runtime.chmod(0o711)
+            for name, mode in runtime_modes.items():
+                path = runtime / name
+                path.mkdir(mode=mode)
+                path.chmod(mode)
+            environment = root / ".env"
+            environment.write_text("DOMAIN=example.invalid\n", encoding="ascii")
+            environment.chmod(0o600)
+            ha_config = ha_home / "node.env"
+            ha_config.write_text(
+                "HA_MODE=ha\nHA_ROLE=dynamic\nHA_NODE_ID=node-a\n"
+                "HA_CLUSTER_ID=mp-opt-test\nHA_PEER_NODE_ID=node-b\n"
+                "HA_WITNESS_URL=https://witness.example.invalid\n",
+                encoding="ascii",
+            )
+            ha_config.chmod(0o600)
+            script = f'''
+                set -Eeuo pipefail
+                export MP_ROOT={shlex.quote(str(root))}
+                export MP_STATE={shlex.quote(str(state))}
+                export MP_HA_HOME={shlex.quote(str(ha_home))}
+                export MP_HA_CONFIG={shlex.quote(str(ha_config))}
+                source {shlex.quote(str(ROOT / "deploy/management/common.sh"))}
+                sudo() {{ printf 'sudo must not run\\n' >&2; return 99; }}
+                mp_compose_init_existing_runtime
+                [ "${{MP_COMPOSE[0]}}" = docker ]
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("sudo must not run", result.stderr)
 
     def test_every_menu_action_has_an_explicit_permission_profile(self) -> None:
         actions = set(re.findall(r"mp_run_action\s+([A-Za-z0-9_]+)", MENU_SOURCE))
@@ -327,6 +394,21 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
         self.assertIn("mp_origin_tls_health_once", validation)
         self.assertIn("local installation remains valid", validation)
         self.assertNotIn("mp_public_https_get /health >/dev/null; then printf 'healthy\\n'; else", validation)
+
+    def test_replication_preflights_backend_evidence_access(self) -> None:
+        permission_prepare = REPLICATION_SOURCE.index("mp_prepare_runtime_permissions")
+        evidence_presence = REPLICATION_SOURCE.index("The evidence store is missing or unsafe.")
+        effective_access = REPLICATION_SOURCE.index(
+            "The Backend identity cannot read the protected evidence store."
+        )
+        archive = REPLICATION_SOURCE.index("exec -T backend tar -C /evidence -cf - .")
+        bounded_capture = REPLICATION_SOURCE.index(
+            "The protected evidence store could not be captured for replication."
+        )
+        self.assertLess(permission_prepare, evidence_presence)
+        self.assertLess(evidence_presence, effective_access)
+        self.assertLess(effective_access, archive)
+        self.assertLess(archive, bounded_capture)
 
     def test_caddy_validation_distinguishes_service_exec_and_configuration_failures(self) -> None:
         validation = function_body(COMMON_SOURCE, "mp_caddy_validate")
@@ -383,6 +465,7 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
                 export MP_ROOT={shlex.quote(str(ROOT))}
                 source "$MP_ROOT/deploy/management/snapshots.sh"
                 mp_compose_init() {{ MP_COMPOSE=(fake_compose); }}
+                mp_wait_for_database() {{ return 0; }}
                 fake_compose() {{
                     case "$*" in
                         "up -d db") return 0 ;;

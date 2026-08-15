@@ -90,7 +90,7 @@ cleanup() {
     local result="$?"
     set +e
     if [ -n "$snapshot_input" ]; then
-        printf 'ROLLBACK;\n\\q\n' >"$snapshot_input" 2>/dev/null || true
+        printf 'ROLLBACK;\n\\q\n' 2>/dev/null >"$snapshot_input" || true
     fi
     [ -z "$snapshot_pid" ] || wait "$snapshot_pid" 2>/dev/null || true
     [ -z "$accepted_receipt" ] || rm -f -- "$accepted_receipt"
@@ -104,6 +104,8 @@ chmod -R go-rwx "$stage"
 
 mp_compose_init
 "${MP_COMPOSE[@]}" up -d db >/dev/null
+mp_wait_for_database 30 \
+    || { echo "The final local database process did not become ready for replication." >&2; exit 1; }
 mp_retire_root_bootstrap_secret
 
 # Hold the same PostgreSQL advisory lock used by every evidence mutation and
@@ -175,8 +177,12 @@ done
 # The backend already owns the mode-0700 evidence store. Stream a read-only
 # archive through that unprivileged container so the hardened replication
 # service does not need sudo or broader host filesystem permissions.
+"${MP_COMPOSE[@]}" exec -T backend sh -ec \
+    '[ "$(id -u)" = 10001 ] && test -x /evidence && test -r /evidence' \
+    || { echo "The Backend identity cannot read the protected evidence store." >&2; exit 1; }
 "${MP_COMPOSE[@]}" exec -T backend tar -C /evidence -cf - . \
-    | tar --no-same-owner -C "$stage/payload/evidence" -xf -
+    | tar --no-same-owner -C "$stage/payload/evidence" -xf - \
+    || { echo "The protected evidence store could not be captured for replication." >&2; exit 1; }
 find "$stage/payload/evidence" -type d -exec chmod 700 {} +
 find "$stage/payload/evidence" -type f -exec chmod 600 {} +
 [ -s "$stage/payload/evidence/ledger/chain-head.json" ] \

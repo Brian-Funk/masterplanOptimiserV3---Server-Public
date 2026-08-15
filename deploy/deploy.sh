@@ -8,6 +8,7 @@ umask 077
 
 PULL_LATEST=1
 FRESH_COMMISSIONING=0
+USING_CANDIDATE=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --no-pull) PULL_LATEST=0 ;;
@@ -173,7 +174,13 @@ chmod 755 "$REPO_DIR/deploy/ha/"*.sh
 if sudo -n true >/dev/null 2>&1; then
     sudo ln -sf "$REPO_DIR/manage.sh" /usr/local/bin/mp-opt
     mp_prepare_evidence_store
-    mp_publish_audit_head
+    # A full-loss replacement host is deliberately blank until the encrypted
+    # snapshot is restored. Publish an existing audit head, but do not require
+    # or invent one before recovery has restored the audit chain. If a log is
+    # present, verification remains mandatory and a malformed chain fails.
+    if [ -s "$MP_AUDIT_FILE" ]; then
+        mp_publish_audit_head
+    fi
 else
     echo "  ERROR: Passwordless sudo is required to prepare the protected evidence store."
     exit 1
@@ -197,7 +204,21 @@ fi
 
 # ── 3. Build frontend (static export) ───────────────────────
 mp_prepare_runtime_permissions
-if [ -f "$REPO_DIR/.release.env" ]; then
+if [ -f "$REPO_DIR/.test-deployment.env" ]; then
+    [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || true)" = test ] \
+        || { echo "  ERROR: Unsigned deployment assets exist outside test policy."; exit 1; }
+    candidate_commit="$(sed -n 's/^MP_TEST_COMMIT=//p' "$REPO_DIR/.test-deployment.env" | head -1)"
+    USING_CANDIDATE=1
+    [[ "$candidate_commit" =~ ^[0-9a-f]{40}$ ]] \
+        || { echo "  ERROR: Candidate frontend identity is invalid."; exit 1; }
+    [ -s "$MP_STATE/test-deployments/candidate/receipt.json" ] \
+        && [ "$(jq -r '.commit // empty' "$MP_STATE/test-deployments/candidate/receipt.json")" = "$candidate_commit" ] \
+        || { echo "  ERROR: Candidate frontend has no matching verified bundle receipt."; exit 1; }
+    echo "[3/5] Using the verified candidate frontend from ${candidate_commit:0:12}..."
+    test -s "$REPO_DIR/web/out/index.html" \
+        && test -s "$REPO_DIR/runtime/frontend-csp.caddy" \
+        || { echo "  ERROR: Candidate frontend assets are incomplete. Restage the exact bundle."; exit 1; }
+elif [ -f "$REPO_DIR/.release.env" ]; then
     echo "[3/5] Using the verified frontend from $(grep -m1 '^MP_RELEASE_TAG=' .release.env | cut -d= -f2-)..."
     test -s "$REPO_DIR/web/out/index.html" \
         && test -s "$REPO_DIR/runtime/frontend-csp.caddy" \
@@ -224,7 +245,9 @@ mp_prepare_runtime_permissions
 # ── 4. Build and start containers ───────────────────────────
 echo "[4/5] Starting the database and applying schema updates..."
 "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
-if [ -f "$REPO_DIR/.release.env" ]; then
+if [ "$USING_CANDIDATE" -eq 1 ]; then
+    echo "       Using locally verified digest-pinned candidate images..."
+elif [ -f "$REPO_DIR/.release.env" ]; then
     echo "       Using digest-pinned, signature-verified production images..."
     "${MP_COMPOSE[@]}" pull db caddy backend
 else
@@ -265,7 +288,12 @@ if ! mp_verify_database_schema_contract; then
 fi
 
 echo "       Starting application containers..."
-if [ -f "$REPO_DIR/.release.env" ]; then
+if [ "$USING_CANDIDATE" -eq 1 ]; then
+    # Candidate registry credentials are intentionally destroyed immediately
+    # after the exact digests are pulled. Recovery must consume those local
+    # verified images and must never perform a second unauthenticated pull.
+    "${MP_COMPOSE[@]}" up -d --no-build --pull never --force-recreate --remove-orphans
+elif [ -f "$REPO_DIR/.release.env" ]; then
     "${MP_COMPOSE[@]}" up -d --no-build --force-recreate --remove-orphans
 else
     "${MP_COMPOSE[@]}" up -d --build --force-recreate --remove-orphans

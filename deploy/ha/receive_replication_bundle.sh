@@ -261,8 +261,23 @@ if [ -f "$MP_ROOT/runtime/ha-receiver.json" ]; then
 fi
 
 mp_compose_init
+# Caddy imports the generated frontend policy from this bind-mounted runtime
+# path. Validate the complete immutable frontend boundary before creating a
+# staging database or changing any local service/data state. This turns a
+# missing candidate asset into a precise, side-effect-free receiver rejection
+# instead of a misleading Docker exec failure after the database swap.
+[ -s "$MP_ROOT/web/out/index.html" ] \
+    && [ -f "$MP_ROOT/runtime/frontend-csp.caddy" ] \
+    && [ ! -L "$MP_ROOT/runtime/frontend-csp.caddy" ] \
+    && [ -s "$MP_ROOT/runtime/frontend-csp.caddy" ] || {
+    echo "HA_RECEIVER_FRONTEND_ASSETS_MISSING: the verified frontend or generated CSP policy is unavailable." >&2
+    exit 1
+}
 "${MP_COMPOSE[@]}" up -d db >/dev/null
-mp_wait_for_database 30 || { echo "The replication peer database did not become ready." >&2; exit 1; }
+mp_wait_for_database 30 || {
+    echo "The replication peer final database process did not become ready." >&2
+    exit 1
+}
 stage_db="mp_stage_${bundle_id//[^A-Za-z0-9]/}"
 stage_db="${stage_db:0:48}"
 rollback_db="mp_rollback_${bundle_id//[^A-Za-z0-9]/}"
@@ -422,11 +437,7 @@ if ! "${MP_COMPOSE[@]}" exec -T db pg_isready -U masterplan -d masterplan >/dev/
     echo "HA_RECEIVER_DATABASE_HEALTH_FAILED: the replicated database is unavailable after activation." >&2
     exit 1
 fi
-if ! "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx caddy; then
-    echo "HA_RECEIVER_CADDY_NOT_RUNNING: the reverse proxy is not running after activation." >&2
-    exit 1
-fi
-if ! mp_caddy_validate; then
+if ! mp_wait_for_caddy_validation 30; then
     case "${MP_CADDY_FAILURE_CODE:-}" in
         CADDY_CONTAINER_UNAVAILABLE|CADDY_SERVICE_UNAVAILABLE)
             echo "HA_RECEIVER_CADDY_NOT_RUNNING: the reverse proxy became unavailable during validation." >&2

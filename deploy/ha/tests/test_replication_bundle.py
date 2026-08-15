@@ -470,7 +470,34 @@ class ReplicationBundleTests(unittest.TestCase):
         first_drop = receiver.index('exec -T db dropdb', database_start)
         self.assertLess(database_start, database_ready)
         self.assertLess(database_ready, first_drop)
-        self.assertIn("The replication peer database did not become ready.", receiver)
+        self.assertIn("The replication peer final database process did not become ready.", receiver)
+
+    def test_database_readiness_rejects_the_temporary_entrypoint_server(self) -> None:
+        common = (ROOT / "deploy" / "management" / "common.sh").read_text(
+            encoding="utf-8"
+        )
+        helper = common[common.index("mp_database_runtime_ready()") :]
+        helper = helper[: helper.index("\n}\n") + 3]
+        self.assertIn("/proc/1/comm", helper)
+        self.assertIn("= postgres", helper)
+        self.assertIn("pg_isready -U masterplan -d masterplan", helper)
+
+    def test_database_mutation_paths_wait_for_the_final_server(self) -> None:
+        cases = (
+            (HA_DIR / "replicate_now.sh", 'up -d db', "mp_wait_for_database 30", "mp_retire_root_bootstrap_secret"),
+            (HA_DIR / "promote_local.sh", 'up -d db', "mp_wait_for_database 30", "current_generation="),
+            (ROOT / "deploy" / "management" / "snapshots.sh", "mp_snapshot_dump_database()", "mp_wait_for_database 30", "exec -T db pg_dump"),
+            (ROOT / "deploy" / "management" / "snapshots.sh", "mp_snapshot_restore_database()", "mp_wait_for_database 30", "exec -T db dropdb"),
+            (ROOT / "deploy" / "management" / "actions.sh", "mp_wipe_database()", "mp_wait_for_database 30", "exec -T db dropdb"),
+        )
+        for path, start_marker, ready_marker, mutation_marker in cases:
+            with self.subTest(path=path.name, start=start_marker):
+                source = path.read_text(encoding="utf-8")
+                start = source.index(start_marker)
+                ready = source.index(ready_marker, start)
+                mutation = source.index(mutation_marker, ready)
+                self.assertLess(start, ready)
+                self.assertLess(ready, mutation)
 
     def test_receiver_expands_bound_marker_values_from_psql_stdin(self) -> None:
         receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(
@@ -518,6 +545,8 @@ class ReplicationBundleTests(unittest.TestCase):
         receiver_receipt = receiver.index(
             'install -m 0600 "$stage/receiver.json" "$MP_ROOT/runtime/ha-receiver.json"'
         )
+        frontend_preflight = receiver.index("HA_RECEIVER_FRONTEND_ASSETS_MISSING")
+        database_stage = receiver.index('stage_db="mp_stage_')
         accepted = receiver.index("printf 'ACCEPTED:%s:%s")
 
         for boundary in (
@@ -531,11 +560,68 @@ class ReplicationBundleTests(unittest.TestCase):
         ):
             self.assertLess(boundary, receiver_receipt)
         self.assertLess(receiver_receipt, accepted)
+        self.assertLess(frontend_preflight, database_stage)
         self.assertIn("mp_replication_caddy_requires_activation", receiver)
         self.assertIn(
             '"$caddy_service_active" "$caddy_configuration_changed"', receiver
         )
         self.assertNotIn("services_to_recreate=(backend)", receiver)
+
+    def test_receiver_waits_through_caddy_start_convergence(self) -> None:
+        receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        common = (ROOT / "deploy" / "management" / "common.sh").read_text(
+            encoding="utf-8"
+        )
+        helper = common[common.index("mp_wait_for_caddy_validation()") :]
+        helper = helper[: helper.index("\n}\n") + 3]
+        self.assertIn("mp_wait_for_caddy_validation 30", receiver)
+        self.assertIn("CADDY_CONTAINER_UNAVAILABLE", helper)
+        self.assertIn("CADDY_EXECUTION_FAILED", helper)
+        self.assertIn("sleep 1", helper)
+        self.assertIn("CADDY_CONFIGURATION_INVALID", helper)
+        self.assertLess(
+            helper.index("CADDY_CONFIGURATION_INVALID"), helper.index("sleep 1")
+        )
+
+    def test_caddy_topology_probe_failure_is_retryable_execution_failure(self) -> None:
+        common = (ROOT / "deploy" / "management" / "common.sh").read_text(
+            encoding="utf-8"
+        )
+        mode = common[common.index("mp_caddy_mode()") :]
+        mode = mode[: mode.index("\n}\n") + 3]
+        validation = common[common.index("mp_caddy_validate()") :]
+        validation = validation[: validation.index("\n}\n") + 3]
+        self.assertIn("services=", mode)
+        self.assertIn("status=0", mode)
+        self.assertIn("indeterminate", mode)
+        self.assertLess(mode.index("systemctl"), mode.index('elif [ "$status" -ne 0 ]'))
+        self.assertIn("indeterminate)", validation)
+        self.assertIn("CADDY_EXECUTION_FAILED", validation)
+
+    def test_candidate_activation_records_public_health_failure_stage(self) -> None:
+        deployment = (ROOT / "deploy" / "test-deployment.sh").read_text(
+            encoding="utf-8"
+        )
+        setup = (ROOT / "deploy" / "management" / "setup_v2.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Candidate activation did not obtain Backend health", deployment)
+        self.assertIn("Candidate activation Caddy validation failed", deployment)
+        self.assertIn("set_apply_stage deployment-receipt", deployment)
+        self.assertIn("UNSIGNED_CANDIDATE_", setup)
+        self.assertIn("test-deployments/current-stage", setup)
+
+    def test_recent_caddy_start_and_reload_paths_use_bounded_validation(self) -> None:
+        expected = {
+            ROOT / "deploy" / "test-deployment.sh": "mp_wait_for_caddy_validation 30",
+            ROOT / "deploy" / "management" / "setup_v2.sh": "mp_wait_for_caddy_validation 30",
+            ROOT / "deploy" / "management" / "actions.sh": "mp_wait_for_caddy_validation 30",
+        }
+        for path, marker in expected.items():
+            with self.subTest(path=path.name):
+                self.assertIn(marker, path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
