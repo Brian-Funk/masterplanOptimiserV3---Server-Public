@@ -1088,6 +1088,12 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         )
         self.assertIn('if [ "$USING_CANDIDATE" -eq 1 ]; then', deploy)
         self.assertIn("up -d --no-build --pull never", deploy)
+        self.assertIn('if [ -s "$MP_AUDIT_FILE" ]; then', deploy)
+        self.assertIn("mp_publish_audit_head", deploy)
+        self.assertLess(
+            deploy.index('if [ -s "$MP_AUDIT_FILE" ]; then'),
+            deploy.index("mp_publish_audit_head"),
+        )
         restored_schema = machine[machine.index('elif .checkpoint == "restored"') :]
         restored_schema = restored_schema[: restored_schema.index("else (.values")]
         self.assertIn('["candidate_commit","recovery_identity","registry"]', restored_schema)
