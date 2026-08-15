@@ -222,6 +222,13 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn("rm -rf '$MP_TEST_HOME/peer-assets/web'", stage)
         self.assertIn("rm -rf '$MP_TEST_HOME/peer-assets/operations'", stage)
 
+        setup = (ROOT / "deploy/management/setup_v2.sh").read_text(encoding="utf-8")
+        repair = setup.split(
+            "mp_setup_prepare_unsigned_replacement_peer_if_needed()", 1
+        )[1].split("mp_setup_finalize_fresh_unsigned_peer()", 1)[0]
+        self.assertIn('"$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit"', repair)
+        self.assertNotIn('prepare_initial_peer "$commit"', repair)
+
     def test_peer_activation_repins_only_an_incomplete_join_and_propagates_failure(self) -> None:
         activate = SUPERVISOR.split("peer_activate()", 1)[1].split(
             "prepare_initial_peer()", 1

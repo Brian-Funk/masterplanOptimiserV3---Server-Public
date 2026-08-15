@@ -3450,7 +3450,7 @@ mp_setup_prepare_unsigned_replacement_peer_if_needed() {
     fi
     commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")" || return 1
     [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
-    prepare_initial_peer "$commit" false
+    "$MP_ROOT/deploy/test-deployment.sh" prepare-peer "$commit"
 }
 
 # A fresh or replacement unsigned peer is deliberately staged before shared
