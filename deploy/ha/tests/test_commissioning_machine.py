@@ -1018,6 +1018,19 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("mp_setup_verify_smtp_and_dns_machine", SETUP)
         self.assertIn("WITNESS_ROUTING witness_ready", SETUP)
 
+    def test_machine_reconcile_retires_bootstrap_before_accepting_browser_completion(self) -> None:
+        reconcile = SETUP[SETUP.index("mp_setup_machine_reconcile()") :]
+        reconcile = reconcile[: reconcile.index("mp_setup_machine_advance_one()")]
+        retirement = reconcile.index("mp_retire_root_bootstrap_secret || return 1")
+        validation = reconcile.index(
+            "mp_validate_retired_root_bootstrap_secret_existing_runtime || return 1"
+        )
+        stage = reconcile.index('stage="$(mp_setup_commissioning_stage')
+        completed = reconcile.index("mp_setup_state_mark root_commissioning_complete")
+        self.assertLess(retirement, validation)
+        self.assertLess(validation, stage)
+        self.assertLess(stage, completed)
+
     def test_witness_transport_unavailability_remains_retryable(self) -> None:
         machine_case = SETUP[SETUP.index("        witness_ready)") :]
         machine_case = machine_case[: machine_case.index("        root_commissioning_complete)")]

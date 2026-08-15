@@ -1,6 +1,8 @@
 """Tests for admin event endpoints."""
 from types import SimpleNamespace
 
+import pytest
+
 from app.core.config import settings
 from app.models.event import Event
 from app.models.ha import HAProtectionOperation
@@ -134,8 +136,12 @@ def test_ha_queue_failure_rejects_event_before_commit(
     )
 
 
+@pytest.mark.parametrize(
+    "retryable_error",
+    ["replication_queue_not_writable", "capture_failed", "runtime_contract_invalid"],
+)
 def test_root_retry_reuses_the_indeterminate_operation_without_duplicates(
-    db, monkeypatch, tmp_path,
+    db, monkeypatch, tmp_path, retryable_error,
 ):
     import app.main as main_module
     from app.core import ha_replication
@@ -160,7 +166,7 @@ def test_root_retry_reuses_the_indeterminate_operation_without_duplicates(
     )
     operation.state = "indeterminate"
     operation.stage = "attention_required"
-    operation.error_code = "replication_queue_not_writable"
+    operation.error_code = retryable_error
     db.commit()
     root = create_test_user(
         db,

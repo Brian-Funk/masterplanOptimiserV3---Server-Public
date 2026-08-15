@@ -663,6 +663,9 @@ export function PublicScheduleLinksTab({
                             "replication_queue_unsafe",
                             "replication_queue_not_writable",
                             "replication_queue_atomic_write_failed",
+                            "runtime_contract_invalid",
+                            "root_bootstrap_contract_invalid",
+                            "capture_failed",
                           ].includes(link.protection_error_code || "") && (
                           <Button
                             className="mt-2"

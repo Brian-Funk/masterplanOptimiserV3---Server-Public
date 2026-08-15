@@ -453,10 +453,12 @@ class ReplicationBundleTests(unittest.TestCase):
             'mv "$accepted_receipt" "$MP_ROOT/runtime/ha-last-accepted-bundle.json"',
             receipt,
         )
-        output = sender.index('printf \'%s\\n\' "$response"', durable_move)
+        peer_reconcile = sender.index("reconcile_peer_join_state", durable_move)
+        output = sender.index('printf \'%s\\n\' "$response"', peer_reconcile)
         self.assertLess(acknowledgement, receipt)
         self.assertLess(receipt, durable_move)
-        self.assertLess(durable_move, output)
+        self.assertLess(durable_move, peer_reconcile)
+        self.assertLess(peer_reconcile, output)
         for field in ("cluster_id", "release_hash", "target_node_id"):
             self.assertIn(field, sender)
             self.assertIn(field, receiver)
@@ -484,7 +486,7 @@ class ReplicationBundleTests(unittest.TestCase):
 
     def test_database_mutation_paths_wait_for_the_final_server(self) -> None:
         cases = (
-            (HA_DIR / "replicate_now.sh", 'up -d db', "mp_wait_for_database 30", "mp_retire_root_bootstrap_secret"),
+            (HA_DIR / "replicate_now.sh", "mp_compose_init_existing_runtime", "mp_wait_for_database 30", "coproc SNAPSHOT_SESSION"),
             (HA_DIR / "promote_local.sh", 'up -d db', "mp_wait_for_database 30", "current_generation="),
             (ROOT / "deploy" / "management" / "snapshots.sh", "mp_snapshot_dump_database()", "mp_wait_for_database 30", "exec -T db pg_dump"),
             (ROOT / "deploy" / "management" / "snapshots.sh", "mp_snapshot_restore_database()", "mp_wait_for_database 30", "exec -T db dropdb"),

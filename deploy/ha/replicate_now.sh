@@ -44,6 +44,22 @@ peer_confirms_bundle() {
     return 0
 }
 
+reconcile_peer_join_state() {
+    local output attempt
+    for attempt in 1 2 3; do
+        output="$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
+            -o ClearAllForwardings=yes "$HA_PEER_SSH" \
+            '/usr/local/bin/mp-opt setup reconcile --json' 2>/dev/null)" || {
+            sleep 1
+            continue
+        }
+        [ "$(jq -r '.run_state // empty' <<< "$output" 2>/dev/null)" = complete ] \
+            && return 0
+        sleep 1
+    done
+    return 1
+}
+
 assert_current_holder() {
     local control holder current_generation routing_ready
     control="$(cat "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
@@ -60,8 +76,22 @@ assert_current_holder() {
 
 # shellcheck source=../management/common.sh
 source "$MP_ROOT/deploy/management/common.sh"
-mp_prepare_runtime_permissions
-mp_load_ha_config
+if ! mp_compose_init_existing_runtime \
+    || ! mp_validate_action_profile_permissions evidence; then
+    echo "The installed runtime permission contract is unsafe; replication did not start." >&2
+    exit 25
+fi
+for required_service in db backend; do
+    "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null \
+        | grep -qx "$required_service" || {
+        echo "The required local service is not running: $required_service" >&2
+        exit 25
+    }
+done
+if ! mp_validate_retired_root_bootstrap_secret_existing_runtime; then
+    echo "The retired root-bootstrap contract is not valid; replication did not start." >&2
+    exit 26
+fi
 [ "$HA_MODE" = "ha" ] || exit 1
 [ "$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json")" = "$HA_NODE_ID" ] || exit 1
 generation="$(jq -r '.generation // 0' "$MP_ROOT/runtime/ha-control.json")"
@@ -102,11 +132,8 @@ mkdir -p "$stage/payload/database" "$stage/payload/config/secrets" \
     "$stage/payload/recovery" "$stage/payload/evidence"
 chmod -R go-rwx "$stage"
 
-mp_compose_init
-"${MP_COMPOSE[@]}" up -d db >/dev/null
 mp_wait_for_database 30 \
     || { echo "The final local database process did not become ready for replication." >&2; exit 1; }
-mp_retire_root_bootstrap_secret
 
 # Hold the same PostgreSQL advisory lock used by every evidence mutation and
 # keep an exported snapshot alive until both the dump and ledger copy have
@@ -265,6 +292,12 @@ sync -f "$accepted_receipt" 2>/dev/null || { rm -f "$accepted_receipt"; exit 1; 
 mv "$accepted_receipt" "$MP_ROOT/runtime/ha-last-accepted-bundle.json"
 accepted_receipt=""
 sync -f "$MP_ROOT/runtime" 2>/dev/null || exit 1
+if ! reconcile_peer_join_state; then
+    # The exact bundle remains accepted. A later replication or an explicit
+    # setup reconciliation can finish the peer's presentation state without
+    # transferring or restoring the database again.
+    echo "The peer accepted the copy but retained its resumable setup state." >&2
+fi
 printf 'MP_SENDER_TIMING capture_ms=%s transfer_round_trip_ms=%s\n' \
     "$((capture_completed_ms - sender_started_ms))" \
     "$((transfer_completed_ms - capture_completed_ms))" >&2

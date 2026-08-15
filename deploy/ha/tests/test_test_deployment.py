@@ -343,7 +343,8 @@ class TestDeploymentPlannerTests(unittest.TestCase):
             "mp_snapshot_normalise_payload_permissions()", 1,
         )[0]
         self.assertIn('$payload/evidence/ledger/chain-head.json', anchor)
-        self.assertIn('sudo -n cat "$head"', anchor)
+        self.assertIn("mp_snapshot_backend_shell", anchor)
+        self.assertNotIn("sudo", anchor)
 
     def test_accepts_only_exact_lowercase_commits_and_canonical_tags(self) -> None:
         commit = "a" * 40

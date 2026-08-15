@@ -997,11 +997,18 @@ mp_compose_validate() {
 # This lets copies exclude the obsolete bearer secret even before an operator
 # explicitly opens the root-recovery menu to clear the host file.
 mp_root_bootstrap_is_disabled() {
-    local disabled
     [ -f "$MP_ROOT/.env" ] || return 1
     mp_compose_init || return 1
     "${MP_COMPOSE[@]}" up -d db >/dev/null 2>&1 || return 1
     mp_wait_for_database 30 || return 1
+    mp_root_bootstrap_database_is_disabled
+}
+
+# Query the already-running database without preparing permissions or changing
+# service state. Hardened systemd workers use this after installation has
+# established the complete runtime contract.
+mp_root_bootstrap_database_is_disabled() {
+    local disabled
     disabled="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d masterplan -Atqc \
         "SELECT
             EXISTS (
@@ -1014,6 +1021,28 @@ mp_root_bootstrap_is_disabled() {
                 WHERE u.is_root_admin
             )" 2>/dev/null || true)"
     [ "$disabled" = t ]
+}
+
+mp_root_bootstrap_is_disabled_existing_runtime() {
+    [ -f "$MP_ROOT/.env" ] && [ ! -L "$MP_ROOT/.env" ] || return 1
+    mp_compose_init_existing_runtime || return 1
+    "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null \
+        | grep -qx db || return 1
+    mp_wait_for_database 30 || return 1
+    mp_root_bootstrap_database_is_disabled
+}
+
+# A scheduled worker may verify a retired bootstrap token, but it must never
+# repair ownership, permissions or contents while NoNewPrivileges is active.
+mp_validate_retired_root_bootstrap_secret_existing_runtime() {
+    local token="$MP_ROOT/secrets/root_bootstrap_token"
+    local expected_mode owner
+    mp_root_bootstrap_is_disabled_existing_runtime || return 1
+    [ -f "$token" ] && [ ! -L "$token" ] && [ ! -s "$token" ] || return 1
+    expected_mode="$(mp_expected_protected_file_mode "$token")" || return 1
+    [ "$(stat -c '%a' "$token" 2>/dev/null)" = "$expected_mode" ] || return 1
+    owner="$(stat -c '%u:%g' "$token" 2>/dev/null)" || return 1
+    [ "$owner" = "$(id -u):10001" ]
 }
 
 mp_retire_root_bootstrap_secret() {

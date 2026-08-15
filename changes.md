@@ -1,5 +1,44 @@
 # Changes
 
+## 3.9.10 — 15 August 2026
+
+This patch release keeps standby protection and scheduled recovery snapshots
+working under the restricted systemd identities used in production.
+
+### Standby-protection reliability
+
+- Make the replication worker validate its existing runtime contract without
+  attempting privileged repairs from inside a `NoNewPrivileges` sandbox.
+- Capture application state from the already-running database and Backend,
+  while retaining the existing permission, evidence and root-bootstrap safety
+  checks.
+- Reconcile the joining peer after the sender has durably written the exact
+  accepted-bundle receipt, so an early receiver check cannot leave Node B in a
+  stale waiting state.
+- Report permission and retired-bootstrap failures with bounded causes, and
+  allow an affected durable mutation to be retried after its runtime contract
+  is healthy.
+- Retire and verify the temporary root-bootstrap bearer value when automated
+  browser commissioning is reconciled, before the first HA copy or snapshot is
+  allowed to run.
+
+### Scheduled recovery snapshots
+
+- Run scheduled snapshots through validation-only service helpers that do not
+  invoke `sudo` or mutate permissions from the restricted oneshot unit.
+- Read evidence and its anchor through the Backend container's existing access
+  contract and require every Compose preparation step to succeed before the
+  snapshot proceeds.
+- Keep interactive root recovery paths able to repair permissions while the
+  scheduled service remains strictly non-privileged.
+
+### Commissioning qualification
+
+- Require the private commissioning laboratory to create a real protected
+  event after root setup and wait for Node B's exact acceptance receipt.
+- Require the installed scheduled-snapshot systemd unit to finish successfully
+  before a fresh HA run can pass.
+
 ## 3.9.9 — 15 August 2026
 
 This patch release makes commissioning and recovery resumable through the same

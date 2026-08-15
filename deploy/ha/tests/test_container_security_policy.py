@@ -55,7 +55,11 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
         tools = (ROOT / "infra/Dockerfile.tools").read_text(encoding="utf-8")
         compose = (ROOT / "infra/docker-compose.yml").read_text(encoding="utf-8")
 
-        self.assertIn("ARG GO_VERSION=1.26.5", caddy)
+        self.assertIn("ARG GO_VERSION=1.26.6", caddy)
+        self.assertIn(
+            "golang:${GO_VERSION}-alpine@sha256:af8d6740070b8906d12eae1c3e3ea0957fb63f492051ea05e354c38ef9fe88df",
+            caddy,
+        )
         self.assertIn("ARG GRPC_VERSION=v1.82.1", caddy)
         self.assertIn("ARG X_TEXT_VERSION=v0.39.0", caddy)
         self.assertIn("xcaddy build ${CADDY_VERSION}", caddy)
@@ -89,7 +93,11 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
             'grep -F "=> google.golang.org/grpc ${GRPC_VERSION}"', caddy
         )
         self.assertIn("RUN apk upgrade --no-cache", caddy)
-        self.assertIn("ARG GO_VERSION=1.26.5", postgres)
+        self.assertIn("ARG GO_VERSION=1.26.6", postgres)
+        self.assertIn(
+            "golang:${GO_VERSION}-alpine@sha256:af8d6740070b8906d12eae1c3e3ea0957fb63f492051ea05e354c38ef9fe88df",
+            postgres,
+        )
         self.assertIn("go install github.com/tianon/gosu@${GOSU_VERSION}", postgres)
         self.assertIn("FROM postgres:16-alpine", postgres)
         self.assertIn("FROM node:25-alpine", tools)
@@ -166,7 +174,7 @@ class ContainerSecurityPolicyTests(unittest.TestCase):
         self.assertIn('for attempt in 1 2 3; do', workflow)
         for image in (
             "python:3.14-alpine",
-            "golang:1.26.5-alpine",
+            "golang:1.26.6-alpine",
             "caddy:2-alpine",
             "postgres:16-alpine",
             "aquasec/trivy:0.72.0",

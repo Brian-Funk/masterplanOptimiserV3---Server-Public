@@ -866,6 +866,9 @@ def _advance_peer_protection(
             "replication_queue_unsafe",
             "replication_queue_not_writable",
             "replication_queue_atomic_write_failed",
+            "runtime_contract_invalid",
+            "root_bootstrap_contract_invalid",
+            "capture_failed",
         }
     ):
         queue_error = queue_protection_operation(operation, privacy_assertion=assertion)

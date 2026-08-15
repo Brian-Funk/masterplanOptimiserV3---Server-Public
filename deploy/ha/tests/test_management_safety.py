@@ -396,7 +396,10 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
         self.assertNotIn("mp_public_https_get /health >/dev/null; then printf 'healthy\\n'; else", validation)
 
     def test_replication_preflights_backend_evidence_access(self) -> None:
-        permission_prepare = REPLICATION_SOURCE.index("mp_prepare_runtime_permissions")
+        permission_validation = REPLICATION_SOURCE.index("mp_compose_init_existing_runtime")
+        retired_bootstrap = REPLICATION_SOURCE.index(
+            "mp_validate_retired_root_bootstrap_secret_existing_runtime"
+        )
         evidence_presence = REPLICATION_SOURCE.index("The evidence store is missing or unsafe.")
         effective_access = REPLICATION_SOURCE.index(
             "The Backend identity cannot read the protected evidence store."
@@ -405,7 +408,10 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
         bounded_capture = REPLICATION_SOURCE.index(
             "The protected evidence store could not be captured for replication."
         )
-        self.assertLess(permission_prepare, evidence_presence)
+        self.assertNotIn("mp_prepare_runtime_permissions", REPLICATION_SOURCE)
+        self.assertNotIn("mp_retire_root_bootstrap_secret", REPLICATION_SOURCE)
+        self.assertLess(permission_validation, retired_bootstrap)
+        self.assertLess(retired_bootstrap, evidence_presence)
         self.assertLess(evidence_presence, effective_access)
         self.assertLess(effective_access, archive)
         self.assertLess(archive, bounded_capture)
@@ -1080,6 +1086,18 @@ class RecoveryKeyWorkflowTests(unittest.TestCase):
         self.assertLess(body.index('stop backend'), body.index('mp_snapshot_dump_database'))
         self.assertIn('mp_snapshot_write_evidence_anchor "$staging/payload"', body)
         self.assertIn('up -d --no-deps backend', body)
+
+    def test_hardened_automatic_workers_never_request_permission_repair(self) -> None:
+        compose = function_body(SNAPSHOT_SOURCE, "mp_snapshot_compose_init")
+        evidence = function_body(SNAPSHOT_SOURCE, "mp_snapshot_backend_shell")
+        copy_configuration = function_body(SNAPSHOT_SOURCE, "mp_snapshot_copy_configuration")
+        anchor = function_body(SNAPSHOT_SOURCE, "mp_snapshot_write_evidence_anchor")
+        self.assertIn("MP_SNAPSHOT_SERVICE_MODE=1", AUTOMATIC_SNAPSHOTS_SOURCE)
+        self.assertIn("mp_validate_action_profile_permissions snapshot", compose)
+        self.assertIn("mp_validate_action_profile_permissions evidence", compose)
+        self.assertIn("run --rm -T --no-deps --entrypoint sh backend", evidence)
+        self.assertNotIn("sudo", copy_configuration)
+        self.assertNotIn("sudo", anchor)
 
     def test_restore_uses_snapshot_key_and_current_rollback_key_separately(self) -> None:
         body = function_body(SNAPSHOT_SOURCE, "mp_snapshot_restore_interactive")

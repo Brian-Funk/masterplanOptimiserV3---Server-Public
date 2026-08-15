@@ -4,7 +4,7 @@ set -Eeuo pipefail
 umask 077
 
 MP_ROOT="${MP_ROOT:-/opt/masterplan}"
-export MP_ROOT MP_TUI=ansi
+export MP_ROOT MP_TUI=ansi MP_SNAPSHOT_SERVICE_MODE=1
 
 # shellcheck source=../management/common.sh
 source "$MP_ROOT/deploy/management/common.sh"
@@ -15,6 +15,10 @@ mp_initialise_paths
 mp_load_ha_config
 [ "$HA_MODE" = "ha" ] || exit 0
 [ "$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null)" = "$HA_NODE_ID" ] || exit 0
+mp_snapshot_compose_init || {
+    printf 'Automatic snapshot stopped: the installed runtime permission contract is unsafe.\n' >&2
+    exit 1
+}
 
 # A scheduled snapshot may overlap a deliberate operator workflow such as a
 # portable export or recovery-key rotation.  That contention is expected: do
