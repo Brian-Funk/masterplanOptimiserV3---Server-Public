@@ -1325,6 +1325,11 @@ mp_setup_machine_advance_one() {
                 fi
                 mp_setup_state_action "Replicating complete application state to Node B" \
                     FIRST_BUNDLE_TRANSFER replicated || return 1
+                mp_setup_prepare_unsigned_replacement_peer_if_needed || {
+                    mp_setup_state_failure PEER_CANDIDATE_PREPARATION_FAILED \
+                        "Node B could not reinstall and verify the exact candidate runtime assets, so no replication bundle was sent." || true
+                    return 1
+                }
                 mp_setup_verify_unsigned_peer_identity || {
                     mp_setup_state_failure PEER_CANDIDATE_IDENTITY_MISMATCH \
                         "Node B is not bound to the exact candidate identity, so no replication bundle was sent." || true
@@ -3430,6 +3435,24 @@ mp_setup_verify_unsigned_peer_identity() {
         /opt/masterplan/deploy/test-deployment.sh internal-verify-peer-identity "$commit"
 }
 
+# A retry may arrive after an older supervisor recorded application_deployed
+# on the surviving node before the replacement peer had received its exact
+# frontend and CSP assets. Repair that pre-copy state from the already verified
+# local candidate. No registry access is needed because candidate activation
+# has already proved and retained all four image digests on this node.
+mp_setup_prepare_unsigned_replacement_peer_if_needed() {
+    local mode lane commit
+    mode="$(jq -r '.mode // empty' "$MP_SETUP_V2_STATE")" || return 1
+    lane="$(jq -r '.deployment_lane // empty' "$MP_SETUP_V2_STATE")" || return 1
+    [ "$mode" = replace-primary ] && [ "$lane" = unsigned ] || return 0
+    if mp_setup_verify_unsigned_peer_identity >/dev/null 2>&1; then
+        return 0
+    fi
+    commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")" || return 1
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
+    prepare_initial_peer "$commit" false
+}
+
 # A fresh or replacement unsigned peer is deliberately staged before shared
 # configuration is available. The first accepted replication bundle activates
 # that staged candidate. Record the exact candidate receipt only after sender
@@ -3575,6 +3598,11 @@ mp_setup_primary_resume() {
         mp_setup_state_action "Replicating complete application state to Node B" \
             FIRST_BUNDLE_TRANSFER replicated || return 1
         if ! mp_setup_record_first_verified_bundle; then
+            mp_setup_prepare_unsigned_replacement_peer_if_needed || {
+                mp_setup_state_failure PEER_CANDIDATE_PREPARATION_FAILED \
+                    "Node B could not reinstall and verify the exact candidate runtime assets, so no replication bundle was sent." || true
+                return 1
+            }
             mp_setup_verify_unsigned_peer_identity || {
                 mp_setup_state_failure PEER_CANDIDATE_IDENTITY_MISMATCH \
                     "Node B is not bound to the exact candidate identity, so no replication bundle was sent." || true

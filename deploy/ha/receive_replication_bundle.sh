@@ -261,6 +261,18 @@ if [ -f "$MP_ROOT/runtime/ha-receiver.json" ]; then
 fi
 
 mp_compose_init
+# Caddy imports the generated frontend policy from this bind-mounted runtime
+# path. Validate the complete immutable frontend boundary before creating a
+# staging database or changing any local service/data state. This turns a
+# missing candidate asset into a precise, side-effect-free receiver rejection
+# instead of a misleading Docker exec failure after the database swap.
+[ -s "$MP_ROOT/web/out/index.html" ] \
+    && [ -f "$MP_ROOT/runtime/frontend-csp.caddy" ] \
+    && [ ! -L "$MP_ROOT/runtime/frontend-csp.caddy" ] \
+    && [ -s "$MP_ROOT/runtime/frontend-csp.caddy" ] || {
+    echo "HA_RECEIVER_FRONTEND_ASSETS_MISSING: the verified frontend or generated CSP policy is unavailable." >&2
+    exit 1
+}
 "${MP_COMPOSE[@]}" up -d db >/dev/null
 mp_wait_for_database 30 || {
     echo "The replication peer final database process did not become ready." >&2

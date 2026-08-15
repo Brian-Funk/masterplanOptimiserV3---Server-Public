@@ -545,6 +545,8 @@ class ReplicationBundleTests(unittest.TestCase):
         receiver_receipt = receiver.index(
             'install -m 0600 "$stage/receiver.json" "$MP_ROOT/runtime/ha-receiver.json"'
         )
+        frontend_preflight = receiver.index("HA_RECEIVER_FRONTEND_ASSETS_MISSING")
+        database_stage = receiver.index('stage_db="mp_stage_')
         accepted = receiver.index("printf 'ACCEPTED:%s:%s")
 
         for boundary in (
@@ -558,6 +560,7 @@ class ReplicationBundleTests(unittest.TestCase):
         ):
             self.assertLess(boundary, receiver_receipt)
         self.assertLess(receiver_receipt, accepted)
+        self.assertLess(frontend_preflight, database_stage)
         self.assertIn("mp_replication_caddy_requires_activation", receiver)
         self.assertIn(
             '"$caddy_service_active" "$caddy_configuration_changed"', receiver

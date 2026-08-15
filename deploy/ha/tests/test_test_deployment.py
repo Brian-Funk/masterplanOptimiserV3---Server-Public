@@ -208,6 +208,20 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn('verify_exact_test_environment "$target"', verify)
         self.assertIn('(.mode | IN("ha-join","replace-node"))', verify)
 
+        environment = SUPERVISOR.split("verify_exact_test_environment()", 1)[1].split(
+            "internal_verify_peer_identity()", 1
+        )[0]
+        self.assertIn('$MP_ROOT/web/out/index.html', environment)
+        self.assertIn('$MP_ROOT/runtime/frontend-csp.caddy', environment)
+
+    def test_operations_only_peer_staging_preserves_frontend_assets(self) -> None:
+        stage = SUPERVISOR.split("peer_stage_prebuilt()", 1)[1].split(
+            "peer_activate()", 1
+        )[0]
+        self.assertNotIn("rm -rf '$MP_TEST_HOME/peer-assets'", stage)
+        self.assertIn("rm -rf '$MP_TEST_HOME/peer-assets/web'", stage)
+        self.assertIn("rm -rf '$MP_TEST_HOME/peer-assets/operations'", stage)
+
     def test_peer_activation_repins_only_an_incomplete_join_and_propagates_failure(self) -> None:
         activate = SUPERVISOR.split("peer_activate()", 1)[1].split(
             "prepare_initial_peer()", 1

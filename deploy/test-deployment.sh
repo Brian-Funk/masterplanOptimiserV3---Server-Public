@@ -946,15 +946,18 @@ peer_stage_prebuilt() {
     local target="$1" components="$2"
     [[ "$target" =~ ^[0-9a-f]{40}$ ]] || return 1
     scp -q "$MP_TEST_ENV" mp-opt-ha-peer:/tmp/mp-opt-test-deployment.env || return 1
-    ssh -T -o BatchMode=yes mp-opt-ha-peer \
-        "rm -rf '$MP_TEST_HOME/peer-assets' && mkdir -p '$MP_TEST_HOME/peer-assets'" \
-        || return 1
     if grep -qw frontend <<< "$components"; then
+        ssh -T -o BatchMode=yes mp-opt-ha-peer \
+            "mkdir -p '$MP_TEST_HOME/peer-assets' && rm -rf '$MP_TEST_HOME/peer-assets/web' '$MP_TEST_HOME/peer-assets/runtime'" \
+            || return 1
         tar -C "$MP_TEST_SOURCE" -czf - web/out runtime/frontend-csp.caddy \
             | ssh -T -o BatchMode=yes mp-opt-ha-peer \
                 "tar -C '$MP_TEST_HOME/peer-assets' -xzf -" \
             || return 1
     fi
+    ssh -T -o BatchMode=yes mp-opt-ha-peer \
+        "mkdir -p '$MP_TEST_HOME/peer-assets' && rm -rf '$MP_TEST_HOME/peer-assets/operations'" \
+        || return 1
     tar -C "$MP_TEST_CANDIDATE_OPERATIONS" -czf - \
         deploy infra manage.sh configure-production.sh \
         | ssh -T -o BatchMode=yes mp-opt-ha-peer \
@@ -1170,6 +1173,11 @@ verify_exact_test_environment() {
     local target="$1" short key value candidate manifest_key expected
     short="${target:0:12}"
     [ "$(sed -n 's/^MP_TEST_COMMIT=//p' "$MP_TEST_ENV" 2>/dev/null | head -1)" = "$target" ] \
+        || return 1
+    [ -s "$MP_ROOT/web/out/index.html" ] \
+        && [ -f "$MP_ROOT/runtime/frontend-csp.caddy" ] \
+        && [ ! -L "$MP_ROOT/runtime/frontend-csp.caddy" ] \
+        && [ -s "$MP_ROOT/runtime/frontend-csp.caddy" ] \
         || return 1
     candidate="$MP_TEST_CANDIDATE_RECEIPT"
     for key in MP_BACKEND_IMAGE MP_CADDY_IMAGE MP_POSTGRES_IMAGE MP_TOOLS_IMAGE; do
