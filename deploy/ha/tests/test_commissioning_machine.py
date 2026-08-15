@@ -1086,6 +1086,8 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
             deploy.index('[ -f "$REPO_DIR/.test-deployment.env" ]'),
             deploy.index('[ -f "$REPO_DIR/.release.env" ]'),
         )
+        self.assertIn('if [ "$USING_CANDIDATE" -eq 1 ]; then', deploy)
+        self.assertIn("up -d --no-build --pull never", deploy)
         restored_schema = machine[machine.index('elif .checkpoint == "restored"') :]
         restored_schema = restored_schema[: restored_schema.index("else (.values")]
         self.assertIn('["candidate_commit","recovery_identity","registry"]', restored_schema)

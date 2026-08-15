@@ -8,6 +8,7 @@ umask 077
 
 PULL_LATEST=1
 FRESH_COMMISSIONING=0
+USING_CANDIDATE=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --no-pull) PULL_LATEST=0 ;;
@@ -201,6 +202,7 @@ if [ -f "$REPO_DIR/.test-deployment.env" ]; then
     [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || true)" = test ] \
         || { echo "  ERROR: Unsigned deployment assets exist outside test policy."; exit 1; }
     candidate_commit="$(sed -n 's/^MP_TEST_COMMIT=//p' "$REPO_DIR/.test-deployment.env" | head -1)"
+    USING_CANDIDATE=1
     [[ "$candidate_commit" =~ ^[0-9a-f]{40}$ ]] \
         || { echo "  ERROR: Candidate frontend identity is invalid."; exit 1; }
     [ -s "$MP_STATE/test-deployments/candidate/receipt.json" ] \
@@ -237,7 +239,9 @@ mp_prepare_runtime_permissions
 # ── 4. Build and start containers ───────────────────────────
 echo "[4/5] Starting the database and applying schema updates..."
 "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
-if [ -f "$REPO_DIR/.release.env" ]; then
+if [ "$USING_CANDIDATE" -eq 1 ]; then
+    echo "       Using locally verified digest-pinned candidate images..."
+elif [ -f "$REPO_DIR/.release.env" ]; then
     echo "       Using digest-pinned, signature-verified production images..."
     "${MP_COMPOSE[@]}" pull db caddy backend
 else
@@ -278,7 +282,12 @@ if ! mp_verify_database_schema_contract; then
 fi
 
 echo "       Starting application containers..."
-if [ -f "$REPO_DIR/.release.env" ]; then
+if [ "$USING_CANDIDATE" -eq 1 ]; then
+    # Candidate registry credentials are intentionally destroyed immediately
+    # after the exact digests are pulled. Recovery must consume those local
+    # verified images and must never perform a second unauthenticated pull.
+    "${MP_COMPOSE[@]}" up -d --no-build --pull never --force-recreate --remove-orphans
+elif [ -f "$REPO_DIR/.release.env" ]; then
     "${MP_COMPOSE[@]}" up -d --no-build --force-recreate --remove-orphans
 else
     "${MP_COMPOSE[@]}" up -d --build --force-recreate --remove-orphans
