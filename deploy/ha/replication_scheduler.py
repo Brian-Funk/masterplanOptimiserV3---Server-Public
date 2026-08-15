@@ -369,6 +369,16 @@ def main() -> int:
             message = "The peer rejected the copy; its previous verified copy remains unchanged."
             peer_reachable = True
             peer_compatible = False
+        elif result.returncode == 25:
+            error_code = "runtime_contract_invalid"
+            message = "The local runtime permission or service contract is unsafe; capture did not start."
+            peer_reachable = None
+            peer_compatible = None
+        elif result.returncode == 26:
+            error_code = "root_bootstrap_contract_invalid"
+            message = "The retired root-bootstrap contract is invalid; capture did not start."
+            peer_reachable = None
+            peer_compatible = None
         else:
             error_code = "capture_failed"
             message = "A complete copy could not be produced; the peer remains unchanged."

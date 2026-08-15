@@ -126,6 +126,51 @@ class ReplicationSchedulerRequestTests(unittest.TestCase):
         self.assertEqual(result["state"], "indeterminate")
         self.assertEqual(result["stage"], "attention_required")
 
+    def test_local_preflight_failures_have_bounded_retryable_codes(self) -> None:
+        for exit_code, expected in (
+            (25, "runtime_contract_invalid"),
+            (26, "root_bootstrap_contract_invalid"),
+            (1, "capture_failed"),
+        ):
+            with self.subTest(exit_code=exit_code):
+                if scheduler.REQUESTS.exists():
+                    for path in scheduler.REQUESTS.iterdir():
+                        path.unlink()
+                else:
+                    scheduler.REQUESTS.mkdir()
+                operation_id = "72a24e65-6f20-45bd-bf87-338f5fcf8f93"
+                marker = {
+                    "operation_id": operation_id,
+                    "mutation_sequence": 7,
+                    "operation_type": "publisher-secret-create",
+                    "resource_type": "event",
+                    "resource_id": "4",
+                    "marker_sha256": "a" * 64,
+                }
+                (scheduler.REQUESTS / f"{operation_id}.json").write_text(json.dumps({
+                    "format": "mp-opt-replication-request-v2",
+                    "job_id": operation_id,
+                    "reason": "publisher-secret-create",
+                    "critical": True,
+                    "operation": marker,
+                }), encoding="utf-8")
+                config = {
+                    "HA_MODE": "ha", "HA_NODE_ID": "node-a",
+                    "HA_PEER_NODE_ID": "node-b",
+                }
+                failure = subprocess.CompletedProcess([], exit_code, stdout="", stderr="bounded")
+                with (
+                    patch.object(scheduler, "config", return_value=config),
+                    patch.object(scheduler, "interval_minutes", return_value=15),
+                    patch.object(scheduler.subprocess, "run", return_value=failure),
+                ):
+                    self.assertEqual(scheduler.main(), 0)
+                result = json.loads(
+                    (scheduler.RESULTS / f"{operation_id}.json").read_text()
+                )
+                self.assertEqual(result["error_code"], expected)
+                (scheduler.DEFERRED / f"{operation_id}.json").unlink()
+
     def test_minimal_results_are_traversable_but_private_jobs_remain_private(self) -> None:
         if os.name == "nt":
             self.skipTest("Windows does not enforce Unix permission bits")

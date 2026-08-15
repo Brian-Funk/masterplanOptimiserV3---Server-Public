@@ -2,6 +2,80 @@
 
 # Encrypted infrastructure snapshot creation, verification and recovery.
 
+mp_snapshot_service_mode() {
+    [ "${MP_SNAPSHOT_SERVICE_MODE:-0}" = 1 ]
+}
+
+# Scheduled snapshots run inside a NoNewPrivileges systemd sandbox. They may
+# validate the installed contract and use Docker, but must never invoke the
+# sudo-backed repair helpers used by an interactive root operator.
+mp_snapshot_compose_init() {
+    if mp_snapshot_service_mode; then
+        mp_validate_action_profile_permissions ha || return 1
+        mp_validate_action_profile_permissions snapshot || return 1
+        mp_validate_action_profile_permissions evidence || return 1
+        mp_compose_build_command || return 1
+    else
+        mp_compose_init || return 1
+    fi
+    MP_SNAPSHOT_COMPOSE_READY=1
+}
+
+mp_snapshot_ensure_compose() {
+    [ "${MP_SNAPSHOT_COMPOSE_READY:-0}" = 1 ] || mp_snapshot_compose_init
+}
+
+mp_snapshot_root_bootstrap_is_disabled() {
+    if ! mp_snapshot_service_mode; then
+        mp_root_bootstrap_is_disabled
+        return
+    fi
+    mp_snapshot_ensure_compose || return 1
+    "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null \
+        | grep -qx db || return 1
+    mp_wait_for_database 30 || return 1
+    mp_root_bootstrap_database_is_disabled
+}
+
+mp_snapshot_caddy_mode() {
+    local services status=0
+    if ! mp_snapshot_service_mode; then
+        mp_caddy_mode
+        return
+    fi
+    mp_snapshot_ensure_compose || status=$?
+    if [ "$status" -eq 0 ]; then
+        services="$("${MP_COMPOSE[@]}" config --services 2>/dev/null)" || status=$?
+    fi
+    if [ "$status" -eq 0 ] && grep -Fxq caddy <<< "$services"; then
+        printf 'container\n'
+    elif [ "$status" -eq 0 ] \
+        && command -v systemctl >/dev/null 2>&1 \
+        && systemctl cat caddy >/dev/null 2>&1 \
+        && [ -f "$MP_HOST_CADDYFILE" ]; then
+        printf 'host\n'
+    elif [ "$status" -ne 0 ]; then
+        printf 'indeterminate\n'
+    else
+        printf 'unavailable\n'
+    fi
+}
+
+# Read the protected evidence bind through the same fixed backend identity
+# that owns it. If the regular backend is paused for a consistent snapshot,
+# use an ephemeral no-dependency container from the exact active image.
+mp_snapshot_backend_shell() {
+    local script="$1" backend_container
+    mp_snapshot_ensure_compose || return 1
+    backend_container="$("${MP_COMPOSE[@]}" ps -q backend 2>/dev/null || true)"
+    if [ -n "$backend_container" ] \
+        && [ "$(docker inspect -f '{{.State.Running}}' "$backend_container" 2>/dev/null || true)" = true ]; then
+        "${MP_COMPOSE[@]}" exec -T backend sh -ec "$script"
+    else
+        "${MP_COMPOSE[@]}" run --rm -T --no-deps --entrypoint sh backend -ec "$script"
+    fi
+}
+
 # Publish a deliberately non-secret snapshot summary for the root dashboard.
 # Receipts are already public metadata; neither private identities nor local
 # workstation/VPS paths are copied into the runtime document.
@@ -72,7 +146,7 @@ mp_snapshot_copy_configuration() {
         rm -f "$payload/config/secrets/evidence_github_fine_grained_token" || return 1
     fi
     if [ -e "$payload/config/secrets/root_bootstrap_token" ] \
-        && mp_root_bootstrap_is_disabled; then
+        && mp_snapshot_root_bootstrap_is_disabled; then
         : > "$payload/config/secrets/root_bootstrap_token" || return 1
     fi
     if [ -f "$MP_ROOT/infra/docker-compose.override.yml" ]; then
@@ -81,7 +155,7 @@ mp_snapshot_copy_configuration() {
     else
         : > "$payload/metadata/compose-override-absent" || return 1
     fi
-    caddy_mode="$(mp_caddy_mode)"
+    caddy_mode="$(mp_snapshot_caddy_mode)"
     case "$caddy_mode" in
         container|host) ;;
         *)
@@ -99,8 +173,11 @@ mp_snapshot_copy_configuration() {
     if [ "$include_caddy" = "yes" ]; then
         if [ -d "$MP_ROOT/state/evidence" ] && [ ! -L "$MP_ROOT/state/evidence" ]; then
             mkdir -m 0700 "$payload/evidence" || return 1
-            sudo -n cp -a "$MP_ROOT/state/evidence/." "$payload/evidence/" || return 1
-            sudo -n chown -R "$(id -u):$(id -g)" "$payload/evidence" || return 1
+            mp_snapshot_backend_shell \
+                '[ "$(id -u)" = 10001 ] && test -x /evidence && test -r /evidence && exec tar -C /evidence -cf - .' \
+                | tar --no-same-owner -C "$payload/evidence" -xf - || return 1
+            find "$payload/evidence" -type d -exec chmod 700 {} + || return 1
+            find "$payload/evidence" -type f -exec chmod 600 {} + || return 1
             [ -s "$payload/evidence/ledger/chain-head.json" ] \
                 && [ -s "$payload/evidence/public/instance_signing_key.pub" ] || return 1
         else
@@ -115,7 +192,7 @@ mp_snapshot_dump_database() {
     local payload="$1"
     mkdir -p "$payload/database" || return 1
     chmod 700 "$payload/database" || return 1
-    mp_compose_init
+    mp_snapshot_ensure_compose || return 1
     "${MP_COMPOSE[@]}" up -d db >/dev/null || return 1
     mp_wait_for_database 30 || return 1
     "${MP_COMPOSE[@]}" exec -T db pg_dump \
@@ -129,19 +206,19 @@ mp_snapshot_dump_database() {
 # Bind a database-bearing snapshot to the exact signed ledger state captured
 # while application writes are paused. This contains no personal data.
 mp_snapshot_write_evidence_anchor() {
-    local payload="$1" head copied_head
+    local payload="$1" copied_head
     mkdir -p "$payload/metadata" || return 1
-    head="$MP_ROOT/state/evidence/ledger/chain-head.json"
     copied_head="$payload/evidence/ledger/chain-head.json"
     if [ -s "$copied_head" ] && [ ! -L "$copied_head" ]; then
         jq -e '{format:"mp-opt-snapshot-evidence-anchor-v1", instance_id, chain_id,
             records, head_sha256}' "$copied_head" > "$payload/metadata/evidence-anchor.json" \
             || return 1
-    elif sudo -n test -s "$head" && sudo -n test ! -L "$head"; then
-        sudo -n cat "$head" \
+    elif mp_snapshot_backend_shell \
+            '[ "$(id -u)" = 10001 ] && test -s /evidence/ledger/chain-head.json && exec cat /evidence/ledger/chain-head.json' \
             | jq -e '{format:"mp-opt-snapshot-evidence-anchor-v1", instance_id, chain_id,
                 records, head_sha256}' > "$payload/metadata/evidence-anchor.json" \
-            || return 1
+            ; then
+        :
     else
         return 1
     fi
@@ -276,7 +353,11 @@ mp_snapshot_create() {
     mkdir -p "$staging/payload" || { rm -rf "$staging"; return 1; }
     chmod 700 "$staging/payload" || { rm -rf "$staging"; return 1; }
     if [ "$snapshot_type" = database ] || [ "$snapshot_type" = full ]; then
-        mp_compose_init
+        mp_snapshot_compose_init || {
+            rm -rf "$staging"
+            [ "$owns_lock" != true ] || mp_unlock
+            return 1
+        }
         backend_container="$("${MP_COMPOSE[@]}" ps -q backend 2>/dev/null || true)"
         if [ -n "$backend_container" ] \
             && [ "$(docker inspect -f '{{.State.Running}}' "$backend_container" 2>/dev/null || true)" = true ]; then
@@ -307,11 +388,21 @@ mp_snapshot_create() {
     if [ "$backend_was_running" = true ]; then
         # Reassert the fixed unprivileged Backend read contract immediately
         # before remounting protected files after a safety snapshot.
-        if ! mp_prepare_backend_secret_permissions \
-            || ! mp_prepare_evidence_store; then
-            capture_ok=false
-        else
+        if mp_snapshot_service_mode; then
             "${MP_COMPOSE[@]}" up -d --no-deps backend >/dev/null || capture_ok=false
+            if [ "$capture_ok" = true ]; then
+                mp_validate_action_profile_permissions ha \
+                    && mp_validate_action_profile_permissions snapshot \
+                    && mp_validate_action_profile_permissions evidence \
+                    || capture_ok=false
+            fi
+        else
+            if ! mp_prepare_backend_secret_permissions \
+                || ! mp_prepare_evidence_store; then
+                capture_ok=false
+            else
+                "${MP_COMPOSE[@]}" up -d --no-deps backend >/dev/null || capture_ok=false
+            fi
         fi
     fi
     if [ "$capture_ok" != true ]; then
