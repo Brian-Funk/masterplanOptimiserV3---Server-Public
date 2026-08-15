@@ -1443,13 +1443,18 @@ mp_setup_machine_advance_one() {
                 *) return 65 ;;
             esac
             if [ "$lane" = unsigned ]; then
-                commit="$(jq -r '.campaign_commit // empty' "$MP_SETUP_V2_STATE")"
+                commit="$(jq -r '.values.candidate_commit // empty' "$input_file")"
                 [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 65
                 jq -c '.values.registry' "$input_file" \
                     | "$MP_ROOT/deploy/test-deployment.sh" \
                         prepare-full-loss-restore-prebuilt "$commit" \
                         --registry-credentials-stdin \
                     || return 1
+                # Only the independently verified staged bundle may retarget
+                # a pending development recovery. Commit the new exact SHA
+                # after runtime preparation and before restoring data.
+                mp_setup_state_update --arg commit "$commit" \
+                    '.campaign_commit = $commit' || return 1
             else
                 jq -e '(.values | keys) == ["recovery_identity"]' \
                     "$input_file" >/dev/null || return 65

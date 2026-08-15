@@ -551,7 +551,8 @@ mp_machine_read_advance_input() {
             and (.values.package_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
           elif .checkpoint == "restored" then
             (((.values | keys) == ["recovery_identity"])
-             or (((.values | keys | sort) == ["recovery_identity","registry"])
+             or (((.values | keys | sort) == ["candidate_commit","recovery_identity","registry"])
+                 and (.values.candidate_commit | type == "string" and test("^[0-9a-f]{40}$"))
                  and (.values.registry | type == "object")
                  and ((.values.registry | keys | sort) == ["token","username"])
                  and (.values.registry.username | type == "string" and length >= 1 and length <= 255)

@@ -1079,6 +1079,7 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
             'verify_exact_test_environment "$target"',
         ):
             self.assertIn(contract, helper)
+        self.assertNotIn("and .campaign_commit == $target", helper)
         self.assertNotIn("docker compose", helper)
         self.assertIn('[ -f "$REPO_DIR/.test-deployment.env" ]', deploy)
         self.assertLess(
@@ -1087,7 +1088,9 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         )
         restored_schema = machine[machine.index('elif .checkpoint == "restored"') :]
         restored_schema = restored_schema[: restored_schema.index("else (.values")]
-        self.assertIn('["recovery_identity","registry"]', restored_schema)
+        self.assertIn('["candidate_commit","recovery_identity","registry"]', restored_schema)
+        self.assertIn(".values.candidate_commit", restored_schema)
+        self.assertIn(".campaign_commit = $commit", restored)
 
     def test_unsigned_replacement_prepares_exact_peer_before_first_copy(self) -> None:
         advance = SETUP[SETUP.index("mp_setup_machine_advance_one()") :]

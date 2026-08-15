@@ -740,7 +740,6 @@ prepare_prebuilt_full_loss_restore() {
         and .mode == "full-restore"
         and .state == "in_progress"
         and .deployment_lane == "unsigned"
-        and .campaign_commit == $target
         and ((.completed // []) | index("imported") != null)
         and ((.completed // []) | index("restored") == null)
     ' "$setup_state" >/dev/null 2>&1 || {
