@@ -61,10 +61,13 @@ def test_completed_root_bootstrap_is_removed_from_replication_and_snapshots():
     assert "key='root_bootstrap_disabled'" in common
     assert "WHERE u.is_root_admin" in common
     assert "mp_retire_root_bootstrap_secret" in deploy_script
-    assert replication.index("mp_retire_root_bootstrap_secret") < replication.index(
+    assert "mp_retire_root_bootstrap_secret" not in replication
+    assert replication.index(
+        "mp_validate_retired_root_bootstrap_secret_existing_runtime"
+    ) < replication.index(
         "pg_dump"
     )
-    assert "mp_root_bootstrap_is_disabled" in snapshots
+    assert "mp_snapshot_root_bootstrap_is_disabled" in snapshots
     assert ': > "$payload/config/secrets/root_bootstrap_token"' in snapshots
 
 

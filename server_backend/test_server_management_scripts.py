@@ -140,6 +140,7 @@ def test_snapshot_only_captures_host_caddy_for_host_topology(tmp_path: Path):
         command = (
             f'source "{common}"; source "{snapshots}"; '
             f'mp_caddy_mode() {{ printf "{topology}\\n"; }}; '
+            'mp_snapshot_backend_shell() { tar -C "$MP_ROOT/state/evidence" -cf - .; }; '
             'sudo() { [ "$1" != "-n" ] || shift; '
             '[ "$1" != "chown" ] || return 0; "$@"; }; '
             f'mp_snapshot_copy_configuration "{payload}" yes'
