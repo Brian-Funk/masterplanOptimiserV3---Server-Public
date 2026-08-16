@@ -11,8 +11,10 @@ MP_SETUP_V2_PENDING_LOCAL_JOIN="${MP_SETUP_V2_PENDING_LOCAL_JOIN:-$MP_STATE/pend
 MP_SETUP_V2_PENDING_REPLACEMENT="${MP_SETUP_V2_PENDING_REPLACEMENT:-$MP_STATE/pending-replacement-request.json}"
 MP_SETUP_V2_IMPORT_RECEIPT="${MP_SETUP_V2_IMPORT_RECEIPT:-$MP_STATE/setup-import-receipt.json}"
 MP_SETUP_V2_EVENTS="${MP_SETUP_V2_EVENTS:-$MP_STATE/setup-events-v1.jsonl}"
-MP_SETUP_V2_EXECUTION_LOCK="${MP_SETUP_V2_EXECUTION_LOCK:-$MP_STATE/setup-execution.lock}"
-MP_SETUP_V2_EXECUTION_STATE="${MP_SETUP_V2_EXECUTION_STATE:-$MP_STATE/setup-execution.json}"
+MP_SETUP_V2_EXECUTION_LOCK="${MP_SETUP_V2_EXECUTION_LOCK:-${MP_SETUP_EXECUTION_LOCK:-$MP_STATE/setup-execution.lock}}"
+MP_SETUP_V2_EXECUTION_STATE="${MP_SETUP_V2_EXECUTION_STATE:-${MP_SETUP_EXECUTION_STATE:-$MP_STATE/setup-execution.json}}"
+MP_SETUP_EXECUTION_LOCK="${MP_SETUP_EXECUTION_LOCK:-$MP_SETUP_V2_EXECUTION_LOCK}"
+MP_SETUP_EXECUTION_STATE="${MP_SETUP_EXECUTION_STATE:-$MP_SETUP_V2_EXECUTION_STATE}"
 MP_SETUP_V2_CANCEL_REQUEST="${MP_SETUP_V2_CANCEL_REQUEST:-$MP_STATE/setup-cancel-request.json}"
 MP_SETUP_V2_ARTIFACTS="${MP_SETUP_V2_ARTIFACTS:-$MP_STATE/setup-artifacts}"
 MP_SETUP_V2_FULL_LOSS_AUTH="${MP_SETUP_V2_FULL_LOSS_AUTH:-$MP_STATE/setup-full-loss-authorization.json}"
@@ -153,9 +155,8 @@ mp_setup_execution_acquire() {
     local run_id="${1:-tui-$$}" command_name="${2:-commissioning}" temporary
     [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || return 64
     [[ "$command_name" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] || return 64
-    mkdir -p "$MP_STATE" && chmod 700 "$MP_STATE" || return 1
+    mp_prepare_private_lock_file "$MP_SETUP_EXECUTION_LOCK" || return 1
     exec 8>"$MP_SETUP_V2_EXECUTION_LOCK" || return 1
-    chmod 600 "$MP_SETUP_V2_EXECUTION_LOCK" || { exec 8>&-; return 1; }
     if ! flock -n 8; then
         exec 8>&-
         return 75
@@ -187,9 +188,8 @@ mp_setup_execution_release() {
 # removes its stale diagnostic metadata before reporting the coordinator idle.
 mp_setup_execution_observe() {
     local metadata=null
-    mkdir -p "$MP_STATE" && chmod 700 "$MP_STATE" || return 1
+    mp_prepare_private_lock_file "$MP_SETUP_EXECUTION_LOCK" || return 1
     exec 9>"$MP_SETUP_V2_EXECUTION_LOCK" || return 1
-    chmod 600 "$MP_SETUP_V2_EXECUTION_LOCK" || { exec 9>&-; return 1; }
     if flock -n 9; then
         rm -f "$MP_SETUP_V2_EXECUTION_STATE"
         flock -u 9 >/dev/null 2>&1 || true; exec 9>&-

@@ -15,6 +15,9 @@ MP_HA_SNAPSHOT_STATUS="${MP_HA_SNAPSHOT_STATUS:-${MP_ROOT}/runtime/ha-snapshot-s
 MP_AUDIT_FILE="${MP_AUDIT_FILE:-${MP_STATE}/management.log}"
 MP_STORAGE_CHECKLIST_FILE="${MP_STORAGE_CHECKLIST_FILE:-${MP_HOME}/storage-security-checklist.json}"
 MP_LOCK_FILE="${MP_LOCK_FILE:-${MP_STATE}/management.lock}"
+MP_SETUP_EXECUTION_LOCK="${MP_SETUP_EXECUTION_LOCK:-${MP_SETUP_V2_EXECUTION_LOCK:-$MP_STATE/setup-execution.lock}}"
+MP_SETUP_EXECUTION_STATE="${MP_SETUP_EXECUTION_STATE:-${MP_SETUP_V2_EXECUTION_STATE:-$MP_STATE/setup-execution.json}}"
+MP_SETUP_TRANSIENT_CLEANUP_LOCK="${MP_SETUP_TRANSIENT_CLEANUP_LOCK:-$MP_STATE/setup-transient-cleanup.lock}"
 MP_EVIDENCE_HOME="${MP_EVIDENCE_HOME:-${MP_ROOT}/state/evidence}"
 MP_UI_SIZE_FILE="${MP_UI_SIZE_FILE:-${MP_HOME}/interface-size}"
 MP_DEPLOYMENT_POLICY_FILE="${MP_DEPLOYMENT_POLICY_FILE:-/etc/mp-opt/deployment-policy}"
@@ -29,6 +32,56 @@ MP_PUBLIC_DNS_RESOLVERS="${MP_PUBLIC_DNS_RESOLVERS:-1.1.1.1 8.8.8.8 9.9.9.9}"
 MP_TUI_BACKTITLE="MP-OPT_SERVER | Brian Funk | Copyright © ${MP_COPYRIGHT_YEAR} Brian Funk"
 
 declare -a MP_COMPOSE=()
+
+# Prepare one owner-only host-local lock without following an existing
+# substituted path. This is intentionally available before mp_initialise_paths
+# so hardened background workers can serialize with commissioning before they
+# inspect or clean shared state.
+mp_prepare_private_lock_file() {
+    local lock_file="$1" parent owner
+    [ -n "$lock_file" ] || return 1
+    parent="$(dirname "$lock_file")"
+    owner="$(id -u):$(id -g)"
+    if [ -e "$parent" ] || [ -L "$parent" ]; then
+        [ -d "$parent" ] && [ ! -L "$parent" ] \
+            && [ "$(stat -c '%u:%g' "$parent" 2>/dev/null)" = "$owner" ] \
+            || return 1
+    else
+        mkdir -p -- "$parent" || return 1
+    fi
+    chmod 700 -- "$parent" || return 1
+    if [ -e "$lock_file" ] || [ -L "$lock_file" ]; then
+        [ -f "$lock_file" ] && [ ! -L "$lock_file" ] \
+            && [ "$(stat -c '%u:%g' "$lock_file" 2>/dev/null)" = "$owner" ] \
+            || return 1
+    else
+        : > "$lock_file" || return 1
+    fi
+    chmod 600 -- "$lock_file"
+}
+
+# Scheduled workers share the commissioning lease but do not publish setup
+# coordinator metadata. Holding this descriptor prevents either side from
+# entering the other's service-changing critical section.
+mp_setup_worker_lease_acquire() {
+    local wait_seconds="${1:-300}"
+    [[ "$wait_seconds" =~ ^[0-9]+$ ]] || return 64
+    mp_prepare_private_lock_file "$MP_SETUP_EXECUTION_LOCK" || return 1
+    exec 8>"$MP_SETUP_EXECUTION_LOCK" || return 1
+    if ! flock -w "$wait_seconds" 8; then
+        exec 8>&-
+        return 75
+    fi
+    export MP_SETUP_WORKER_LEASE_HELD=1
+}
+
+mp_setup_worker_lease_release() {
+    if [ "${MP_SETUP_WORKER_LEASE_HELD:-0}" = 1 ]; then
+        flock -u 8 >/dev/null 2>&1 || true
+        exec 8>&- 2>/dev/null || true
+        unset MP_SETUP_WORKER_LEASE_HELD
+    fi
+}
 
 # Load only the documented, non-secret HA keys without evaluating shell code.
 mp_load_ha_config() {

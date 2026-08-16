@@ -33,7 +33,18 @@ source "$MP_ROOT/deploy/management/evidence.sh"
 source "$MP_ROOT/deploy/management/setup_v2.sh"
 
 mp_require_interactive_terminal
-mp_initialise_paths
+startup_lease_status=0
+if mp_setup_execution_acquire "tui-startup-$(date -u +%Y%m%dT%H%M%SZ)-$$" startup; then
+    trap 'mp_setup_execution_release' EXIT
+    mp_initialise_paths
+    mp_setup_execution_release
+    trap - EXIT
+else
+    startup_lease_status=$?
+    [ "$startup_lease_status" -ne 75 ] \
+        || ui_error "A scheduled snapshot or another commissioning coordinator is active. Wait for it to finish, then reopen mp-opt."
+    exit "$startup_lease_status"
+fi
 
 # Remove any transient private recovery identity when the menu exits unexpectedly.
 mp_cleanup() {
