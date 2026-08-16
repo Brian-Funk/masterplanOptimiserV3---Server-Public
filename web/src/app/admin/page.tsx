@@ -459,7 +459,7 @@ export default function AdminPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
+    <div className={`min-h-screen bg-gray-50 dark:bg-gray-900 ${user?.is_root_admin ? "" : "mobile-page-with-nav"}`}>
       {/* Header */}
       <header className="sticky top-0 z-20 border-b border-gray-200 bg-white/95 backdrop-blur dark:border-gray-700 dark:bg-gray-800/95">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-2.5 sm:px-6 sm:py-3">
@@ -476,7 +476,7 @@ export default function AdminPage() {
               )}
             </div>
           </div>
-          <div className="flex items-center gap-1">
+          <div className={user?.is_root_admin ? "flex items-center gap-1" : "hidden items-center gap-1 md:flex"}>
             {!user?.is_root_admin && (user?.event_id || selectedEvent) && (
               <button
                 onClick={() => router.push(`/calendar?event=${user?.event_id || selectedEvent}`)}
@@ -518,6 +518,7 @@ export default function AdminPage() {
           isIssuerOnly={!!isIssuerOnly}
           canManagePublicLinks={canManagePublicScheduleLinks(user)}
           onSelect={setTab}
+          hideMobile={!user?.is_root_admin}
         />
 
         <div className="min-w-0 space-y-5 md:space-y-6">

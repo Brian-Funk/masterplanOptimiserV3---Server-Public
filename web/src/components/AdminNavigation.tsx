@@ -82,12 +82,14 @@ export function AdminNavigation({
   isIssuerOnly,
   canManagePublicLinks,
   onSelect,
+  hideMobile = false,
 }: {
   active: AdminDestination;
   isRootAdmin: boolean;
   isIssuerOnly: boolean;
   canManagePublicLinks: boolean;
   onSelect?: (tab: AdminTab) => void;
+  hideMobile?: boolean;
 }) {
   const router = useRouter();
   const visibleItems = ITEMS.filter((item) => {
@@ -124,7 +126,7 @@ export function AdminNavigation({
 
   return (
     <nav aria-label={workspaceLabel} className="min-w-0">
-        <div className="lg:hidden">
+        <div className={hideMobile ? "hidden" : "lg:hidden"}>
           <label className="block text-xs font-semibold uppercase tracking-[0.14em] text-gray-500 dark:text-gray-400">
             Administration page
             <select

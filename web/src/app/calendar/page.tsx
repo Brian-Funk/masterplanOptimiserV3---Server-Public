@@ -10,7 +10,6 @@ import { hardNavigate } from "@/lib/hardNavigation";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { AuthenticatedHeaderActions } from "@/components/AuthenticatedHeaderActions";
-import { ThemeToggle } from "@/components/ThemeToggle";
 import { Logo } from "@/components/Logo";
 import { DynamicPWA } from "@/components/DynamicPWA";
 import { ServiceStatusBanner, ServiceStatusPanel } from "@/components/ServiceStatusPanel";
@@ -30,7 +29,6 @@ import { ChangesModal } from "@/components/ChangesModal";
 import { WebEditReviewModal } from "@/components/WebEditReviewModal";
 import { ScheduleWebEditIndicator } from "@/components/ScheduleWebEditIndicator";
 import { MobileActionSheet } from "@/components/MobileActionSheet";
-import { MobileBottomNavigation } from "@/components/MobileBottomNavigation";
 import {
   describeWebEditTask,
   type WebEditSummary,
@@ -42,17 +40,14 @@ import {
 } from "@/lib/publicScheduleViews";
 import {
   buildOfflineAccessForCalendar,
-  clearOfflineAccessMarker,
   commitOfflineAccessMarker,
   formatOfflineCachedAt,
   offlineAccessAllowsEvent,
 } from "@/lib/offlineAccess";
 import {
-  clearOfflineCalendarCacheForUser,
   getOfflineCalendarPayload,
   OfflineCalendarStorageError,
   offlineCalendarStorageEnabled,
-  setOfflineCalendarStorageEnabled,
   storeOfflineCalendarPayload,
 } from "@/lib/offlineCalendarCache";
 import {
@@ -66,7 +61,6 @@ import type { PendingChange } from "@/components/ChangesModal";
 import type { DraftEdit } from "@/components/TaskDetailModal";
 import type { DraftNewTask } from "@/components/CreateTaskModal";
 import {
-  LogOut,
   ChevronLeft,
   ChevronRight,
   RotateCcw,
@@ -82,14 +76,6 @@ import {
   Settings,
   PencilLine,
   SlidersHorizontal,
-  UserRound,
-  MoreHorizontal,
-  Users,
-  Megaphone,
-  History,
-  Share2,
-  RefreshCw,
-  Shield,
   X,
 } from "lucide-react";
 
@@ -305,8 +291,6 @@ function CalendarContent() {
   const { isReady: serviceReady } = useServiceAvailability();
   const {
     user,
-    logout,
-    isLoggingOut,
     isLoading: authLoading,
     authStatus,
     offlineAccess,
@@ -325,7 +309,7 @@ function CalendarContent() {
   const [offlineStorageEnabled, setOfflineStorageEnabled] = useState(false);
   const [offlineStorageError, setOfflineStorageError] = useState<string | null>(null);
   const [offlineStorageNoticeDismissed, setOfflineStorageNoticeDismissed] = useState(false);
-  const [showOfflineStorageSettings, setShowOfflineStorageSettings] = useState(false);
+  const [compactPhoneLayout, setCompactPhoneLayout] = useState(false);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [filterPersonId, setFilterPersonId] = useState<number | null>(null);
   const [publicScheduleViewId, setPublicScheduleViewId] = useState<string | null>(null);
@@ -336,8 +320,18 @@ function CalendarContent() {
   const leftCachedMode = useRef(false);
 
   useEffect(() => {
-    setOfflineStorageEnabled(user ? offlineCalendarStorageEnabled(user.id) : false);
-  }, [user]);
+    const query = window.matchMedia("(max-width: 767px)");
+    const update = () => setCompactPhoneLayout(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
+    setOfflineStorageEnabled(
+      user && compactPhoneLayout ? offlineCalendarStorageEnabled(user.id) : false,
+    );
+  }, [compactPhoneLayout, user]);
 
   useEffect(() => {
     setOfflineStorageNoticeDismissed(
@@ -346,7 +340,7 @@ function CalendarContent() {
   }, []);
 
   const saveOfflineCalendar = useCallback(async (cachedAt: string) => {
-    if (!user || !eventId) {
+    if (!user || !eventId || !compactPhoneLayout) {
       throw new OfflineCalendarStorageError(
         "storage_write_failed",
         "The offline schedule cannot be saved without an active event session.",
@@ -385,40 +379,7 @@ function CalendarContent() {
     commitOfflineAccessMarker(marker);
     setOfflineStorageError(null);
     return payload;
-  }, [user, eventId]);
-
-  const toggleOfflineStorage = useCallback(async () => {
-    if (!user) return;
-    setOfflineStorageError(null);
-    if (!offlineStorageEnabled) {
-      setOfflineCalendarStorageEnabled(user.id, true);
-      try {
-        await saveOfflineCalendar(new Date().toISOString());
-        setOfflineStorageEnabled(true);
-      } catch (storageError) {
-        setOfflineCalendarStorageEnabled(user.id, false);
-        setOfflineStorageEnabled(false);
-        setOfflineStorageError(
-          storageError instanceof Error
-            ? storageError.message
-            : "The offline schedule could not be enabled.",
-        );
-      }
-      return;
-    }
-    try {
-      await clearOfflineCalendarCacheForUser(user.id);
-      setOfflineCalendarStorageEnabled(user.id, false);
-      clearOfflineAccessMarker();
-      setOfflineStorageEnabled(false);
-    } catch (storageError) {
-      setOfflineStorageError(
-        storageError instanceof Error
-          ? storageError.message
-          : "The offline schedule could not be removed.",
-      );
-    }
-  }, [offlineStorageEnabled, saveOfflineCalendar, user]);
+  }, [compactPhoneLayout, user, eventId]);
 
   const dismissOfflineStorageNotice = useCallback(() => {
     window.localStorage.setItem(OFFLINE_NOTICE_DISMISSED_KEY, "1");
@@ -434,7 +395,6 @@ function CalendarContent() {
   const [nextTempId, setNextTempId] = useState(-1);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showMobileFilters, setShowMobileFilters] = useState(false);
-  const [showMobileMore, setShowMobileMore] = useState(false);
   const [committing, setCommitting] = useState(false);
   const [acknowledgingPolicy, setAcknowledgingPolicy] = useState(false);
 
@@ -937,17 +897,6 @@ function CalendarContent() {
     return person ? person.external_person_id : null;
   }, [user, data]);
 
-  const mobileScheduleInitialisedForEvent = useRef<number | null>(null);
-  useEffect(() => {
-    if (!eventId || !highlightedPersonId) return;
-    if (mobileScheduleInitialisedForEvent.current === eventId) return;
-    mobileScheduleInitialisedForEvent.current = eventId;
-    if (window.matchMedia("(max-width: 767px)").matches) {
-      setFilterPersonId(highlightedPersonId);
-      setPublicScheduleViewId(null);
-    }
-  }, [eventId, highlightedPersonId]);
-
   // Filter tasks
   const visibleTasks = useMemo(() => {
     if (!selectedDate) return [];
@@ -984,6 +933,34 @@ function CalendarContent() {
       : [];
   }, [data?.public_schedule_categories, data?.public_schedule_items, data?.public_schedule_views]);
 
+  const mobileScheduleInitialisedForEvent = useRef<string | null>(null);
+  useEffect(() => {
+    if (!eventId || !compactPhoneLayout) return;
+    const requestedView = searchParams.get("view");
+    const stateKey = `${eventId}:${requestedView ?? "default"}`;
+    if (mobileScheduleInitialisedForEvent.current === stateKey) return;
+    if (requestedView === "all") {
+      setFilterPersonId(null);
+      setPublicScheduleViewId(null);
+    } else if (requestedView === "mine" && highlightedPersonId) {
+      setFilterPersonId(highlightedPersonId);
+      setPublicScheduleViewId(null);
+    } else if (requestedView === "programme" && publicScheduleCategories.length > 0) {
+      setFilterPersonId(null);
+      setPublicScheduleViewId(publicScheduleCategories[0].id);
+    } else if (!requestedView) {
+      if (user?.linked_person_id && !highlightedPersonId) return;
+      setFilterPersonId(highlightedPersonId);
+      setPublicScheduleViewId(null);
+    } else if (requestedView !== "programme") {
+      setFilterPersonId(null);
+      setPublicScheduleViewId(null);
+    } else {
+      return;
+    }
+    mobileScheduleInitialisedForEvent.current = stateKey;
+  }, [compactPhoneLayout, eventId, highlightedPersonId, publicScheduleCategories, searchParams, user?.linked_person_id]);
+
   useEffect(() => {
     if (
       publicScheduleViewId !== null &&
@@ -1004,9 +981,6 @@ function CalendarContent() {
   const dateIndex = selectedDate ? dates.indexOf(selectedDate) : -1;
   const canPrev = dateIndex > 0;
   const canNext = dateIndex < dates.length - 1;
-  const canManageEvent = Boolean(
-    user && !user.is_root_admin && (user.is_admin || user.is_issuer),
-  );
   const selectedPublicScheduleView = publicScheduleCategories.find(
     (category) => category.id === publicScheduleViewId,
   );
@@ -1178,10 +1152,6 @@ function CalendarContent() {
     } finally {
       setAcknowledgingPolicy(false);
     }
-  };
-
-  const handleLogout = async () => {
-    if (await logout()) router.replace("/login");
   };
 
   // Open a task and sync the my-tasks navigator
@@ -1420,7 +1390,9 @@ function CalendarContent() {
                 ((!user?.is_admin && !user?.is_root_admin) ||
                   user?.is_issuer) && <NotificationBell eventId={eventId} />}
             </div>
-            <AuthenticatedHeaderActions iconSize={20} />
+            <div className={user?.is_root_admin ? "" : "hidden md:block"}>
+              <AuthenticatedHeaderActions iconSize={20} />
+            </div>
           </div>
         </div>
       </header>
@@ -1481,26 +1453,18 @@ function CalendarContent() {
                   ? "This device can keep showing your schedule without a connection."
                   : "Optional. Keep your schedule available when this device loses its connection."}
               </p>
-              <button type="button" className="mt-1.5 text-xs font-medium text-blue-700 underline dark:text-blue-300" onClick={() => setShowOfflineStorageSettings(true)}>
+              {offlineStorageError && (
+                <p role="alert" className="mt-1 text-xs text-red-700 dark:text-red-300">
+                  {offlineStorageError} The existing copy, if any, was not replaced.
+                </p>
+              )}
+              <button type="button" className="mt-1.5 text-xs font-medium text-blue-700 underline dark:text-blue-300" onClick={() => router.push(`/more?event=${eventId}#offline`)}>
                 Manage offline schedule
               </button>
             </div>
             <button type="button" onClick={dismissOfflineStorageNotice} aria-label="Dismiss offline schedule notice" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700">
               <X size={18} aria-hidden="true" />
             </button>
-          </div>
-        )}
-        {user && !isSnapshotMode && (
-          <div className="mb-4 hidden space-y-3 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm dark:border-gray-700 dark:bg-gray-800 md:block">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div><p className="font-medium text-gray-900 dark:text-gray-100">Offline schedule on this device</p><p className="text-xs text-gray-500 dark:text-gray-400">Optional. Stores the calendar, at most your linked participant identity and your own published unavailability in IndexedDB until the server-bounded expiry, logout or successful removal. Other participant identities, organiser-only task fields and edit history are excluded. <a className="underline" href="/privacy">Privacy details</a>.</p></div>
-              <button type="button" className={`rounded px-3 py-2 font-medium ${offlineStorageEnabled ? "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200" : "bg-blue-600 text-white"}`} onClick={() => void toggleOfflineStorage()}>{offlineStorageEnabled ? "Remove offline copy" : "Enable offline copy"}</button>
-            </div>
-            {offlineStorageError && (
-              <p role="alert" className="rounded border border-red-300 bg-red-50 px-3 py-2 text-red-900 dark:border-red-800 dark:bg-red-950 dark:text-red-100">
-                {offlineStorageError} No offline copy is being claimed unless storage completed successfully.
-              </p>
-            )}
           </div>
         )}
         {!serviceReady && <ServiceStatusBanner cachedAt={offlineCachedAtLabel} />}
@@ -1880,94 +1844,9 @@ function CalendarContent() {
         />
       )}
 
-      <Footer />
-
-      {!user?.is_root_admin && (
-        <MobileBottomNavigation
-          elevated={draftEdits.size + draftDeletions.size + draftCreations.length > 0}
-          items={
-            canManageEvent
-              ? [
-                  {
-                    id: "schedule",
-                    label: highlightedPersonId ? "My schedule" : "Schedule",
-                    icon: <CalendarDays size={19} />,
-                    active: publicScheduleViewId === null && (
-                      highlightedPersonId
-                        ? filterPersonId === highlightedPersonId
-                        : filterPersonId === null
-                    ),
-                    onSelect: () => {
-                      setFilterPersonId(highlightedPersonId);
-                      setPublicScheduleViewId(null);
-                    },
-                  },
-                  {
-                    id: "people",
-                    label: "People",
-                    icon: <Users size={19} />,
-                    onSelect: () => router.push(`/admin?tab=users&event=${eventId}`),
-                  },
-                  {
-                    id: "updates",
-                    label: "Updates",
-                    icon: <Megaphone size={19} />,
-                    onSelect: () => router.push(`/admin?tab=announcements&event=${eventId}`),
-                  },
-                  {
-                    id: "more",
-                    label: "More",
-                    icon: <MoreHorizontal size={20} />,
-                    active: showMobileMore,
-                    onSelect: () => setShowMobileMore(true),
-                  },
-                ]
-              : [
-                  {
-                    id: "schedule",
-                    label: "Schedule",
-                    icon: <CalendarDays size={19} />,
-                    active: filterPersonId === null && publicScheduleViewId === null,
-                    onSelect: () => {
-                      setFilterPersonId(null);
-                      setPublicScheduleViewId(null);
-                    },
-                  },
-                  ...(highlightedPersonId
-                    ? [{
-                        id: "mine",
-                        label: "My schedule",
-                        icon: <UserRound size={19} />,
-                        active: filterPersonId === highlightedPersonId,
-                        onSelect: () => {
-                          setFilterPersonId(highlightedPersonId);
-                          setPublicScheduleViewId(null);
-                        },
-                      }]
-                    : []),
-                  ...(publicScheduleCategories.length > 0
-                    ? [{
-                        id: "programme",
-                        label: "Programme",
-                        icon: <List size={19} />,
-                        active: publicScheduleViewId !== null,
-                        onSelect: () => {
-                          setPublicScheduleViewId(publicScheduleViewId ?? publicScheduleCategories[0].id);
-                          setFilterPersonId(null);
-                        },
-                      }]
-                    : []),
-                  {
-                    id: "more",
-                    label: "More",
-                    icon: <MoreHorizontal size={20} />,
-                    active: showMobileMore,
-                    onSelect: () => setShowMobileMore(true),
-                  },
-                ]
-          }
-        />
-      )}
+      <div className={user && !user.is_root_admin ? "hidden md:block" : ""}>
+        <Footer />
+      </div>
 
       <MobileActionSheet
         open={showMobileFilters}
@@ -2057,52 +1936,6 @@ function CalendarContent() {
         </div>
       </MobileActionSheet>
 
-      <MobileActionSheet
-        open={showMobileMore}
-        onClose={() => setShowMobileMore(false)}
-        title="More"
-        description="Event tools and account settings."
-      >
-        <div className="space-y-2">
-          {canManageEvent && (
-            <>
-              <button type="button" onClick={() => router.push(`/admin?tab=history&event=${eventId}`)} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><History size={18} /> History</button>
-              <button type="button" onClick={() => router.push(`/admin?tab=public-links&event=${eventId}`)} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><Share2 size={18} /> Public links</button>
-            </>
-          )}
-          {serviceReady && eventId > 0 && <div className="flex min-h-11 items-center justify-between rounded-lg px-3"><span className="text-sm">Notifications</span><NotificationBell eventId={eventId} /></div>}
-          {user && <button type="button" onClick={() => { setShowMobileMore(false); setShowOfflineStorageSettings(true); }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><CalendarDays size={18} /> Offline schedule on this device</button>}
-          <div className="flex min-h-11 items-center justify-between rounded-lg px-3"><span className="text-sm">Appearance</span><ThemeToggle /></div>
-          {user && <button type="button" onClick={() => router.push("/account/security")} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><Shield size={18} /> Account security</button>}
-          {user ? (
-            <button type="button" onClick={handleLogout} disabled={isLoggingOut} aria-busy={isLoggingOut} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-red-600 hover:bg-red-50 disabled:cursor-wait disabled:opacity-60 dark:text-red-400 dark:hover:bg-red-900/20">{isLoggingOut ? <RefreshCw size={18} className="animate-spin" /> : <LogOut size={18} />} {isLoggingOut ? "Logging out…" : "Log out"}</button>
-          ) : (
-            <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-900/20 dark:text-amber-200">Offline read-only access is active.</p>
-          )}
-        </div>
-      </MobileActionSheet>
-
-      <MobileActionSheet
-        open={showOfflineStorageSettings}
-        onClose={() => setShowOfflineStorageSettings(false)}
-        title="Offline schedule on this device"
-        description="Choose whether this device keeps a bounded offline copy."
-      >
-        <div className="space-y-4 text-sm">
-          <p className="text-gray-600 dark:text-gray-300">
-            Optional. Stores the calendar, at most your linked participant identity and your own published unavailability in IndexedDB until the server-bounded expiry, logout or successful removal. Other participant identities, organiser-only task fields and edit history are excluded.
-          </p>
-          <a className="inline-block font-medium text-blue-700 underline dark:text-blue-300" href="/privacy">Privacy details</a>
-          {offlineStorageError && (
-            <p role="alert" className="rounded border border-red-300 bg-red-50 px-3 py-2 text-red-900 dark:border-red-800 dark:bg-red-950 dark:text-red-100">
-              {offlineStorageError} No offline copy is being claimed unless storage completed successfully.
-            </p>
-          )}
-          <Button fullWidth variant={offlineStorageEnabled ? "danger" : "primary"} onClick={() => void toggleOfflineStorage()}>
-            {offlineStorageEnabled ? "Remove offline copy" : "Enable offline copy"}
-          </Button>
-        </div>
-      </MobileActionSheet>
     </div>
   );
 }

@@ -194,6 +194,13 @@ class OfflineTaskOut(BaseModel):
     web_edit_change_summary: List[str] = []
 
 
+class OfflineAudienceTeamOut(BaseModel):
+    """The deliberately small audience identity retained on a device."""
+
+    name: str
+    short_name: Optional[str] = None
+
+
 class OfflinePublicScheduleItemOut(BaseModel):
     """Public programme fields approved for authenticated offline storage."""
 
@@ -207,7 +214,7 @@ class OfflinePublicScheduleItemOut(BaseModel):
     location_name: Optional[str] = None
     location_address: Optional[str] = None
     responsible: Optional[str] = None
-    audience_teams: List[Dict[str, Optional[str]]] = []
+    audience_teams: List[OfflineAudienceTeamOut] = []
     description: Optional[str] = None
     category_id: Optional[int] = None
     category_name: Optional[str] = None
@@ -943,7 +950,20 @@ def _offline_calendar_response(calendar: CalendarResponse) -> OfflineCalendarRes
                 location_name=item.location_name,
                 location_address=item.location_address,
                 responsible=item.responsible,
-                audience_teams=item.audience_teams,
+                audience_teams=[
+                    OfflineAudienceTeamOut(
+                        name=team["name"],
+                        short_name=team.get("short_name"),
+                    )
+                    for team in item.audience_teams
+                    if isinstance(team, dict)
+                    and isinstance(team.get("name"), str)
+                    and team["name"]
+                    and (
+                        team.get("short_name") is None
+                        or isinstance(team.get("short_name"), str)
+                    )
+                ],
                 description=item.description,
                 category_id=item.category_id,
                 category_name=item.category_name,

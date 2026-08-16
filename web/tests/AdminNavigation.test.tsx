@@ -90,4 +90,22 @@ describe("AdminNavigation", () => {
     });
     expect(onSelect).toHaveBeenCalledWith("privacy");
   });
+
+  it("removes the duplicate mobile selector when the shared shell is active", () => {
+    render(
+      <AdminNavigation
+        active="users"
+        isRootAdmin={false}
+        isIssuerOnly
+        canManagePublicLinks
+        hideMobile
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("combobox", { name: "Administration page" }).closest("div"),
+    ).toHaveClass("hidden");
+    expect(screen.getByText("Issuer administration")).toBeInTheDocument();
+  });
 });

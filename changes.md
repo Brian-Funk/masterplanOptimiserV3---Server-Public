@@ -1,5 +1,25 @@
 # Changes
 
+## 3.9.14 — 16 August 2026
+
+### Changed
+
+- Use one persistent, role-aware phone navigation bar across schedules, event
+  management, account security and the new More page.
+- Move phone account, appearance, notification, privacy, legal and offline
+  schedule controls into a calm dedicated More destination.
+- Keep optional offline-schedule storage phone-only. Existing bounded copies
+  still expire and are removed through the established logout and deletion
+  rules.
+
+### Fixed
+
+- Project published audience teams into the explicit `name` and optional
+  `short_name` offline wire contract, preventing the live numeric category
+  metadata from turning an otherwise valid offline response into HTTP 500.
+- Remove duplicated mobile issuer navigation, header actions, back controls
+  and footer links while preserving the existing desktop and root layouts.
+
 ## 3.9.13 — 16 August 2026
 
 This patch release restores the compact, phone-first schedule experience while

@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect } from "react";
+import { Suspense, useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { ThemeProvider } from "@/contexts/ThemeContext";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { ServiceAvailabilityProvider } from "@/contexts/ServiceAvailabilityContext";
 import { InstallPrompt } from "@/components/InstallPrompt";
+import { AuthenticatedMobileShell } from "@/components/AuthenticatedMobileShell";
 
 /** Provide route-appropriate client state and register offline support. */
 export default function ClientProviders({
@@ -39,7 +40,10 @@ export default function ClientProviders({
   return (
     <ThemeProvider>
       <ServiceAvailabilityProvider>
-        <AuthProvider>{themedContent}</AuthProvider>
+        <AuthProvider>
+          {themedContent}
+          <Suspense fallback={null}><AuthenticatedMobileShell /></Suspense>
+        </AuthProvider>
       </ServiceAvailabilityProvider>
     </ThemeProvider>
   );

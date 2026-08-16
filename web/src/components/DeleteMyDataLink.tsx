@@ -15,7 +15,7 @@ type DeletionReceipt = {
 };
 
 /** Footer link and confirmation modal for GDPR deletion requests. */
-export function DeleteMyDataLink() {
+export function DeleteMyDataLink({ standalone = false }: { standalone?: boolean } = {}) {
   const { isAuthenticated } = useAuth();
   const [open, setOpen] = useState(false);
   const [receipt, setReceipt] = useState<DeletionReceipt | null>(null);
@@ -68,10 +68,12 @@ export function DeleteMyDataLink() {
 
   return (
     <>
-      {separator}
+      {!standalone && separator}
       <button
         onClick={() => setOpen(true)}
-        className="hover:text-gray-700 dark:hover:text-gray-200 transition-colors"
+        className={standalone
+          ? "flex min-h-11 w-full items-center rounded-xl border border-gray-200 px-3 text-left text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+          : "hover:text-gray-700 dark:hover:text-gray-200 transition-colors"}
       >
         {receipt ? "Deletion request" : "Delete my data"}
       </button>
