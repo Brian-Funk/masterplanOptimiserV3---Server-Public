@@ -2,7 +2,7 @@
  * Offline calendar rendering regressions.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 
 const mockPush = vi.hoisted(() => vi.fn());
@@ -277,6 +277,11 @@ describe("CalendarPage offline cache", () => {
   });
 
   it("stores live calendar data after a successful online fetch", async () => {
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query === "(max-width: 767px)", media: query, onchange: null,
+      addListener: vi.fn(), removeListener: vi.fn(),
+      addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn(),
+    }));
     mockUseServiceAvailability.mockReturnValue({
       state: "ready",
       status: null,
@@ -314,41 +319,6 @@ describe("CalendarPage offline cache", () => {
     );
   });
 
-  it("reports a failed optional save and does not claim that storage is enabled", async () => {
-    mockOfflineCalendarStorageEnabled.mockReturnValue(false);
-    mockUseServiceAvailability.mockReturnValue({
-      state: "ready",
-      status: null,
-      isReady: true,
-      refresh: vi.fn(),
-    });
-    mockUseAuth.mockReturnValue(authState({
-      user,
-      isAuthenticated: true,
-      authStatus: "authenticated",
-    }));
-    mockApiFetch.mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => cachedCalendar,
-    });
-    mockStoreOfflineCalendarPayload.mockRejectedValueOnce(
-      new Error("The offline schedule could not be saved on this device."),
-    );
-
-    const { default: CalendarPage } = await import("@/app/calendar/page");
-    render(<CalendarPage />);
-    const enable = await screen.findByRole("button", { name: "Enable offline copy" });
-    fireEvent.click(enable);
-
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "The offline schedule could not be saved on this device.",
-    );
-    expect(mockSetOfflineCalendarStorageEnabled).toHaveBeenNthCalledWith(1, 42, true);
-    expect(mockSetOfflineCalendarStorageEnabled).toHaveBeenNthCalledWith(2, 42, false);
-    expect(screen.getByRole("button", { name: "Enable offline copy" })).toBeInTheDocument();
-  });
-
   it("dismisses the compact phone notice without deleting the offline copy", async () => {
     mockUseServiceAvailability.mockReturnValue({
       state: "ready", status: null, isReady: true, refresh: vi.fn(),
@@ -364,15 +334,11 @@ describe("CalendarPage offline cache", () => {
     render(<CalendarPage />);
 
     expect(await screen.findByTestId("mobile-offline-schedule-notice")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Manage offline schedule" }));
+    expect(mockPush).toHaveBeenCalledWith("/more?event=1#offline");
     fireEvent.click(screen.getByRole("button", { name: "Dismiss offline schedule notice" }));
     expect(screen.queryByTestId("mobile-offline-schedule-notice")).not.toBeInTheDocument();
     expect(localStorage.getItem("mp-opt:offline-schedule-notice-dismissed:v1")).toBe("1");
-
-    fireEvent.click(screen.getByRole("button", { name: "More" }));
-    fireEvent.click(screen.getByRole("button", { name: "Offline schedule on this device" }));
-    const dialog = screen.getByRole("dialog", { name: "Offline schedule on this device" });
-    expect(dialog).toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: "Remove offline copy" })).toBeInTheDocument();
     expect(mockClearOfflineCalendarCacheForUser).not.toHaveBeenCalled();
   });
 
@@ -418,7 +384,30 @@ describe("CalendarPage offline cache", () => {
 
     expect(await screen.findByText("My assignment")).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByText("Someone else's assignment")).not.toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "My schedule" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("does not download or refresh an offline copy on a wide screen", async () => {
+    mockUseServiceAvailability.mockReturnValue({
+      state: "ready", status: null, isReady: true, refresh: vi.fn(),
+    });
+    mockUseAuth.mockReturnValue(authState({
+      user, isAuthenticated: true, authStatus: "authenticated",
+    }));
+    mockApiFetch.mockResolvedValue({
+      ok: true, status: 200, json: async () => cachedCalendar,
+    });
+
+    const { default: CalendarPage } = await import("@/app/calendar/page");
+    render(<CalendarPage />);
+
+    expect(await screen.findByText("Cached Masterplan")).toBeInTheDocument();
+    expect(mockApiFetch).toHaveBeenCalledWith("/api/v1/calendar/1");
+    expect(mockApiFetch).not.toHaveBeenCalledWith(
+      "/api/v1/calendar/1/offline",
+      expect.anything(),
+    );
+    expect(mockStoreOfflineCalendarPayload).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /offline copy/i })).not.toBeInTheDocument();
   });
 
   it("keeps the complete organiser schedule as the default desktop view", async () => {

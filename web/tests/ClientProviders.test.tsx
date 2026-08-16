@@ -12,6 +12,8 @@ const { mockFetch, mockPathname } = vi.hoisted(() => ({
 
 vi.mock("next/navigation", () => ({
   usePathname: () => mockPathname(),
+  useSearchParams: () => new URLSearchParams(),
+  useRouter: () => ({ push: vi.fn() }),
 }));
 vi.mock("@/contexts/ThemeContext", () => ({
   ThemeProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,

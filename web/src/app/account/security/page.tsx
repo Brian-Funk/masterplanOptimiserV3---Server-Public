@@ -109,11 +109,11 @@ export default function AccountSecurityPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100">
+    <div className={`min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100 ${user.is_root_admin ? "" : "mobile-page-with-nav"}`}>
       <header className="sticky top-0 z-10 border-b border-gray-200 bg-white/95 shadow-sm backdrop-blur dark:border-gray-700 dark:bg-gray-800/95">
         <div className="mx-auto flex max-w-4xl items-center justify-between px-4 py-3 sm:px-6">
           <Logo height={32} href="https://info.mp-opt.net" />
-          <div className="flex items-center gap-2">
+          <div className={user.is_root_admin ? "flex items-center gap-2" : "hidden items-center gap-2 md:flex"}>
             <button
               type="button"
               onClick={() => router.push(backHref)}

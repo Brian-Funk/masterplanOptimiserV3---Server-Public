@@ -127,6 +127,64 @@ def test_offline_calendar_contract_is_participant_only_even_for_editor(db):
     assert returned["web_edit_change_summary"] == []
 
 
+def test_offline_calendar_projects_live_audience_teams_to_bounded_shape(db):
+    """The richer published team shape never escapes into device storage."""
+    event, _ = create_test_event(db, name="Audience projection")
+    category = PublishedGeneralScheduleCategory(
+        event_id=event.id,
+        external_category_id=21,
+        name="Programme",
+        sort_order=0,
+    )
+    db.add(category)
+    db.flush()
+    item = PublishedGeneralScheduleItem(
+        event_id=event.id,
+        external_session_element_id=301,
+        title="Opening",
+        date="2026-08-26",
+        start_time="09:00",
+        end_time="10:00",
+        category_id=category.id,
+        category_name=category.name,
+        audience_teams_json=json.dumps([
+            {
+                "id": 7,
+                "name": "Officials",
+                "short_name": "OFF",
+                "category_id": 2,
+                "category_name": "Delegations",
+                "colour": None,
+            },
+            {
+                "id": 8,
+                "name": "Chairs",
+                "short_name": None,
+                "category_id": 2,
+                "category_name": "Delegations",
+                "colour": "#123456",
+            },
+        ]),
+    )
+    db.add(item)
+    db.commit()
+    participant = create_test_user(
+        db,
+        username="audience.offline",
+        event_id=event.id,
+    )
+
+    response = _make_client(db, participant).get(
+        f"/api/v1/calendar/{event.id}/offline",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["public_schedule_items"][0]["audience_teams"] == [
+        {"name": "Officials", "short_name": "OFF"},
+        {"name": "Chairs", "short_name": None},
+    ]
+
+
 def test_calendar_returns_overnight_working_day_and_private_unavailability(db):
     """Authenticated calendars retain the overnight tail and exact missing-person detail."""
     event, _ = create_test_event(db, name="Night Calendar")
