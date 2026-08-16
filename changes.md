@@ -21,6 +21,16 @@ installations and their data.
 - Show the safe message from structured passkey API errors instead of reducing
   them to a generic registration failure.
 
+### HA readiness convergence
+
+- Treat the short interval between peer-copy acceptance and the witness's next
+  healthy observation as a retryable commissioning wait instead of a terminal
+  setup failure.
+- Keep automatic failover disabled after readiness is proven, and continue to
+  treat a failed provider write as a hard error.
+- Leave retryable interactive setup waits unfailed so reopening `mp-opt`
+  resumes the same pinned checkpoint without an inaccurate attention record.
+
 ## 3.9.11 — 16 August 2026
 
 This patch release prevents scheduled recovery snapshots from racing with
