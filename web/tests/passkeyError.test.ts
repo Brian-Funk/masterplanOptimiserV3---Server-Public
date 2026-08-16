@@ -10,6 +10,22 @@ describe("passkeyErrorMessage", () => {
     ).toBe("Registration failed");
   });
 
+  it("reads safe messages from structured FastAPI details", () => {
+    expect(
+      passkeyErrorMessage(
+        {
+          detail: {
+            code: "processing_consent_evidence_unavailable",
+            message: "The consent record could not be sealed. No passkey was registered; try again.",
+          },
+        },
+        "Fallback",
+      ),
+    ).toBe(
+      "The consent record could not be sealed. No passkey was registered; try again.",
+    );
+  });
+
   it("turns SlowAPI rate-limit errors into actionable copy", () => {
     expect(
       passkeyErrorMessage(
