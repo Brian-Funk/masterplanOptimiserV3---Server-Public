@@ -1,5 +1,40 @@
 # Changes
 
+## 3.9.11 — 16 August 2026
+
+This patch release prevents scheduled recovery snapshots from racing with
+commissioning, while preserving the restricted service identities used in
+production.
+
+### Commissioning and snapshot coordination
+
+- Use one host-local execution lease for setup and snapshots, with a consistent
+  lock order across both paths.
+- Defer a scheduled snapshot successfully when commissioning holds the lease,
+  while returning a retryable result if setup encounters an active snapshot.
+- Keep final installation validation inside the setup lease so a timer catch-up
+  cannot stop the Backend during its health checks.
+- Resume a completed `validated` checkpoint without redeploying the application
+  or repeating the first HA copy.
+
+### Restricted snapshot execution
+
+- Reuse the already-validated runtime Compose command from the scheduled
+  snapshot service instead of attempting permission repair or `sudo` inside a
+  `NoNewPrivileges` unit.
+- Retain strict path, mount, owner and mode checks before database readiness,
+  encryption and retention work begins.
+- Keep a non-holder Node B snapshot invocation successful and side-effect free.
+
+### Concurrent transient cleanup
+
+- Serialize cleanup of approved commissioning temporary files through a
+  protected lock.
+- Treat an expected file disappearing during inspection as already removed,
+  while continuing to reject symlinks, substituted paths and unsafe file
+  ownership or modes.
+- Never read or print temporary secret contents during cleanup.
+
 ## 3.9.10 — 15 August 2026
 
 This patch release keeps standby protection and scheduled recovery snapshots
