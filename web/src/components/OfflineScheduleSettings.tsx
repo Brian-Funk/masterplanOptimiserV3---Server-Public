@@ -20,7 +20,9 @@ import { Button } from "@/components/ui/Button";
 /** Phone-only control for the optional, bounded IndexedDB schedule copy. */
 export function OfflineScheduleSettings({ eventId }: { eventId: number }) {
   const { user } = useAuth();
-  const [enabled, setEnabled] = useState(false);
+  const [enabled, setEnabled] = useState(() => (
+    user ? offlineCalendarStorageEnabled(user.id) : false
+  ));
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
 
