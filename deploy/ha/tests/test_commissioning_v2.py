@@ -869,8 +869,10 @@ class PairingSetupContractTests(unittest.TestCase):
         ):
             self.assertIn(prefix, cleanup)
         self.assertIn("[ ! -L", cleanup)
-        self.assertIn("stat -c '%u'", cleanup)
-        self.assertIn("stat -c '%a'", cleanup)
+        self.assertIn("stat -c '%d:%i:%u:%a:%Y'", cleanup)
+        self.assertIn("MP_SETUP_TRANSIENT_CLEANUP_LOCK", cleanup)
+        self.assertIn("MP_SETUP_TRANSIENT_STALE_SECONDS:-300", cleanup)
+        self.assertIn('flock -x "$cleanup_fd"', cleanup)
         self.assertIn("shred -u", remove)
         self.assertIn("mp_setup_deploy_witness_scoped() (", SETUP)
         self.assertIn("mp_setup_repair_witness_admin_secret_scoped() (", SETUP)
@@ -949,6 +951,7 @@ class PairingSetupContractTests(unittest.TestCase):
             script = r'''
                 set -Eeuo pipefail
                 export MP_STATE="$2"
+                export MP_SETUP_TRANSIENT_STALE_SECONDS=0
                 source "$1/deploy/management/common.sh"
                 mp_cleanup_stale_setup_transients
                 test ! -e "$2/wrangler-secrets.Abc123"
@@ -964,6 +967,154 @@ class PairingSetupContractTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX transient-file concurrency contract")
+    def test_stale_transient_disappearing_during_validation_is_already_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state"
+            state.mkdir()
+            transient = state / "witness-join.Abc123"
+            transient.write_text("synthetic", encoding="utf-8")
+            transient.chmod(0o600)
+            script = r'''
+                set -Eeuo pipefail
+                export MP_STATE="$2"
+                export MP_SETUP_TRANSIENT_STALE_SECONDS=0
+                source "$1/deploy/management/common.sh"
+                test_state="$2"
+                stat() {
+                    case "$*" in
+                        *witness-join.Abc123*)
+                            rm -f -- "$test_state/witness-join.Abc123"
+                            return 1
+                            ;;
+                        *) command stat "$@" ;;
+                    esac
+                }
+                mp_cleanup_stale_setup_transients
+                test ! -e "$2/witness-join.Abc123"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(ROOT), str(state)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX transient-file concurrency contract")
+    def test_concurrent_transient_cleanup_is_serialised(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state"
+            state.mkdir()
+            transient = state / "witness-join.Abc123"
+            transient.write_text("synthetic", encoding="utf-8")
+            transient.chmod(0o600)
+            script = r'''
+                set -Eeuo pipefail
+                export MP_STATE="$2"
+                export MP_SETUP_TRANSIENT_STALE_SECONDS=0
+                source "$1/deploy/management/common.sh"
+                mp_cleanup_stale_setup_transients & first=$!
+                mp_cleanup_stale_setup_transients & second=$!
+                wait "$first"
+                wait "$second"
+                test ! -e "$2/witness-join.Abc123"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(ROOT), str(state)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX setup lease contract")
+    def test_snapshot_worker_and_setup_share_one_execution_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state"
+            state.mkdir()
+            script = r'''
+                set -Eeuo pipefail
+                export MP_STATE="$2"
+                export MP_SETUP_TRANSIENT_STALE_SECONDS=0
+                source "$1/deploy/management/common.sh"
+                source "$1/deploy/management/setup_v2.sh"
+                mp_setup_worker_lease_acquire 0
+                if (mp_setup_execution_acquire competing advance); then
+                    exit 10
+                else
+                    test "$?" -eq 75
+                fi
+                mp_setup_worker_lease_release
+                mp_setup_execution_acquire resumed advance
+                mp_setup_execution_release
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(ROOT), str(state)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX scheduled snapshot contention contract")
+    def test_persistent_snapshot_catchup_defers_cleanly_while_setup_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            home = root / "home"
+            snapshots = root / "snapshots"
+            for path in (state, home, snapshots):
+                path.mkdir()
+            script = r'''
+                set -Eeuo pipefail
+                exec 7>"$2/setup-execution.lock"
+                chmod 600 "$2/setup-execution.lock"
+                flock -n 7
+                output="$(
+                    MP_ROOT="$1" MP_STATE="$2" MP_HOME="$3" MP_SNAPSHOTS="$4" \
+                    MP_SETUP_WORKER_LEASE_WAIT_SECONDS=0 \
+                    bash "$1/deploy/ha/automatic_snapshots.sh"
+                )"
+                grep -Fq 'Automatic snapshot deferred' <<< "$output"
+            '''
+            result = subprocess.run(
+                [
+                    "bash", "-Eeuo", "pipefail", "-c", script, "bash",
+                    str(ROOT), str(state), str(home), str(snapshots),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX snapshot service-mode contract")
+    def test_snapshot_service_database_wait_never_calls_permission_repair(self) -> None:
+        script = r'''
+            set -Eeuo pipefail
+            source "$1/deploy/management/common.sh"
+            export MP_SNAPSHOT_SERVICE_MODE=1
+            mp_compose_init() { printf 'unsafe init\n' >&2; return 90; }
+            mp_compose_init_existing_runtime() { printf 'unexpected init\n' >&2; return 91; }
+            fake_compose() {
+                case "$*" in
+                    "exec -T db sh -c "*) return 0 ;;
+                    "exec -T db pg_isready -U masterplan -d masterplan") return 0 ;;
+                    *) printf 'unexpected compose call: %s\n' "$*" >&2; return 1 ;;
+                esac
+            }
+            MP_COMPOSE=(fake_compose)
+            mp_wait_for_database 1
+        '''
+        result = subprocess.run(
+            ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(ROOT)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_resume_notice_explicitly_continues_and_next_action_is_current(self) -> None:
         setup = shell_function(SETUP, "mp_setup_v2")
