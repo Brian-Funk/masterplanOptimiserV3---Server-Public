@@ -63,7 +63,7 @@ sudo bash /tmp/mp-opt-setup.sh \
 Do not substitute `main`, `master`, or a moving branch name. The bootstrap
 rejects them.
 
-The explicit public repository URL also keeps the immutable `v3.9.11`
+The explicit public repository URL also keeps the immutable `v3.9.12`
 bootstrap asset usable after the source repository transition. Later bootstrap
 assets use the same public URL by default.
 
@@ -164,7 +164,7 @@ mp-opt setup plan --mode ha-primary-new --lane signed --json
 mp-opt setup start --mode ha-primary-new --lane signed --json
 mp-opt setup status --json
 mp-opt setup events --jsonl --after 0
-printf '%s\n' '{"format":"mp-opt-commissioning-input-v1","checkpoint":"signed_baseline_verified","idempotency_key":"run01-baseline","values":{"tag":"v3.9.11","commit":"<exact-40-character-release-commit>"}}' \
+printf '%s\n' '{"format":"mp-opt-commissioning-input-v1","checkpoint":"signed_baseline_verified","idempotency_key":"run01-baseline","values":{"tag":"v3.9.12","commit":"<exact-40-character-release-commit>"}}' \
   | mp-opt setup advance --input-stdin --json
 ```
 
@@ -219,7 +219,7 @@ not send the test message again.
 Exact deployment lifecycle operations use another stdin-only contract:
 
 ```bash
-printf '%s\n' '{"format":"mp-opt-deployment-lifecycle-input-v1","action":"signed-upgrade","tag":"v3.9.11","commit":"<exact-40-character-release-commit>","idempotency_key":"run01-signed-upgrade","values":{}}' \
+printf '%s\n' '{"format":"mp-opt-deployment-lifecycle-input-v1","action":"signed-upgrade","tag":"v3.9.12","commit":"<exact-40-character-release-commit>","idempotency_key":"run01-signed-upgrade","values":{}}' \
   | mp-opt setup deployment --input-stdin --json
 ```
 

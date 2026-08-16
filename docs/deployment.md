@@ -80,13 +80,13 @@ Signed deployments can also be run non-interactively by a trusted deployment
 workstation:
 
 ```bash
-/opt/masterplan/deploy/signed-deployment.sh v3.9.11
+/opt/masterplan/deploy/signed-deployment.sh v3.9.12
 ```
 
 The tag spelling is canonical and case-sensitive: `vMAJOR.MINOR.PATCH`. Release
 names use the identical value. Tags and release names are never overwritten;
 `v3.4.0` is permanently retired and the release prepared by this source tree is
-`v3.9.11`.
+`v3.9.12`.
 
 Production installation, standalone-to-HA migration, node replacement, and
 full-loss recovery all start in the same resumable commissioning interface.

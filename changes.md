@@ -1,5 +1,26 @@
 # Changes
 
+## 3.9.12 — 16 August 2026
+
+This patch release repairs initial account activation while preserving existing
+installations and their data.
+
+### Consent evidence
+
+- Seal first-activation consent with the evidence ledger's existing
+  pseudonymous subject, event, policy, statement, document and timestamp
+  fields.
+- Register the consent record type with the signed evidence validator without
+  permitting controller names, email addresses or display names in ledger
+  payloads.
+- Exercise the real evidence writer during account activation tests and audit
+  every application evidence call against the signed manifest contract.
+
+### Registration feedback
+
+- Show the safe message from structured passkey API errors instead of reducing
+  them to a generic registration failure.
+
 ## 3.9.11 — 16 August 2026
 
 This patch release prevents scheduled recovery snapshots from racing with
