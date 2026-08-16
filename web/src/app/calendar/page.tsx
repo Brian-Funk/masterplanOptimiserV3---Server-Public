@@ -90,7 +90,10 @@ import {
   Share2,
   RefreshCw,
   Shield,
+  X,
 } from "lucide-react";
+
+const OFFLINE_NOTICE_DISMISSED_KEY = "mp-opt:offline-schedule-notice-dismissed:v1";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -321,6 +324,8 @@ function CalendarContent() {
   const [offlineCachedAt, setOfflineCachedAt] = useState<string | null>(null);
   const [offlineStorageEnabled, setOfflineStorageEnabled] = useState(false);
   const [offlineStorageError, setOfflineStorageError] = useState<string | null>(null);
+  const [offlineStorageNoticeDismissed, setOfflineStorageNoticeDismissed] = useState(false);
+  const [showOfflineStorageSettings, setShowOfflineStorageSettings] = useState(false);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [filterPersonId, setFilterPersonId] = useState<number | null>(null);
   const [publicScheduleViewId, setPublicScheduleViewId] = useState<string | null>(null);
@@ -333,6 +338,12 @@ function CalendarContent() {
   useEffect(() => {
     setOfflineStorageEnabled(user ? offlineCalendarStorageEnabled(user.id) : false);
   }, [user]);
+
+  useEffect(() => {
+    setOfflineStorageNoticeDismissed(
+      window.localStorage.getItem(OFFLINE_NOTICE_DISMISSED_KEY) === "1",
+    );
+  }, []);
 
   const saveOfflineCalendar = useCallback(async (cachedAt: string) => {
     if (!user || !eventId) {
@@ -375,6 +386,44 @@ function CalendarContent() {
     setOfflineStorageError(null);
     return payload;
   }, [user, eventId]);
+
+  const toggleOfflineStorage = useCallback(async () => {
+    if (!user) return;
+    setOfflineStorageError(null);
+    if (!offlineStorageEnabled) {
+      setOfflineCalendarStorageEnabled(user.id, true);
+      try {
+        await saveOfflineCalendar(new Date().toISOString());
+        setOfflineStorageEnabled(true);
+      } catch (storageError) {
+        setOfflineCalendarStorageEnabled(user.id, false);
+        setOfflineStorageEnabled(false);
+        setOfflineStorageError(
+          storageError instanceof Error
+            ? storageError.message
+            : "The offline schedule could not be enabled.",
+        );
+      }
+      return;
+    }
+    try {
+      await clearOfflineCalendarCacheForUser(user.id);
+      setOfflineCalendarStorageEnabled(user.id, false);
+      clearOfflineAccessMarker();
+      setOfflineStorageEnabled(false);
+    } catch (storageError) {
+      setOfflineStorageError(
+        storageError instanceof Error
+          ? storageError.message
+          : "The offline schedule could not be removed.",
+      );
+    }
+  }, [offlineStorageEnabled, saveOfflineCalendar, user]);
+
+  const dismissOfflineStorageNotice = useCallback(() => {
+    window.localStorage.setItem(OFFLINE_NOTICE_DISMISSED_KEY, "1");
+    setOfflineStorageNoticeDismissed(true);
+  }, []);
 
   // Draft state
   const [draftEdits, setDraftEdits] = useState<Map<number, DraftEdit>>(
@@ -888,6 +937,17 @@ function CalendarContent() {
     return person ? person.external_person_id : null;
   }, [user, data]);
 
+  const mobileScheduleInitialisedForEvent = useRef<number | null>(null);
+  useEffect(() => {
+    if (!eventId || !highlightedPersonId) return;
+    if (mobileScheduleInitialisedForEvent.current === eventId) return;
+    mobileScheduleInitialisedForEvent.current = eventId;
+    if (window.matchMedia("(max-width: 767px)").matches) {
+      setFilterPersonId(highlightedPersonId);
+      setPublicScheduleViewId(null);
+    }
+  }, [eventId, highlightedPersonId]);
+
   // Filter tasks
   const visibleTasks = useMemo(() => {
     if (!selectedDate) return [];
@@ -1316,11 +1376,11 @@ function CalendarContent() {
   }
 
   return (
-    <div className={`min-h-screen flex flex-col bg-gray-50 dark:bg-gray-900 ${user?.is_root_admin ? "" : "mobile-page-with-nav"}`}>
+    <div className={`min-h-screen w-screen max-w-full min-w-0 overflow-x-hidden flex flex-col bg-gray-50 dark:bg-gray-900 md:w-full md:overflow-x-visible ${user?.is_root_admin ? "" : "mobile-page-with-nav"}`}>
       <DynamicPWA eventName={data?.event_name} />
       {/* Header */}
-      <header className="sticky top-0 z-50 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 shadow-sm">
-        <div className="max-w-5xl mx-auto px-4 py-2.5 md:py-3 flex items-center justify-between">
+      <header className="sticky top-0 z-50 w-full min-w-0 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 shadow-sm">
+        <div className="max-w-5xl mx-auto w-full min-w-0 px-4 py-2.5 md:py-3 flex items-center justify-between">
           <div className="flex min-w-0 items-center gap-3">
             <span className="hidden sm:inline-flex"><Logo height={32} href="https://info.mp-opt.net" /></span>
             <div className="min-w-0">
@@ -1365,7 +1425,7 @@ function CalendarContent() {
         </div>
       </header>
 
-      <main className="flex-1 max-w-5xl mx-auto px-4 py-4 md:py-6 w-full">
+      <main className="flex-1 max-w-5xl min-w-0 mx-auto px-4 py-4 md:py-6 w-full">
         {/* Snapshot banner */}
         {isSnapshotMode && (
           <div className="mb-4 flex items-center gap-3 bg-amber-50 dark:bg-amber-900/20 border-2 border-amber-400 dark:border-amber-600 rounded-lg px-4 py-3">
@@ -1409,42 +1469,32 @@ function CalendarContent() {
           <p className="mb-4 text-right text-xs text-gray-500 dark:text-gray-400"><a className="underline" href={data.data_policy_version ? `${getApiUrl()}/api/v1/governance/public/versions/${data.data_policy_version}/data-policy.html` : "/data-policy"}>Permitted-data policy{data.data_policy_version ? ` v${data.data_policy_version}` : ""}</a>{data.data_policy_sha256 && <span className="ml-2 font-mono">{data.data_policy_sha256.slice(0, 12)}...</span>}</p>
         )}
 
-        {/* Offline indicator */}
+        {/* Offline schedule control: compact on phones, unchanged disclosure on larger screens. */}
+        {user && !isSnapshotMode && !offlineStorageNoticeDismissed && (
+          <div data-testid="mobile-offline-schedule-notice" className="mb-4 flex items-start gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm dark:border-gray-700 dark:bg-gray-800 md:hidden">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium text-gray-900 dark:text-gray-100">
+                {offlineStorageEnabled ? "Offline copy available" : "Use this schedule offline"}
+              </p>
+              <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                {offlineStorageEnabled
+                  ? "This device can keep showing your schedule without a connection."
+                  : "Optional. Keep your schedule available when this device loses its connection."}
+              </p>
+              <button type="button" className="mt-1.5 text-xs font-medium text-blue-700 underline dark:text-blue-300" onClick={() => setShowOfflineStorageSettings(true)}>
+                Manage offline schedule
+              </button>
+            </div>
+            <button type="button" onClick={dismissOfflineStorageNotice} aria-label="Dismiss offline schedule notice" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700">
+              <X size={18} aria-hidden="true" />
+            </button>
+          </div>
+        )}
         {user && !isSnapshotMode && (
-          <div className="mb-4 space-y-3 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm dark:border-gray-700 dark:bg-gray-800">
+          <div className="mb-4 hidden space-y-3 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm dark:border-gray-700 dark:bg-gray-800 md:block">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div><p className="font-medium text-gray-900 dark:text-gray-100">Offline schedule on this device</p><p className="text-xs text-gray-500 dark:text-gray-400">Optional. Stores the calendar, at most your linked participant identity and your own published unavailability in IndexedDB until the server-bounded expiry, logout or successful removal. Other participant identities, organiser-only task fields and edit history are excluded. <a className="underline" href="/privacy">Privacy details</a>.</p></div>
-              <button type="button" className={`rounded px-3 py-2 font-medium ${offlineStorageEnabled ? "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200" : "bg-blue-600 text-white"}`} onClick={async () => {
-                setOfflineStorageError(null);
-                if (!offlineStorageEnabled) {
-                  setOfflineCalendarStorageEnabled(user.id, true);
-                  try {
-                    await saveOfflineCalendar(new Date().toISOString());
-                    setOfflineStorageEnabled(true);
-                  } catch (storageError) {
-                    setOfflineCalendarStorageEnabled(user.id, false);
-                    setOfflineStorageEnabled(false);
-                    setOfflineStorageError(
-                      storageError instanceof Error
-                        ? storageError.message
-                        : "The offline schedule could not be enabled.",
-                    );
-                  }
-                  return;
-                }
-                try {
-                  await clearOfflineCalendarCacheForUser(user.id);
-                  setOfflineCalendarStorageEnabled(user.id, false);
-                  clearOfflineAccessMarker();
-                  setOfflineStorageEnabled(false);
-                } catch (storageError) {
-                  setOfflineStorageError(
-                    storageError instanceof Error
-                      ? storageError.message
-                      : "The offline schedule could not be removed.",
-                  );
-                }
-              }}>{offlineStorageEnabled ? "Remove offline copy" : "Enable offline copy"}</button>
+              <button type="button" className={`rounded px-3 py-2 font-medium ${offlineStorageEnabled ? "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200" : "bg-blue-600 text-white"}`} onClick={() => void toggleOfflineStorage()}>{offlineStorageEnabled ? "Remove offline copy" : "Enable offline copy"}</button>
             </div>
             {offlineStorageError && (
               <p role="alert" className="rounded border border-red-300 bg-red-50 px-3 py-2 text-red-900 dark:border-red-800 dark:bg-red-950 dark:text-red-100">
@@ -1840,11 +1890,15 @@ function CalendarContent() {
               ? [
                   {
                     id: "schedule",
-                    label: "Schedule",
+                    label: highlightedPersonId ? "My schedule" : "Schedule",
                     icon: <CalendarDays size={19} />,
-                    active: true,
+                    active: publicScheduleViewId === null && (
+                      highlightedPersonId
+                        ? filterPersonId === highlightedPersonId
+                        : filterPersonId === null
+                    ),
                     onSelect: () => {
-                      setFilterPersonId(null);
+                      setFilterPersonId(highlightedPersonId);
                       setPublicScheduleViewId(null);
                     },
                   },
@@ -1882,7 +1936,7 @@ function CalendarContent() {
                   ...(highlightedPersonId
                     ? [{
                         id: "mine",
-                        label: "Mine",
+                        label: "My schedule",
                         icon: <UserRound size={19} />,
                         active: filterPersonId === highlightedPersonId,
                         onSelect: () => {
@@ -2017,6 +2071,7 @@ function CalendarContent() {
             </>
           )}
           {serviceReady && eventId > 0 && <div className="flex min-h-11 items-center justify-between rounded-lg px-3"><span className="text-sm">Notifications</span><NotificationBell eventId={eventId} /></div>}
+          {user && <button type="button" onClick={() => { setShowMobileMore(false); setShowOfflineStorageSettings(true); }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><CalendarDays size={18} /> Offline schedule on this device</button>}
           <div className="flex min-h-11 items-center justify-between rounded-lg px-3"><span className="text-sm">Appearance</span><ThemeToggle /></div>
           {user && <button type="button" onClick={() => router.push("/account/security")} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"><Shield size={18} /> Account security</button>}
           {user ? (
@@ -2024,6 +2079,28 @@ function CalendarContent() {
           ) : (
             <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-900/20 dark:text-amber-200">Offline read-only access is active.</p>
           )}
+        </div>
+      </MobileActionSheet>
+
+      <MobileActionSheet
+        open={showOfflineStorageSettings}
+        onClose={() => setShowOfflineStorageSettings(false)}
+        title="Offline schedule on this device"
+        description="Choose whether this device keeps a bounded offline copy."
+      >
+        <div className="space-y-4 text-sm">
+          <p className="text-gray-600 dark:text-gray-300">
+            Optional. Stores the calendar, at most your linked participant identity and your own published unavailability in IndexedDB until the server-bounded expiry, logout or successful removal. Other participant identities, organiser-only task fields and edit history are excluded.
+          </p>
+          <a className="inline-block font-medium text-blue-700 underline dark:text-blue-300" href="/privacy">Privacy details</a>
+          {offlineStorageError && (
+            <p role="alert" className="rounded border border-red-300 bg-red-50 px-3 py-2 text-red-900 dark:border-red-800 dark:bg-red-950 dark:text-red-100">
+              {offlineStorageError} No offline copy is being claimed unless storage completed successfully.
+            </p>
+          )}
+          <Button fullWidth variant={offlineStorageEnabled ? "danger" : "primary"} onClick={() => void toggleOfflineStorage()}>
+            {offlineStorageEnabled ? "Remove offline copy" : "Enable offline copy"}
+          </Button>
         </div>
       </MobileActionSheet>
     </div>

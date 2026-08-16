@@ -2,7 +2,7 @@
  * Offline calendar rendering regressions.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import React from "react";
 
 const mockPush = vi.hoisted(() => vi.fn());
@@ -174,6 +174,19 @@ describe("CalendarPage offline cache", () => {
     mockClearOfflineCalendarCacheForUser.mockReset();
     mockRoute.searchParams = new URLSearchParams("event=1");
     localStorage.clear();
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
   });
 
   it("renders a cached calendar while offline with a valid marker", async () => {
@@ -334,5 +347,114 @@ describe("CalendarPage offline cache", () => {
     expect(mockSetOfflineCalendarStorageEnabled).toHaveBeenNthCalledWith(1, 42, true);
     expect(mockSetOfflineCalendarStorageEnabled).toHaveBeenNthCalledWith(2, 42, false);
     expect(screen.getByRole("button", { name: "Enable offline copy" })).toBeInTheDocument();
+  });
+
+  it("dismisses the compact phone notice without deleting the offline copy", async () => {
+    mockUseServiceAvailability.mockReturnValue({
+      state: "ready", status: null, isReady: true, refresh: vi.fn(),
+    });
+    mockUseAuth.mockReturnValue(authState({
+      user, isAuthenticated: true, authStatus: "authenticated",
+    }));
+    mockApiFetch.mockResolvedValue({
+      ok: true, status: 200, json: async () => cachedCalendar,
+    });
+
+    const { default: CalendarPage } = await import("@/app/calendar/page");
+    render(<CalendarPage />);
+
+    expect(await screen.findByTestId("mobile-offline-schedule-notice")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss offline schedule notice" }));
+    expect(screen.queryByTestId("mobile-offline-schedule-notice")).not.toBeInTheDocument();
+    expect(localStorage.getItem("mp-opt:offline-schedule-notice-dismissed:v1")).toBe("1");
+
+    fireEvent.click(screen.getByRole("button", { name: "More" }));
+    fireEvent.click(screen.getByRole("button", { name: "Offline schedule on this device" }));
+    const dialog = screen.getByRole("dialog", { name: "Offline schedule on this device" });
+    expect(dialog).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Remove offline copy" })).toBeInTheDocument();
+    expect(mockClearOfflineCalendarCacheForUser).not.toHaveBeenCalled();
+  });
+
+  it("opens a linked organiser's own schedule first on a phone", async () => {
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query === "(max-width: 767px)",
+      media: query,
+      onchange: null,
+      addListener: vi.fn(), removeListener: vi.fn(),
+      addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn(),
+    }));
+    const organiser = { ...user, is_admin: true, linked_person_id: 10 };
+    const calendar = {
+      ...cachedCalendar,
+      persons: [
+        { id: 1, external_person_id: 10, first_name: "Own", last_name: "Person" },
+        { id: 2, external_person_id: 11, first_name: "Other", last_name: "Person" },
+      ],
+      tasks: [
+        { ...cachedCalendar.tasks[0], id: 1, name: "My assignment", attendees: [{ name: "Own Person", person_id: 10 }] },
+        { ...cachedCalendar.tasks[0], id: 2, name: "Someone else's assignment", attendees: [{ name: "Other Person", person_id: 11 }] },
+      ],
+      data_policy_acknowledged: true,
+    };
+    mockUseServiceAvailability.mockReturnValue({
+      state: "ready", status: null, isReady: true, refresh: vi.fn(),
+    });
+    mockUseAuth.mockReturnValue(authState({
+      user: organiser, isAuthenticated: true, authStatus: "authenticated",
+    }));
+    mockApiFetch.mockImplementation(async (url: string) => ({
+      ok: true,
+      status: 200,
+      json: async () => url.includes("/web-edits")
+        ? { total: 0, pending: 0, accepted: 0, rejected: 0 }
+        : url.includes("/notifications/changes/")
+          ? { changes: [] }
+          : calendar,
+    }));
+
+    const { default: CalendarPage } = await import("@/app/calendar/page");
+    render(<CalendarPage />);
+
+    expect(await screen.findByText("My assignment")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Someone else's assignment")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "My schedule" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("keeps the complete organiser schedule as the default desktop view", async () => {
+    const organiser = { ...user, is_admin: true, linked_person_id: 10 };
+    const calendar = {
+      ...cachedCalendar,
+      persons: [
+        { id: 1, external_person_id: 10, first_name: "Own", last_name: "Person" },
+        { id: 2, external_person_id: 11, first_name: "Other", last_name: "Person" },
+      ],
+      tasks: [
+        { ...cachedCalendar.tasks[0], id: 1, name: "My desktop assignment", attendees: [{ name: "Own Person", person_id: 10 }] },
+        { ...cachedCalendar.tasks[0], id: 2, name: "Other desktop assignment", attendees: [{ name: "Other Person", person_id: 11 }] },
+      ],
+      data_policy_acknowledged: true,
+    };
+    mockUseServiceAvailability.mockReturnValue({
+      state: "ready", status: null, isReady: true, refresh: vi.fn(),
+    });
+    mockUseAuth.mockReturnValue(authState({
+      user: organiser, isAuthenticated: true, authStatus: "authenticated",
+    }));
+    mockApiFetch.mockImplementation(async (url: string) => ({
+      ok: true,
+      status: 200,
+      json: async () => url.includes("/web-edits")
+        ? { total: 0, pending: 0, accepted: 0, rejected: 0 }
+        : url.includes("/notifications/changes/")
+          ? { changes: [] }
+          : calendar,
+    }));
+
+    const { default: CalendarPage } = await import("@/app/calendar/page");
+    render(<CalendarPage />);
+
+    expect(await screen.findByText("My desktop assignment")).toBeInTheDocument();
+    expect(screen.getByText("Other desktop assignment")).toBeInTheDocument();
   });
 });

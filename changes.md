@@ -1,5 +1,27 @@
 # Changes
 
+## 3.9.13 — 16 August 2026
+
+This patch release restores the compact, phone-first schedule experience while
+leaving the desktop browser interface unchanged.
+
+### Phone schedule
+
+- Open a linked organiser's own assignments by default on narrow screens and
+  provide a clear **My schedule** destination in the mobile navigation.
+- Keep the full event-management schedule and filtering controls available to
+  organisers without changing their desktop layout.
+- Contain the schedule and legal navigation within the phone viewport so the
+  page no longer leaves a blank, horizontally overflowing column.
+
+### Offline schedule notice
+
+- Replace the large mobile offline-storage disclosure with a compact notice
+  that can be dismissed without deleting the stored schedule.
+- Keep offline storage manageable from **More**, including the complete privacy
+  explanation and the existing remove-or-enable action.
+- Preserve the complete inline disclosure on desktop browsers.
+
 ## 3.9.12 — 16 August 2026
 
 This patch release repairs initial account activation while preserving existing
