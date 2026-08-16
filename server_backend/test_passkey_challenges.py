@@ -15,7 +15,8 @@ from app.core.passkey_ceremonies import (
 from app.models.audit import AuditLog
 from app.models.governance import AccountProcessingConsent
 from app.models.user import PasskeyCeremony, WebAuthnCredential
-from app.core.evidence import EvidenceUnavailable
+from app.core.evidence import EvidenceUnavailable, verify_local_chain
+from app.models.evidence import EvidenceOperation
 from server_backend.conftest import (
     _make_client,
     _raw_client,
@@ -94,7 +95,12 @@ def _install_auth_success(monkeypatch):
     )
 
 
-def _install_registration_success(monkeypatch, credential_id: bytes):
+def _install_registration_success(
+    monkeypatch,
+    credential_id: bytes,
+    *,
+    real_evidence: bool = False,
+):
     def fake_verify_registration_response(**kwargs):
         assert kwargs["require_user_verification"] is True
         return SimpleNamespace(
@@ -109,7 +115,8 @@ def _install_registration_success(monkeypatch, credential_id: bytes):
         "verify_registration_response",
         fake_verify_registration_response,
     )
-    monkeypatch.setattr(passkey_api, "append_record", lambda *args, **kwargs: "a" * 64)
+    if not real_evidence:
+        monkeypatch.setattr(passkey_api, "append_record", lambda *args, **kwargs: "a" * 64)
 
 
 def _add_credential(db, user, credential_name: str) -> WebAuthnCredential:
@@ -713,15 +720,11 @@ def test_initial_activation_records_one_atomic_consent(db, monkeypatch):
     db.commit()
     client = _raw_client()
     consent = _processing_consent(client, token)
-    captured = {}
-
-    _install_registration_success(monkeypatch, b"atomic-consent-credential")
-
-    def record_consent(*args, **kwargs):
-        captured.update(kwargs)
-        return "b" * 64
-
-    monkeypatch.setattr(passkey_api, "append_record", record_consent)
+    _install_registration_success(
+        monkeypatch,
+        b"atomic-consent-credential",
+        real_evidence=True,
+    )
     begin = client.post(
         "/api/v1/passkey/register/begin",
         headers={"X-Activation-Token": token},
@@ -743,8 +746,28 @@ def test_initial_activation_records_one_atomic_consent(db, monkeypatch):
     assert stored.policy_version == publication.version
     assert stored.policy_sha256 == publication.content_sha256
     assert stored.statement_sha256 == consent["statement_sha256"]
-    assert stored.instance_record_sha256 == "b" * 64
-    assert captured["record_type"] == "account.processing_consent_recorded"
+    operation = db.query(EvidenceOperation).filter_by(
+        workflow_type="account_consent",
+        workflow_id=stored.consent_id,
+        operation_type="recorded",
+    ).one()
+    assert operation.record_type == "account.processing_consent_recorded"
+    assert operation.state == "complete"
+    assert stored.instance_record_sha256 == operation.record_sha256
+    evidence_payload = json.loads(operation.payload_json)
+    expected_evidence_payload = {
+        "document_sha256": hashlib.sha256(stored.document_json.encode("utf-8")).hexdigest(),
+        "policy_sha256": stored.policy_sha256,
+        "policy_version": stored.policy_version,
+        "signed_at": stored.consented_at.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "statement_sha256": stored.statement_sha256,
+        "subject_ref": stored.user_subject_id,
+    }
+    if stored.event_evidence_id:
+        expected_evidence_payload["event_ref"] = stored.event_evidence_id
+    assert evidence_payload == expected_evidence_payload
+    assert stored.controller_identity not in operation.payload_json
+    assert verify_local_chain(db)["valid"] is True
     assert db.query(WebAuthnCredential).filter_by(user_id=user.id).count() == 1
     assert db.get(type(link), link.id).used_at is not None
     assert db.get(type(user), user.id).is_activated is True
