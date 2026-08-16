@@ -9,7 +9,7 @@ export function Footer() {
         <span>
           Masterplan Optimiser self-hosted instance
         </span>
-        <nav className="flex items-center gap-3">
+        <nav className="flex max-w-full flex-wrap items-center justify-center gap-x-3 gap-y-1 sm:justify-end">
           <Link
             href="/about"
             className="hover:text-gray-700 dark:hover:text-gray-200 transition-colors"
