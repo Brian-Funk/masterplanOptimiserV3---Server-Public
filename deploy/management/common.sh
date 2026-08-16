@@ -1674,7 +1674,13 @@ mp_wait_for_public_health() {
 # entrypoint deliberately shuts it down, so accepting pg_isready alone creates
 # a race for fresh commissioning, restore, and first-copy activation.
 mp_database_runtime_ready() {
-    mp_compose_init
+    if [ "${#MP_COMPOSE[@]}" -eq 0 ]; then
+        if [ "${MP_SNAPSHOT_SERVICE_MODE:-0}" = 1 ]; then
+            mp_compose_init_existing_runtime || return 1
+        else
+            mp_compose_init || return 1
+        fi
+    fi
     "${MP_COMPOSE[@]}" exec -T db sh -c \
         '[ "$(cat /proc/1/comm 2>/dev/null)" = postgres ]' \
         >/dev/null 2>&1 \
@@ -1687,7 +1693,13 @@ mp_database_runtime_ready() {
 # volumes and centralises the readiness contract for every management path.
 mp_wait_for_database() {
     local attempts="${1:-30}"
-    mp_compose_init
+    if [ "${#MP_COMPOSE[@]}" -eq 0 ]; then
+        if [ "${MP_SNAPSHOT_SERVICE_MODE:-0}" = 1 ]; then
+            mp_compose_init_existing_runtime || return 1
+        else
+            mp_compose_init || return 1
+        fi
+    fi
     for _ in $(seq 1 "$attempts"); do
         if mp_database_runtime_ready; then
             return 0

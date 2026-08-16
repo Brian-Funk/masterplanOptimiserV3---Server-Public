@@ -20,6 +20,7 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
+TimeoutStartSec=1h
 
 [Install]
 WantedBy=multi-user.target
