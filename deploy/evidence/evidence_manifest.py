@@ -64,6 +64,7 @@ RECORD_TYPES = frozenset(
         "trust_key.revoked",
         "commissioning.recovery_key_acknowledged",
         "commissioning.completed",
+        "account.processing_consent_recorded",
         "desktop.policy_acknowledged",
         "data_subject.deletion.requested",
         "data_subject.deletion.withdrawn",

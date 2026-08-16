@@ -938,6 +938,22 @@ mp_setup_machine_reconcile() {
     return 10
 }
 
+# Readiness observations converge asynchronously: the peer can accept a
+# verified bundle moments after the primary first asks the witness for its
+# current view.  Treat that ordinary observation gap as a wait, not as a
+# terminal commissioning failure.  Provider mutations below remain hard
+# failures; only the read-only convergence gates return the machine waiting
+# status.
+mp_setup_verify_automatic_failover_readiness() {
+    mp_ha_refresh_witness_observations || return 10
+    mp_ha_active_verification_readiness || return 10
+    # Commissioning proves that automatic failover could be enabled, but
+    # activation remains a separate explicit action after recovery testing.
+    python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic disabled >/dev/null \
+        || return 1
+    mp_ha_set_config_value HA_AUTOMATIC_FAILOVER disabled || return 1
+}
+
 # Execute exactly one non-interactive transition. The input document has
 # already been schema-validated by the machine adapter and names the expected
 # next checkpoint, preventing a stale coordinator from advancing another step.
@@ -1385,11 +1401,7 @@ mp_setup_machine_advance_one() {
         automatic_failover_readiness)
             mp_setup_state_action "Verifying automatic failover readiness" \
                 AUTOMATIC_FAILOVER_VALIDATING automatic_failover_readiness || return 1
-            mp_ha_refresh_witness_observations || return 1
-            mp_ha_active_verification_readiness || return 1
-            python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic disabled >/dev/null \
-                || return 1
-            mp_ha_set_config_value HA_AUTOMATIC_FAILOVER disabled || return 1
+            mp_setup_verify_automatic_failover_readiness || return $?
             mp_setup_state_mark automatic_failover_readiness
             ;;
         recovery_recipient)
@@ -3700,13 +3712,7 @@ mp_setup_primary_resume() {
     if ! mp_setup_state_has automatic_failover_readiness; then
         mp_setup_state_action "Verifying automatic failover readiness" \
             AUTOMATIC_FAILOVER_VALIDATING automatic_failover_readiness || return 1
-        mp_ha_refresh_witness_observations || return 1
-        mp_ha_active_verification_readiness || return 1
-        # Commissioning proves that automatic failover could be enabled, but
-        # activation remains a separate, explicit guarded TUI action after the
-        # operator has tested handover and both failover directions.
-        python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic disabled >/dev/null || return 1
-        mp_ha_set_config_value HA_AUTOMATIC_FAILOVER disabled || return 1
+        mp_setup_verify_automatic_failover_readiness || return $?
         mp_setup_state_mark automatic_failover_readiness
     fi
     rm -f "$body" "$MP_SETUP_V2_PENDING_JOIN"; unset token
@@ -3922,6 +3928,12 @@ mp_setup_v2() {
         cancel|"") return 0 ;;
         *) ui_error "Unsupported setup checkpoint mode: $mode"; return 1 ;;
     esac
+    if [ "$status" -eq 10 ] && [ -s "$MP_SETUP_V2_STATE" ]; then
+        action="$(jq -r '.current_action // "the current action"' "$MP_SETUP_V2_STATE" 2>/dev/null || printf 'the current action')"
+        ui_message "Commissioning is waiting" \
+            "${action} is waiting for a transient dependency to converge. No completed action will be repeated. Keep mp-opt open to retry from the menu, or run mp-opt again later to resume the same pinned setup."
+        return 0
+    fi
     if [ "$status" -ne 0 ] && [ -s "$MP_SETUP_V2_STATE" ]; then
         action="$(jq -r '.current_action // "the current action"' "$MP_SETUP_V2_STATE" 2>/dev/null || printf 'the current action')"
         jq -e '.last_failure != null' "$MP_SETUP_V2_STATE" >/dev/null 2>&1 \

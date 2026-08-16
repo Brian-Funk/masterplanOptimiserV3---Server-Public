@@ -259,6 +259,47 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             holder.terminate()
             holder.communicate(timeout=5)
 
+    def test_failover_readiness_convergence_is_waiting_not_attention(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            script = r'''
+                source "$MP_ROOT/deploy/management/common.sh"
+                source "$MP_ROOT/deploy/management/setup_v2.sh"
+                refresh_calls=0; readiness_calls=0; provider_calls=0; config_calls=0
+                mp_ha_refresh_witness_observations() {
+                    refresh_calls=$((refresh_calls + 1)); [ "${REFRESH_RESULT:-ok}" = ok ]
+                }
+                mp_ha_active_verification_readiness() {
+                    readiness_calls=$((readiness_calls + 1)); [ "${READINESS_RESULT:-ok}" = ok ]
+                }
+                python3() {
+                    provider_calls=$((provider_calls + 1)); [ "${PROVIDER_RESULT:-ok}" = ok ]
+                }
+                mp_ha_set_config_value() {
+                    config_calls=$((config_calls + 1)); [ "${CONFIG_RESULT:-ok}" = ok ]
+                }
+                status=0
+                mp_setup_verify_automatic_failover_readiness || status=$?
+                printf '%s:%s:%s:%s:%s\n' "$status" "$refresh_calls" \
+                    "$readiness_calls" "$provider_calls" "$config_calls"
+            '''
+
+            def invoke(**values: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["bash", "-Eeuo", "pipefail", "-c", script],
+                    env={**environment, **values}, text=True, capture_output=True, check=False,
+                )
+
+            refresh = invoke(REFRESH_RESULT="fail")
+            self.assertEqual(refresh.returncode, 0, refresh.stderr)
+            self.assertEqual(refresh.stdout.strip(), "10:1:0:0:0")
+            readiness = invoke(READINESS_RESULT="fail")
+            self.assertEqual(readiness.stdout.strip(), "10:1:1:0:0")
+            provider = invoke(PROVIDER_RESULT="fail")
+            self.assertEqual(provider.stdout.strip(), "1:1:1:1:0")
+            success = invoke()
+            self.assertEqual(success.stdout.strip(), "0:1:1:1:1")
+
     def test_noisy_transition_still_emits_one_json_document(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             environment = self.environment(Path(directory_name))
@@ -1287,9 +1328,16 @@ class CandidateBundleTests(unittest.TestCase):
         resume_end = SETUP.index("\nmp_setup_standalone()", resume_start)
         resume = SETUP[resume_start:resume_end]
         self.assertIn("automatic_failover_readiness", resume)
-        self.assertIn('witness_control.py" automatic disabled', resume)
-        self.assertIn("HA_AUTOMATIC_FAILOVER disabled", resume)
         self.assertNotIn('witness_control.py" automatic enabled', resume)
+        helper_start = SETUP.index("mp_setup_verify_automatic_failover_readiness()")
+        helper_end = SETUP.index("\n# Execute exactly one non-interactive transition", helper_start)
+        helper = SETUP[helper_start:helper_end]
+        self.assertIn("mp_ha_refresh_witness_observations || return 10", helper)
+        self.assertIn("mp_ha_active_verification_readiness || return 10", helper)
+        self.assertIn('witness_control.py" automatic disabled', helper)
+        self.assertIn("HA_AUTOMATIC_FAILOVER disabled", helper)
+        waiting = SETUP[SETUP.index('if [ "$status" -eq 10 ]') :]
+        self.assertIn('ui_message "Commissioning is waiting"', waiting)
 
     def test_known_resume_gaps_are_guarded(self) -> None:
         self.assertIn("mp_setup_state_has paired || mp_setup_state_mark paired", SETUP)

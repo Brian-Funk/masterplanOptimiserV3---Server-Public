@@ -732,15 +732,21 @@ def register_complete(
                 operation_type="recorded",
                 record_type="account.processing_consent_recorded",
                 payload={
-                    "consent_id": consent_row.consent_id,
-                    "user_subject_id": user.evidence_subject_id,
-                    "event_ref": document.get("event_ref"),
+                    "subject_ref": user.evidence_subject_id,
+                    **(
+                        {"event_ref": document["event_ref"]}
+                        if document.get("event_ref")
+                        else {}
+                    ),
                     "policy_version": consent_row.policy_version,
                     "policy_sha256": consent_row.policy_sha256,
-                    "statement_version": consent_row.statement_version,
                     "statement_sha256": consent_row.statement_sha256,
-                    "controller_identity": consent_row.controller_identity,
-                    "consented_at": consented_at.replace(microsecond=0).isoformat(),
+                    "document_sha256": hashlib.sha256(
+                        consent_row.document_json.encode("utf-8")
+                    ).hexdigest(),
+                    "signed_at": consented_at.replace(microsecond=0).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
                 },
             )
         except EvidenceUnavailable as exc:

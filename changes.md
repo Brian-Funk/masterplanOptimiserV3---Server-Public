@@ -1,5 +1,36 @@
 # Changes
 
+## 3.9.12 — 16 August 2026
+
+This patch release repairs initial account activation while preserving existing
+installations and their data.
+
+### Consent evidence
+
+- Seal first-activation consent with the evidence ledger's existing
+  pseudonymous subject, event, policy, statement, document and timestamp
+  fields.
+- Register the consent record type with the signed evidence validator without
+  permitting controller names, email addresses or display names in ledger
+  payloads.
+- Exercise the real evidence writer during account activation tests and audit
+  every application evidence call against the signed manifest contract.
+
+### Registration feedback
+
+- Show the safe message from structured passkey API errors instead of reducing
+  them to a generic registration failure.
+
+### HA readiness convergence
+
+- Treat the short interval between peer-copy acceptance and the witness's next
+  healthy observation as a retryable commissioning wait instead of a terminal
+  setup failure.
+- Keep automatic failover disabled after readiness is proven, and continue to
+  treat a failed provider write as a hard error.
+- Leave retryable interactive setup waits unfailed so reopening `mp-opt`
+  resumes the same pinned checkpoint without an inaccurate attention record.
+
 ## 3.9.11 — 16 August 2026
 
 This patch release prevents scheduled recovery snapshots from racing with

@@ -15,9 +15,14 @@ export function passkeyErrorMessage(
   }
 
   const payload = body as Record<string, unknown>;
+  const detail = payload.detail;
   const message =
-    typeof payload.detail === "string"
-      ? payload.detail
+    typeof detail === "string"
+      ? detail
+      : detail &&
+          typeof detail === "object" &&
+          typeof (detail as Record<string, unknown>).message === "string"
+        ? ((detail as Record<string, unknown>).message as string)
       : typeof payload.error === "string"
         ? payload.error
         : fallback;
