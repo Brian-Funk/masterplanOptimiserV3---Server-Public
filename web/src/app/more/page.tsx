@@ -58,7 +58,7 @@ export default function MorePage() {
           <Link href="/account/security" className="flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700"><Shield size={18} /> Account security</Link>
           <div className="flex min-h-11 items-center justify-between rounded-xl px-3"><span className="text-sm font-medium">Appearance</span><ThemeToggle /></div>
           <div className="flex min-h-11 items-center justify-between rounded-xl px-3"><span className="text-sm font-medium">Notifications</span><NotificationBell eventId={eventId} /></div>
-          <button type="button" disabled={isLoggingOut} onClick={() => void handleLogout()} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-60 dark:text-red-400 dark:hover:bg-red-950"><LogOut size={18} /> {isLoggingOut ? "Logging out…" : "Log out"}</button>
+          <button type="button" disabled={isLoggingOut} aria-busy={isLoggingOut} onClick={() => void handleLogout()} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-60 dark:text-red-400 dark:hover:bg-red-950"><LogOut size={18} /> {isLoggingOut ? "Logging out…" : "Log out"}</button>
         </section>
 
         <OfflineScheduleSettings eventId={eventId} />

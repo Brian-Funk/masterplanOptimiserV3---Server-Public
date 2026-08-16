@@ -12,6 +12,7 @@ ADMIN_NAV = (ROOT / "web/src/components/AdminNavigation.tsx").read_text(
     encoding="utf-8"
 )
 CALENDAR_UI = (ROOT / "web/src/app/calendar/page.tsx").read_text(encoding="utf-8")
+MORE_UI = (ROOT / "web/src/app/more/page.tsx").read_text(encoding="utf-8")
 UNAVAILABILITY_UI = (
     ROOT / "web/src/components/DailyUnavailabilityIndicator.tsx"
 ).read_text(encoding="utf-8")
@@ -140,7 +141,7 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
             'user && !user.is_root_admin && ["security", "privacy", "ha"].includes(tab)',
             ADMIN_UI,
         )
-        for source in (ADMIN_UI, CALENDAR_UI):
+        for source in (ADMIN_UI, MORE_UI):
             self.assertIn('if (await logout()) router.replace("/login")', source)
             self.assertIn("disabled={isLoggingOut}", source)
             self.assertIn("aria-busy={isLoggingOut}", source)
