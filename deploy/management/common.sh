@@ -242,7 +242,7 @@ mp_initialise_paths() {
 # overwrite is best-effort on copy-on-write and journalled storage; unlinking
 # the short-lived file remains the authoritative lifecycle boundary.
 mp_secure_remove_file() {
-    local file="${1:-}"
+    local file="${1:-}" expected_identity="${2:-}" observed
     [ -n "$file" ] || return 0
     if [ ! -e "$file" ] && [ ! -L "$file" ]; then
         return 0
@@ -251,11 +251,26 @@ mp_secure_remove_file() {
         printf 'Refusing to remove an unsafe transient secret path.\n' >&2
         return 1
     }
-    chmod 600 -- "$file" || return 1
+    if [ -n "$expected_identity" ]; then
+        observed="$(stat -c '%d:%i:%u:%a:%Y' -- "$file" 2>/dev/null)" || {
+            [ ! -e "$file" ] && [ ! -L "$file" ] && return 0
+            return 1
+        }
+        [ "$observed" = "$expected_identity" ] || {
+            printf 'Refusing to remove a replaced transient secret path.\n' >&2
+            return 1
+        }
+    fi
     if command -v shred >/dev/null 2>&1; then
-        shred -u -z -n 1 -- "$file"
+        shred -u -z -n 1 -- "$file" || {
+            [ ! -e "$file" ] && [ ! -L "$file" ] && return 0
+            return 1
+        }
     else
-        : > "$file" && rm -f -- "$file"
+        : > "$file" && rm -f -- "$file" || {
+            [ ! -e "$file" ] && [ ! -L "$file" ] && return 0
+            return 1
+        }
     fi
 }
 
@@ -263,27 +278,44 @@ mp_secure_remove_file() {
 # interface. Unexpected ownership, type or mode stops startup rather than
 # following or deleting a substituted path.
 mp_cleanup_stale_setup_transients() {
-    local file name owner mode state_real file_parent found=0
+    (
+    local file name metadata device inode owner mode modified now age state_real file_parent
+    local found=0 cleanup_fd stale_seconds="${MP_SETUP_TRANSIENT_STALE_SECONDS:-300}"
+    [[ "$stale_seconds" =~ ^[0-9]+$ ]] || return 1
+    mp_prepare_private_lock_file "$MP_SETUP_TRANSIENT_CLEANUP_LOCK" || return 1
+    exec {cleanup_fd}>"$MP_SETUP_TRANSIENT_CLEANUP_LOCK" || return 1
+    flock -x "$cleanup_fd" || return 1
     state_real="$(readlink -f "$MP_STATE")" || return 1
+    now="$(date +%s)" || return 1
     while IFS= read -r -d '' file; do
         name="$(basename "$file")"
         [[ "$name" =~ ^(wrangler-secrets|wrangler-repair|wrangler-deploy|pair-wait|pair-state|witness-bootstrap|witness-bootstrap-error|witness-join|witness-join-error|ha-join|pair-open|configure-dns|routing-ready|decommission-cloudflare|setup-machine-input|setup-recovery-package|setup-recovery-identity|portable-last-import|provider-worker-probe|pending-witness-bootstrap|pending-local-join|pending-ha-join|pending-replacement-request|setup-state|setup-execution|setup-cancel-request|setup-deployment-lifecycle|provider-cleanup-receipt|setup-full-loss-authorization|cloudflare-provider-resource|setup-smtp-delivery)\.[A-Za-z0-9]{6}$ ]] \
             || continue
         found=1
         file_parent="$(readlink -f "$(dirname "$file")")" || return 1
-        [ "$file_parent" = "$state_real" ] && [ -f "$file" ] && [ ! -L "$file" ] || {
+        [ "$file_parent" = "$state_real" ] || return 1
+        if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+            continue
+        fi
+        [ -f "$file" ] && [ ! -L "$file" ] || {
             printf 'A stale commissioning transient path is unsafe; commissioning stopped before reading it.\n' >&2
             return 1
         }
-        owner="$(stat -c '%u' -- "$file")" || return 1
-        mode="$(stat -c '%a' -- "$file")" || return 1
+        metadata="$(stat -c '%d:%i:%u:%a:%Y' -- "$file" 2>/dev/null)" || {
+            [ ! -e "$file" ] && [ ! -L "$file" ] && continue
+            return 1
+        }
+        IFS=: read -r device inode owner mode modified <<< "$metadata"
         [ "$owner" = "$(id -u)" ] && [ "$mode" = 600 ] || {
             printf 'A stale commissioning transient has unsafe ownership or mode; commissioning stopped before reading it.\n' >&2
             return 1
         }
-        mp_secure_remove_file "$file" || return 1
+        age=$((now - modified))
+        [ "$age" -ge "$stale_seconds" ] || continue
+        mp_secure_remove_file "$file" "$metadata" || return 1
     done < <(find -P "$MP_STATE" -maxdepth 1 -mindepth 1 -print0)
     [ "$found" -eq 0 ] || sync -f "$MP_STATE" 2>/dev/null || true
+    )
 }
 
 # Retained as a narrow compatibility entry point for older administrative
