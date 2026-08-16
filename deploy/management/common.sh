@@ -15,6 +15,9 @@ MP_HA_SNAPSHOT_STATUS="${MP_HA_SNAPSHOT_STATUS:-${MP_ROOT}/runtime/ha-snapshot-s
 MP_AUDIT_FILE="${MP_AUDIT_FILE:-${MP_STATE}/management.log}"
 MP_STORAGE_CHECKLIST_FILE="${MP_STORAGE_CHECKLIST_FILE:-${MP_HOME}/storage-security-checklist.json}"
 MP_LOCK_FILE="${MP_LOCK_FILE:-${MP_STATE}/management.lock}"
+MP_SETUP_EXECUTION_LOCK="${MP_SETUP_EXECUTION_LOCK:-${MP_SETUP_V2_EXECUTION_LOCK:-$MP_STATE/setup-execution.lock}}"
+MP_SETUP_EXECUTION_STATE="${MP_SETUP_EXECUTION_STATE:-${MP_SETUP_V2_EXECUTION_STATE:-$MP_STATE/setup-execution.json}}"
+MP_SETUP_TRANSIENT_CLEANUP_LOCK="${MP_SETUP_TRANSIENT_CLEANUP_LOCK:-$MP_STATE/setup-transient-cleanup.lock}"
 MP_EVIDENCE_HOME="${MP_EVIDENCE_HOME:-${MP_ROOT}/state/evidence}"
 MP_UI_SIZE_FILE="${MP_UI_SIZE_FILE:-${MP_HOME}/interface-size}"
 MP_DEPLOYMENT_POLICY_FILE="${MP_DEPLOYMENT_POLICY_FILE:-/etc/mp-opt/deployment-policy}"
@@ -29,6 +32,56 @@ MP_PUBLIC_DNS_RESOLVERS="${MP_PUBLIC_DNS_RESOLVERS:-1.1.1.1 8.8.8.8 9.9.9.9}"
 MP_TUI_BACKTITLE="MP-OPT_SERVER | Brian Funk | Copyright © ${MP_COPYRIGHT_YEAR} Brian Funk"
 
 declare -a MP_COMPOSE=()
+
+# Prepare one owner-only host-local lock without following an existing
+# substituted path. This is intentionally available before mp_initialise_paths
+# so hardened background workers can serialize with commissioning before they
+# inspect or clean shared state.
+mp_prepare_private_lock_file() {
+    local lock_file="$1" parent owner
+    [ -n "$lock_file" ] || return 1
+    parent="$(dirname "$lock_file")"
+    owner="$(id -u):$(id -g)"
+    if [ -e "$parent" ] || [ -L "$parent" ]; then
+        [ -d "$parent" ] && [ ! -L "$parent" ] \
+            && [ "$(stat -c '%u:%g' "$parent" 2>/dev/null)" = "$owner" ] \
+            || return 1
+    else
+        mkdir -p -- "$parent" || return 1
+    fi
+    chmod 700 -- "$parent" || return 1
+    if [ -e "$lock_file" ] || [ -L "$lock_file" ]; then
+        [ -f "$lock_file" ] && [ ! -L "$lock_file" ] \
+            && [ "$(stat -c '%u:%g' "$lock_file" 2>/dev/null)" = "$owner" ] \
+            || return 1
+    else
+        : > "$lock_file" || return 1
+    fi
+    chmod 600 -- "$lock_file"
+}
+
+# Scheduled workers share the commissioning lease but do not publish setup
+# coordinator metadata. Holding this descriptor prevents either side from
+# entering the other's service-changing critical section.
+mp_setup_worker_lease_acquire() {
+    local wait_seconds="${1:-300}"
+    [[ "$wait_seconds" =~ ^[0-9]+$ ]] || return 64
+    mp_prepare_private_lock_file "$MP_SETUP_EXECUTION_LOCK" || return 1
+    exec 8>"$MP_SETUP_EXECUTION_LOCK" || return 1
+    if ! flock -w "$wait_seconds" 8; then
+        exec 8>&-
+        return 75
+    fi
+    export MP_SETUP_WORKER_LEASE_HELD=1
+}
+
+mp_setup_worker_lease_release() {
+    if [ "${MP_SETUP_WORKER_LEASE_HELD:-0}" = 1 ]; then
+        flock -u 8 >/dev/null 2>&1 || true
+        exec 8>&- 2>/dev/null || true
+        unset MP_SETUP_WORKER_LEASE_HELD
+    fi
+}
 
 # Load only the documented, non-secret HA keys without evaluating shell code.
 mp_load_ha_config() {
@@ -189,7 +242,7 @@ mp_initialise_paths() {
 # overwrite is best-effort on copy-on-write and journalled storage; unlinking
 # the short-lived file remains the authoritative lifecycle boundary.
 mp_secure_remove_file() {
-    local file="${1:-}"
+    local file="${1:-}" expected_identity="${2:-}" observed
     [ -n "$file" ] || return 0
     if [ ! -e "$file" ] && [ ! -L "$file" ]; then
         return 0
@@ -198,11 +251,26 @@ mp_secure_remove_file() {
         printf 'Refusing to remove an unsafe transient secret path.\n' >&2
         return 1
     }
-    chmod 600 -- "$file" || return 1
+    if [ -n "$expected_identity" ]; then
+        observed="$(stat -c '%d:%i:%u:%a:%Y' -- "$file" 2>/dev/null)" || {
+            [ ! -e "$file" ] && [ ! -L "$file" ] && return 0
+            return 1
+        }
+        [ "$observed" = "$expected_identity" ] || {
+            printf 'Refusing to remove a replaced transient secret path.\n' >&2
+            return 1
+        }
+    fi
     if command -v shred >/dev/null 2>&1; then
-        shred -u -z -n 1 -- "$file"
+        shred -u -z -n 1 -- "$file" || {
+            [ ! -e "$file" ] && [ ! -L "$file" ] && return 0
+            return 1
+        }
     else
-        : > "$file" && rm -f -- "$file"
+        : > "$file" && rm -f -- "$file" || {
+            [ ! -e "$file" ] && [ ! -L "$file" ] && return 0
+            return 1
+        }
     fi
 }
 
@@ -210,27 +278,44 @@ mp_secure_remove_file() {
 # interface. Unexpected ownership, type or mode stops startup rather than
 # following or deleting a substituted path.
 mp_cleanup_stale_setup_transients() {
-    local file name owner mode state_real file_parent found=0
+    (
+    local file name metadata device inode owner mode modified now age state_real file_parent
+    local found=0 cleanup_fd stale_seconds="${MP_SETUP_TRANSIENT_STALE_SECONDS:-300}"
+    [[ "$stale_seconds" =~ ^[0-9]+$ ]] || return 1
+    mp_prepare_private_lock_file "$MP_SETUP_TRANSIENT_CLEANUP_LOCK" || return 1
+    exec {cleanup_fd}>"$MP_SETUP_TRANSIENT_CLEANUP_LOCK" || return 1
+    flock -x "$cleanup_fd" || return 1
     state_real="$(readlink -f "$MP_STATE")" || return 1
+    now="$(date +%s)" || return 1
     while IFS= read -r -d '' file; do
         name="$(basename "$file")"
         [[ "$name" =~ ^(wrangler-secrets|wrangler-repair|wrangler-deploy|pair-wait|pair-state|witness-bootstrap|witness-bootstrap-error|witness-join|witness-join-error|ha-join|pair-open|configure-dns|routing-ready|decommission-cloudflare|setup-machine-input|setup-recovery-package|setup-recovery-identity|portable-last-import|provider-worker-probe|pending-witness-bootstrap|pending-local-join|pending-ha-join|pending-replacement-request|setup-state|setup-execution|setup-cancel-request|setup-deployment-lifecycle|provider-cleanup-receipt|setup-full-loss-authorization|cloudflare-provider-resource|setup-smtp-delivery)\.[A-Za-z0-9]{6}$ ]] \
             || continue
         found=1
         file_parent="$(readlink -f "$(dirname "$file")")" || return 1
-        [ "$file_parent" = "$state_real" ] && [ -f "$file" ] && [ ! -L "$file" ] || {
+        [ "$file_parent" = "$state_real" ] || return 1
+        if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+            continue
+        fi
+        [ -f "$file" ] && [ ! -L "$file" ] || {
             printf 'A stale commissioning transient path is unsafe; commissioning stopped before reading it.\n' >&2
             return 1
         }
-        owner="$(stat -c '%u' -- "$file")" || return 1
-        mode="$(stat -c '%a' -- "$file")" || return 1
+        metadata="$(stat -c '%d:%i:%u:%a:%Y' -- "$file" 2>/dev/null)" || {
+            [ ! -e "$file" ] && [ ! -L "$file" ] && continue
+            return 1
+        }
+        IFS=: read -r device inode owner mode modified <<< "$metadata"
         [ "$owner" = "$(id -u)" ] && [ "$mode" = 600 ] || {
             printf 'A stale commissioning transient has unsafe ownership or mode; commissioning stopped before reading it.\n' >&2
             return 1
         }
-        mp_secure_remove_file "$file" || return 1
+        age=$((now - modified))
+        [ "$age" -ge "$stale_seconds" ] || continue
+        mp_secure_remove_file "$file" "$metadata" || return 1
     done < <(find -P "$MP_STATE" -maxdepth 1 -mindepth 1 -print0)
     [ "$found" -eq 0 ] || sync -f "$MP_STATE" 2>/dev/null || true
+    )
 }
 
 # Retained as a narrow compatibility entry point for older administrative
@@ -1621,7 +1706,13 @@ mp_wait_for_public_health() {
 # entrypoint deliberately shuts it down, so accepting pg_isready alone creates
 # a race for fresh commissioning, restore, and first-copy activation.
 mp_database_runtime_ready() {
-    mp_compose_init
+    if [ "${#MP_COMPOSE[@]}" -eq 0 ]; then
+        if [ "${MP_SNAPSHOT_SERVICE_MODE:-0}" = 1 ]; then
+            mp_compose_init_existing_runtime || return 1
+        else
+            mp_compose_init || return 1
+        fi
+    fi
     "${MP_COMPOSE[@]}" exec -T db sh -c \
         '[ "$(cat /proc/1/comm 2>/dev/null)" = postgres ]' \
         >/dev/null 2>&1 \
@@ -1634,7 +1725,13 @@ mp_database_runtime_ready() {
 # volumes and centralises the readiness contract for every management path.
 mp_wait_for_database() {
     local attempts="${1:-30}"
-    mp_compose_init
+    if [ "${#MP_COMPOSE[@]}" -eq 0 ]; then
+        if [ "${MP_SNAPSHOT_SERVICE_MODE:-0}" = 1 ]; then
+            mp_compose_init_existing_runtime || return 1
+        else
+            mp_compose_init || return 1
+        fi
+    fi
     for _ in $(seq 1 "$attempts"); do
         if mp_database_runtime_ready; then
             return 0

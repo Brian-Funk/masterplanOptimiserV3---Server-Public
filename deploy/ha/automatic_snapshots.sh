@@ -11,6 +11,20 @@ source "$MP_ROOT/deploy/management/common.sh"
 # shellcheck source=../management/snapshots.sh
 source "$MP_ROOT/deploy/management/snapshots.sh"
 
+# A persistent timer catch-up may begin while commissioning is still
+# finishing. Share the setup lease before touching state so validation and
+# snapshots can never stop or recreate the same services concurrently.
+mp_setup_worker_lease_acquire "${MP_SETUP_WORKER_LEASE_WAIT_SECONDS:-300}" || {
+    status=$?
+    if [ "$status" -eq 75 ]; then
+        printf 'Automatic snapshot deferred: commissioning still owns the setup lease.\n'
+        exit 0
+    fi
+    printf 'Automatic snapshot stopped: the setup lease is unsafe.\n' >&2
+    exit "$status"
+}
+trap 'mp_setup_worker_lease_release' EXIT
+
 mp_initialise_paths
 mp_load_ha_config
 [ "$HA_MODE" = "ha" ] || exit 0
@@ -31,7 +45,7 @@ if ! flock -n 9; then
     exit 0
 fi
 export MP_MANAGEMENT_LOCK_HELD=1
-trap 'mp_unlock' EXIT
+trap 'mp_unlock; mp_setup_worker_lease_release' EXIT
 
 create_snapshot() {
     local type="$1" name="$2" path

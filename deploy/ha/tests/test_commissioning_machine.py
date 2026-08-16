@@ -860,6 +860,15 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("mp_setup_execution_acquire", MANAGE)
         self.assertIn('if [ "$profile" = commissioning ]', COMMON)
 
+    def test_setup_paths_are_initialised_only_while_the_shared_lease_is_held(self) -> None:
+        source = MACHINE.read_text(encoding="utf-8")
+        start = source[source.index("mp_machine_start() {") : source.index("mp_machine_read_advance_input()")]
+        advance = source[source.index("mp_machine_advance_command() {") : source.index("mp_machine_read_test_hook_input()")]
+        self.assertLess(start.index("mp_setup_execution_acquire"), start.index("mp_initialise_paths"))
+        self.assertLess(advance.index("mp_setup_execution_acquire"), advance.index("mp_initialise_paths"))
+        startup = MANAGE[: MANAGE.index("# Remove any transient private recovery identity")]
+        self.assertLess(startup.index("mp_setup_execution_acquire"), startup.index("mp_initialise_paths"))
+
     def test_fault_wrapper_is_exact_and_public_advance_preserves_interruption(self) -> None:
         source = MACHINE.read_text(encoding="utf-8")
         self.assertIn("mp_setup_test_hook_should_wrap", SETUP)

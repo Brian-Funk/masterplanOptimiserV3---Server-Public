@@ -417,15 +417,8 @@ mp_machine_with_lease() {
     return "$status"
 }
 
-mp_machine_start() {
-    local mode="$1" lane="$2" policy expected_lane run_id status
-    case "$mode" in standalone-new|ha-primary-new|ha-join|convert-ha|replace-primary|replace-node|full-restore) ;; *) return 64 ;; esac
-    case "$lane" in signed|unsigned) ;; *) return 64 ;; esac
-    policy="$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)"
-    case "$policy" in production) expected_lane=signed ;; test) expected_lane=unsigned ;; *) return 65 ;; esac
-    [ "$lane" = "$expected_lane" ] || return 65
-    mp_machine_require_local_owner || return 77
-    mp_initialise_paths || return 77
+mp_machine_start_locked() {
+    local mode="$1" lane="$2"
     if [ -s "$MP_SETUP_V2_STATE" ]; then
         mp_setup_validate_state_contract "$MP_SETUP_V2_STATE" || return $?
         if [ "$(jq -r .state "$MP_SETUP_V2_STATE")" = complete ] \
@@ -446,16 +439,25 @@ mp_machine_start() {
             || return 65
         return 0
     fi
-    run_id="start-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-    if mp_setup_execution_acquire "$run_id" start; then :; else status=$?; return "$status"; fi
-    trap 'mp_setup_execution_release' EXIT
     if [ "$mode" = full-restore ] && ! mp_snapshot_full_loss_host_is_blank; then
-        mp_setup_execution_release
-        trap - EXIT
         return 65
     fi
     mp_setup_state_begin "$mode"
-    status=$?
+}
+
+mp_machine_start() {
+    local mode="$1" lane="$2" policy expected_lane run_id status=0
+    case "$mode" in standalone-new|ha-primary-new|ha-join|convert-ha|replace-primary|replace-node|full-restore) ;; *) return 64 ;; esac
+    case "$lane" in signed|unsigned) ;; *) return 64 ;; esac
+    policy="$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)"
+    case "$policy" in production) expected_lane=signed ;; test) expected_lane=unsigned ;; *) return 65 ;; esac
+    [ "$lane" = "$expected_lane" ] || return 65
+    mp_machine_require_local_owner || return 77
+    run_id="start-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    if mp_setup_execution_acquire "$run_id" start; then :; else status=$?; return "$status"; fi
+    trap 'mp_setup_execution_release' EXIT
+    mp_initialise_paths || status=77
+    [ "$status" -ne 0 ] || mp_machine_start_locked "$mode" "$lane" || status=$?
     mp_setup_execution_release
     trap - EXIT
     return "$status"
@@ -601,13 +603,13 @@ mp_machine_stage_migration_snapshot() {
     local input run_id log output status=0
     [ -s "$MP_SETUP_V2_STATE" ] || return 65
     mp_machine_require_local_owner || return 77
-    input="$(mktemp "$MP_STATE/setup-machine-input.XXXXXX")" || return 1
-    MP_MACHINE_INPUT_FILE="$input"; chmod 600 "$input"
-    trap 'mp_secure_remove_file "${MP_MACHINE_INPUT_FILE:-}"; mp_setup_execution_release' EXIT
-    head -c 8193 > "$input" || return 1
-    [ "$(stat -c %s "$input")" -le 8192 ] || return 64
     run_id="stage-migration-$(date -u +%Y%m%dT%H%M%SZ)-$$"
     mp_setup_execution_acquire "$run_id" stage-migration || return $?
+    trap 'mp_secure_remove_file "${MP_MACHINE_INPUT_FILE:-}"; mp_setup_execution_release' EXIT
+    input="$(mktemp "$MP_STATE/setup-machine-input.XXXXXX")" || return 1
+    MP_MACHINE_INPUT_FILE="$input"; chmod 600 "$input"
+    head -c 8193 > "$input" || return 1
+    [ "$(stat -c %s "$input")" -le 8192 ] || return 64
     mkdir -p "$MP_STATE/setup-machine-logs"; chmod 700 "$MP_STATE/setup-machine-logs"
     log="$MP_STATE/setup-machine-logs/${run_id}.log"; : > "$log"; chmod 600 "$log"
     output="$(mp_setup_machine_stage_migration_snapshot "$input" 2>"$log")" || status=$?
@@ -655,14 +657,14 @@ mp_machine_stage_recovery_package() {
     [[ "$sha256" =~ ^[0-9a-f]{64}$ ]] || return 64
     [ -s "$MP_SETUP_V2_STATE" ] || return 65
     mp_machine_require_local_owner || return 77
+    run_id="stage-recovery-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    mp_setup_execution_acquire "$run_id" stage-recovery || return $?
+    trap 'mp_secure_remove_file "${MP_MACHINE_INPUT_FILE:-}"; mp_setup_execution_release' EXIT
     package="$(mktemp "$MP_STATE/setup-recovery-package.XXXXXX")" || return 1
     MP_MACHINE_INPUT_FILE="$package"; chmod 600 "$package"
-    trap 'mp_secure_remove_file "${MP_MACHINE_INPUT_FILE:-}"; mp_setup_execution_release' EXIT
     dd bs=1048576 count=4097 status=none > "$package" || return 1
     bytes="$(stat -c %s "$package")"
     [ "$bytes" -ge 1 ] && [ "$bytes" -le 4294967296 ] || return 64
-    run_id="stage-recovery-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-    mp_setup_execution_acquire "$run_id" stage-recovery || return $?
     mkdir -p "$MP_STATE/setup-machine-logs"; chmod 700 "$MP_STATE/setup-machine-logs"
     log="$MP_STATE/setup-machine-logs/${run_id}.log"; : > "$log"; chmod 600 "$log"
     output="$(mp_setup_machine_import_recovery_package "$package" "$sha256" 2>"$log")" \
@@ -679,9 +681,11 @@ mp_machine_deployment_action() {
     [ -s "$MP_SETUP_V2_STATE" ] || return 65
     mp_setup_validate_state_contract "$MP_SETUP_V2_STATE" || return $?
     mp_machine_require_local_owner || return 77
+    run_id="deployment-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    mp_setup_execution_acquire "$run_id" deployment || return $?
+    trap 'mp_secure_remove_file "${MP_MACHINE_INPUT_FILE:-}"; mp_setup_execution_release' EXIT
     input="$(mktemp "$MP_STATE/setup-machine-input.XXXXXX")" || return 1
     MP_MACHINE_INPUT_FILE="$input"; chmod 600 "$input"
-    trap 'mp_secure_remove_file "${MP_MACHINE_INPUT_FILE:-}"; mp_setup_execution_release' EXIT
     head -c 16385 > "$input" || return 1
     [ "$(stat -c %s "$input")" -le 16384 ] \
         && jq -e 'type == "object"
@@ -749,11 +753,10 @@ mp_machine_deployment_action() {
             'map(select(.idempotency_key==$key)) | last
              | {format:"mp-opt-deployment-lifecycle-result-v1",ok:true,
                 action,tag,commit,resumed:true,completed_at,exit_code:0}' "$receipt_file"
-        mp_secure_remove_file "$input"; MP_MACHINE_INPUT_FILE=""; trap - EXIT
+        mp_secure_remove_file "$input"; MP_MACHINE_INPUT_FILE=""
+        mp_setup_execution_release; trap - EXIT
         return 0
     fi
-    run_id="deployment-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-    mp_setup_execution_acquire "$run_id" deployment || return $?
     mkdir -p "$MP_STATE/setup-machine-logs"; chmod 700 "$MP_STATE/setup-machine-logs"
     log="$MP_STATE/setup-machine-logs/${run_id}.log"; : > "$log"; chmod 600 "$log"
     policy="$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)"
@@ -831,9 +834,11 @@ mp_machine_deployment_action() {
 mp_machine_cleanup_provider() {
     local input run_id log output status=0 token account worker zone
     [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)" = test ] || return 77
+    run_id="cleanup-provider-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    mp_setup_execution_acquire "$run_id" cleanup-provider || return $?
+    trap 'mp_secure_remove_file "${MP_MACHINE_INPUT_FILE:-}"; mp_setup_execution_release' EXIT
     input="$(mktemp "$MP_STATE/setup-machine-input.XXXXXX")" || return 1
     MP_MACHINE_INPUT_FILE="$input"; chmod 600 "$input"
-    trap 'mp_secure_remove_file "${MP_MACHINE_INPUT_FILE:-}"; mp_setup_execution_release' EXIT
     head -c 8193 > "$input" || return 1
     [ "$(stat -c %s "$input")" -le 8192 ] \
         && jq -e 'type=="object" and (keys|sort)==["account_id","deploy_token","format","worker_name","zone_id"]
@@ -847,8 +852,6 @@ mp_machine_cleanup_provider() {
     account="$(jq -r .account_id "$input")"
     worker="$(jq -r .worker_name "$input")"
     zone="$(jq -r .zone_id "$input")"
-    run_id="cleanup-provider-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-    mp_setup_execution_acquire "$run_id" cleanup-provider || return $?
     mkdir -p "$MP_STATE/setup-machine-logs"; chmod 700 "$MP_STATE/setup-machine-logs"
     log="$MP_STATE/setup-machine-logs/${run_id}.log"; : > "$log"; chmod 600 "$log"
     output="$(mp_setup_decommission_cloudflare_machine "$token" "$account" "$worker" "$zone" \
@@ -862,15 +865,15 @@ mp_machine_cleanup_provider() {
 mp_machine_advance_command() {
     local input_file run_id status=0 log
     mp_machine_require_local_owner || return 77
-    mp_initialise_paths || return 77
     [ -s "$MP_SETUP_V2_STATE" ] || return 65
+    run_id="advance-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    if mp_setup_execution_acquire "$run_id" advance; then :; else status=$?; return "$status"; fi
+    trap 'mp_secure_remove_file "${MP_MACHINE_INPUT_FILE:-}"; mp_setup_execution_release' EXIT
+    mp_initialise_paths || return 77
     input_file="$(mktemp "$MP_STATE/setup-machine-input.XXXXXX")" || return 1
     chmod 600 "$input_file"
     MP_MACHINE_INPUT_FILE="$input_file"
-    trap 'mp_secure_remove_file "${MP_MACHINE_INPUT_FILE:-}"; mp_setup_execution_release' EXIT
     mp_machine_read_advance_input "$input_file" || return $?
-    run_id="advance-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-    if mp_setup_execution_acquire "$run_id" advance; then :; else status=$?; return "$status"; fi
     mp_setup_journal_event execution.started || return 1
     mkdir -p "$MP_STATE/setup-machine-logs"; chmod 700 "$MP_STATE/setup-machine-logs"
     log="$MP_STATE/setup-machine-logs/${run_id}.log"; : > "$log"; chmod 600 "$log"

@@ -495,14 +495,34 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_scheduled_snapshot_lock_contention_is_a_clean_retryable_skip(self) -> None:
+    def test_scheduled_snapshot_serialises_with_setup_before_touching_state(self) -> None:
+        setup_lease = AUTOMATIC_SNAPSHOTS_SOURCE.index("mp_setup_worker_lease_acquire")
+        initialise = AUTOMATIC_SNAPSHOTS_SOURCE.index("mp_initialise_paths")
         lock = AUTOMATIC_SNAPSHOTS_SOURCE.index('exec 9>"$MP_LOCK_FILE"')
         create = AUTOMATIC_SNAPSHOTS_SOURCE.index("create_snapshot database")
+        self.assertLess(setup_lease, initialise)
+        self.assertLess(initialise, lock)
         self.assertLess(lock, create)
+        self.assertIn('MP_SETUP_WORKER_LEASE_WAIT_SECONDS:-300', AUTOMATIC_SNAPSHOTS_SOURCE)
+        self.assertIn("MP_SNAPSHOT_SERVICE_MODE=1", AUTOMATIC_SNAPSHOTS_SOURCE)
+        self.assertIn("Automatic snapshot deferred", AUTOMATIC_SNAPSHOTS_SOURCE)
         self.assertIn("if ! flock -n 9", AUTOMATIC_SNAPSHOTS_SOURCE)
         self.assertIn("Automatic snapshot skipped", AUTOMATIC_SNAPSHOTS_SOURCE)
         self.assertIn("export MP_MANAGEMENT_LOCK_HELD=1", AUTOMATIC_SNAPSHOTS_SOURCE)
-        self.assertIn("trap 'mp_unlock' EXIT", AUTOMATIC_SNAPSHOTS_SOURCE)
+        self.assertIn("mp_unlock; mp_setup_worker_lease_release", AUTOMATIC_SNAPSHOTS_SOURCE)
+
+    def test_snapshot_service_allows_bounded_setup_lease_wait(self) -> None:
+        service = (ROOT / "deploy/ha/mp-opt-ha-snapshots.service").read_text(encoding="utf-8")
+        self.assertIn("TimeoutStartSec=1h", service)
+        self.assertIn("NoNewPrivileges=true", service)
+
+    def test_snapshot_database_wait_reuses_existing_runtime_compose(self) -> None:
+        ready = function_body(COMMON_SOURCE, "mp_database_runtime_ready")
+        wait = function_body(COMMON_SOURCE, "mp_wait_for_database")
+        for body in (ready, wait):
+            self.assertIn('"${#MP_COMPOSE[@]}" -eq 0', body)
+            self.assertIn('MP_SNAPSHOT_SERVICE_MODE:-0', body)
+            self.assertIn("mp_compose_init_existing_runtime", body)
 
     def test_installer_precreates_every_hardened_snapshot_write_path(self) -> None:
         for path in (
