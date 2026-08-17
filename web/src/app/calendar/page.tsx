@@ -1438,7 +1438,7 @@ function CalendarContent() {
           </div>
         )}
         {user && (user.can_edit || user.is_admin || user.is_root_admin || user.is_issuer) && data?.data_policy_acknowledged && (
-          <p className="mb-4 text-right text-xs text-gray-500 dark:text-gray-400"><a className="underline" href={data.data_policy_version ? `${getApiUrl()}/api/v1/governance/public/versions/${data.data_policy_version}/data-policy.html` : "/data-policy"}>Permitted-data policy{data.data_policy_version ? ` v${data.data_policy_version}` : ""}</a>{data.data_policy_sha256 && <span className="ml-2 font-mono">{data.data_policy_sha256.slice(0, 12)}...</span>}</p>
+          <p className="mb-4 hidden text-right text-xs text-gray-500 dark:text-gray-400 md:block"><a className="underline" href={data.data_policy_version ? `${getApiUrl()}/api/v1/governance/public/versions/${data.data_policy_version}/data-policy.html` : "/data-policy"}>Permitted-data policy{data.data_policy_version ? ` v${data.data_policy_version}` : ""}</a>{data.data_policy_sha256 && <span className="ml-2 font-mono">{data.data_policy_sha256.slice(0, 12)}...</span>}</p>
         )}
 
         {/* Offline schedule control: compact on phones, unchanged disclosure on larger screens. */}

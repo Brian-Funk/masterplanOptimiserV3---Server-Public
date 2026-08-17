@@ -7,9 +7,16 @@ import AdminPage from "@/app/admin/page";
 import { deriveUsernameFromDisplayName } from "@/lib/adminUsers";
 
 const mockApiFetch = vi.hoisted(() => vi.fn());
-const mockPush = vi.hoisted(() => vi.fn());
-const mockReplace = vi.hoisted(() => vi.fn());
 const mockUseAuth = vi.hoisted(() => vi.fn());
+const mockNavigation = vi.hoisted(() => ({
+  searchParams: new URLSearchParams(""),
+  router: {
+    push: vi.fn(),
+    replace: vi.fn(),
+  },
+}));
+const mockPush = mockNavigation.router.push;
+const mockReplace = mockNavigation.router.replace;
 
 vi.mock("@/lib/api", () => ({
   apiFetch: mockApiFetch,
@@ -21,7 +28,8 @@ vi.mock("@/contexts/AuthContext", () => ({
 }));
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: mockPush, replace: mockReplace }),
+  useRouter: () => mockNavigation.router,
+  useSearchParams: () => mockNavigation.searchParams,
 }));
 
 vi.mock("@/components/PasskeyManager", () => ({
@@ -83,11 +91,50 @@ describe("Admin users", () => {
     mockApiFetch.mockReset();
     mockPush.mockReset();
     mockReplace.mockReset();
+    mockNavigation.searchParams = new URLSearchParams("");
     mockUseAuth.mockReturnValue({
       user: rootUser,
       logout: vi.fn(),
       isLoading: false,
     });
+  });
+
+  it("opens issuer Updates, History and Public links from their URL and follows query changes", async () => {
+    mockNavigation.searchParams = new URLSearchParams("tab=announcements&event=7");
+    mockUseAuth.mockReturnValue({
+      user: issuerUser,
+      logout: vi.fn(),
+      isLoggingOut: false,
+      isLoading: false,
+      authStatus: "authenticated",
+    });
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/users") return jsonResponse([]);
+      if (path === "/api/v1/notifications/announcements/7") return jsonResponse([]);
+      if (path === "/api/v1/calendar/7") {
+        return jsonResponse({
+          data_policy_acknowledged: true,
+          data_policy_version: 1,
+          data_policy_sha256: "a".repeat(64),
+        });
+      }
+      if (path === "/api/v1/admin/settings") return jsonResponse({});
+      if (path === "/api/v1/admin/events/7/history") return jsonResponse([]);
+      if (path.startsWith("/api/v1/admin/public-schedule-links")) return jsonResponse([]);
+      return jsonResponse([]);
+    });
+
+    const { rerender } = render(<AdminPage />);
+    expect(await screen.findByRole("heading", { name: "Announcements" })).toBeInTheDocument();
+
+    mockNavigation.searchParams = new URLSearchParams("tab=history&event=7");
+    rerender(<AdminPage />);
+    expect(await screen.findByRole("heading", { name: "Publish Snapshots" })).toBeInTheDocument();
+
+    mockNavigation.searchParams = new URLSearchParams("tab=public-links&event=7");
+    rerender(<AdminPage />);
+    expect(await screen.findByRole("heading", { name: "Public Links" })).toBeInTheDocument();
+    expect(mockReplace).not.toHaveBeenCalledWith(expect.stringContaining("tab=users"));
   });
 
   it("derives usernames from display names", () => {

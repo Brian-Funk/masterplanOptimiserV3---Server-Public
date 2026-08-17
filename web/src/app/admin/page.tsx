@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useState, useEffect, useCallback } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
 import { useServiceAvailability } from "@/contexts/ServiceAvailabilityContext";
 import { apiFetch, retryServiceTransition } from "@/lib/api";
@@ -308,8 +308,33 @@ const ACTIVE_HA_SERVICE_STATES = new Set([
   "standby_shell",
 ]);
 
-export default function AdminPage() {
+function resolveAdminTab(
+  requested: string | null,
+  user: {
+    is_root_admin: boolean;
+    is_admin: boolean;
+    is_issuer: boolean;
+  },
+): AdminTab {
+  const issuerOnly = user.is_issuer && !user.is_admin && !user.is_root_admin;
+  const fallback: AdminTab = issuerOnly ? "users" : "events";
+  if (!requested || !ADMIN_TABS.includes(requested as AdminTab)) return fallback;
+
+  const requestedTab = requested as AdminTab;
+  if (!user.is_root_admin && ["security", "privacy", "ha"].includes(requestedTab)) {
+    return fallback;
+  }
+  if (issuerOnly && ["events", "audit"].includes(requestedTab)) return fallback;
+  if (requestedTab === "public-links" && !canManagePublicScheduleLinks(user)) {
+    return fallback;
+  }
+  return requestedTab;
+}
+
+function AdminPageContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const queryString = searchParams.toString();
   const {
     user,
     logout,
@@ -326,11 +351,10 @@ export default function AdminPage() {
 
   const setTab = useCallback((nextTab: AdminTab) => {
     setTabState(nextTab);
-    if (typeof window === "undefined") return;
-    const url = new URL(window.location.href);
-    url.searchParams.set("tab", nextTab);
-    window.history.replaceState({}, "", url);
-  }, []);
+    const nextParams = new URLSearchParams(queryString);
+    nextParams.set("tab", nextTab);
+    router.replace(`/admin?${nextParams.toString()}`);
+  }, [queryString, router]);
 
   // Auth guard  -  admin or issuer
   useEffect(() => {
@@ -359,13 +383,16 @@ export default function AdminPage() {
       : null;
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    const requestedTab = params.get("tab") as AdminTab | null;
-    if (requestedTab && ADMIN_TABS.includes(requestedTab)) {
-      setTabState(requestedTab);
+    if (!user || (!user.is_admin && !user.is_root_admin && !user.is_issuer)) return;
+    const currentParams = new URLSearchParams(queryString);
+    const requested = currentParams.get("tab");
+    const resolved = resolveAdminTab(requested, user);
+    setTabState((current) => current === resolved ? current : resolved);
+    if (requested !== resolved) {
+      currentParams.set("tab", resolved);
+      router.replace(`/admin?${currentParams.toString()}`);
     }
-  }, []);
+  }, [queryString, router, user]);
 
   const fetchData = useCallback(async (showInitialLoading = false) => {
     if (showInitialLoading) setLoading(true);
@@ -396,23 +423,13 @@ export default function AdminPage() {
   }, [user, fetchData]);
 
   useEffect(() => {
-    if (typeof window === "undefined" || selectedEvent) return;
-    const eventParam = Number(new URLSearchParams(window.location.search).get("event"));
-    if (eventParam > 0 && events.some((event) => event.id === eventParam)) {
-      setSelectedEvent(eventParam);
-    }
-  }, [events, selectedEvent]);
-
-  // Default tab for issuers (they don't have access to Events tab)
-  useEffect(() => {
-    if (isIssuerOnly && tab === "events") {
-      setTab("users");
-      return;
-    }
-    if (user && !user.is_root_admin && ["security", "privacy", "ha"].includes(tab)) {
-      setTab(isIssuerOnly ? "users" : "events");
-    }
-  }, [isIssuerOnly, tab, user, setTab]);
+    if (isIssuerOnly) return;
+    const eventParam = Number(new URLSearchParams(queryString).get("event"));
+    const nextEvent = eventParam > 0 && events.some((event) => event.id === eventParam)
+      ? eventParam
+      : "";
+    setSelectedEvent((current) => current === nextEvent ? current : nextEvent);
+  }, [events, isIssuerOnly, queryString]);
 
   // Auto-select issuer's own event
   useEffect(() => {
@@ -539,13 +556,13 @@ export default function AdminPage() {
               onChange={(e) => {
                 const value = e.target.value ? Number(e.target.value) : "";
                 setSelectedEvent(value);
-                const url = new URL(window.location.href);
+                const nextParams = new URLSearchParams(queryString);
                 if (value) {
-                  url.searchParams.set("event", String(value));
+                  nextParams.set("event", String(value));
                 } else {
-                  url.searchParams.delete("event");
+                  nextParams.delete("event");
                 }
-                window.history.replaceState({}, "", url);
+                router.replace(`/admin?${nextParams.toString()}`);
               }}
               className="min-w-0 flex-1 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 sm:max-w-xs"
             >
@@ -602,6 +619,14 @@ export default function AdminPage() {
       </main>
 
     </div>
+  );
+}
+
+export default function AdminPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900"><p className="text-gray-500 dark:text-gray-400">Loading...</p></div>}>
+      <AdminPageContent />
+    </Suspense>
   );
 }
 

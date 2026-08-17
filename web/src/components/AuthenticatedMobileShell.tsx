@@ -58,7 +58,9 @@ export function AuthenticatedMobileShell() {
           id: "more",
           label: "More",
           icon: <MoreHorizontal size={20} />,
-          active: pathname === "/more" || pathname === "/account/security",
+          active: pathname === "/more"
+            || pathname === "/account/security"
+            || (pathname === "/admin" && ["history", "public-links"].includes(adminTab)),
           onSelect: navigate(`/more?event=${eventId}`),
         },
       ]

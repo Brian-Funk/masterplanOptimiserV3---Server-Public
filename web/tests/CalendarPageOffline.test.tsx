@@ -383,6 +383,10 @@ describe("CalendarPage offline cache", () => {
     render(<CalendarPage />);
 
     expect(await screen.findByText("My assignment")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Permitted-data policy" }).parentElement).toHaveClass(
+      "hidden",
+      "md:block",
+    );
     await waitFor(() => expect(screen.queryByText("Someone else's assignment")).not.toBeInTheDocument());
   });
 

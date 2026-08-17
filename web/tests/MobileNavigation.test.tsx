@@ -103,6 +103,20 @@ describe("AuthenticatedMobileShell", () => {
     expect(screen.getByRole("button", { name: "Updates" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "People" }));
     expect(shell.push).toHaveBeenCalledWith("/admin?tab=users&event=7");
+    await user.click(screen.getByRole("button", { name: "Updates" }));
+    expect(shell.push).toHaveBeenCalledWith("/admin?tab=announcements&event=7");
+  });
+
+  it("keeps More selected on issuer history and public-link pages", () => {
+    shell.user = { ...baseUser, is_issuer: true };
+    shell.pathname = "/admin";
+    shell.search = new URLSearchParams("tab=history&event=7");
+    const { rerender } = render(<AuthenticatedMobileShell />);
+
+    expect(screen.getByRole("button", { name: "More" })).toHaveAttribute("aria-current", "page");
+    shell.search = new URLSearchParams("tab=public-links&event=7");
+    rerender(<AuthenticatedMobileShell />);
+    expect(screen.getByRole("button", { name: "More" })).toHaveAttribute("aria-current", "page");
   });
 
   it("keeps root administration outside the phone shell", () => {
