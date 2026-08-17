@@ -1,5 +1,24 @@
 # Changes
 
+## 3.9.15 — 17 August 2026
+
+### Fixed
+
+- Keep issuer phone routes bound to the requested URL so Updates, event history
+  and Public links no longer fall back to People on direct navigation, reload,
+  or browser back and forward.
+- Reconcile a signed peer's commissioning journal from the canonical release
+  commit and accepted replication receipt instead of leaving a healthy standby
+  at “Waiting for first verified copy.”
+- Show Public links in More only to roles that can manage them.
+
+### Changed
+
+- Move the acknowledged permitted-data policy identity from the phone schedule
+  into More, including its exact published version and shortened SHA-256. The
+  required acknowledgement warning and the desktop policy identity remain in
+  place.
+
 ## 3.9.14 — 16 August 2026
 
 ### Changed

@@ -138,7 +138,7 @@ class AdminOperationalInterfaceTests(unittest.TestCase):
         self.assertIn("isLoggingOut", AUTH_CONTEXT)
         self.assertIn('role="alert"', AUTH_CONTEXT)
         self.assertIn(
-            'user && !user.is_root_admin && ["security", "privacy", "ha"].includes(tab)',
+            '!user.is_root_admin && ["security", "privacy", "ha"].includes(requestedTab)',
             ADMIN_UI,
         )
         for source in (ADMIN_UI, MORE_UI):

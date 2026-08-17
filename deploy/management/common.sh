@@ -1795,8 +1795,12 @@ mp_reconcile_signed_join_setup() {
     ' "$setup_state" >/dev/null 2>&1 || return 0
     [ -s "$receiver_state" ] || return 0
     mp_load_ha_config >/dev/null 2>&1 || return 0
-    release="$(mp_release_hash 2>/dev/null || true)"
-    [[ "$release" =~ ^[0-9a-f]{64}$ ]] || return 0
+    # mp_release_hash is the single release-identity contract. Signed releases
+    # use their exact 40-character Git commit, while qualified development
+    # identities may use 64 characters. Do not narrow that contract here: a
+    # 64-only re-check left successfully joined signed peers stuck at
+    # "Waiting for first verified copy" even though both receipts matched.
+    release="$(mp_release_hash 2>/dev/null)" || return 0
     receiver="$(cat "$receiver_state")" || return 0
     jq -e --arg source "$HA_PEER_NODE_ID" --arg target "$HA_NODE_ID" \
         --arg cluster "$HA_CLUSTER_ID" --arg release "$release" '
