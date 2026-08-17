@@ -378,6 +378,7 @@ class SignedJoinReconciliationTests(unittest.TestCase):
         services: tuple[str, ...],
         *,
         receiver: dict[str, object] | None,
+        release_hash: str = "b" * 40,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -413,7 +414,7 @@ class SignedJoinReconciliationTests(unittest.TestCase):
                 "source_node_id": "node-a",
                 "target_node_id": "node-b",
                 "cluster_id": "mp-opt-12345678-1234-4234-8234-123456789abc",
-                "release_hash": "b" * 64,
+                "release_hash": release_hash,
                 "generation": 1,
                 "accepted_at": "2026-08-11T18:00:01Z",
             }), encoding="utf-8")
@@ -454,7 +455,7 @@ esac
                     'mp_load_ha_config() { HA_NODE_ID=node-b; HA_PEER_NODE_ID=node-a; '
                     'HA_CLUSTER_ID=mp-opt-12345678-1234-4234-8234-123456789abc; '
                     'HA_PEER_SSH=mp-opt-ha-peer; }; '
-                    'mp_release_hash() { printf "%s\\n" "$(printf b%.0s {1..64})"; }; '
+                    f'mp_release_hash() {{ printf "%s\\n" "{release_hash}"; }}; '
                     'ssh() { cat "$FAKE_SENDER"; }; '
                     'mp_origin_tls_health_once() { return 0; }; '
                     'mp_reconcile_signed_join_setup',
@@ -468,7 +469,7 @@ esac
             return result, state
 
     @staticmethod
-    def receiver() -> dict[str, object]:
+    def receiver(release_hash: str = "b" * 40) -> dict[str, object]:
         return {
             "format": "mp-opt-receiver-state-v2",
             "last_bundle_id": "bundle-first-copy",
@@ -477,7 +478,7 @@ esac
             "source_node_id": "node-a",
             "target_node_id": "node-b",
             "cluster_id": "mp-opt-12345678-1234-4234-8234-123456789abc",
-            "release_hash": "b" * 64,
+            "release_hash": release_hash,
             "generation": 1,
             "protection_operations": [],
         }
@@ -502,6 +503,18 @@ esac
                 "accepted_at": "2026-08-11T18:00:00Z",
             },
         )
+
+    @unittest.skipIf(os.name == "nt", "the executable shell contract runs in Linux CI")
+    def test_qualified_64_character_identity_also_reconciles(self) -> None:
+        release_hash = "c" * 64
+        result, state = self.run_reconciliation(
+            ("db", "backend", "caddy"),
+            receiver=self.receiver(release_hash),
+            release_hash=release_hash,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["state"], "complete")
+        self.assertIn("replicated", state["completed"])
 
     @unittest.skipIf(os.name == "nt", "the executable shell contract runs in Linux CI")
     def test_missing_receipt_or_service_keeps_the_join_waiting(self) -> None:
