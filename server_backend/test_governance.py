@@ -150,8 +150,10 @@ def test_draft_is_private_and_publication_is_immutable(db):
     assert len(public["content_sha256"]) == 64
     storage = public["storage"]
     assert "IndexedDB offline calendar response" in storage["offline_schedule"]
-    assert "linked identity" in storage["offline_schedule"]
-    assert "other participant identities" in storage["offline_schedule"]
+    assert "names attached to authenticated task allocations" in storage["offline_schedule"]
+    assert "linked directory identity" in storage["offline_schedule"]
+    assert "complete people directory" in storage["offline_schedule"]
+    assert "other people's unavailability" in storage["offline_schedule"]
     assert "server-bounded expiry" in storage["offline_schedule"]
     assert "never stores authenticated API responses" in storage["application_shell"]
     assert "localStorage" in storage["preferences"]
@@ -391,7 +393,8 @@ def test_public_legal_notice_is_readable_without_javascript_and_escapes_controll
     assert "fetch(" not in response.text
     assert 'href="/rights"' in response.text
     assert "IndexedDB offline calendar response" in response.text
-    assert "linked identity" in response.text
+    assert "linked directory identity" in response.text
+    assert "names attached to authenticated task allocations" in response.text
     assert "sessionStorage" in response.text
 
 
@@ -533,6 +536,26 @@ def test_preview_classifies_material_changes_and_export_contains_only_published_
     assert exported.json()["supersedes_version"] == 1
     assert exported.json()["source_sha256"]
     assert exported.json()["source_configuration"]["structured"]["processing_purposes"][0]["gdpr_legal_basis"]
+
+
+def test_offline_disclosure_and_template_revision_are_material_changes():
+    previous = {
+        "template_version": "2026-07-31",
+        "storage": {"offline_schedule": "Only the linked participant identity."},
+    }
+    current = deepcopy(previous)
+    current["template_version"] = governance_rendering.POLICY_TEMPLATE_VERSION
+    current["storage"]["offline_schedule"] = (
+        "Includes names attached to authenticated task allocations."
+    )
+
+    diff = governance_rendering.publication_diff(previous, current)
+
+    assert diff["material_change"] is True
+    assert {change["path"] for change in diff["changes"]} == {
+        "storage.offline_schedule",
+        "template_version",
+    }
 
 
 def test_event_controller_override_requires_root_review_and_complete_contact(db):

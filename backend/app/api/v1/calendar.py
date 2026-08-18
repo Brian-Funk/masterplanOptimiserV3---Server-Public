@@ -18,9 +18,11 @@ from app.core.rate_limit import limiter
 from app.core.audit import audit
 from app.core.governance import (
     current_policy_identity,
+    current_policy_template_version,
     has_data_policy_acknowledgement,
     require_data_policy_acknowledgement,
 )
+from app.core.governance_rendering import POLICY_TEMPLATE_VERSION
 from app.core.schedule_days import (
     event_schedule_day_range,
     working_date_for_clock,
@@ -166,7 +168,7 @@ class CalendarResponse(BaseModel):
 
 
 class OfflineTaskOut(BaseModel):
-    """Participant-visible task contract approved for browser persistence."""
+    """Authenticated-event task contract approved for browser persistence."""
 
     id: int
     external_task_id: int
@@ -329,10 +331,9 @@ def _serialise_field_assignments(
 def _flatten_field_assignments(
     assignments: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
-    """Derive a unique flat attendee list from structured assignment buckets."""
+    """Flatten already-validated assignment buckets in their published order."""
 
     flattened: List[Dict[str, Any]] = []
-    seen: set[int] = set()
     for raw_attendees in assignments.values():
         if not isinstance(raw_attendees, list):
             continue
@@ -349,11 +350,32 @@ def _flatten_field_assignments(
                     continue
             else:
                 continue
-            if attendee.person_id in seen:
-                continue
-            seen.add(attendee.person_id)
             flattened.append(attendee.model_dump())
     return flattened
+
+
+def _require_unique_assignment_people(assignments: Dict[str, Any]) -> None:
+    """Enforce one allocation category per person for an effective task edit."""
+
+    assigned_people: set[int] = set()
+    for raw_attendees in assignments.values():
+        if not isinstance(raw_attendees, list):
+            raise HTTPException(status_code=422, detail="A task assignment field is invalid")
+        for raw_attendee in raw_attendees:
+            if isinstance(raw_attendee, AttendeeOut):
+                person_id = raw_attendee.person_id
+            elif isinstance(raw_attendee, dict):
+                person_id = raw_attendee.get("person_id", raw_attendee.get("id"))
+            else:
+                raise HTTPException(status_code=422, detail="A task assignment is invalid")
+            if not isinstance(person_id, int):
+                raise HTTPException(status_code=422, detail="A task assignment is invalid")
+            if person_id in assigned_people:
+                raise HTTPException(
+                    status_code=422,
+                    detail="A person may be allocated only once across a task's assignment fields",
+                )
+            assigned_people.add(person_id)
 
 
 _HEX_COLOUR = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -439,6 +461,7 @@ def _merge_field_assignments(
         if field_id not in effective:
             merged.setdefault(field_id, [])
             effective[field_id] = merged[field_id]
+    _require_unique_assignment_people(effective)
     return merged, effective
 
 
@@ -517,7 +540,8 @@ def _task_to_out(
     edit: Optional[TaskEdit] = None,
     editor_name: Optional[str] = None,
     include_web_edit_details: bool = True,
-    include_internal_fields: bool = True,
+    include_management_details: bool = True,
+    include_all_authenticated_fields: bool = True,
     schedule_day_range: Optional[Dict[str, int]] = None,
 ) -> Optional[TaskOut]:
     """Convert a PublishedTask (+ optional edit overlay) to the API response.
@@ -585,9 +609,12 @@ def _task_to_out(
             if parsed_field_values is not None:
                 field_values = parsed_field_values
 
+    # Both historical authenticated visibility values now describe the same
+    # event-member audience. ``public`` remains readable to authenticated users;
+    # unauthenticated schedules use their separate public contract.
     allowed_visibilities = (
         {"participant", "organiser", "public"}
-        if include_internal_fields
+        if include_all_authenticated_fields
         else {"participant"}
     )
     visible_definitions: list[dict[str, str]] = []
@@ -641,7 +668,7 @@ def _task_to_out(
         } if visible_assignments else None,
         field_values=visible_values or None,
         field_definitions=visible_definitions or None,
-        additional=additional if include_internal_fields else None,
+        additional=additional if include_management_details else None,
         sort_order=task.sort_order or 0,
         **web_edit_metadata,
     )
@@ -699,18 +726,19 @@ def _build_calendar_response(
     current_user: User,
     db: Session,
     *,
-    participant_only: bool = False,
+    restrict_identity_directory: bool = False,
+    restrict_task_assignments: bool = False,
 ) -> CalendarResponse:
-    """Build one role-aware calendar response without selecting a transport."""
+    """Build an authenticated calendar without conflating content and permissions."""
     event = _check_event_access(event_id, current_user, db)
     schedule_day_range = event_schedule_day_range(event.metadata_json)
-    include_web_edit_details = not participant_only and (
+    include_web_edit_details = not restrict_identity_directory and (
         current_user.can_edit
         or current_user.is_admin
         or current_user.is_root_admin
         or current_user.is_issuer
     )
-    include_internal_fields = not participant_only and include_web_edit_details
+    include_management_details = include_web_edit_details
 
     tasks = (
         db.query(PublishedTask)
@@ -799,11 +827,12 @@ def _build_calendar_response(
             if task.id in edits_map and edits_map[task.id].edited_by_user_id is not None
             else None,
             include_web_edit_details=include_web_edit_details,
-            include_internal_fields=include_internal_fields,
+            include_management_details=include_management_details,
+            include_all_authenticated_fields=not restrict_task_assignments,
             schedule_day_range=schedule_day_range,
         )) is not None
     ]
-    if participant_only:
+    if restrict_identity_directory:
         linked_person_id = current_user.linked_person_id
         persons = [
             person for person in persons
@@ -815,27 +844,28 @@ def _build_calendar_response(
             if linked_person_id is not None
             and row.external_person_id == linked_person_id
         ]
-        safe_tasks: list[TaskOut] = []
-        for task in task_outputs:
-            attendees = [
-                attendee for attendee in task.attendees
-                if attendee.person_id == linked_person_id
-            ] if linked_person_id is not None else []
-            assignments = None
-            if task.field_assignments and linked_person_id is not None:
-                assignments = {
-                    field_id: matching
-                    for field_id, field_attendees in task.field_assignments.items()
-                    if (matching := [
-                        attendee for attendee in field_attendees
-                        if attendee.person_id == linked_person_id
-                    ])
-                } or None
-            safe_tasks.append(task.model_copy(update={
-                "attendees": attendees,
-                "field_assignments": assignments,
-            }))
-        task_outputs = safe_tasks
+        if restrict_task_assignments:
+            safe_tasks: list[TaskOut] = []
+            for task in task_outputs:
+                attendees = [
+                    attendee for attendee in task.attendees
+                    if attendee.person_id == linked_person_id
+                ] if linked_person_id is not None else []
+                assignments = None
+                if task.field_assignments and linked_person_id is not None:
+                    assignments = {
+                        field_id: matching
+                        for field_id, field_attendees in task.field_assignments.items()
+                        if (matching := [
+                            attendee for attendee in field_attendees
+                            if attendee.person_id == linked_person_id
+                        ])
+                    } or None
+                safe_tasks.append(task.model_copy(update={
+                    "attendees": attendees,
+                    "field_assignments": assignments,
+                }))
+            task_outputs = safe_tasks
 
     policy_identity = current_policy_identity(db)
     return CalendarResponse(
@@ -992,15 +1022,18 @@ def get_calendar(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get published tasks for an event, with permitted role-specific fields."""
-    participant_only = not (
+    """Get identical published task content for every authenticated event member."""
+    restrict_identity_directory = not (
         current_user.can_edit
         or current_user.is_admin
         or current_user.is_root_admin
         or current_user.is_issuer
     )
     return _build_calendar_response(
-        event_id, current_user, db, participant_only=participant_only
+        event_id,
+        current_user,
+        db,
+        restrict_identity_directory=restrict_identity_directory,
     )
 
 
@@ -1013,11 +1046,15 @@ def get_offline_calendar(
     db: Session = Depends(get_db),
 ):
     """Return the bounded calendar contract approved for optional device storage."""
+    policy_allows_allocation_names = (
+        current_policy_template_version(db) == POLICY_TEMPLATE_VERSION
+    )
     calendar = _build_calendar_response(
         event_id,
         current_user,
         db,
-        participant_only=True,
+        restrict_identity_directory=True,
+        restrict_task_assignments=not policy_allows_allocation_names,
     )
     return _offline_calendar_response(calendar)
 
@@ -1077,10 +1114,18 @@ def edit_task(
     _check_event_access(event_id, current_user, db)
     require_data_policy_acknowledgement(current_user, event_id, db)
 
-    task = db.query(PublishedTask).filter(
-        PublishedTask.id == task_id,
-        PublishedTask.event_id == event_id,
-    ).first()
+    # Serialize all edits for one published task. This makes the cross-category
+    # uniqueness check authoritative even when two editors submit partial
+    # category changes at the same time.
+    task = (
+        db.query(PublishedTask)
+        .filter(
+            PublishedTask.id == task_id,
+            PublishedTask.event_id == event_id,
+        )
+        .with_for_update()
+        .first()
+    )
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
 
@@ -1189,14 +1234,34 @@ def batch_commit(
     event = _check_event_access(event_id, current_user, db)
     require_data_policy_acknowledgement(current_user, event_id, db)
 
+    # Lock every affected source task once, in deterministic order. Besides
+    # preventing lost partial edits, the ordering prevents two batch requests
+    # from deadlocking when they touch the same tasks in a different order.
+    affected_task_ids = sorted({
+        *[item.task_id for item in body.edits],
+        *body.deletions,
+    })
+    locked_tasks = (
+        db.query(PublishedTask)
+        .filter(
+            PublishedTask.event_id == event_id,
+            PublishedTask.id.in_(affected_task_ids),
+        )
+        .order_by(PublishedTask.id)
+        .with_for_update()
+        .all()
+        if affected_task_ids
+        else []
+    )
+    tasks_by_id = {task.id: task for task in locked_tasks}
+    missing_task_ids = set(affected_task_ids) - set(tasks_by_id)
+    if missing_task_ids:
+        missing = min(missing_task_ids)
+        raise HTTPException(status_code=404, detail=f"Task {missing} not found")
+
     # --- Edits ---
     for item in body.edits:
-        task = db.query(PublishedTask).filter(
-            PublishedTask.id == item.task_id,
-            PublishedTask.event_id == event_id,
-        ).first()
-        if task is None:
-            raise HTTPException(status_code=404, detail=f"Task {item.task_id} not found")
+        task = tasks_by_id[item.task_id]
 
         edit = db.query(TaskEdit).filter(TaskEdit.task_id == item.task_id).first()
         if edit is None:
@@ -1252,12 +1317,7 @@ def batch_commit(
 
     # --- Deletions ---
     for task_id in body.deletions:
-        task = db.query(PublishedTask).filter(
-            PublishedTask.id == task_id,
-            PublishedTask.event_id == event_id,
-        ).first()
-        if task is None:
-            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        task = tasks_by_id[task_id]
 
         # For web-created tasks, hard-delete instead of soft-delete
         if task.web_created:

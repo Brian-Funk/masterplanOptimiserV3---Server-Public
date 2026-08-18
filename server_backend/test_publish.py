@@ -482,6 +482,82 @@ def test_publish_rejects_retired_logo_theme_payload(db):
     assert r.status_code == 422
 
 
+def test_publish_rejects_one_person_in_multiple_assignment_categories(db):
+    """The Desktop boundary enforces the allocation model before any write."""
+
+    _event, secret = create_test_event(db, name="Unique publish")
+    client = _publish_client(secret)
+    payload = {
+        "tasks": [{
+            "id": 1,
+            "name": "Desk",
+            "start": "2026-08-01T09:00:00+00:00",
+            "end": "2026-08-01T10:00:00+00:00",
+            "attendees": [{"name": "Anna Example", "person_id": 1}],
+            "field_definitions": [
+                {"id": "front", "name": "Front-Orga", "type": "persons_list", "purpose": "assignment", "visibility": "participant"},
+                {"id": "side", "name": "Side-Orga", "type": "persons_list", "purpose": "assignment", "visibility": "participant"},
+            ],
+            "field_assignments": {
+                "front": [{"name": "Anna Example", "person_id": 1}],
+                "side": [{"name": "Anna Example", "person_id": 1}],
+            },
+        }],
+        "persons": [{
+            "id": 1,
+            "first_name": "Anna",
+            "last_name": "Example",
+            "evidence_subject_id": _subject_id(1),
+        }],
+    }
+
+    response = client.post("/api/v1/publish/publish", json=payload)
+
+    assert response.status_code == 422
+    assert "only once" in response.text
+    assert db.query(PublishedTask).count() == 0
+
+
+def test_publish_requires_flat_attendees_to_match_ordered_allocations(db):
+    """A second, divergent assignment representation cannot cross the boundary."""
+
+    _event, secret = create_test_event(db, name="Canonical allocations")
+    client = _publish_client(secret)
+    task = {
+        "id": 1,
+        "name": "Desk",
+        "start": "2026-08-01T09:00:00+00:00",
+        "end": "2026-08-01T10:00:00+00:00",
+        "attendees": [{"name": "Ben Example", "person_id": 2}],
+        "field_definitions": [
+            {"id": "front", "name": "Front-Orga", "type": "persons_list", "purpose": "assignment", "visibility": "participant"},
+            {"id": "side", "name": "Side-Orga", "type": "persons_list", "purpose": "assignment", "visibility": "organiser"},
+        ],
+        "field_assignments": {
+            "front": [{"name": "Anna Example", "person_id": 1}],
+            "side": [{"name": "Ben Example", "person_id": 2}],
+        },
+    }
+    payload = {
+        "tasks": [task],
+        "persons": [
+            {"id": 1, "first_name": "Anna", "last_name": "Example", "evidence_subject_id": _subject_id(1)},
+            {"id": 2, "first_name": "Ben", "last_name": "Example", "evidence_subject_id": _subject_id(2)},
+        ],
+    }
+
+    mismatched = client.post("/api/v1/publish/publish", json=payload)
+    assert mismatched.status_code == 422
+    assert "exactly match" in mismatched.text
+
+    task["attendees"] = [
+        {"name": "Anna Example", "person_id": 1},
+        {"name": "Ben Example", "person_id": 2},
+    ]
+    accepted = client.post("/api/v1/publish/publish", json=payload)
+    assert accepted.status_code == 200, accepted.text
+
+
 def test_general_schedule_publish_uses_explicit_schedule_views(db):
     """Explicit Schedule Views publish one public item row per selected view."""
     event, secret = create_test_event(db, name="General Schedule Evt")

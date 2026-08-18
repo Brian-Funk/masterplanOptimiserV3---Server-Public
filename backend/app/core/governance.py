@@ -53,6 +53,22 @@ def current_policy_identity(db: Session) -> tuple[int, str] | None:
     return publication.version, publication.content_sha256
 
 
+def current_policy_template_version(db: Session) -> str | None:
+    """Return the renderer version embedded in the current immutable policy."""
+
+    publication = db.query(GovernancePublication).order_by(
+        GovernancePublication.version.desc()
+    ).first()
+    if publication is None:
+        return None
+    try:
+        content = json.loads(publication.content_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    version = content.get("template_version") if isinstance(content, dict) else None
+    return version if isinstance(version, str) else None
+
+
 def require_current_policy_identity(
     policy_version: int,
     policy_sha256: str,
