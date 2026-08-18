@@ -13,6 +13,11 @@ import {
 import { apiFetch } from "@/lib/api";
 import { TASK_COLORS, ALERT_COLOR } from "@/lib/colors";
 import { describeWebEditTask } from "@/lib/webEditConfidence";
+import {
+  taskAllocations,
+  taskOperationalFields,
+  taskTypeBadge,
+} from "@/lib/taskPresentation";
 import { PermittedDataInputNotice } from "@/components/PermittedDataInputNotice";
 
 // ---------------------------------------------------------------------------
@@ -172,93 +177,7 @@ function buildFieldAssignmentRecord(
 function flattenFieldAssignments(
   assignments: Record<string, Attendee[]>,
 ): Attendee[] {
-  const flattened: Attendee[] = [];
-  const seen = new Set<number>();
-  Object.values(assignments).forEach((attendees) => {
-    attendees.forEach((attendee) => {
-      if (seen.has(attendee.person_id)) return;
-      seen.add(attendee.person_id);
-      flattened.push(attendee);
-    });
-  });
-  return flattened;
-}
-
-/** Extract persons_list fields from field definitions, values, and assignments. */
-function getPersonFields(task: Task): { fieldName: string; names: string }[] {
-  // First: use field_definitions for clean field names
-  if (task.field_definitions) {
-    const fromDefs = task.field_definitions
-      .filter((def) => def.type === "persons_list")
-      .map((def) => {
-        const val = task.field_assignments?.[def.id];
-        if (!val) return { fieldName: def.name, names: "" };
-        const names = Array.isArray(val)
-          ? val.map((p: { name?: string }) => p.name ?? String(p)).join(", ")
-          : String(val);
-        return { fieldName: def.name, names };
-      });
-    if (fromDefs.length > 0) return fromDefs;
-  }
-  return [];
-}
-
-/** Extract text (notes) fields */
-function getTextFields(task: Task): { fieldName: string; text: string }[] {
-  if (!task.field_definitions || !task.field_values) return [];
-  return task.field_definitions
-    .filter((def) => def.type === "text" && task.field_values?.[def.id])
-    .map((def) => ({
-      fieldName: def.name,
-      text: String(task.field_values![def.id]),
-    }));
-}
-
-/** Extract link fields */
-function getLinkFields(
-  task: Task,
-): { fieldName: string; url: string; text: string }[] {
-  if (!task.field_definitions || !task.field_values) return [];
-  return task.field_definitions
-    .filter((def) => def.type === "link" && task.field_values?.[def.id])
-    .map((def) => {
-      const raw = task.field_values![def.id];
-      if (typeof raw === "object" && raw !== null && "url" in raw) {
-        const obj = raw as { url: string; text?: string };
-        return { fieldName: def.name, url: obj.url, text: obj.text || obj.url };
-      }
-      const url = String(raw);
-      return { fieldName: def.name, url, text: url };
-    })
-    .filter((field) => {
-      try {
-        const parsed = new URL(field.url);
-        return parsed.protocol === "http:" || parsed.protocol === "https:";
-      } catch {
-        return false;
-      }
-    });
-}
-
-/** Extract location fields (for transfer tasks with start/end locations) */
-function getLocationFields(
-  task: Task,
-): { fieldName: string; name: string; address: string | null }[] {
-  if (!task.field_definitions || !task.field_values) return [];
-  return task.field_definitions
-    .filter((def) => def.type === "location" && task.field_values?.[def.id])
-    .map((def) => {
-      const raw = task.field_values![def.id];
-      if (typeof raw === "object" && raw !== null && "name" in raw) {
-        const obj = raw as { name: string; address?: string | null };
-        return {
-          fieldName: def.name,
-          name: obj.name,
-          address: obj.address ?? null,
-        };
-      }
-      return { fieldName: def.name, name: String(raw), address: null };
-    });
+  return Object.values(assignments).flatMap((attendees) => attendees);
 }
 
 // ---------------------------------------------------------------------------
@@ -400,7 +319,11 @@ export function TaskDetailModal({
     setEditFieldAssignments((prev) => {
       const current = prev ?? {};
       const fieldAttendees = current[fieldId] ?? [];
-      if (fieldAttendees.some((attendee) => attendee.person_id === personId)) {
+      if (
+        Object.values(current).some((attendees) =>
+          attendees.some((attendee) => attendee.person_id === personId),
+        )
+      ) {
         return current;
       }
       return {
@@ -447,13 +370,16 @@ export function TaskDetailModal({
     }
   };
 
-  const personFields = getPersonFields(task);
-  const hasMultiplePersonFields = personFields.length > 1;
+  const allocations = taskAllocations(task);
   const editableAssignmentFields = getStructuredAssignmentFields(task);
   const hasStructuredAssignments = editableAssignmentFields.length > 0;
-  const textFields = getTextFields(task);
-  const linkFields = getLinkFields(task);
-  const locationFields = getLocationFields(task);
+  const operationalFields = taskOperationalFields(task);
+  const typeBadge = taskTypeBadge(task);
+  const allocatedPersonIds = new Set(
+    Object.values(editFieldAssignments ?? {}).flatMap((attendees) =>
+      attendees.map((attendee) => attendee.person_id),
+    ),
+  );
 
   return (
     <div
@@ -501,8 +427,8 @@ export function TaskDetailModal({
             <h2 className="text-lg font-bold text-white truncate">
               {task.name}
             </h2>
-            {task.task_type_name && (
-              <p className="text-sm text-white/80">{task.task_type_name}</p>
+            {typeBadge && (
+              <p className="text-sm text-white/80">{typeBadge}</p>
             )}
           </div>
           <div className="flex items-center gap-2 flex-shrink-0 ml-3">
@@ -564,7 +490,7 @@ export function TaskDetailModal({
               {/* Name */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  Participant-visible task name
+                  Task name
                 </label>
                 <input
                   type="text"
@@ -603,7 +529,7 @@ export function TaskDetailModal({
               {/* Location */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  Participant-visible operational location
+                  Operational location
                 </label>
                 <input
                   type="text"
@@ -616,7 +542,7 @@ export function TaskDetailModal({
                   type="text"
                   value={editLocationAddress}
                   onChange={(e) => setEditLocationAddress(e.target.value)}
-                  placeholder="Participant-visible location details"
+                  placeholder="Location details"
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-sm mt-2"
                 />
               </div>
@@ -624,7 +550,7 @@ export function TaskDetailModal({
               {/* Summary */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  Participant-visible schedule summary
+                  Schedule summary
                 </label>
                 <input
                   type="text"
@@ -637,7 +563,7 @@ export function TaskDetailModal({
               {/* Description */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  Participant-visible operational instruction
+                  Operational instruction
                 </label>
                 <textarea
                   value={editDescription}
@@ -689,7 +615,7 @@ export function TaskDetailModal({
               {/* Attendees */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  Attendees
+                  People
                 </label>
                 {hasStructuredAssignments ? (
                   <div className="space-y-3">
@@ -713,9 +639,11 @@ export function TaskDetailModal({
                                 >
                                   {attendee.name}
                                   <button
+                                    type="button"
                                     onClick={() =>
                                       removeFieldAttendee(field.fieldId, index)
                                     }
+                                    aria-label={`Remove ${attendee.name} from ${field.fieldName}`}
                                     className="text-gray-400 transition-colors hover:text-red-500"
                                   >
                                     <X size={12} />
@@ -729,6 +657,7 @@ export function TaskDetailModal({
                             </p>
                           )}
                           <select
+                            aria-label={`Add person to ${field.fieldName}`}
                             onChange={(e) => {
                               if (e.target.value) {
                                 addFieldAttendee(
@@ -745,10 +674,7 @@ export function TaskDetailModal({
                             {persons
                               .filter(
                                 (p) =>
-                                  !fieldAttendees.some(
-                                    (a) =>
-                                      a.person_id === p.external_person_id,
-                                  ),
+                                  !allocatedPersonIds.has(p.external_person_id),
                               )
                               .map((p) => (
                                 <option
@@ -774,7 +700,9 @@ export function TaskDetailModal({
                           >
                             {a.name}
                             <button
+                              type="button"
                               onClick={() => removeAttendee(i)}
+                              aria-label={`Remove ${a.name}`}
                               className="text-gray-400 transition-colors hover:text-red-500"
                             >
                               <X size={12} />
@@ -784,6 +712,7 @@ export function TaskDetailModal({
                       </div>
                     )}
                     <select
+                      aria-label="Add person"
                       onChange={(e) => {
                         if (e.target.value) addAttendee(Number(e.target.value));
                         e.target.value = "";
@@ -902,38 +831,7 @@ export function TaskDetailModal({
                 </p>
               </div>
 
-              {/* Location */}
-              {locationFields.length > 0 ? (
-                <div>
-                  <h4 className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-1">
-                    {locationFields.length > 1 ? "Locations" : "Location"}
-                  </h4>
-                  <div className="space-y-2">
-                    {locationFields.map((lf) => (
-                      <div key={lf.fieldName}>
-                        {locationFields.length > 1 && (
-                          <span className="text-xs font-medium text-gray-500 dark:text-gray-400">
-                            {lf.fieldName}:
-                          </span>
-                        )}
-                        <p className="text-sm text-gray-900 dark:text-gray-100">
-                          {lf.name}
-                        </p>
-                        {lf.address && (
-                          <a
-                            href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(lf.address)}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-xs text-blue-600 dark:text-blue-400 hover:underline block"
-                          >
-                            {lf.address}
-                          </a>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : task.location_name ? (
+              {task.location_name ? (
                 <div>
                   <h4 className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-1">
                     Location
@@ -954,84 +852,59 @@ export function TaskDetailModal({
                 </div>
               ) : null}
 
-              {/* Assigned persons */}
-              {personFields.length > 0 ? (
+              {allocations.length > 0 && (
                 <div>
                   <h4 className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-1">
-                    Assigned
+                    People
                   </h4>
-                  {hasMultiplePersonFields ? (
-                    <div className="space-y-1.5">
-                      {personFields.map((pf) => (
-                        <div key={pf.fieldName}>
-                          <span className="text-xs font-medium text-gray-500 dark:text-gray-400">
-                            {pf.fieldName}:
-                          </span>
-                          <span className="text-sm text-gray-900 dark:text-gray-100 ml-1">
-                            {pf.names}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-sm text-gray-900 dark:text-gray-100">
-                      {personFields[0].names}
-                    </p>
-                  )}
-                </div>
-              ) : task.attendees.length > 0 ? (
-                <div>
-                  <h4 className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-1">
-                    Assigned
-                  </h4>
-                  <p className="text-sm text-gray-900 dark:text-gray-100">
-                    {task.attendees.map((a) => a.name).join(", ")}
-                  </p>
-                </div>
-              ) : null}
-
-              {/* Notes (text fields) */}
-              {textFields.length > 0 && (
-                <div>
-                  <h4 className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-1">
-                    Notes
-                  </h4>
-                  <div className="space-y-2">
-                    {textFields.map((tf) => (
-                      <p
-                        key={tf.fieldName}
-                        className="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap"
-                      >
-                        {tf.text}
-                      </p>
+                  <dl className="space-y-1.5">
+                    {allocations.map((allocation) => (
+                      <div key={allocation.fieldId ?? "legacy"} className="text-sm">
+                        {allocation.label && (
+                          <dt className="inline font-medium text-gray-500 dark:text-gray-400">
+                            {allocation.label}:{" "}
+                          </dt>
+                        )}
+                        <dd className="inline text-gray-900 dark:text-gray-100">
+                          {allocation.attendees.map((attendee) => attendee.name).join(", ")}
+                        </dd>
+                      </div>
                     ))}
-                  </div>
+                  </dl>
                 </div>
               )}
 
-              {/* Links */}
-              {linkFields.length > 0 && (
+              {operationalFields.length > 0 && (
                 <div>
                   <h4 className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-1">
-                    Links
+                    Details
                   </h4>
-                  <div className="space-y-1">
-                    {linkFields.map((lf) => {
-                      return (
-                        <div key={lf.fieldName} className="text-sm">
-                          <a
-                            href={lf.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-blue-600 dark:text-blue-400 hover:underline"
-                            title={lf.url}
-                          >
-                            {lf.fieldName}
-                          </a>
-                        </div>
-                      );
-                    })}
-                  </div>
+                  <dl className="space-y-2">
+                    {operationalFields.map((field) => (
+                      <div key={field.fieldId} className="text-sm">
+                        <dt className="inline font-medium text-gray-500 dark:text-gray-400">
+                          {field.label}:{" "}
+                        </dt>
+                        <dd className="inline whitespace-pre-wrap text-gray-700 dark:text-gray-300">
+                          {field.href ? (
+                            <a
+                              href={field.href}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-blue-600 hover:underline dark:text-blue-400"
+                            >
+                              {field.value}
+                            </a>
+                          ) : field.value}
+                          {field.secondary && (
+                            <span className="block pl-0 text-xs text-gray-500 dark:text-gray-400">
+                              {field.secondary}
+                            </span>
+                          )}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
                 </div>
               )}
 

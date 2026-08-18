@@ -140,7 +140,7 @@ export function CreateTaskModal({
           {/* Name */}
           <div>
             <label className={labelClass}>
-              Participant-visible task name <span className="text-red-500">*</span>
+              Task name <span className="text-red-500">*</span>
             </label>
             <input
               type="text"
@@ -176,7 +176,7 @@ export function CreateTaskModal({
 
           {/* Location */}
           <div>
-            <label className={labelClass}>Participant-visible operational location</label>
+            <label className={labelClass}>Operational location</label>
             <input
               type="text"
               value={locationName}
@@ -188,14 +188,14 @@ export function CreateTaskModal({
               type="text"
               value={locationAddress}
               onChange={(e) => setLocationAddress(e.target.value)}
-              placeholder="Participant-visible location details"
+              placeholder="Location details"
               className={`${inputClass} mt-2`}
             />
           </div>
 
           {/* Summary */}
           <div>
-            <label className={labelClass}>Participant-visible schedule summary</label>
+            <label className={labelClass}>Schedule summary</label>
             <input
               type="text"
               value={summary}
@@ -206,7 +206,7 @@ export function CreateTaskModal({
 
           {/* Description */}
           <div>
-            <label className={labelClass}>Participant-visible operational instruction</label>
+            <label className={labelClass}>Operational instruction</label>
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}

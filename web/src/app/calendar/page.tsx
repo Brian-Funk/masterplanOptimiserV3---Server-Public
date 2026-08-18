@@ -34,6 +34,7 @@ import {
   type WebEditSummary,
 } from "@/lib/webEditConfidence";
 import { chooseInitialScheduleDate } from "@/lib/calendarDate";
+import { taskAllocations } from "@/lib/taskPresentation";
 import {
   getOrderedPublicScheduleViews,
   getPublicScheduleItemsForView,
@@ -228,49 +229,6 @@ function formatCacheTime(timestamp: string | null): string | null {
     hour: "2-digit",
     minute: "2-digit",
   });
-}
-
-function formatFieldValue(val: unknown, fieldType: string): string {
-  if (val === null || val === undefined) return "";
-  if (fieldType === "persons_list") {
-    if (Array.isArray(val))
-      return val.map((p: { name?: string }) => p.name ?? String(p)).join(", ");
-    return String(val);
-  }
-  if (typeof val === "object") return JSON.stringify(val);
-  return String(val);
-}
-
-function getPersonFields(task: Task): { fieldName: string; names: string }[] {
-  // First: use field_definitions for clean field names
-  if (task.field_definitions) {
-    const fromDefs = task.field_definitions
-      .filter((def) => def.type === "persons_list")
-      .map((def) => {
-        const val =
-          task.field_assignments?.[def.id] ?? task.field_values?.[def.id];
-        if (!val) return { fieldName: def.name, names: "" };
-        return {
-          fieldName: def.name,
-          names: formatFieldValue(val, "persons_list"),
-        };
-      })
-      .filter((f) => f.names);
-    if (fromDefs.length > 0) return fromDefs;
-  }
-  // Fallback: use field_assignments directly
-  if (task.field_assignments) {
-    const defMap = new Map(
-      (task.field_definitions ?? []).map((d) => [d.id, d.name]),
-    );
-    return Object.entries(task.field_assignments)
-      .filter(([, v]) => v.length > 0)
-      .map(([key, attendees]) => ({
-        fieldName: defMap.get(key) ?? key,
-        names: attendees.map((a) => a.name).join(", "),
-      }));
-  }
-  return [];
 }
 
 // ---------------------------------------------------------------------------
@@ -1980,6 +1938,7 @@ function TaskCard({
   const isGreyed = isDimmed && highlightMode === "greyed-out";
   const isHatched = isDimmed && highlightMode === "hatched";
   const webEditDescription = task.has_web_edit ? describeWebEditTask(task) : "";
+  const allocations = taskAllocations(task);
 
   return (
     <div
@@ -2038,45 +1997,18 @@ function TaskCard({
                 {task.summary}
               </p>
             )}
-            {/* Assigned persons */}
-            {(() => {
-              // Web-edited tasks: show attendees directly (field structures not updated by edits)
-              if (task.has_web_edit && task.attendees.length > 0) {
-                return (
-                  <p className="text-xs text-gray-400 dark:text-gray-500 mt-2">
-                    {task.attendees.map((a) => a.name).join(", ")}
-                  </p>
-                );
-              }
-              const pf = getPersonFields(task);
-              if (pf.length > 1) {
-                return (
-                  <div className="text-xs text-gray-400 dark:text-gray-500 mt-2 space-y-0.5">
-                    {pf.map((f) => (
-                      <div key={f.fieldName}>
-                        <span className="font-medium">{f.fieldName}:</span>{" "}
-                        {f.names}
-                      </div>
-                    ))}
+            {allocations.length > 0 && (
+              <div className="mt-2 space-y-0.5 text-xs text-gray-400 dark:text-gray-500">
+                {allocations.map((allocation) => (
+                  <div key={allocation.fieldId ?? "legacy"}>
+                    {allocation.label && (
+                      <span className="font-medium">{allocation.label}: </span>
+                    )}
+                    {allocation.attendees.map((attendee) => attendee.name).join(", ")}
                   </div>
-                );
-              }
-              if (pf.length === 1) {
-                return (
-                  <p className="text-xs text-gray-400 dark:text-gray-500 mt-2">
-                    {pf[0].names}
-                  </p>
-                );
-              }
-              if (task.attendees.length > 0) {
-                return (
-                  <p className="text-xs text-gray-400 dark:text-gray-500 mt-2">
-                    {task.attendees.map((a) => a.name).join(", ")}
-                  </p>
-                );
-              }
-              return null;
-            })()}
+                ))}
+              </div>
+            )}
           </div>
           {canEdit && task.has_web_edit && (
             <button

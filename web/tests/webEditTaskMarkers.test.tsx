@@ -152,6 +152,8 @@ describe("web edit task markers", () => {
     expect(screen.getByText("Cook")).toBeInTheDocument();
 
     const selects = container.querySelectorAll("select");
+    expect(Array.from(selects[0].options).map((option) => option.value)).not.toContain("2");
+    expect(Array.from(selects[1].options).map((option) => option.value)).not.toContain("1");
     fireEvent.change(selects[1], { target: { value: "3" } });
     fireEvent.click(screen.getByText("Save Draft"));
 
@@ -172,5 +174,57 @@ describe("web edit task markers", () => {
         ],
       }),
     );
+  });
+
+  it("shows one People section with allocation labels and labelled multiline details", () => {
+    const task: Task = {
+      ...editedTask,
+      has_web_edit: false,
+      task_type_name: "Registration desk",
+      attendees: [
+        { name: "Brian Funk", person_id: 1 },
+        { name: "Anna Example", person_id: 2 },
+      ],
+      field_assignments: {
+        front: [{ name: "Brian Funk", person_id: 1 }],
+        side: [{ name: "Anna Example", person_id: 2 }],
+      },
+      field_values: {
+        note_a: "First paragraph\nSecond paragraph",
+        note_b: "Another note",
+      },
+      field_definitions: [
+        { id: "front", name: "Front-Orga", type: "persons_list", purpose: "assignment", visibility: "participant" },
+        { id: "side", name: "Side-Orga", type: "persons_list", purpose: "assignment", visibility: "organiser" },
+        { id: "note_a", name: "Field_A", type: "text", purpose: "operational_instruction", visibility: "participant" },
+        { id: "note_b", name: "Field_B", type: "text", purpose: "operational_instruction", visibility: "organiser" },
+      ],
+    };
+
+    render(
+      <TaskDetailModal
+        task={task}
+        canEdit={false}
+        eventId={1}
+        dataPolicyAcknowledged
+        persons={[]}
+        onClose={vi.fn()}
+        onDataChanged={vi.fn()}
+        onDraftEdit={vi.fn()}
+        onDraftDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("People")).toBeInTheDocument();
+    expect(screen.queryByText("Assigned")).not.toBeInTheDocument();
+    expect(screen.getByText(/Front-Orga:/)).toBeInTheDocument();
+    expect(screen.getByText(/Side-Orga:/)).toBeInTheDocument();
+    expect(screen.getByText(/Field_A:/)).toBeInTheDocument();
+    expect(screen.getByText(/Field_B:/)).toBeInTheDocument();
+    expect(screen.getByText((_, element) =>
+      element?.tagName === "DD"
+      && element.textContent === "First paragraph\nSecond paragraph",
+    )).toHaveClass("whitespace-pre-wrap");
+    expect(screen.getByText("Registration desk")).toBeInTheDocument();
   });
 });
