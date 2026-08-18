@@ -80,7 +80,7 @@ Signed deployments can also be run non-interactively by a trusted deployment
 workstation:
 
 ```bash
-/opt/masterplan/deploy/signed-deployment.sh v3.9.16
+/opt/masterplan/deploy/signed-deployment.sh v3.9.17
 ```
 
 When the signed manifest proves that a release has no migration, keeps the
@@ -93,11 +93,16 @@ assets are installed before HTML and CSP are switched; the previous Backend
 and frontend remain available until authenticated and public acceptance pass.
 PostgreSQL and Caddy are not restarted. A release without the exact signed
 eligibility contract fails closed instead of silently attempting this path.
+If a signed release was published but never deployed, the next release may
+name the exact active predecessor explicitly. The workflow accepts that
+override only after verifying the predecessor's signed manifest, immutable tag
+commit and ancestry; the node-side installer then proves that the named release
+is the one actually active before staging anything.
 
 The tag spelling is canonical and case-sensitive: `vMAJOR.MINOR.PATCH`. Release
 names use the identical value. Tags and release names are never overwritten;
 `v3.4.0` is permanently retired and the release prepared by this source tree is
-`v3.9.16`.
+`v3.9.17`.
 
 Production installation, standalone-to-HA migration, node replacement, and
 full-loss recovery all start in the same resumable commissioning interface.

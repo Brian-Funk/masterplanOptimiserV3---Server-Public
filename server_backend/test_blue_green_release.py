@@ -171,4 +171,17 @@ def test_release_manifest_fails_closed_on_migrations_or_infrastructure_change():
     assert 'migration_free:$migration_free' in RELEASE_WORKFLOW
     assert 'infrastructure_unchanged:$infrastructure_unchanged' in RELEASE_WORKFLOW
     assert 'blue_green_eligible:$blue_green_eligible' in RELEASE_WORKFLOW
-    assert 'index("database")' in RELEASE_WORKFLOW
+    assert "deploy/migrations backend/app/models backend/app/db/database.py" in RELEASE_WORKFLOW
+
+
+def test_release_can_bind_a_skipped_release_to_the_exact_active_predecessor():
+    assert "active_predecessor_tag:" in RELEASE_WORKFLOW
+    assert '[[ "$ACTIVE_PREDECESSOR_TAG" != "$TAG" ]]' in RELEASE_WORKFLOW
+    assert 'git merge-base --is-ancestor "$previous_commit" "$RELEASE_COMMIT"' in RELEASE_WORKFLOW
+    assert '[[ "$(git rev-parse "$previous_tag^{commit}")" == "$previous_commit" ]]' in RELEASE_WORKFLOW
+
+
+def test_unchanged_caddy_and_postgres_are_reused_even_for_a_full_plan():
+    assert 'INFRASTRUCTURE_UNCHANGED: ${{ steps.plan.outputs.infrastructure_unchanged }}' in RELEASE_WORKFLOW
+    assert '( "$service" == caddy || "$service" == postgres )' in RELEASE_WORKFLOW
+    assert "changed=false" in RELEASE_WORKFLOW
