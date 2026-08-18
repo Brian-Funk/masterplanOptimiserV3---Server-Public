@@ -125,6 +125,8 @@ jobs:
           previous_tag="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // empty')"
           components='["backend","frontend","database","caddy","tools","witness","operations"]'
           previous_manifest=''
+          migration_free=false
+          infrastructure_unchanged=false
           if [[ "$REBUILD_ALL" != true && -n "$previous_tag" ]]; then
             mkdir -p /tmp/previous-release
             gh release download "$previous_tag" --dir /tmp/previous-release \
@@ -136,12 +138,23 @@ jobs:
             previous_commit="$(jq -r .commit /tmp/previous-release/release-manifest.json)"
             plan="$(python3 deploy/test_deployment.py classify --repo . --base "$previous_commit" --target "$RELEASE_COMMIT")"
             components="$(jq -c .components <<< "$plan")"
+            if [[ "$(jq -r '.migrations == false and (.components | index("database") | not)' <<< "$plan")" == true ]]; then
+              migration_free=true
+            fi
+            if git diff --quiet "$previous_commit" "$RELEASE_COMMIT" -- \
+                infra/docker-compose.yml infra/docker-compose.prod.yml infra/docker-compose.ha.yml \
+                infra/Dockerfile.caddy infra/Dockerfile.postgres deploy/migrations \
+                backend/app/models backend/app/db/database.py; then
+              infrastructure_unchanged=true
+            fi
             previous_manifest=/tmp/previous-release/release-manifest.json
             jq . <<< "$plan"
           fi
           echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
           echo "previous_manifest=$previous_manifest" >> "$GITHUB_OUTPUT"
           echo "components=$components" >> "$GITHUB_OUTPUT"
+          echo "migration_free=$migration_free" >> "$GITHUB_OUTPUT"
+          echo "infrastructure_unchanged=$infrastructure_unchanged" >> "$GITHUB_OUTPUT"
       - name: Build changed images and reuse unchanged digests
         if: steps.release.outputs.release_exists != 'true'
         id: images
@@ -237,6 +250,10 @@ jobs:
           CADDY_PROVENANCE: ${{ steps.images.outputs.caddy_provenance }}
           POSTGRES_PROVENANCE: ${{ steps.images.outputs.postgres_provenance }}
           TOOLS_PROVENANCE: ${{ steps.images.outputs.tools_provenance }}
+          PREVIOUS_TAG: ${{ steps.plan.outputs.previous_tag }}
+          PREVIOUS_MANIFEST: ${{ steps.plan.outputs.previous_manifest }}
+          MIGRATION_FREE: ${{ steps.plan.outputs.migration_free }}
+          INFRASTRUCTURE_UNCHANGED: ${{ steps.plan.outputs.infrastructure_unchanged }}
         run: |
           set -Eeuo pipefail
           mkdir -p runtime
@@ -253,6 +270,13 @@ jobs:
           sbom_caddy_sha="$(sha256sum sbom-caddy.cdx.json | awk '{print $1}')"
           sbom_postgres_sha="$(sha256sum sbom-postgres.cdx.json | awk '{print $1}')"
           sbom_tools_sha="$(sha256sum sbom-tools.cdx.json | awk '{print $1}')"
+          blue_green_eligible=false
+          if [[ "$MIGRATION_FREE" == true && "$INFRASTRUCTURE_UNCHANGED" == true \
+                && -n "$PREVIOUS_MANIFEST" \
+                && "$CADDY" == "$(jq -r .images.caddy "$PREVIOUS_MANIFEST")" \
+                && "$POSTGRES" == "$(jq -r .images.postgres "$PREVIOUS_MANIFEST")" ]]; then
+            blue_green_eligible=true
+          fi
           jq -n --arg tag "$TAG" --arg commit "$RELEASE_COMMIT" \
             --arg backend "$BACKEND" --arg caddy "$CADDY" --arg postgres "$POSTGRES" --arg tools "$TOOLS" \
             --arg bp "$BACKEND_PROVENANCE" --arg cp "$CADDY_PROVENANCE" --arg pp "$POSTGRES_PROVENANCE" --arg tp "$TOOLS_PROVENANCE" \
@@ -260,12 +284,19 @@ jobs:
             --arg sbom_source_sha "$sbom_source_sha" --arg sbom_backend_sha "$sbom_backend_sha" \
             --arg sbom_caddy_sha "$sbom_caddy_sha" --arg sbom_postgres_sha "$sbom_postgres_sha" \
             --arg sbom_tools_sha "$sbom_tools_sha" \
+            --arg previous_tag "$PREVIOUS_TAG" \
+            --argjson migration_free "$MIGRATION_FREE" \
+            --argjson infrastructure_unchanged "$INFRASTRUCTURE_UNCHANGED" \
+            --argjson blue_green_eligible "$blue_green_eligible" \
             '{format:"mp-opt-release-v1",tag:$tag,commit:$commit,
               images:{backend:$backend,caddy:$caddy,postgres:$postgres,tools:$tools},
               component_provenance:{backend:$bp,caddy:$cp,postgres:$pp,tools:$tp},
               frontend:{asset:"web-out.tar.gz",sha256:$frontend_sha},
               operations:{asset:"operations.tar.gz",sha256:$operations_sha},
               bootstrap:{asset:"mp-opt-setup.sh",sha256:$bootstrap_sha},
+              deployment:{format:"mp-opt-deployment-contract-v1",previous_tag:$previous_tag,
+                migration_free:$migration_free,infrastructure_unchanged:$infrastructure_unchanged,
+                blue_green_eligible:$blue_green_eligible},
               sboms:{source:{asset:"sbom-source.cdx.json",sha256:$sbom_source_sha},
                 backend:{asset:"sbom-backend.cdx.json",sha256:$sbom_backend_sha},
                 caddy:{asset:"sbom-caddy.cdx.json",sha256:$sbom_caddy_sha},
@@ -305,7 +336,12 @@ jobs:
             --certificate-identity "$identity" \
             release-manifest.json
           jq -e --arg tag "$TAG" --arg commit "$RELEASE_COMMIT" \
-            '.format == "mp-opt-release-v1" and .tag == $tag and .commit == $commit' \
+            '.format == "mp-opt-release-v1" and .tag == $tag and .commit == $commit
+              and .deployment.format == "mp-opt-deployment-contract-v1"
+              and (.deployment.previous_tag | type == "string")
+              and (.deployment.migration_free | type == "boolean")
+              and (.deployment.infrastructure_unchanged | type == "boolean")
+              and (.deployment.blue_green_eligible | type == "boolean")' \
             release-manifest.json >/dev/null
           verify_asset() {
             local selector="$1" asset expected actual

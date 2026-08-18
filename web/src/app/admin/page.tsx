@@ -1238,7 +1238,7 @@ function EventsTab({
             <ul className="list-disc pl-5">{eventPolicy.allowed.map((item) => <li key={item}>{item}</li>)}</ul>
             <p className="mt-2 font-medium">Unsupported</p>
             <ul className="list-disc pl-5">{eventPolicy.unsupported.map((item) => <li key={item}>{item}</li>)}</ul>
-            <p className="mt-2">Field audiences are explicit: participant-visible, organisers only, or public. New events have no optional public, offline or integration feature enabled until separately configured.</p>
+            <p className="mt-2">Published operational task fields are visible to authenticated event accounts. Unauthenticated public schedules remain a separate, explicitly enabled surface. Governance audiences describe legal information, not a hidden task-content tier. New events have no optional public, offline or integration feature enabled until separately configured.</p>
             <p className="mt-2">Policy version {eventPolicy.version}; SHA-256 <code className="break-all">{eventPolicy.sha256}</code>. <a className="underline" href={`${getApiUrl()}/api/v1/governance/public/versions/${eventPolicy.version}/data-policy.html`}>Open the permanent exact policy</a>.</p>
             <label className="mt-3 flex items-start gap-2 font-medium">
               <input type="checkbox" className="mt-1" checked={eventPolicyAcknowledged} onChange={(event) => setEventPolicyAcknowledged(event.target.checked)} />

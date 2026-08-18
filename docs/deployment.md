@@ -80,13 +80,24 @@ Signed deployments can also be run non-interactively by a trusted deployment
 workstation:
 
 ```bash
-/opt/masterplan/deploy/signed-deployment.sh v3.9.15
+/opt/masterplan/deploy/signed-deployment.sh v3.9.16
 ```
+
+When the signed manifest proves that a release has no migration, keeps the
+infrastructure contract unchanged, and reuses the exact PostgreSQL and Caddy
+image digests, this command uses migration-free blue/green activation. The
+standby is staged first. On each node a scheduler-free temporary Backend is
+health-checked beside the current Backend, Caddy is reloaded to that temporary
+upstream, and only the canonical Backend is replaced. New hashed frontend
+assets are installed before HTML and CSP are switched; the previous Backend
+and frontend remain available until authenticated and public acceptance pass.
+PostgreSQL and Caddy are not restarted. A release without the exact signed
+eligibility contract fails closed instead of silently attempting this path.
 
 The tag spelling is canonical and case-sensitive: `vMAJOR.MINOR.PATCH`. Release
 names use the identical value. Tags and release names are never overwritten;
 `v3.4.0` is permanently retired and the release prepared by this source tree is
-`v3.9.15`.
+`v3.9.16`.
 
 Production installation, standalone-to-HA migration, node replacement, and
 full-loss recovery all start in the same resumable commissioning interface.

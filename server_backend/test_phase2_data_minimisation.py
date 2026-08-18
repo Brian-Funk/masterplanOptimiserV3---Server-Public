@@ -147,29 +147,47 @@ def test_participant_and_offline_contracts_expose_only_linked_identity(db):
     db.commit()
     client = _make_client(db, participant)
 
-    for suffix in ("", "/offline"):
-        response = client.get(f"/api/v1/calendar/{event.id}{suffix}")
-        assert response.status_code == 200
-        body = response.json()
-        assert [person["external_person_id"] for person in body["persons"]] == [1]
-        assert [row["person_id"] for row in body["unavailabilities"]] == [1]
-        assert [row["person_id"] for row in body["tasks"][0]["attendees"]] == [1]
-        assert [row["person_id"] for row in body["tasks"][0]["field_assignments"]["crew"]] == [1]
-        assert body["tasks"][0]["field_values"] == {
-            "participant_instruction": "Meet at the participant desk",
-        }
-        assert {
-            definition["id"] for definition in body["tasks"][0]["field_definitions"]
-        } == {"crew", "participant_instruction"}
+    live = client.get(f"/api/v1/calendar/{event.id}")
+    assert live.status_code == 200
+    live_body = live.json()
+    assert [person["external_person_id"] for person in live_body["persons"]] == [1]
+    assert [row["person_id"] for row in live_body["unavailabilities"]] == [1]
+    assert [row["person_id"] for row in live_body["tasks"][0]["attendees"]] == [1, 2]
+    assert [
+        row["person_id"]
+        for row in live_body["tasks"][0]["field_assignments"]["crew"]
+    ] == [1, 2]
+    assert live_body["tasks"][0]["field_values"] == {
+        "participant_instruction": "Meet at the participant desk",
+        "organiser_note": "Internal room key code",
+    }
+    assert {
+        definition["id"] for definition in live_body["tasks"][0]["field_definitions"]
+    } == {"crew", "participant_instruction", "organiser_note"}
+
+    # Until the controller publishes the revised immutable disclosure, an old
+    # offline opt-in keeps the previous, narrower schedule contract.
+    offline = client.get(f"/api/v1/calendar/{event.id}/offline")
+    assert offline.status_code == 200
+    offline_body = offline.json()
+    assert [person["external_person_id"] for person in offline_body["persons"]] == [1]
+    assert [row["person_id"] for row in offline_body["unavailabilities"]] == [1]
+    assert [row["person_id"] for row in offline_body["tasks"][0]["attendees"]] == [1]
+    assert [
+        row["person_id"]
+        for row in offline_body["tasks"][0]["field_assignments"]["crew"]
+    ] == [1]
+    assert offline_body["tasks"][0]["field_values"] == {
+        "participant_instruction": "Meet at the participant desk",
+    }
 
     editor = create_test_user(
         db, username="scoped.editor", event_id=event.id, can_edit=True
     )
     organiser_body = _make_client(db, editor).get(f"/api/v1/calendar/{event.id}").json()
-    assert organiser_body["tasks"][0]["field_values"] == {
-        "participant_instruction": "Meet at the participant desk",
-        "organiser_note": "Internal room key code",
-    }
+    assert organiser_body["tasks"][0]["attendees"] == live_body["tasks"][0]["attendees"]
+    assert organiser_body["tasks"][0]["field_assignments"] == live_body["tasks"][0]["field_assignments"]
+    assert organiser_body["tasks"][0]["field_values"] == live_body["tasks"][0]["field_values"]
 
 
 def test_acknowledgement_is_bound_to_exact_current_policy_digest(db):

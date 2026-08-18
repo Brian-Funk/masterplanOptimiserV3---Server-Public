@@ -62,10 +62,15 @@ mp_lock
 trap 'mp_unlock' EXIT
 if [ "$rollback" = true ]; then
     python3 "$MP_ROOT/deploy/release/install_release.py" --repo-root "$MP_ROOT" --rollback
+elif [ -f "$MP_ROOT/.release.env" ]; then
+    python3 "$MP_ROOT/deploy/release/install_release.py" \
+        --repo-root "$MP_ROOT" --tag "$tag" --blue-green
+    MP_RELEASE_LOCK_HELD=1 \
+        "$MP_ROOT/deploy/release/blue_green_upgrade.sh"
 else
     python3 "$MP_ROOT/deploy/release/install_release.py" --repo-root "$MP_ROOT" --tag "$tag"
+    "$MP_ROOT/deploy/deploy.sh" --no-pull
 fi
-"$MP_ROOT/deploy/deploy.sh" --no-pull
 mp_unlock
 trap - EXIT
 

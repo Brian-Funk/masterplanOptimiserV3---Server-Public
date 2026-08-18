@@ -1,10 +1,10 @@
 "use client";
 
 const DB_NAME = "mp-opt-offline-calendar";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const STORE_NAME = "calendar-payloads";
-const CACHE_SCHEMA_VERSION = 3;
-const OPT_IN_PREFIX = "mp-opt-offline-calendar-enabled:";
+const CACHE_SCHEMA_VERSION = 4;
+const OPT_IN_PREFIX = "mp-opt-offline-calendar-enabled:v2:";
 
 type StorageErrorCode =
   | "storage_unavailable"
@@ -120,6 +120,11 @@ const PARTICIPANT_FIELD_TYPES = new Set([
   "text",
   "time_range",
 ]);
+const AUTHENTICATED_FIELD_VISIBILITIES = new Set([
+  "participant",
+  "organiser",
+  "public",
+]);
 const PERSON_KEYS = new Set(["id", "external_person_id", "first_name", "last_name"]);
 const CATEGORY_KEYS = new Set(["id", "name", "sort_order"]);
 const PUBLIC_ITEM_KEYS = new Set([
@@ -198,7 +203,7 @@ export function assertParticipantSafeOfflineCalendarPayload(
     throw new OfflineCalendarStorageError("unsafe_payload", "The offline calendar payload is incomplete.");
   }
 
-  const participantIds = new Set<number>();
+  const directoryIdentityIds = new Set<number>();
   for (const taskValue of payload.tasks) {
     if (!isRecord(taskValue)) {
       throw new OfflineCalendarStorageError("unsafe_payload", "An offline task is invalid.");
@@ -216,7 +221,7 @@ export function assertParticipantSafeOfflineCalendarPayload(
     ) {
       throw new OfflineCalendarStorageError(
         "unsafe_payload",
-        "An offline task contains organiser-only information.",
+        "An offline task contains management-only information.",
       );
     }
     const definitions = taskValue.field_definitions === null
@@ -236,13 +241,14 @@ export function assertParticipantSafeOfflineCalendarPayload(
         || typeof definitionValue.name !== "string"
         || typeof definitionValue.type !== "string"
         || typeof definitionValue.purpose !== "string"
-        || definitionValue.visibility !== "participant"
+        || typeof definitionValue.visibility !== "string"
+        || !AUTHENTICATED_FIELD_VISIBILITIES.has(definitionValue.visibility)
         || !PARTICIPANT_FIELD_TYPES.has(definitionValue.type)
         || definitionById.has(definitionValue.id)
       ) {
         throw new OfflineCalendarStorageError(
           "unsafe_payload",
-          "An offline task contains a field without an explicit participant-visible classification.",
+          "An offline task contains a field without an explicit authenticated-event classification.",
         );
       }
       definitionById.set(definitionValue.id, definitionValue.type);
@@ -258,22 +264,42 @@ export function assertParticipantSafeOfflineCalendarPayload(
       }
       assertParticipantFieldValue(type, value, `task field ${fieldId}`);
     }
+    const flatAttendeeIds: number[] = [];
     taskValue.attendees.forEach((attendee, index) => {
       assertAttendee(attendee, `task attendee ${index + 1}`);
-      participantIds.add((attendee as Record<string, unknown>).person_id as number);
+      flatAttendeeIds.push((attendee as Record<string, unknown>).person_id as number);
     });
     if (taskValue.field_assignments !== null) {
       if (!isRecord(taskValue.field_assignments)) {
         throw new OfflineCalendarStorageError("unsafe_payload", "Offline task assignments are invalid.");
       }
+      const assignedIds: number[] = [];
+      const assignedOnce = new Set<number>();
       for (const [field, attendees] of Object.entries(taskValue.field_assignments)) {
         if (definitionById.get(field) !== "persons_list" || !Array.isArray(attendees)) {
           throw new OfflineCalendarStorageError("unsafe_payload", `Offline task assignment ${field} is invalid.`);
         }
         attendees.forEach((attendee, index) => {
           assertAttendee(attendee, `task assignment ${field} item ${index + 1}`);
-          participantIds.add((attendee as Record<string, unknown>).person_id as number);
+          const personId = (attendee as Record<string, unknown>).person_id as number;
+          if (assignedOnce.has(personId)) {
+            throw new OfflineCalendarStorageError(
+              "unsafe_payload",
+              "An offline task assigns one person to more than one allocation.",
+            );
+          }
+          assignedOnce.add(personId);
+          assignedIds.push(personId);
         });
+      }
+      if (
+        assignedIds.length !== flatAttendeeIds.length
+        || assignedIds.some((personId, index) => flatAttendeeIds[index] !== personId)
+      ) {
+        throw new OfflineCalendarStorageError(
+          "unsafe_payload",
+          "An offline task's flat and structured allocations do not agree.",
+        );
       }
     }
   }
@@ -286,7 +312,7 @@ export function assertParticipantSafeOfflineCalendarPayload(
     if (!Number.isInteger(personValue.external_person_id)) {
       throw new OfflineCalendarStorageError("unsafe_payload", "An offline person is invalid.");
     }
-    participantIds.add(personValue.external_person_id as number);
+    directoryIdentityIds.add(personValue.external_person_id as number);
   }
 
   for (const key of ["public_schedule_views", "public_schedule_categories"] as const) {
@@ -332,13 +358,13 @@ export function assertParticipantSafeOfflineCalendarPayload(
     if (!Number.isInteger(intervalValue.person_id)) {
       throw new OfflineCalendarStorageError("unsafe_payload", "An offline unavailability is invalid.");
     }
-    participantIds.add(intervalValue.person_id as number);
+    directoryIdentityIds.add(intervalValue.person_id as number);
   }
 
-  if (participantIds.size > 1) {
+  if (directoryIdentityIds.size > 1) {
     throw new OfflineCalendarStorageError(
       "unsafe_payload",
-      "The offline calendar contains another participant's identity or availability.",
+      "The offline calendar contains another person's directory identity or availability.",
     );
   }
 

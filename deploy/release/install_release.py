@@ -29,6 +29,7 @@ IDENTITY = (
     r"\.github/workflows/release\.yml@refs/(?:tags/v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$"
 )
 IMAGE = re.compile(r"^ghcr\.io/brian-funk/masterplanoptimiserv3---server/[a-z-]+@sha256:[0-9a-f]{64}$")
+TAG = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 LATEST_RELEASE_RETRY_DELAYS = (1, 2, 4)
 TRANSIENT_RELEASE_HTTP_STATUSES = {404, 408, 425, 429, 500, 502, 503, 504}
 
@@ -163,18 +164,33 @@ def signed_asset(manifest: dict, name: str) -> tuple[str, str]:
     return asset, digest
 
 
-def release_environment(tag: str, commit: str, images: dict[str, str]) -> str:
+def release_environment(
+    tag: str,
+    commit: str,
+    images: dict[str, str],
+    deployment: dict | None = None,
+    *,
+    blue_green_staged: bool = False,
+) -> str:
     """Return the non-secret immutable image metadata for one signed release."""
 
-    return "\n".join([
+    lines = [
         f"MP_RELEASE_TAG={tag}",
         f"MP_RELEASE_COMMIT={commit}",
         f"MP_BACKEND_IMAGE={images['backend']}",
         f"MP_CADDY_IMAGE={images['caddy']}",
         f"MP_POSTGRES_IMAGE={images['postgres']}",
         f"MP_TOOLS_IMAGE={images['tools']}",
-        "",
-    ])
+    ]
+    if deployment is not None:
+        lines.extend([
+            f"MP_RELEASE_MIGRATION_FREE={str(deployment['migration_free']).lower()}",
+            f"MP_RELEASE_INFRASTRUCTURE_UNCHANGED={str(deployment['infrastructure_unchanged']).lower()}",
+            f"MP_RELEASE_BLUE_GREEN_ELIGIBLE={str(deployment['blue_green_eligible']).lower()}",
+            f"MP_RELEASE_PREVIOUS_TAG={deployment['previous_tag']}",
+            f"MP_RELEASE_BLUE_GREEN_STAGED={str(blue_green_staged).lower()}",
+        ])
+    return "\n".join([*lines, ""])
 
 
 def swap_with_previous(current: Path, previous: Path) -> None:
@@ -227,11 +243,52 @@ def rollback(root: Path) -> int:
     return 0
 
 
+def rollback_staged(root: Path) -> int:
+    """Undo a blue/green stage without exchanging the still-active frontend."""
+
+    pairs = [
+        (root / "deploy", root / ".deploy.previous"),
+        (root / "infra", root / ".infra.previous"),
+        (root / "manage.sh", root / ".manage.sh.previous"),
+        (root / "configure-production.sh", root / ".configure-production.sh.previous"),
+        (root / ".release.env", root / ".release.env.previous"),
+    ]
+    for current, previous in pairs:
+        if not current.exists() or not previous.exists():
+            raise RuntimeError("No complete staged blue/green release is available")
+    if "MP_RELEASE_BLUE_GREEN_STAGED=true" not in (root / ".release.env").read_text(encoding="utf-8"):
+        raise RuntimeError("The active release is not a blue/green stage")
+    next_frontend = root / "web/.out.next"
+    next_policy = root / "runtime/.frontend-csp.next"
+    if next_frontend.is_symlink() or next_policy.is_symlink():
+        raise RuntimeError("Staged frontend cleanup target is unsafe")
+    completed: list[tuple[Path, Path]] = []
+    try:
+        for current, previous in pairs:
+            swap_with_previous(current, previous)
+            completed.append((current, previous))
+    except Exception:
+        for current, previous in reversed(completed):
+            swap_with_previous(current, previous)
+        raise
+    if next_frontend.exists():
+        shutil.rmtree(next_frontend)
+    next_policy.unlink(missing_ok=True)
+    print("Restored the release that preceded the blue/green stage")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--tag", default="latest")
     parser.add_argument("--rollback", action="store_true")
+    parser.add_argument("--rollback-staged", action="store_true")
+    parser.add_argument(
+        "--blue-green",
+        action="store_true",
+        help="stage a manifest-authorised migration-free release for live activation",
+    )
     parser.add_argument(
         "--baseline-only",
         action="store_true",
@@ -242,10 +299,12 @@ def main() -> int:
     )
     args = parser.parse_args()
     root = args.repo_root.resolve()
-    if args.rollback and args.baseline_only:
-        parser.error("--rollback and --baseline-only are mutually exclusive")
+    if sum((args.rollback, args.rollback_staged, args.baseline_only, args.blue_green)) > 1:
+        parser.error("release operation modes are mutually exclusive")
     if args.rollback:
         return rollback(root)
+    if args.rollback_staged:
+        return rollback_staged(root)
     if args.tag == "latest":
         tag = latest_stable_tag()
     else:
@@ -284,6 +343,36 @@ def main() -> int:
                 "--certificate-identity-regexp", IDENTITY, reference,
             )
             subprocess.run(["docker", "pull", reference], check=True)
+        deployment = manifest.get("deployment")
+        if args.blue_green:
+            if not isinstance(deployment, dict) or deployment.get("format") != "mp-opt-deployment-contract-v1":
+                raise RuntimeError("signed release has no blue/green deployment contract")
+            expected_deployment_keys = {
+                "format", "previous_tag", "migration_free",
+                "infrastructure_unchanged", "blue_green_eligible",
+            }
+            if set(deployment) != expected_deployment_keys:
+                raise RuntimeError("signed release has an invalid blue/green deployment contract")
+            if (
+                not isinstance(deployment.get("previous_tag"), str)
+                or not TAG.fullmatch(deployment["previous_tag"])
+                or deployment.get("migration_free") is not True
+                or deployment.get("infrastructure_unchanged") is not True
+                or deployment.get("blue_green_eligible") is not True
+            ):
+                raise RuntimeError("signed release is not eligible for migration-free blue/green activation")
+            active_environment = root / ".release.env"
+            if active_environment.is_symlink() or not active_environment.is_file():
+                raise RuntimeError("blue/green activation requires safe active release metadata")
+            active_tags = [
+                line.removeprefix("MP_RELEASE_TAG=")
+                for line in active_environment.read_text(encoding="utf-8").splitlines()
+                if line.startswith("MP_RELEASE_TAG=")
+            ]
+            if active_tags != [deployment["previous_tag"]]:
+                raise RuntimeError(
+                    "signed blue/green release does not name the exact active predecessor"
+                )
         frontend_asset, frontend_digest = signed_asset(manifest, "frontend")
         operations_asset, operations_digest = signed_asset(manifest, "operations")
         download(f"{base}/{frontend_asset}", frontend_path, 128 * 1024 * 1024)
@@ -303,7 +392,7 @@ def main() -> int:
             # campaign checkout and do not remove .test-deployment.env.
             atomic_text(
                 root / ".release.env",
-                release_environment(tag, commit, images),
+                release_environment(tag, commit, images, deployment),
             )
             print(f"Verified signed rollback baseline {tag}")
             return 0
@@ -313,6 +402,8 @@ def main() -> int:
         runtime.mkdir(mode=0o700, exist_ok=True)
         policy = runtime / "frontend-csp.caddy"
         previous_policy = runtime / ".frontend-csp.previous"
+        next_frontend = root / "web/.out.next"
+        next_policy = runtime / ".frontend-csp.next"
         root_file_backups = work / "root-file-backups"
         root_file_backups.mkdir()
         for filename in ("manage.sh", "configure-production.sh"):
@@ -342,11 +433,20 @@ def main() -> int:
             else:
                 shutil.copy2(retained_path, backup)
         try:
+            if args.blue_green and (
+                next_frontend.exists()
+                or next_frontend.is_symlink()
+                or next_policy.exists()
+                or next_policy.is_symlink()
+            ):
+                raise RuntimeError("stale blue/green frontend staging state exists")
             if previous.exists():
-                shutil.rmtree(previous)
+                if not args.blue_green:
+                    shutil.rmtree(previous)
             if previous_policy.exists():
-                previous_policy.unlink()
-            if policy.exists():
+                if not args.blue_green:
+                    previous_policy.unlink()
+            if policy.exists() and not args.blue_green:
                 policy.replace(previous_policy)
             for filename in ("manage.sh", "configure-production.sh"):
                 retained_file = root / f".{filename}.previous"
@@ -369,24 +469,40 @@ def main() -> int:
                 temporary_file = root / f".{filename}.next"
                 shutil.copy2(extracted / filename, temporary_file)
                 temporary_file.replace(root / filename)
-            if destination.exists():
-                destination.replace(previous)
-            (extracted / "web/out").replace(destination)
-            shutil.copy2(extracted / "runtime/frontend-csp.caddy", policy)
+            if args.blue_green:
+                (extracted / "web/out").replace(next_frontend)
+                shutil.copy2(extracted / "runtime/frontend-csp.caddy", next_policy)
+                next_policy.chmod(0o644)
+            else:
+                if destination.exists():
+                    destination.replace(previous)
+                (extracted / "web/out").replace(destination)
+                shutil.copy2(extracted / "runtime/frontend-csp.caddy", policy)
             atomic_text(
                 root / ".release.env",
-                release_environment(tag, commit, images),
+                release_environment(
+                    tag,
+                    commit,
+                    images,
+                    deployment,
+                    blue_green_staged=args.blue_green,
+                ),
             )
             (root / ".test-deployment.env").unlink(missing_ok=True)
         except Exception:
-            if destination.exists():
-                shutil.rmtree(destination)
-            if previous.exists():
-                previous.replace(destination)
-            if policy.exists():
-                policy.unlink()
-            if previous_policy.exists():
-                previous_policy.replace(policy)
+            if args.blue_green:
+                if next_frontend.exists():
+                    shutil.rmtree(next_frontend)
+                next_policy.unlink(missing_ok=True)
+            else:
+                if destination.exists():
+                    shutil.rmtree(destination)
+                if previous.exists():
+                    previous.replace(destination)
+                if policy.exists():
+                    policy.unlink()
+                if previous_policy.exists():
+                    previous_policy.replace(policy)
             for directory_name in ("deploy", "infra"):
                 current_directory = root / directory_name
                 previous_directory = root / f".{directory_name}.previous"

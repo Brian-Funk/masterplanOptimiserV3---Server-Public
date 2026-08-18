@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   clearOfflineCalendarCacheForUser,
   getOfflineCalendarPayload,
-  OfflineCalendarStorageError,
   offlineCalendarStorageEnabled,
   participantSafeOfflineCalendarPayload,
   pruneExpiredOfflineCalendarPayloads,
@@ -167,7 +166,7 @@ describe("offlineCalendarCache", () => {
     await expect(
       getOfflineCalendarPayload<typeof payload>(12, 7, beforeExpiry),
     ).resolves.toMatchObject({
-      schema_version: 3,
+      schema_version: 4,
       user_id: 12,
       event_id: 7,
       cached_at: cachedAt,
@@ -184,7 +183,7 @@ describe("offlineCalendarCache", () => {
     expect(records.size).toBe(0);
   });
 
-  it("accepts explicitly participant-visible fields", () => {
+  it("accepts both authenticated-event visibility values", () => {
     expect(() => participantSafeOfflineCalendarPayload({
       ...payload,
       tasks: [{
@@ -199,37 +198,55 @@ describe("offlineCalendarCache", () => {
         }],
       }],
     })).not.toThrow();
-  });
-
-  it("rejects organiser fields and unknown fields instead of sanitising client-side", () => {
     expect(() => participantSafeOfflineCalendarPayload({
       ...payload,
       tasks: [{
         ...payload.tasks[0],
-        field_values: { note: "organiser only" },
+        field_values: { note: "Authenticated operational note" },
         field_definitions: [{
           id: "note",
-          name: "Internal organiser operational note",
+          name: "Field_B",
           type: "text",
           purpose: "operational_instruction",
           visibility: "organiser",
         }],
       }],
-    })).toThrow(OfflineCalendarStorageError);
+    })).not.toThrow();
+  });
+
+  it("rejects unknown fields instead of sanitising client-side", () => {
     expect(() => participantSafeOfflineCalendarPayload({
       ...payload,
       unexpected: "not in the approved contract",
     })).toThrow(/unsupported field/);
   });
 
-  it("rejects another participant's identity or availability", () => {
+  it("allows assignment names but rejects another directory identity or availability", () => {
+    expect(() => participantSafeOfflineCalendarPayload({
+      ...payload,
+      tasks: [{
+        ...payload.tasks[0],
+        attendees: [
+          { name: "Viewer", person_id: 1 },
+          { name: "Other Person", person_id: 2 },
+        ],
+        field_assignments: {
+          front: [{ name: "Viewer", person_id: 1 }],
+          side: [{ name: "Other Person", person_id: 2 }],
+        },
+        field_definitions: [
+          { id: "front", name: "Front-Orga", type: "persons_list", purpose: "assignment", visibility: "participant" },
+          { id: "side", name: "Side-Orga", type: "persons_list", purpose: "assignment", visibility: "organiser" },
+        ],
+      }],
+    })).not.toThrow();
     expect(() => participantSafeOfflineCalendarPayload({
       ...payload,
       persons: [
         ...payload.persons,
         { id: 2, external_person_id: 2, first_name: "Other", last_name: "Person" },
       ],
-    })).toThrow(/another participant/);
+    })).toThrow(/another person's directory identity/);
     expect(() => participantSafeOfflineCalendarPayload({
       ...payload,
       unavailabilities: [{
@@ -238,7 +255,35 @@ describe("offlineCalendarCache", () => {
         start: "2026-07-30T08:00:00",
         end: "2026-07-30T09:00:00",
       }],
-    })).toThrow(/another participant/);
+    })).toThrow(/another person's directory identity/);
+  });
+
+  it("rejects duplicate or inconsistent structured allocations", () => {
+    const definitions = [
+      { id: "front", name: "Front-Orga", type: "persons_list", purpose: "assignment", visibility: "participant" },
+      { id: "side", name: "Side-Orga", type: "persons_list", purpose: "assignment", visibility: "participant" },
+    ];
+    expect(() => participantSafeOfflineCalendarPayload({
+      ...payload,
+      tasks: [{
+        ...payload.tasks[0],
+        attendees: [{ name: "Viewer", person_id: 1 }, { name: "Viewer", person_id: 1 }],
+        field_assignments: {
+          front: [{ name: "Viewer", person_id: 1 }],
+          side: [{ name: "Viewer", person_id: 1 }],
+        },
+        field_definitions: definitions,
+      }],
+    })).toThrow(/more than one allocation/);
+    expect(() => participantSafeOfflineCalendarPayload({
+      ...payload,
+      tasks: [{
+        ...payload.tasks[0],
+        attendees: [{ name: "Viewer", person_id: 1 }],
+        field_assignments: { front: [], side: [] },
+        field_definitions: definitions,
+      }],
+    })).toThrow(/do not agree/);
   });
 
   it("does not return another user or event's payload", async () => {
@@ -308,7 +353,7 @@ describe("offlineCalendarCache", () => {
     await expect(
       storeOfflineCalendarPayload(12, 7, payload, cachedAt, validUntil, beforeExpiry),
     ).rejects.toMatchObject({ code: "storage_unavailable" });
-    expect(localStorage.getItem("mp-opt-offline-calendar-enabled:12")).toBe("true");
+    expect(localStorage.getItem("mp-opt-offline-calendar-enabled:v2:12")).toBe("true");
   });
 
   it("reports an IndexedDB write failure", async () => {

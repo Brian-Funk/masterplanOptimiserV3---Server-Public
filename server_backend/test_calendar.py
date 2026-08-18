@@ -1,5 +1,6 @@
 """Tests for calendar endpoints."""
 import json
+import hashlib
 from datetime import datetime, timezone
 
 from server_backend.conftest import (
@@ -16,6 +17,26 @@ from app.models.published import (
     PublishedPersonUnavailability,
     TaskEdit,
 )
+from app.models.governance import GovernancePublication
+from app.core.governance_rendering import POLICY_TEMPLATE_VERSION
+
+
+def _publish_current_offline_policy(db) -> None:
+    content = json.dumps(
+        {"template_version": POLICY_TEMPLATE_VERSION},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    db.add(GovernancePublication(
+        version=1,
+        content_json=content,
+        content_sha256=hashlib.sha256(content.encode()).hexdigest(),
+        source_json="{}",
+        source_sha256="0" * 64,
+        material_change=True,
+        change_summary_json="[]",
+    ))
+    db.commit()
 
 
 def _seed_published_data(db, event_id: int):
@@ -78,8 +99,8 @@ def test_participant_calendar_excludes_arbitrary_internal_task_dictionaries(db):
     assert returned["additional"] is None
 
 
-def test_offline_calendar_contract_is_participant_only_even_for_editor(db):
-    """Optional device storage never receives organiser-only calendar fields."""
+def test_offline_calendar_keeps_old_scope_until_revised_policy_is_published(db):
+    """The immutable old opt-in is never broadened by a software upgrade."""
     event, _ = create_test_event(db, name="Offline contract")
     task, _person = _seed_published_data(db, event.id)
     task.field_values_json = json.dumps({"internal_notes": "not for the device"})
@@ -125,6 +146,111 @@ def test_offline_calendar_contract_is_participant_only_even_for_editor(db):
     assert returned["web_edit_edited_by"] is None
     assert returned["web_edit_edited_by_user_id"] is None
     assert returned["web_edit_change_summary"] == []
+
+
+def test_revised_offline_policy_includes_authenticated_allocations_but_not_directory(db):
+    event, _ = create_test_event(db, name="Revised offline contract")
+    db.add_all([
+        PublishedPerson(
+            event_id=event.id,
+            external_person_id=person_id,
+            first_name=first_name,
+            last_name="Example",
+        )
+        for person_id, first_name in ((1, "Anna"), (2, "Ben"))
+    ])
+    task = PublishedTask(
+        event_id=event.id,
+        external_task_id=8,
+        name="Briefing",
+        start_datetime=datetime(2026, 8, 1, 9, 0, tzinfo=timezone.utc),
+        end_datetime=datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc),
+        attendees_json=json.dumps([
+            {"name": "Anna Example", "person_id": 1},
+            {"name": "Ben Example", "person_id": 2},
+        ]),
+        field_assignments_json=json.dumps({
+            "front": [{"name": "Anna Example", "person_id": 1}],
+            "side": [{"name": "Ben Example", "person_id": 2}],
+        }),
+        field_values_json=json.dumps({"note": "Bring the documents"}),
+        field_definitions_json=json.dumps([
+            {"id": "front", "name": "Front-Orga", "type": "persons_list", "purpose": "assignment", "visibility": "participant"},
+            {"id": "side", "name": "Side-Orga", "type": "persons_list", "purpose": "assignment", "visibility": "organiser"},
+            {"id": "note", "name": "Note", "type": "text", "purpose": "operational_instruction", "visibility": "organiser"},
+        ]),
+    )
+    db.add(task)
+    db.commit()
+    viewer = create_test_user(db, username="revised.offline", event_id=event.id)
+    viewer.linked_person_id = 1
+    db.commit()
+    _publish_current_offline_policy(db)
+
+    response = _make_client(db, viewer).get(f"/api/v1/calendar/{event.id}/offline")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [person["external_person_id"] for person in data["persons"]] == [1]
+    returned = data["tasks"][0]
+    assert list(returned["field_assignments"]) == ["front", "side"]
+    assert returned["field_assignments"]["front"][0]["name"] == "Anna Example"
+    assert returned["field_assignments"]["side"][0]["name"] == "Ben Example"
+    assert returned["field_values"] == {"note": "Bring the documents"}
+
+
+def test_all_authenticated_event_roles_receive_the_same_task_allocations(db):
+    event, _ = create_test_event(db, name="One viewing class")
+    db.add_all([
+        PublishedPerson(event_id=event.id, external_person_id=1, first_name="Brian", last_name="Funk"),
+        PublishedPerson(event_id=event.id, external_person_id=2, first_name="Anna", last_name="Example"),
+    ])
+    db.add(PublishedTask(
+        event_id=event.id,
+        external_task_id=9,
+        name="Desk",
+        start_datetime=datetime(2026, 8, 1, 9, 0, tzinfo=timezone.utc),
+        end_datetime=datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc),
+        attendees_json=json.dumps([
+            {"name": "Brian Funk", "person_id": 1},
+            {"name": "Anna Example", "person_id": 2},
+        ]),
+        field_assignments_json=json.dumps({
+            "front": [{"name": "Brian Funk", "person_id": 1}],
+            "side": [{"name": "Anna Example", "person_id": 2}],
+        }),
+        field_values_json=json.dumps({"participant_note": "A", "legacy_note": "B"}),
+        field_definitions_json=json.dumps([
+            {"id": "front", "name": "Front-Orga", "type": "persons_list", "purpose": "assignment", "visibility": "participant"},
+            {"id": "side", "name": "Side-Orga", "type": "persons_list", "purpose": "assignment", "visibility": "organiser"},
+            {"id": "participant_note", "name": "Field_A", "type": "text", "purpose": "operational_instruction", "visibility": "participant"},
+            {"id": "legacy_note", "name": "Field_B", "type": "text", "purpose": "operational_instruction", "visibility": "organiser"},
+        ]),
+    ))
+    db.commit()
+    users = [
+        create_test_user(db, username="viewer", event_id=event.id),
+        create_test_user(db, username="editor", event_id=event.id, can_edit=True),
+        create_test_user(db, username="issuer", event_id=event.id, is_issuer=True),
+        create_test_user(db, username="administrator", event_id=event.id, is_admin=True),
+        create_test_user(db, username="root", is_root_admin=True, is_admin=True),
+        create_test_user(db, username="unlinked", event_id=event.id),
+    ]
+    users[0].linked_person_id = 1
+    db.commit()
+
+    task_views = []
+    for user in users:
+        response = _make_client(db, user).get(f"/api/v1/calendar/{event.id}")
+        assert response.status_code == 200
+        returned = response.json()["tasks"][0]
+        task_views.append({
+            "attendees": returned["attendees"],
+            "field_assignments": returned["field_assignments"],
+            "field_values": returned["field_values"],
+            "field_definitions": returned["field_definitions"],
+        })
+    assert all(view == task_views[0] for view in task_views[1:])
 
 
 def test_offline_calendar_projects_live_audience_teams_to_bounded_shape(db):
@@ -395,6 +521,53 @@ def test_commit_preserves_structured_assignment_categories(db):
         {"name": "Person A", "person_id": 1},
         {"name": "Person C", "person_id": 3},
     ]
+
+
+def test_partial_assignment_edit_rejects_person_already_in_untouched_category(db):
+    """A partial patch is checked against the complete effective allocation."""
+
+    event, _ = create_test_event(db, name="Unique assignments")
+    db.add_all([
+        PublishedPerson(event_id=event.id, external_person_id=1, first_name="Person", last_name="A"),
+        PublishedPerson(event_id=event.id, external_person_id=2, first_name="Person", last_name="B"),
+    ])
+    task = PublishedTask(
+        event_id=event.id,
+        external_task_id=50,
+        name="Desk",
+        start_datetime=datetime(2026, 8, 1, 9, 0, tzinfo=timezone.utc),
+        end_datetime=datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc),
+        attendees_json=json.dumps([{"name": "Person A", "person_id": 1}]),
+        field_assignments_json=json.dumps({
+            "front": [{"name": "Person A", "person_id": 1}],
+            "side": [],
+        }),
+        field_definitions_json=json.dumps([
+            {"id": "front", "name": "Front-Orga", "type": "persons_list", "purpose": "assignment", "visibility": "participant"},
+            {"id": "side", "name": "Side-Orga", "type": "persons_list", "purpose": "assignment", "visibility": "participant"},
+        ]),
+    )
+    db.add(task)
+    db.commit()
+    editor = create_test_user(db, username="unique.editor", event_id=event.id, can_edit=True)
+
+    response = _make_client(db, editor).post(
+        f"/api/v1/calendar/{event.id}/tasks/commit",
+        json={
+            "edits": [{
+                "task_id": task.id,
+                "field_assignments": {
+                    "side": [{"name": "ignored", "person_id": 1}],
+                },
+            }],
+            "deletions": [],
+            "creations": [],
+        },
+    )
+
+    assert response.status_code == 422
+    assert "only once" in response.json()["detail"]
+    assert db.query(TaskEdit).filter(TaskEdit.task_id == task.id).first() is None
 
 
 def test_get_calendar_unauthenticated(db):

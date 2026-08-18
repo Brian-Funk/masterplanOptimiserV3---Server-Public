@@ -5,6 +5,10 @@ import { PencilLine } from "lucide-react";
 import { layoutCalendarIntervals } from "@/lib/calendarIntervalLayout";
 import { describeWebEditTask } from "@/lib/webEditConfidence";
 import {
+  taskAllocations,
+  taskOperationalFields,
+} from "@/lib/taskPresentation";
+import {
   currentWorkingDate,
   currentWorkingMinute,
   DEFAULT_SCHEDULE_DAY_RANGE,
@@ -104,76 +108,6 @@ function taskHasPersonId(task: Task, personId: number): boolean {
   return task.attendees.some((a) => a.person_id === personId);
 }
 
-/** Extract persons_list fields from field definitions, values, and assignments. */
-function getPersonFields(task: Task): { fieldName: string; names: string }[] {
-  // First: use field_definitions for clean field names
-  if (task.field_definitions) {
-    const fromDefs = task.field_definitions
-      .filter((def) => def.type === "persons_list")
-      .map((def) => {
-        const val =
-          task.field_assignments?.[def.id] ?? task.field_values?.[def.id];
-        if (!val) return { fieldName: def.name, names: "" };
-        const names = Array.isArray(val)
-          ? val.map((p: { name?: string }) => p.name ?? String(p)).join(", ")
-          : String(val);
-        return { fieldName: def.name, names };
-      })
-      .filter((f) => f.names);
-    if (fromDefs.length > 0) return fromDefs;
-  }
-  // Fallback: use field_assignments directly
-  if (task.field_assignments) {
-    const defMap = new Map(
-      (task.field_definitions ?? []).map((d) => [d.id, d.name]),
-    );
-    return Object.entries(task.field_assignments)
-      .filter(([, v]) => v.length > 0)
-      .map(([key, attendees]) => ({
-        fieldName: defMap.get(key) ?? key,
-        names: attendees.map((a) => a.name).join(", "),
-      }));
-  }
-  return [];
-}
-
-/** Extract text (notes) fields */
-function getTextFields(task: Task): { fieldName: string; text: string }[] {
-  if (!task.field_definitions || !task.field_values) return [];
-  return task.field_definitions
-    .filter((def) => def.type === "text" && task.field_values?.[def.id])
-    .map((def) => ({
-      fieldName: def.name,
-      text: String(task.field_values![def.id]),
-    }));
-}
-
-/** Extract location fields (for transfer tasks with start/end locations) */
-function getLocationFields(task: Task): { fieldName: string; name: string }[] {
-  if (!task.field_definitions || !task.field_values) return [];
-  return task.field_definitions
-    .filter((def) => def.type === "location" && task.field_values?.[def.id])
-    .map((def) => {
-      const raw = task.field_values![def.id];
-      if (typeof raw === "object" && raw !== null && "name" in raw) {
-        return { fieldName: def.name, name: (raw as { name: string }).name };
-      }
-      return { fieldName: def.name, name: String(raw) };
-    });
-}
-
-/** Get location display string for transfers or a single location. */
-function getLocationDisplay(task: Task): string | null {
-  const locFields = getLocationFields(task);
-  if (locFields.length >= 2) {
-    return locFields.map((l) => l.name).join(" -> ");
-  }
-  if (locFields.length === 1) {
-    return locFields[0].name;
-  }
-  return task.location_name || null;
-}
-
 // ---------------------------------------------------------------------------
 // CalendarGridCard (individual task block)
 // ---------------------------------------------------------------------------
@@ -206,10 +140,14 @@ function CalendarGridCard({
   const startTime = formatIsoTime(task.start);
   const endTime = formatIsoTime(task.end);
 
-  // Extract person fields from field_definitions
-  const personFields = getPersonFields(task);
-  const hasMultiplePersonFields = personFields.length > 1;
-  const locationDisplay = getLocationDisplay(task);
+  const allocations = taskAllocations(task);
+  const operationalFields = taskOperationalFields(task);
+  const locationValues = operationalFields
+    .filter((field) => field.type === "location")
+    .map((field) => field.value);
+  const locationDisplay = locationValues.length > 0
+    ? locationValues.join(" · ")
+    : task.location_name || null;
   const webEditDescription = task.has_web_edit ? describeWebEditTask(task) : "";
 
   return (
@@ -292,24 +230,18 @@ function CalendarGridCard({
           </div>
 
           {/* Assigned persons */}
-          {personFields.length > 0 ? (
+          {allocations.length > 0 ? (
             <div className="text-xs text-gray-600 dark:text-gray-300 mt-0.5 space-y-0.5 overflow-hidden">
-              {hasMultiplePersonFields ? (
-                personFields.map((pf) => (
-                  <div key={pf.fieldName} className="truncate">
+              {allocations.map((allocation) => (
+                <div key={allocation.fieldId ?? "legacy"} className="truncate">
+                  {allocation.label && (
                     <span className="font-semibold text-gray-400 dark:text-gray-500">
-                      {pf.fieldName}:
-                    </span>{" "}
-                    {pf.names}
-                  </div>
-                ))
-              ) : (
-                <div className="truncate">{personFields[0].names}</div>
-              )}
-            </div>
-          ) : task.attendees.length > 0 ? (
-            <div className="text-xs text-gray-600 dark:text-gray-300 mt-0.5 truncate">
-              {task.attendees.map((a) => a.name).join(", ")}
+                      {allocation.label}:{" "}
+                    </span>
+                  )}
+                  {allocation.attendees.map((attendee) => attendee.name).join(", ")}
+                </div>
+              ))}
             </div>
           ) : null}
         </div>
@@ -330,23 +262,18 @@ function CalendarGridCard({
           </div>
           {locationDisplay && <div>📍 {locationDisplay}</div>}
           {/* Assigned */}
-          {personFields.length > 0 ? (
-            hasMultiplePersonFields ? (
-              personFields.map((pf) => (
-                <div key={pf.fieldName}>
-                  <span className="opacity-70">{pf.fieldName}:</span> {pf.names}
-                </div>
-              ))
-            ) : (
-              <div>{personFields[0].names}</div>
-            )
-          ) : task.attendees.length > 0 ? (
-            <div>{task.attendees.map((a) => a.name).join(", ")}</div>
-          ) : null}
-          {/* Notes */}
-          {getTextFields(task).map((tf) => (
-            <div key={tf.fieldName} className="opacity-80">
-              {tf.text}
+          {allocations.map((allocation) => (
+            <div key={allocation.fieldId ?? "legacy"}>
+              {allocation.label && (
+                <span className="opacity-70">{allocation.label}: </span>
+              )}
+              {allocation.attendees.map((attendee) => attendee.name).join(", ")}
+            </div>
+          ))}
+          {operationalFields.map((field) => (
+            <div key={field.fieldId} className="whitespace-pre-wrap opacity-80">
+              <span className="opacity-70">{field.label}: </span>
+              {field.value}
             </div>
           ))}
           {task.summary && (

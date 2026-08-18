@@ -10,8 +10,9 @@ from app.core.config import settings
 from app.models.governance import InstanceGovernanceProfile
 
 
-POLICY_TEMPLATE_VERSION = "2026-07-31"
+POLICY_TEMPLATE_VERSION = "2026-08-18"
 MATERIAL_PATH_PREFIXES = (
+    "template_version",
     "controller_type",
     "controller_legal_name",
     "controller_postal_address",
@@ -29,6 +30,8 @@ MATERIAL_PATH_PREFIXES = (
     "structured.hosting_countries",
     "optional_features",
     "structured.optional_features",
+    "storage.offline_schedule",
+    "feature_disclosures",
     "retention.live_retention_days",
     "retention.event_grace_days",
     "retention.backup_retention_days",
@@ -134,8 +137,9 @@ def _feature_disclosures(structured: dict[str, Any]) -> list[dict[str, str]]:
         disclosures.append({
             "code": "offline_schedule",
             "text": (
-                "Participants may explicitly store their own limited schedule in IndexedDB on this device "
-                "until the displayed expiry or manual removal. Shared-device users should remove it after use."
+                "Authenticated event members may explicitly store a limited schedule in IndexedDB on this "
+                "device until the displayed expiry or manual removal. The copy includes names attached to "
+                "authenticated task allocations. Shared-device users should remove it after use."
             ),
         })
     if features.get("public_schedule_enabled"):
@@ -214,9 +218,10 @@ def build_publication_payload(profile: InstanceGovernanceProfile) -> dict[str, A
     if features.get("offline_schedule_enabled"):
         storage["offline_schedule"] = (
             "Optional IndexedDB offline calendar response data is stored only after explicit enablement. It contains "
-            "at most the signed-in participant's linked identity and own published unavailability, excludes "
-            "other participant identities and organiser-only history, carries the server-bounded expiry, and is removed on expiry, confirmed "
-            "logout, authorisation failure or successful manual removal."
+            "names attached to authenticated task allocations, at most the signed-in member's linked directory "
+            "identity and own published unavailability. It excludes the complete people directory, other people's "
+            "unavailability, organiser audit history and unsupported internal data, carries the server-bounded "
+            "expiry, and is removed on expiry, confirmed logout, authorisation failure or successful manual removal."
         )
 
     return {

@@ -159,6 +159,26 @@ class TaskIn(BaseModel):
                 raise ValueError("persons_list data must use the structured assignment contract")
             if field_id in assignments and definition.type != "persons_list":
                 raise ValueError("Only persons_list fields may contain published assignments")
+        assigned_people: set[int] = set()
+        ordered_assignments: list[AttendeeIn] = []
+        for definition in definitions:
+            if definition.type != "persons_list":
+                continue
+            for attendee in assignments.get(definition.id, []):
+                if attendee.person_id in assigned_people:
+                    raise ValueError(
+                        "A person may be allocated only once across a published task's assignment fields"
+                    )
+                assigned_people.add(attendee.person_id)
+                ordered_assignments.append(attendee)
+        attendee_ids = [attendee.person_id for attendee in self.attendees]
+        if len(attendee_ids) != len(set(attendee_ids)):
+            raise ValueError("A person may appear only once in a published task's attendee list")
+        if any(definition.type == "persons_list" for definition in definitions):
+            if self.attendees != ordered_assignments:
+                raise ValueError(
+                    "Published flat attendees must exactly match the ordered assignment fields"
+                )
         return self
 
 
