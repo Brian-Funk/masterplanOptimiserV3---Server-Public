@@ -1,5 +1,19 @@
 # Changes
 
+## 3.9.16 — 18 August 2026
+
+- Give every authenticated event account the same bounded task fields and the
+  same ordered allocation names while retaining role-based editing controls,
+  cross-event isolation and the private people-directory boundary.
+- Preserve allocation categories in phone cards, calendar blocks, tooltips and
+  the full task view; show operational fields as labelled multiline rows and
+  reject a person assigned to more than one category on a task.
+- Expand optional offline schedules only after a newly published governance
+  template names allocation identities, invalidate the old cache/opt-in, and
+  continue excluding the complete directory and other people's availability.
+- Add a signed, manifest-gated blue/green path for migration-free upgrades that
+  keeps PostgreSQL and Caddy running while Backend and static assets switch.
+
 ## 3.9.15 — 17 August 2026
 
 ### Fixed
