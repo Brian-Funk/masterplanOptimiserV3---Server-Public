@@ -40,7 +40,7 @@ describe("OfflineScheduleSettings", () => {
     await waitFor(() => expect(mocks.store).toHaveBeenCalled());
     expect(mocks.apiFetch).toHaveBeenCalledWith("/api/v1/calendar/3/offline", { cache: "no-store" });
     expect(mocks.commitMarker).toHaveBeenCalledOnce();
-    expect(screen.getByRole("button", { name: "Remove offline copy" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Remove offline copy" })).toBeInTheDocument();
   });
 
   it("fails closed when payload validation or storage fails", async () => {

@@ -12,6 +12,10 @@ on:
         required: true
         default: false
         type: boolean
+      active_predecessor_tag:
+        description: Exact signed release currently active in production; leave empty for the latest release
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -120,9 +124,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REBUILD_ALL: ${{ inputs.rebuild_all }}
+          ACTIVE_PREDECESSOR_TAG: ${{ inputs.active_predecessor_tag }}
         run: |
           set -Eeuo pipefail
-          previous_tag="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // empty')"
+          latest_tag="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // empty')"
+          previous_tag="${ACTIVE_PREDECESSOR_TAG:-$latest_tag}"
+          if [[ -n "$ACTIVE_PREDECESSOR_TAG" ]]; then
+            [[ "$ACTIVE_PREDECESSOR_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            [[ "$ACTIVE_PREDECESSOR_TAG" != "$TAG" ]]
+            ! grep -Fxq "$ACTIVE_PREDECESSOR_TAG" deploy/release/retired-tags.txt
+            gh release view "$ACTIVE_PREDECESSOR_TAG" >/dev/null
+          fi
           components='["backend","frontend","database","caddy","tools","witness","operations"]'
           previous_manifest=''
           migration_free=false
@@ -136,9 +148,14 @@ jobs:
               --certificate-identity-regexp '^https://github\.com/Brian-Funk/masterplanOptimiserV3---Server-Public/\.github/workflows/release\.yml@refs/(tags/v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$' \
               /tmp/previous-release/release-manifest.json
             previous_commit="$(jq -r .commit /tmp/previous-release/release-manifest.json)"
+            [[ "$previous_commit" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$(git rev-parse "$previous_tag^{commit}")" == "$previous_commit" ]]
+            git merge-base --is-ancestor "$previous_commit" "$RELEASE_COMMIT"
             plan="$(python3 deploy/test_deployment.py classify --repo . --base "$previous_commit" --target "$RELEASE_COMMIT")"
             components="$(jq -c .components <<< "$plan")"
-            if [[ "$(jq -r '.migrations == false and (.components | index("database") | not)' <<< "$plan")" == true ]]; then
+            if [[ "$(jq -r '.migrations == false' <<< "$plan")" == true ]] \
+                && git diff --quiet "$previous_commit" "$RELEASE_COMMIT" -- \
+                  deploy/migrations backend/app/models backend/app/db/database.py; then
               migration_free=true
             fi
             if git diff --quiet "$previous_commit" "$RELEASE_COMMIT" -- \
@@ -163,6 +180,7 @@ jobs:
           COMPONENTS: ${{ steps.plan.outputs.components }}
           PREVIOUS_MANIFEST: ${{ steps.plan.outputs.previous_manifest }}
           REBUILD_ALL: ${{ inputs.rebuild_all }}
+          INFRASTRUCTURE_UNCHANGED: ${{ steps.plan.outputs.infrastructure_unchanged }}
         run: |
           set -Eeuo pipefail
           for service in backend caddy postgres tools; do
@@ -173,6 +191,10 @@ jobs:
               tools) component=tools; dockerfile=infra/Dockerfile.tools ;;
             esac
             changed="$(jq -r --arg component "$component" 'index($component) != null' <<< "$COMPONENTS")"
+            if [[ "$REBUILD_ALL" != true && "$INFRASTRUCTURE_UNCHANGED" == true \
+                && ( "$service" == caddy || "$service" == postgres ) ]]; then
+              changed=false
+            fi
             if [[ "$REBUILD_ALL" == true || "$changed" == true || -z "$PREVIOUS_MANIFEST" ]]; then
               docker buildx build --platform linux/amd64,linux/arm64 --push \
                 --cache-from "type=gha,scope=release-$service" \

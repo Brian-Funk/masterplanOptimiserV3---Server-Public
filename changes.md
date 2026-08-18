@@ -1,5 +1,14 @@
 # Changes
 
+## 3.9.17 — 19 August 2026
+
+- Preserve the exact signed Caddy and PostgreSQL image digests for a
+  migration-free blue/green release even when release-workflow changes require
+  a conservative full component test plan.
+- Allow a skipped, undeployed release to be bypassed only by explicitly
+  selecting the exact signed active predecessor and verifying its manifest,
+  tag commit and ancestry before building the next release.
+
 ## 3.9.16 — 18 August 2026
 
 - Give every authenticated event account the same bounded task fields and the
