@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # API
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
+    # A temporary blue/green backend serves requests during canonical-container
+    # replacement, but must not run startup housekeeping or background workers.
+    BLUE_GREEN_STAGING: bool = False
 
     # Security
     SECRET_KEY: str = "CHANGE-ME-IN-ENV"

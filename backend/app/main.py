@@ -50,21 +50,26 @@ async def lifespan(_app: FastAPI):
     from app.services.evidence_archive import evidence_archive_worker_loop
 
     retention_stop = asyncio.Event()
-    retention_task = asyncio.create_task(
-        retention_scheduler_loop(retention_stop),
-        name="retention-scheduler",
-    )
     archive_stop = asyncio.Event()
-    archive_task = asyncio.create_task(
-        evidence_archive_worker_loop(archive_stop),
-        name="evidence-git-uploader",
-    )
+    tasks: list[asyncio.Task] = []
+    if not settings.BLUE_GREEN_STAGING:
+        tasks = [
+            asyncio.create_task(
+                retention_scheduler_loop(retention_stop),
+                name="retention-scheduler",
+            ),
+            asyncio.create_task(
+                evidence_archive_worker_loop(archive_stop),
+                name="evidence-git-uploader",
+            ),
+        ]
     try:
         yield
     finally:
         retention_stop.set()
         archive_stop.set()
-        await asyncio.gather(retention_task, archive_task)
+        if tasks:
+            await asyncio.gather(*tasks)
 
 
 app = FastAPI(
@@ -470,6 +475,17 @@ async def startup_event():
             verification_db.rollback()
             verification_db.close()
         print("[Startup] Schema verification and housekeeping skipped on a non-holder HA node")
+        return
+
+    if settings.BLUE_GREEN_STAGING:
+        verification_db = SessionLocal()
+        try:
+            from app.core.evidence import verify_existing
+            verify_existing(verification_db)
+        finally:
+            verification_db.rollback()
+            verification_db.close()
+        print("[Startup] Blue/green staging verified existing state without housekeeping")
         return
 
     # create_all is an engine-level DDL operation and therefore does not pass
