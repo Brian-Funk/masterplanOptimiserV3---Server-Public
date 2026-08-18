@@ -13,6 +13,9 @@
   continue excluding the complete directory and other people's availability.
 - Add a signed, manifest-gated blue/green path for migration-free upgrades that
   keeps PostgreSQL and Caddy running while Backend and static assets switch.
+- Upgrade the locked cryptography stack to the fixed `cryptography 50.0.0` and
+  `pyOpenSSL 26.4.0`, removing the expired CVE exception from both dependency
+  and container-image audits.
 
 ## 3.9.15 — 17 August 2026
 

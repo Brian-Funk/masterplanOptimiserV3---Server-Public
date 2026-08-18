@@ -48,7 +48,7 @@
       "license": "BSD-3-Clause",
       "project_url": "https://pypi.org/project/click/"
     },
-    "cryptography==49.0.0": {
+    "cryptography==50.0.0": {
       "license": "Apache-2.0 OR BSD-3-Clause",
       "project_url": "https://pypi.org/project/cryptography/"
     },
@@ -152,7 +152,7 @@
       "license": "MIT",
       "project_url": "https://pypi.org/project/pydantic/"
     },
-    "pyopenssl==26.3.0": {
+    "pyopenssl==26.4.0": {
       "license": "Apache-2.0",
       "project_url": "https://pypi.org/project/pyOpenSSL/"
     },

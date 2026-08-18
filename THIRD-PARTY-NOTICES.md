@@ -21,7 +21,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | cffi | 2.1.0 | MIT-0 | https://pypi.org/project/cffi/ |
 | charset-normalizer | 3.4.9 | MIT | https://pypi.org/project/charset-normalizer/ |
 | click | 8.4.2 | BSD-3-Clause | https://pypi.org/project/click/ |
-| cryptography | 49.0.0 | Apache-2.0 OR BSD-3-Clause | https://pypi.org/project/cryptography/ |
+| cryptography | 50.0.0 | Apache-2.0 OR BSD-3-Clause | https://pypi.org/project/cryptography/ |
 | deprecated | 1.3.1 | MIT | https://pypi.org/project/Deprecated/ |
 | dnspython | 2.8.0 | ISC | https://pypi.org/project/dnspython/ |
 | email-validator | 2.3.0 | Unlicense | https://pypi.org/project/email-validator/ |
@@ -47,7 +47,7 @@ Release SBOMs remain authoritative for operating-system packages and exact conta
 | pydantic-core | 2.46.4 | MIT | https://pypi.org/project/pydantic_core/ |
 | pydantic-settings | 2.6.0 | MIT | https://pypi.org/project/pydantic-settings/ |
 | pydantic | 2.13.4 | MIT | https://pypi.org/project/pydantic/ |
-| pyopenssl | 26.3.0 | Apache-2.0 | https://pypi.org/project/pyOpenSSL/ |
+| pyopenssl | 26.4.0 | Apache-2.0 | https://pypi.org/project/pyOpenSSL/ |
 | python-dotenv | 1.2.2 | BSD-3-Clause | https://pypi.org/project/python-dotenv/ |
 | pywebpush | 2.3.0 | MPL-2.0 | https://pypi.org/project/pywebpush/ |
 | pyyaml | 6.0.3 | MIT | https://pypi.org/project/PyYAML/ |
