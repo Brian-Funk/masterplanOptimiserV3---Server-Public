@@ -3,8 +3,8 @@
 import uuid
 
 from sqlalchemy import (
-    Boolean, CheckConstraint, Column, DateTime, ForeignKey, Integer, String, Text,
-    UniqueConstraint,
+    Boolean, CheckConstraint, Column, DateTime, ForeignKey, ForeignKeyConstraint,
+    Integer, String, Text, UniqueConstraint,
 )
 from sqlalchemy.sql import func
 
@@ -99,15 +99,26 @@ class DataPolicyAcknowledgement(Base):
             "'authorised_editor', 'field_visibility_administrator')",
             name="ck_data_policy_ack_scope",
         ),
+        CheckConstraint(
+            "event_id IS NULL OR controller_id IS NOT NULL",
+            name="ck_data_policy_ack_controller_scope",
+        ),
         UniqueConstraint(
             "user_id", "event_id", "policy_version", "scope",
             name="uq_data_policy_acknowledgement",
+        ),
+        ForeignKeyConstraint(
+            ["event_id", "controller_id"],
+            ["events.id", "events.controller_id"],
+            name="fk_data_policy_ack_event_controller",
+            ondelete="CASCADE",
         ),
     )
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
-    event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=True, index=True)
+    controller_id = Column(Integer, ForeignKey("controllers.id", ondelete="RESTRICT"), nullable=True, index=True)
+    event_id = Column(Integer, nullable=True, index=True)
     policy_version = Column(Integer, nullable=False)
     policy_sha256 = Column(String(64), nullable=False)
     scope = Column(String(48), nullable=False)
@@ -127,6 +138,7 @@ class AccountProcessingConsent(Base):
     id = Column(Integer, primary_key=True)
     consent_id = Column(String(36), nullable=False, unique=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    controller_id = Column(Integer, ForeignKey("controllers.id", ondelete="RESTRICT"), nullable=False, index=True)
     user_subject_id = Column(String(36), nullable=False, index=True)
     event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True)
     event_evidence_id = Column(String(36), nullable=True, index=True)
@@ -136,6 +148,14 @@ class AccountProcessingConsent(Base):
     statement_version = Column(String(64), nullable=False)
     statement_sha256 = Column(String(64), nullable=False)
     controller_identity = Column(String(200), nullable=False)
+    confirmation_type = Column(String(32), nullable=False, default="disclosure_acknowledgement")
+    legal_basis_code = Column(String(64), nullable=True)
+    operator_policy_version = Column(Integer, nullable=True)
+    operator_policy_sha256 = Column(String(64), nullable=True)
+    controller_policy_version = Column(Integer, nullable=True)
+    controller_policy_sha256 = Column(String(64), nullable=True)
+    event_notice_revision = Column(Integer, nullable=True)
+    event_notice_sha256 = Column(String(64), nullable=True)
     document_json = Column(Text, nullable=False)
     instance_record_sha256 = Column(String(64), nullable=True)
     consented_at = Column(DateTime(timezone=True), nullable=False)

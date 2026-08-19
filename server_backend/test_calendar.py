@@ -19,11 +19,15 @@ from app.models.published import (
 )
 from app.models.governance import GovernancePublication
 from app.core.governance_rendering import POLICY_TEMPLATE_VERSION
+from app.core.tenancy import assign_event_membership
 
 
 def _publish_current_offline_policy(db) -> None:
     content = json.dumps(
-        {"template_version": POLICY_TEMPLATE_VERSION},
+        {
+            "template_version": POLICY_TEMPLATE_VERSION,
+            "optional_features": {"offline_calendar": True},
+        },
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -92,7 +96,7 @@ def test_participant_calendar_excludes_arbitrary_internal_task_dictionaries(db):
 
     response = _make_client(db, participant).get(f"/api/v1/calendar/{event.id}")
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     returned = response.json()["tasks"][0]
     assert returned["field_values"] is None
     assert returned["field_definitions"] is None
@@ -133,6 +137,8 @@ def test_offline_calendar_keeps_old_scope_until_revised_policy_is_published(db):
     assert offline.status_code == 200
     data = offline.json()
     assert set(data) == {
+        "offline_contract_version", "controller_public_id",
+        "controller_trust_entity_id", "event_ref", "membership_id",
         "event_id", "event_name", "start_date", "end_date", "day_aliases",
         "schedule_day_range", "tasks", "persons", "public_schedule_categories",
         "public_schedule_views", "public_schedule_items", "unavailabilities",
@@ -184,12 +190,13 @@ def test_revised_offline_policy_includes_authenticated_allocations_but_not_direc
     db.commit()
     viewer = create_test_user(db, username="revised.offline", event_id=event.id)
     viewer.linked_person_id = 1
+    assign_event_membership(db, viewer, event, linked_person_id=1)
     db.commit()
     _publish_current_offline_policy(db)
 
     response = _make_client(db, viewer).get(f"/api/v1/calendar/{event.id}/offline")
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     data = response.json()
     assert [person["external_person_id"] for person in data["persons"]] == [1]
     returned = data["tasks"][0]
@@ -370,6 +377,7 @@ def test_get_calendar_persons(db):
         db, username="pers_user", event_id=event.id,
     )
     user.linked_person_id = 1
+    assign_event_membership(db, user, event, linked_person_id=1)
     db.commit()
     client = _make_client(db, user)
 
@@ -589,7 +597,7 @@ def test_calendar_rejects_cross_event_read(db):
         f"/api/v1/calendar/{other_event.id}",
     )
 
-    assert response.status_code == 403
+    assert response.status_code == 404
 
 
 def test_calendar_commit_rejects_user_without_edit_permission(db):

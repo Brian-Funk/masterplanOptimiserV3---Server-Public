@@ -19,6 +19,7 @@ from app.core.security import (
 from app.core.push import get_application_server_key, send_push_to_event
 from app.core.audit import audit
 from app.core.governance import require_data_policy_acknowledgement
+from app.core.features import require_event_feature
 from app.core.rate_limit import limiter
 from app.core import runtime_settings as rt
 from app.models.notification import PushSubscription, Announcement, ScheduleChange
@@ -125,6 +126,7 @@ def subscribe(
 ):
     """Save a push subscription for the current user + event."""
     require_event_access(req.event_id, current_user, db)
+    require_event_feature(req.event_id, "push_notifications", db)
     _validate_push_endpoint(req.endpoint)
     if not req.p256dh or not req.auth:
         raise HTTPException(400, "p256dh and auth keys are required")
@@ -194,6 +196,7 @@ def subscription_status(
 ):
     """Check if the current user has any push subscription for this event."""
     require_event_access(event_id, current_user, db)
+    require_event_feature(event_id, "push_notifications", db)
     exists = (
         db.query(PushSubscription)
         .filter(
@@ -246,8 +249,9 @@ def create_announcement(
     db: Session = Depends(get_db),
 ):
     """Create an announcement (admin or issuer). Optionally sends push notification."""
-    # Issuer scoping: force own event
-    if _is_issuer_only(admin):
+    # Every non-root role derives the event from its membership. A submitted
+    # event identifier is never an authorization source.
+    if not admin.is_root_admin:
         req.event_id = admin.event_id
     require_event_access(req.event_id, admin, db)
     require_data_policy_acknowledgement(admin, req.event_id, db)
@@ -298,8 +302,7 @@ def delete_announcement(
     if not ann:
         raise HTTPException(status_code=404, detail="Announcement not found")
     # Issuer scoping: verify announcement belongs to their event
-    if _is_issuer_only(admin) and ann.event_id != admin.event_id:
-        raise HTTPException(status_code=403, detail="No access to announcements from other events")
+    require_event_access(ann.event_id, admin, db)
     audit(db, user=admin, action="announcement.delete", resource_type="announcement",
           resource_id=announcement_id, request=request)
     db.delete(ann)

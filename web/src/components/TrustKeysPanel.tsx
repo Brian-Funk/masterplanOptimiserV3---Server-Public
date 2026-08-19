@@ -49,6 +49,13 @@ type ArchiveTrust = {
   signed_at?: string;
 };
 
+type ControllerTenant = {
+  public_id: string;
+  trust_entity_id: string;
+  display_name: string;
+  status: "draft" | "active" | "suspended" | "retired";
+};
+
 function messageFrom(value: unknown): string {
   if (!value || typeof value !== "object") return "The operation was rejected.";
   const detail = (value as Record<string, unknown>).detail;
@@ -90,24 +97,44 @@ export function TrustKeysPanel() {
   const [challenge, setChallenge] = useState("");
   const [signedRegistration, setSignedRegistration] = useState("");
   const [archiveTrust, setArchiveTrust] = useState<ArchiveTrust>({ ready: false });
+  const [controllerTenants, setControllerTenants] = useState<ControllerTenant[]>([]);
+  const [selectedController, setSelectedController] = useState("");
 
   const load = useCallback(async () => {
     setError("");
     try {
-      const [keysResponse, pendingResponse, archiveResponse] = await Promise.all([
+      const [keysResponse, pendingResponse, controllerResponse] = await Promise.all([
         apiFetch("/api/v1/admin/evidence/trust-keys"),
         apiFetch("/api/v1/admin/evidence/trust-keys/pending-enrolments"),
-        apiFetch("/api/v1/admin/evidence/trust-keys/archive-trust"),
+        apiFetch("/api/v1/admin/controllers"),
       ]);
       setKeys(await checked(keysResponse) as TrustKey[]);
       setPending(await checked(pendingResponse) as PendingEnrolment[]);
-      setArchiveTrust(await checked(archiveResponse) as ArchiveTrust);
+      const tenants = await checked(controllerResponse) as ControllerTenant[];
+      setControllerTenants(tenants);
+      setSelectedController((current) => current || tenants[0]?.public_id || "");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Trust status could not be loaded.");
     }
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  useEffect(() => {
+    if (!selectedController) return;
+    setArchiveTrust({ ready: false });
+    apiFetch(`/api/v1/admin/evidence/trust-keys/archive-trust?controller_public_id=${encodeURIComponent(selectedController)}`)
+      .then((response) => checked(response) as Promise<ArchiveTrust>)
+      .then(setArchiveTrust)
+      .catch((cause) => setError(cause instanceof Error ? cause.message : "Archive trust status could not be loaded."));
+  }, [selectedController, keys]);
+
+  useEffect(() => {
+    const selected = controllerTenants.find((item) => item.public_id === selectedController);
+    setControllerEntity(selected?.trust_entity_id || "");
+    setChallenge("");
+    setSignedRegistration("");
+  }, [controllerTenants, selectedController]);
 
   const controllers = keys.filter((key) => key.role === "controller");
   const processorsByEvent = useMemo(() => {
@@ -146,7 +173,7 @@ export function TrustKeysPanel() {
   async function beginControllerRegistration() {
     setBusy("controller-begin"); setError("");
     try {
-      const result = await checked(await withReauth(() => apiFetch("/api/v1/admin/evidence/trust-keys/challenges", { method: "POST", body: JSON.stringify({ public_key: controllerPublicKey.trim(), role: "controller", entity_id: controllerEntity.trim() }) }))) as { challenge: object };
+      const result = await checked(await withReauth(() => apiFetch("/api/v1/admin/evidence/trust-keys/challenges", { method: "POST", body: JSON.stringify({ public_key: controllerPublicKey.trim(), role: "controller", entity_id: controllerEntity.trim(), controller_public_id: selectedController || null }) }))) as { challenge: object };
       setChallenge(JSON.stringify(result.challenge, null, 2));
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Controller challenge creation failed."); }
     finally { setBusy(""); }
@@ -171,10 +198,11 @@ export function TrustKeysPanel() {
     try {
       const keyPackage = JSON.parse(await file.text()) as ControllerPrivatePackage;
       await loadControllerKey(keyPackage);
-      const prepared = await checked(await withReauth(() => apiFetch("/api/v1/admin/evidence/trust-keys/archive-trust/prepare", { method: "POST", body: "{}" }))) as { ready: boolean; document: Record<string, unknown> };
+      const selector = `?controller_public_id=${encodeURIComponent(selectedController)}`;
+      const prepared = await checked(await withReauth(() => apiFetch(`/api/v1/admin/evidence/trust-keys/archive-trust/prepare${selector}`, { method: "POST", body: "{}" }))) as { ready: boolean; document: Record<string, unknown> };
       if (prepared.ready) { setNotice("Portable evidence archive trust is already ready."); await load(); return; }
       const proof = await signControllerArchiveTrust(keyPackage, prepared.document);
-      await checked(await withReauth(() => apiFetch("/api/v1/admin/evidence/trust-keys/archive-trust/complete", { method: "POST", body: JSON.stringify({ document: prepared.document, proof }) })));
+      await checked(await withReauth(() => apiFetch(`/api/v1/admin/evidence/trust-keys/archive-trust/complete${selector}`, { method: "POST", body: JSON.stringify({ document: prepared.document, proof }) })));
       setNotice("Portable evidence archives are now bound to this controller and deployment. The selected private file stayed in this browser session only.");
       await load();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Archive trust could not be established."); }
@@ -203,8 +231,9 @@ export function TrustKeysPanel() {
 
     <section aria-labelledby="controller-keys" className="space-y-3"><h2 id="controller-keys" className="text-lg font-semibold">Controller keys</h2><div className="grid gap-3 lg:grid-cols-2">{controllers.map((key) => <KeyCard key={key.key_id} title={key.entity_id || key.key_id} subtitle={`${key.key_id} · ${key.trust_establishment_sha256 ? "trust established" : "pending activation"}`} scope="Controller trust and governance statements only. Each publication still requires the root passkey." icon={<UserRoundCheck size={20} />} status={key.validity_status} fingerprint={key.public_key_sha256}>{key.validity_status === "active" && <Button size="sm" variant="outline" onClick={() => void revoke(key)} disabled={!!busy}>Revoke</Button>}</KeyCard>)}</div>
       {controllers.some((key) => key.validity_status === "active" && key.trust_establishment_sha256) && <p className="flex items-center gap-2 text-sm text-green-700 dark:text-green-300"><CheckCircle2 size={16} />Controller identity and possession were established during registration.</p>}
-      <Card className={`space-y-3 border-l-4 p-4 ${archiveTrust.ready ? "border-l-green-500" : "border-l-amber-500"}`}><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-semibold">Portable evidence archive trust</h3><p className="mt-1 max-w-2xl text-sm text-gray-600 dark:text-gray-300">This one-time binding lets an offline verifier prove that the controller authorised this deployment&apos;s exact instance evidence key. No private key is uploaded or retained.</p></div><Status value={archiveTrust.ready ? "ready" : "required"} /></div>{archiveTrust.ready ? <><p className="text-sm text-green-700 dark:text-green-300">Ready for verified manual or guarded private archival.</p><p className="truncate font-mono text-xs text-gray-500" title={archiveTrust.statement_sha256}>SHA-256 {archiveTrust.statement_sha256}</p></> : <><p className="text-sm text-amber-800 dark:text-amber-200">{archiveTrust.message || "Authorisation is required before a portable archive can be created."}</p><label className="inline-flex min-h-11 w-fit cursor-pointer items-center rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium dark:border-gray-600">Select active controller private-key file<input type="file" accept="application/json,.json" className="sr-only" onChange={(event) => void bindArchiveTrust(event)} disabled={!!busy} /></label></>}</Card>
-      <details className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800"><summary className="cursor-pointer text-sm font-semibold">Advanced controller key ceremony</summary><div className="mt-4 space-y-3"><p className="text-sm text-gray-600 dark:text-gray-300">The controller custody tool signs the exact challenge. Never paste a private key into this page.</p><label className="block text-sm font-medium">Controller entity ID<input value={controllerEntity} onChange={(event) => setControllerEntity(event.target.value)} className="mt-1 min-h-11 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-900" /></label><label className="block text-sm font-medium">OpenSSH public key<textarea value={controllerPublicKey} onChange={(event) => setControllerPublicKey(event.target.value)} rows={3} className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-900" /></label><Button variant="outline" onClick={() => void beginControllerRegistration()} disabled={!!busy || !controllerEntity || !controllerPublicKey}>Create exact challenge</Button>{challenge && <label className="block text-sm font-medium">Challenge to sign<textarea readOnly value={challenge} rows={8} className="mt-1 w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-950" /></label>}<label className="block text-sm font-medium">Signed registration package<textarea value={signedRegistration} onChange={(event) => setSignedRegistration(event.target.value)} rows={8} className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-900" /></label><Button onClick={() => void completeControllerRegistration()} disabled={!!busy || !signedRegistration}>Verify and activate with root passkey</Button></div></details>
+      <label className="block text-sm font-medium">Controller context<select className="mt-1 min-h-11 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-900" value={selectedController} onChange={(event) => setSelectedController(event.target.value)}>{controllerTenants.map((item) => <option key={item.public_id} value={item.public_id}>{item.display_name} · {item.status}</option>)}</select></label>
+      <Card className={`space-y-3 border-l-4 p-4 ${archiveTrust.ready ? "border-l-green-500" : "border-l-amber-500"}`}><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-semibold">Portable evidence archive trust</h3><p className="mt-1 max-w-2xl text-sm text-gray-600 dark:text-gray-300">This controller-specific binding proves that the selected legal controller authorised this deployment&apos;s exact instance evidence key. Every hosted controller binds independently; no private key is uploaded or retained.</p></div><Status value={archiveTrust.ready ? "ready" : "required"} /></div>{archiveTrust.ready ? <><p className="text-sm text-green-700 dark:text-green-300">Ready for the selected controller.</p><p className="truncate font-mono text-xs text-gray-500" title={archiveTrust.statement_sha256}>SHA-256 {archiveTrust.statement_sha256}</p></> : <><p className="text-sm text-amber-800 dark:text-amber-200">{archiveTrust.message || "Authorisation is required before a portable archive can be created."}</p><label className="inline-flex min-h-11 w-fit cursor-pointer items-center rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium dark:border-gray-600">Select this controller&apos;s active private-key file<input type="file" accept="application/json,.json" className="sr-only" onChange={(event) => void bindArchiveTrust(event)} disabled={!!busy || !selectedController} /></label></>}</Card>
+      <details className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800"><summary className="cursor-pointer text-sm font-semibold">Advanced controller key ceremony</summary><div className="mt-4 space-y-3"><p className="text-sm text-gray-600 dark:text-gray-300">The selected controller&apos;s custody tool signs the exact challenge. Never paste a private key into this page.</p><label className="block text-sm font-medium">Controller trust entity ID<input readOnly value={controllerEntity} className="mt-1 min-h-11 w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-950" /></label><label className="block text-sm font-medium">OpenSSH public key<textarea value={controllerPublicKey} onChange={(event) => setControllerPublicKey(event.target.value)} rows={3} className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-900" /></label><Button variant="outline" onClick={() => void beginControllerRegistration()} disabled={!!busy || !selectedController || !controllerEntity || !controllerPublicKey}>Create exact challenge</Button>{challenge && <label className="block text-sm font-medium">Challenge to sign<textarea readOnly value={challenge} rows={8} className="mt-1 w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-950" /></label>}<label className="block text-sm font-medium">Signed registration package<textarea value={signedRegistration} onChange={(event) => setSignedRegistration(event.target.value)} rows={8} className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-xs dark:border-gray-600 dark:bg-gray-900" /></label><Button onClick={() => void completeControllerRegistration()} disabled={!!busy || !signedRegistration}>Verify and activate with root passkey</Button></div></details>
     </section>
     <p className="flex items-center gap-2 text-xs text-gray-500"><CheckCircle2 size={14} />Rotation and revocation preserve earlier public keys and signatures for historical verification.</p>
   </div>;

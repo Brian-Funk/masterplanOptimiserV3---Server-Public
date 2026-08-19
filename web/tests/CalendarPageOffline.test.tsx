@@ -77,9 +77,15 @@ vi.mock("@/components/DraftChangesPanel", () => ({
 }));
 
 const futureMarker = {
-  schema_version: 1 as const,
+  schema_version: 2 as const,
   user_id: 42,
   event_id: 1,
+  event_ref: "9d492121-5a09-4e8a-a0a9-3c873af85928",
+  membership_id: 12,
+  controller_public_id: "07096118-e64c-4b89-a7c9-1f26d6198719",
+  controller_trust_entity_id: "ctl-0123456789abcdef",
+  data_policy_version: 2,
+  data_policy_sha256: "a".repeat(64),
   cached_at: "2026-05-21T09:30:00.000Z",
   valid_until: "2999-05-21T23:59:59.999Z",
   ttl_hours: 24,
@@ -98,10 +104,21 @@ const user = {
   is_activated: true,
   linked_person_id: null,
   event_id: 1,
+  event_ref: futureMarker.event_ref,
+  membership_id: futureMarker.membership_id,
+  controller_public_id: futureMarker.controller_public_id,
+  controller_trust_entity_id: futureMarker.controller_trust_entity_id,
+  data_policy_version: futureMarker.data_policy_version,
+  data_policy_sha256: futureMarker.data_policy_sha256,
   offline_access_ttl_hours: 24,
 };
 
 const cachedCalendar = {
+  offline_contract_version: "mp-opt-offline-calendar-v5",
+  controller_public_id: futureMarker.controller_public_id,
+  controller_trust_entity_id: futureMarker.controller_trust_entity_id,
+  event_ref: futureMarker.event_ref,
+  membership_id: futureMarker.membership_id,
   event_id: 1,
   event_name: "Cached Masterplan",
   start_date: null,
@@ -311,6 +328,12 @@ describe("CalendarPage offline cache", () => {
         cachedCalendar,
         expect.any(String),
         expect.any(String),
+        undefined,
+        expect.objectContaining({
+          event_ref: futureMarker.event_ref,
+          membership_id: futureMarker.membership_id,
+          controller_public_id: futureMarker.controller_public_id,
+        }),
       );
     });
     expect(mockApiFetch).toHaveBeenCalledWith(

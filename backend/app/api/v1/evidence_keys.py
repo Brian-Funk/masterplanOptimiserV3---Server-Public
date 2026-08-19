@@ -45,6 +45,7 @@ from app.core.operator_evidence import (
 )
 from app.core.passkey_ceremonies import TRUST_KEY_ACTIVATION, consume_ceremony, create_ceremony
 from app.core.security import require_root_admin, require_root_recent_reauth
+from app.core.tenancy import TENANCY_HOSTED, TENANCY_SINGLE, tenancy_mode
 from app.db.database import get_db
 from app.models.evidence import (
     EvidenceKey,
@@ -52,6 +53,7 @@ from app.models.evidence import (
     ProcessorIdentity,
     RootActionAuthorisation,
 )
+from app.models.tenancy import Controller
 from app.models.user import User, WebAuthnCredential
 
 
@@ -65,6 +67,7 @@ class BeginTrustKeyChallenge(BaseModel):
     public_key: str = Field(min_length=32, max_length=2048)
     role: Literal["controller"]
     entity_id: str = Field(min_length=12, max_length=64)
+    controller_public_id: str | None = Field(default=None, min_length=36, max_length=36)
     supersedes_key_id: str | None = Field(default=None, pattern=r"^ek-[0-9a-f]{16}$")
     reason: Literal["routine", "lost", "compromised"] | None = None
 
@@ -96,28 +99,92 @@ def _reject(exc: Exception) -> HTTPException:
     return HTTPException(status_code=409, detail={"code": "TRUST_EVIDENCE_REJECTED", "message": str(exc)})
 
 
-def _active_role_key(db: Session, role: str) -> EvidenceKey:
-    row = db.query(EvidenceKey).filter(
+def _active_role_key(
+    db: Session, role: str, *, controller_id: int | None = None
+) -> EvidenceKey:
+    query = db.query(EvidenceKey).filter(
         EvidenceKey.role == role,
         EvidenceKey.activated_at.isnot(None),
         EvidenceKey.revoked_at.is_(None),
-    ).order_by(EvidenceKey.activated_at.desc(), EvidenceKey.id.desc()).first()
+    )
+    if controller_id is not None:
+        query = query.filter(EvidenceKey.controller_id == controller_id)
+    row = query.order_by(EvidenceKey.activated_at.desc(), EvidenceKey.id.desc()).first()
     if row is None:
         raise TrustEvidenceError(f"an active {role} evidence key is required")
     return row
 
 
-def _archive_trust_directory() -> Path:
-    return evidence_home() / "archive-trust"
+def _challenge_controller(
+    db: Session, *, controller_public_id: str | None, entity_id: str
+) -> Controller:
+    """Resolve and bind a controller trust action to one first-class tenant."""
+
+    mode = tenancy_mode(db)
+    if controller_public_id is None:
+        if mode == TENANCY_HOSTED:
+            raise TrustEvidenceError("controller_public_id is required in hosted mode")
+        controller = db.get(Controller, 1)
+    else:
+        controller = (
+            db.query(Controller)
+            .filter(Controller.public_id == controller_public_id)
+            .first()
+        )
+    if controller is None or controller.status == "retired":
+        raise TrustEvidenceError("the controller is unavailable")
+    if controller.trust_entity_id != entity_id:
+        existing = db.query(EvidenceKey).filter(
+            EvidenceKey.controller_id == controller.id,
+            EvidenceKey.role == "controller",
+        ).first()
+        pending = db.query(EvidenceKeyRegistrationChallenge).filter(
+            EvidenceKeyRegistrationChallenge.controller_id == controller.id,
+            EvidenceKeyRegistrationChallenge.role == "controller",
+            EvidenceKeyRegistrationChallenge.used_at.is_(None),
+        ).first()
+        if mode == TENANCY_SINGLE and controller.id == 1 and existing is None and pending is None:
+            # A fresh single-controller installation historically let the
+            # controller-key package choose this identity during commissioning.
+            controller.trust_entity_id = entity_id
+            db.flush()
+        else:
+            raise TrustEvidenceError("the trust identity belongs to another controller")
+    return controller
 
 
-def _archive_trust_package(db: Session) -> tuple[dict[str, Any], str] | None:
+def _archive_trust_directory(controller: Controller | None = None) -> Path:
+    if controller is None:
+        return evidence_home() / "archive-trust"
+    if not re.fullmatch(r"ctl-[0-9a-f]{16}", controller.trust_entity_id):
+        raise TrustEvidenceError("the controller trust identity is invalid")
+    return evidence_home() / "controllers" / controller.trust_entity_id / "archive-trust"
+
+
+def _archive_controller(db: Session, public_id: str | None) -> Controller:
+    if public_id is None:
+        if tenancy_mode(db) == TENANCY_HOSTED:
+            raise TrustEvidenceError("controller_public_id is required in hosted mode")
+        controller = db.get(Controller, 1)
+    else:
+        controller = db.query(Controller).filter(Controller.public_id == public_id).first()
+    if controller is None or controller.status not in {"active", "draft"}:
+        raise TrustEvidenceError("the controller is unavailable")
+    return controller
+
+
+def _archive_trust_package(
+    db: Session, *, controller_id: int | None = None
+) -> tuple[dict[str, Any], str] | None:
     try:
-        controller = _active_role_key(db, "controller")
+        controller = _active_role_key(db, "controller", controller_id=controller_id)
         instance = _active_role_key(db, "instance")
     except TrustEvidenceError:
         return None
-    directory = _archive_trust_directory()
+    controller_tenant = db.get(Controller, controller.controller_id)
+    directory = _archive_trust_directory(
+        controller_tenant if tenancy_mode(db) == TENANCY_HOSTED else None
+    )
     if not directory.is_dir() or directory.is_symlink():
         return None
     for path in sorted(directory.glob("[0-9a-f]" * 64 + ".json"), reverse=True):
@@ -226,8 +293,16 @@ def list_trust_keys(_root: User = Depends(require_root_admin), db: Session = Dep
 
 
 @router.get("/trust-keys/archive-trust")
-def archive_trust_status(_root: User = Depends(require_root_admin), db: Session = Depends(get_db)):
-    binding = _archive_trust_package(db)
+def archive_trust_status(
+    controller_public_id: str | None = None,
+    _root: User = Depends(require_root_admin),
+    db: Session = Depends(get_db),
+):
+    try:
+        controller = _archive_controller(db, controller_public_id)
+    except TrustEvidenceError as exc:
+        raise _reject(exc) from exc
+    binding = _archive_trust_package(db, controller_id=controller.id)
     if binding is None:
         return {"ready": False, "message": "Select the active controller key once to authorise portable evidence archives."}
     package, digest = binding
@@ -245,13 +320,17 @@ def archive_trust_status(_root: User = Depends(require_root_admin), db: Session 
 @router.post("/trust-keys/archive-trust/prepare")
 def prepare_archive_trust(
     request: Request,
+    controller_public_id: str | None = None,
     root: User = Depends(require_root_recent_reauth),
     db: Session = Depends(get_db),
 ):
     del request
-    controller = _active_role_key(db, "controller")
+    controller_tenant = _archive_controller(db, controller_public_id)
+    controller = _active_role_key(
+        db, "controller", controller_id=controller_tenant.id
+    )
     instance = _active_role_key(db, "instance")
-    existing = _archive_trust_package(db)
+    existing = _archive_trust_package(db, controller_id=controller_tenant.id)
     if existing is not None:
         return {"ready": True, "document": existing[0]["document"]}
     document = {
@@ -281,11 +360,15 @@ def prepare_archive_trust(
 def complete_archive_trust(
     body: CompleteArchiveTrust,
     request: Request,
+    controller_public_id: str | None = None,
     root: User = Depends(require_root_recent_reauth),
     db: Session = Depends(get_db),
 ):
     try:
-        controller = _active_role_key(db, "controller")
+        controller_tenant = _archive_controller(db, controller_public_id)
+        controller = _active_role_key(
+            db, "controller", controller_id=controller_tenant.id
+        )
         instance = _active_role_key(db, "instance")
         validate_archive_trust_document(
             body.document,
@@ -307,7 +390,9 @@ def complete_archive_trust(
         }
         raw = canonical_json(package)
         statement_sha256 = hashlib.sha256(raw).hexdigest()
-        path = _archive_trust_directory() / f"{statement_sha256}.json"
+        path = _archive_trust_directory(
+            controller_tenant if tenancy_mode(db) == TENANCY_HOSTED else None
+        ) / f"{statement_sha256}.json"
         created = False
         if path.exists():
             if path.is_symlink() or path.read_bytes() != raw:
@@ -331,6 +416,7 @@ def complete_archive_trust(
                     "proof_sha256": proof_sha256,
                     "status": "verified",
                 },
+                controller_id=controller.controller_id,
             )
         except Exception:
             if created:
@@ -382,6 +468,11 @@ def begin_trust_key_challenge(
     """Begin public proof of possession after a recent root passkey reauthentication."""
     try:
         validate_entity(body.role, body.entity_id)
+        controller = _challenge_controller(
+            db,
+            controller_public_id=body.controller_public_id,
+            entity_id=body.entity_id,
+        )
         state = initialise(db)
         if state is None: raise EvidenceUnavailable("required evidence is unavailable")
         public = canonical_public_key(body.public_key)
@@ -399,6 +490,7 @@ def begin_trust_key_challenge(
                 EvidenceKey.key_id == body.supersedes_key_id,
                 EvidenceKey.role == body.role,
                 EvidenceKey.entity_id == body.entity_id,
+                EvidenceKey.controller_id == controller.id,
                 EvidenceKey.instance_id == state.instance_id,
                 EvidenceKey.revoked_at.is_(None),
             ).first()
@@ -413,6 +505,7 @@ def begin_trust_key_challenge(
             EvidenceKeyRegistrationChallenge.instance_id == state.instance_id,
             EvidenceKeyRegistrationChallenge.entity_id == body.entity_id,
             EvidenceKeyRegistrationChallenge.role == body.role,
+            EvidenceKeyRegistrationChallenge.controller_id == controller.id,
             EvidenceKeyRegistrationChallenge.used_at.is_(None),
         ).all()
         for pending in superseded_pending:
@@ -443,6 +536,7 @@ def begin_trust_key_challenge(
         challenge = EvidenceKeyRegistrationChallenge(
             challenge_id=document["challenge_id"], purpose=purpose,
             instance_id=state.instance_id, entity_id=body.entity_id,
+            controller_id=controller.id,
             public_key=public, public_key_sha256=fingerprint, key_id=identifier,
             role=body.role, supersedes_key_id=previous.key_id if previous else None,
             rotation_reason=body.reason if previous else None,
@@ -456,6 +550,7 @@ def begin_trust_key_challenge(
                   "schema_version": 1,
                   "purpose": purpose,
                   "role": body.role,
+                  "controller_public_id": controller.public_id,
                   "superseded_pending_challenges": len(superseded_pending),
               }))
         db.commit()
@@ -535,6 +630,7 @@ def begin_root_authorisation(
         "challenge_sha256": challenge.challenge_sha256,
         "instance_id": challenge.instance_id,
         "entity_id": challenge.entity_id,
+        "controller_id": challenge.controller_id,
         "event_ref": challenge.event_evidence_id,
         "key_id": challenge.key_id,
         "role": challenge.role,
@@ -629,6 +725,8 @@ def complete_root_authorisation(
         key_id=challenge.key_id, public_key=challenge.public_key,
         public_key_sha256=challenge.public_key_sha256,
         instance_id=challenge.instance_id, entity_id=challenge.entity_id,
+        controller_id=challenge.controller_id,
+        event_id=challenge.event_id,
         algorithm="Ed25519", role=challenge.role,
         supersedes_key_id=challenge.supersedes_key_id,
         registration_proof_sha256=challenge.possession_proof_sha256,
@@ -647,6 +745,7 @@ def complete_root_authorisation(
             processor_identity = ProcessorIdentity(
                 instance_id=challenge.instance_id,
                 entity_id=challenge.entity_id,
+                controller_id=challenge.controller_id,
                 event_id=challenge.event_id,
                 event_evidence_id=challenge.event_evidence_id,
                 event_display_name=challenge.event_display_name,
@@ -664,6 +763,7 @@ def complete_root_authorisation(
             EvidenceKey.instance_id == challenge.instance_id,
             EvidenceKey.entity_id == challenge.entity_id,
             EvidenceKey.role == challenge.role,
+            EvidenceKey.controller_id == challenge.controller_id,
             EvidenceKey.revoked_at.is_(None),
         ).first()
         if previous is None: raise _reject(TrustEvidenceError("the superseded key is no longer active"))
@@ -677,8 +777,12 @@ def complete_root_authorisation(
         processor_identity.activated_at = now
     db.flush()
     challenge.used_at = now
+    controller = db.get(Controller, row.controller_id)
+    if controller is None:
+        raise _reject(TrustEvidenceError("the controller trust scope is unavailable"))
     payload: dict[str, Any] = {
         "instance_id": row.instance_id, "entity_id": row.entity_id,
+        "controller_id": controller.trust_entity_id,
         "key_id": row.key_id, "key_role": row.role, "algorithm": "ed25519",
         "public_key_sha256": row.public_key_sha256,
         "challenge_sha256": challenge.challenge_sha256,
@@ -706,6 +810,7 @@ def complete_root_authorisation(
     digest = append_record(
         db, workflow_type="trust_key", workflow_id=row.key_id,
         operation_type=operation, record_type=record_type, payload=payload,
+        controller_id=row.controller_id, event_id=row.event_id,
     )
     if row.role == "controller":
         row.trust_establishment_sha256 = digest
@@ -732,6 +837,8 @@ def revoke_trust_key(
         if body.reason_code not in REVOCATION_REASONS: raise TrustEvidenceError("the revocation reason is invalid")
         row = db.query(EvidenceKey).filter(EvidenceKey.key_id == trust_key_id, EvidenceKey.role.in_(("controller", "processor")), EvidenceKey.revoked_at.is_(None)).first()
         if row is None: raise TrustEvidenceError("the trust key is unavailable or already revoked")
+        controller = db.get(Controller, row.controller_id)
+        if controller is None: raise TrustEvidenceError("the controller trust scope is unavailable")
         row.revoked_at = datetime.now(timezone.utc); row.revocation_reason = body.reason_code
         if row.role == "processor":
             identity = db.query(ProcessorIdentity).filter(
@@ -744,11 +851,13 @@ def revoke_trust_key(
         digest = append_record(
             db, workflow_type="trust_key", workflow_id=row.key_id,
             operation_type="revoked", record_type="trust_key.revoked",
-            payload={"instance_id": row.instance_id, "entity_id": row.entity_id, "key_id": row.key_id,
+            payload={"instance_id": row.instance_id, "entity_id": row.entity_id,
+                     "controller_id": controller.trust_entity_id, "key_id": row.key_id,
                      "key_role": row.role, "algorithm": "ed25519",
                      "public_key_sha256": row.public_key_sha256,
                      "reason_code": body.reason_code, "root_authorisation": "recent_root_passkey",
                      "ledger_signer_role": "instance", "status": "revoked"},
+            controller_id=row.controller_id, event_id=row.event_id,
         )
         audit(db, user=root, action="evidence.trust_key.revoke", resource_type="evidence", request=request,
               detail=json.dumps({"schema_version": 1, "role": row.role, "reason_code": body.reason_code}))

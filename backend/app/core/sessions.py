@@ -150,6 +150,9 @@ def validate_session(
     update_last_seen: bool = True,
 ) -> Optional[AuthSession]:
     """Look up a session token and return it if still valid."""
+    from app.core.database_tenancy import authentication_service_context
+
+    authentication_service_context(db)
     token_hash = _hash_token(session_token)
     session = (
         db.query(AuthSession)

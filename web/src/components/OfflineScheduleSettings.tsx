@@ -59,6 +59,8 @@ export function OfflineScheduleSettings({ eventId }: { eventId: number }) {
           payload,
           cachedAt,
           marker.valid_until,
+          undefined,
+          marker,
         );
         if (!stored) throw new Error("The offline schedule could not be saved on this device.");
         commitOfflineAccessMarker(marker);

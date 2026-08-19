@@ -20,6 +20,7 @@ from app.models.evidence import EvidenceOperation
 from server_backend.conftest import (
     _make_client,
     _raw_client,
+    create_test_event,
     create_test_governance_publication,
     create_test_user,
 )
@@ -568,9 +569,16 @@ def test_account_registration_attempts_have_independent_records(db, monkeypatch)
 
 def test_two_activation_devices_complete_independently(db, monkeypatch):
     """Separate activation attempts cannot invalidate each other's challenge."""
-    issuer = create_test_user(db, username="activation.issuer", is_admin=True)
-    user_a = create_test_user(db, username="activation.a", is_activated=False)
-    user_b = create_test_user(db, username="activation.b", is_activated=False)
+    event, _ = create_test_event(db, name="Two-device activation")
+    issuer = create_test_user(
+        db, username="activation.issuer", is_admin=True, event_id=event.id,
+    )
+    user_a = create_test_user(
+        db, username="activation.a", is_activated=False, event_id=event.id,
+    )
+    user_b = create_test_user(
+        db, username="activation.b", is_activated=False, event_id=event.id,
+    )
     token_a, _ = create_activation_link(user_a.id, issuer.id, db)
     token_b, _ = create_activation_link(user_b.id, issuer.id, db)
     create_test_governance_publication(db)
@@ -614,8 +622,13 @@ def test_two_activation_devices_complete_independently(db, monkeypatch):
 
 
 def test_activation_token_is_single_use(db, monkeypatch):
-    issuer = create_test_user(db, username="single.issuer", is_admin=True)
-    user = create_test_user(db, username="single.activation", is_activated=False)
+    event, _ = create_test_event(db, name="Single-use activation")
+    issuer = create_test_user(
+        db, username="single.issuer", is_admin=True, event_id=event.id,
+    )
+    user = create_test_user(
+        db, username="single.activation", is_activated=False, event_id=event.id,
+    )
     token, _ = create_activation_link(user.id, issuer.id, db)
     create_test_governance_publication(db)
     db.commit()
@@ -682,8 +695,13 @@ def test_duplicate_credential_id_is_rejected_across_users(db, monkeypatch):
 
 
 def test_initial_activation_requires_exact_processing_consent(db):
-    issuer = create_test_user(db, username="consent.issuer", is_admin=True)
-    user = create_test_user(db, username="consent.subject", is_activated=False)
+    event, _ = create_test_event(db, name="Consent activation")
+    issuer = create_test_user(
+        db, username="consent.issuer", is_admin=True, event_id=event.id,
+    )
+    user = create_test_user(
+        db, username="consent.subject", is_activated=False, event_id=event.id,
+    )
     token, _ = create_activation_link(user.id, issuer.id, db)
     create_test_governance_publication(db)
     db.commit()
@@ -713,8 +731,13 @@ def test_initial_activation_requires_exact_processing_consent(db):
 
 
 def test_initial_activation_records_one_atomic_consent(db, monkeypatch):
-    issuer = create_test_user(db, username="atomic.issuer", is_admin=True)
-    user = create_test_user(db, username="atomic.subject", is_activated=False)
+    event, _ = create_test_event(db, name="Atomic consent activation")
+    issuer = create_test_user(
+        db, username="atomic.issuer", is_admin=True, event_id=event.id,
+    )
+    user = create_test_user(
+        db, username="atomic.subject", is_activated=False, event_id=event.id,
+    )
     token, link = create_activation_link(user.id, issuer.id, db)
     publication = create_test_governance_publication(db)
     db.commit()
@@ -747,16 +770,18 @@ def test_initial_activation_records_one_atomic_consent(db, monkeypatch):
     assert stored.policy_sha256 == publication.content_sha256
     assert stored.statement_sha256 == consent["statement_sha256"]
     operation = db.query(EvidenceOperation).filter_by(
-        workflow_type="account_consent",
+        workflow_type="account_disclosure",
         workflow_id=stored.consent_id,
         operation_type="recorded",
     ).one()
-    assert operation.record_type == "account.processing_consent_recorded"
+    assert operation.record_type == "account.processing_disclosure_acknowledged"
     assert operation.state == "complete"
     assert stored.instance_record_sha256 == operation.record_sha256
     evidence_payload = json.loads(operation.payload_json)
     expected_evidence_payload = {
         "document_sha256": hashlib.sha256(stored.document_json.encode("utf-8")).hexdigest(),
+        "confirmation_type": "disclosure_acknowledgement",
+        "legal_basis_code": "legacy_controller_declared",
         "policy_sha256": stored.policy_sha256,
         "policy_version": stored.policy_version,
         "signed_at": stored.consented_at.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -774,8 +799,13 @@ def test_initial_activation_records_one_atomic_consent(db, monkeypatch):
 
 
 def test_evidence_failure_rolls_back_activation_and_consent(db, monkeypatch):
-    issuer = create_test_user(db, username="evidence.issuer", is_admin=True)
-    user = create_test_user(db, username="evidence.subject", is_activated=False)
+    event, _ = create_test_event(db, name="Evidence-failure activation")
+    issuer = create_test_user(
+        db, username="evidence.issuer", is_admin=True, event_id=event.id,
+    )
+    user = create_test_user(
+        db, username="evidence.subject", is_activated=False, event_id=event.id,
+    )
     token, link = create_activation_link(user.id, issuer.id, db)
     create_test_governance_publication(db)
     db.commit()

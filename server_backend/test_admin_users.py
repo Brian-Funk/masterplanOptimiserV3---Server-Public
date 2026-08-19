@@ -3,6 +3,7 @@ from server_backend.conftest import (
     create_test_event, create_test_user, inject_session, _make_client,
 )
 from app.models.published import PublishedPerson
+from app.models.event import Event
 from app.models.user import User
 
 
@@ -29,23 +30,39 @@ def test_create_user_happy_path(db, admin_client):
 
 def test_create_user_duplicate_username(db, admin_client):
     """Creating a user with an existing username → 409."""
-    event, _ = create_test_event(db, name="Evt")
-    create_test_user(db, username="duplicate", event_id=event.id)
+    admin = db.query(User).filter(User.username == "admin.user").one()
+    create_test_user(db, username="duplicate", event_id=admin.event_id)
     r = admin_client.post("/api/v1/admin/users", json={
         "username": "duplicate",
         "display_name": "Dup",
-        "event_id": event.id,
+        "event_id": admin.event_id,
     })
     assert r.status_code == 409
 
 
-def test_create_user_missing_event_id(db, admin_client):
-    """Creating a user without event_id → 422."""
+def test_same_username_is_independent_between_events(db, root_client):
+    """Hosted accounts may reuse a login label in a different event scope."""
+    first, _ = create_test_event(db, name="First tenant")
+    second, _ = create_test_event(db, name="Second tenant")
+    create_test_user(db, username="shared.label", event_id=first.id)
+    response = root_client.post("/api/v1/admin/users", json={
+        "username": "shared.label",
+        "display_name": "Independent account",
+        "event_id": second.id,
+    })
+    assert response.status_code == 200
+    assert response.json()["user"]["event_id"] == second.id
+
+
+def test_event_admin_create_user_omitted_event_is_server_scoped(db, admin_client):
+    """A non-root admin's membership, not request input, selects the event."""
     r = admin_client.post("/api/v1/admin/users", json={
         "username": "noevt",
         "display_name": "No Event",
     })
-    assert r.status_code == 422
+    assert r.status_code == 200
+    admin = db.query(User).filter(User.username == "admin.user").one()
+    assert r.json()["user"]["event_id"] == admin.event_id
 
 
 def test_create_user_issuer_forces_own_event(db):
@@ -121,7 +138,9 @@ def test_create_user_issuer_cannot_grant_issuer(db):
 
 def test_bulk_create_users_partial_success_and_tags(db, admin_client):
     """Bulk creation creates valid rows and reports invalid rows."""
-    event, _ = create_test_event(db, name="BulkEvt")
+    admin = db.query(User).filter(User.username == "admin.user").one()
+    event = db.get(Event, admin.event_id)
+    assert event is not None
     create_test_user(db, username="taken.user", event_id=event.id)
 
     r = admin_client.post("/api/v1/admin/users/bulk", json={
@@ -251,25 +270,26 @@ def test_reauthenticated_root_can_set_issuer(db):
     assert response.json()["user"]["is_issuer"] is True
 
 
-def test_root_can_create_an_unassigned_ordinary_user(db, root_client):
+def test_root_cannot_create_an_unassigned_ordinary_user(db, root_client):
     response = root_client.post("/api/v1/admin/users", json={
         "username": "awaiting.assignment",
         "display_name": "Awaiting Assignment",
         "event_id": None,
     })
 
-    assert response.status_code == 200
-    assert response.json()["user"]["event_id"] is None
+    assert response.status_code == 422
 
 
-def test_non_root_admin_cannot_create_an_unassigned_user(db, admin_client):
+def test_non_root_admin_explicit_null_is_scoped_to_membership(db, admin_client):
     response = admin_client.post("/api/v1/admin/users", json={
         "username": "unscoped.account",
         "display_name": "Unscoped Account",
         "event_id": None,
     })
 
-    assert response.status_code == 422
+    assert response.status_code == 200
+    admin = db.query(User).filter(User.username == "admin.user").one()
+    assert response.json()["user"]["event_id"] == admin.event_id
 
 
 def test_reauthenticated_root_can_unassign_an_ordinary_user(db):
@@ -333,7 +353,9 @@ def test_list_users_issuer_sees_own_event_only(db):
 
 def test_update_user_fields(db, admin_client):
     """Admin can update user fields."""
-    event, _ = create_test_event(db, name="Evt")
+    actor = db.query(User).filter(User.username == "admin.user").one()
+    event = db.get(Event, actor.event_id)
+    assert event is not None
     user = create_test_user(db, username="updatable", event_id=event.id)
 
     r = admin_client.put(f"/api/v1/admin/users/{user.id}", json={
@@ -381,7 +403,7 @@ def test_update_user_issuer_blocked_event_reassignment(db):
     r = client.put(f"/api/v1/admin/users/{target.id}", json={
         "event_id": event2.id,
     })
-    assert r.status_code == 403
+    assert r.status_code == 404
 
 
 def test_update_user_cannot_modify_root(db, admin_client):
@@ -408,7 +430,7 @@ def test_update_issuer_cross_event_blocked(db):
     r = client.put(f"/api/v1/admin/users/{target.id}", json={
         "display_name": "Should Fail",
     })
-    assert r.status_code == 403
+    assert r.status_code == 404
 
 
 def test_non_root_admin_cannot_modify_privileged_account(db):
@@ -440,7 +462,9 @@ def test_non_root_admin_cannot_modify_privileged_account(db):
 def test_deactivating_user_requires_recent_reauthentication(db):
     """Account deactivation is denied until the admin steps up with a passkey."""
     event, _ = create_test_event(db, name="Deactivate Event")
-    actor = create_test_user(db, username="deactivate.admin", is_admin=True)
+    actor = create_test_user(
+        db, username="deactivate.admin", is_admin=True, event_id=event.id
+    )
     target = create_test_user(db, username="deactivate.target", event_id=event.id)
 
     denied = _make_client(db, actor).put(
@@ -462,7 +486,9 @@ def test_update_user_rejects_person_from_another_event(db):
     own_event, _ = create_test_event(db, name="Own Person Event")
     other_event, _ = create_test_event(db, name="Other Person Event")
     target = create_test_user(db, username="person.target", event_id=own_event.id)
-    actor = create_test_user(db, username="person.admin", is_admin=True)
+    actor = create_test_user(
+        db, username="person.admin", is_admin=True, event_id=own_event.id
+    )
     db.add(PublishedPerson(
         event_id=other_event.id,
         external_person_id=91,
@@ -485,7 +511,9 @@ def test_event_reassignment_clears_stale_person_link(db):
     """Moving a user to another event cannot retain the old person identity."""
     first_event, _ = create_test_event(db, name="First Link Event")
     second_event, _ = create_test_event(db, name="Second Link Event")
-    actor = create_test_user(db, username="move.admin", is_admin=True)
+    actor = create_test_user(
+        db, username="move.admin", is_root_admin=True, is_admin=True
+    )
     target = create_test_user(db, username="move.target", event_id=first_event.id)
     target.linked_person_id = 42
     db.commit()
@@ -503,7 +531,9 @@ def test_event_reassignment_clears_stale_person_link(db):
 def test_event_reassignment_requires_reauthentication(db):
     first_event, _ = create_test_event(db, name="Original Assignment")
     second_event, _ = create_test_event(db, name="New Assignment")
-    actor = create_test_user(db, username="move.without.reauth", is_admin=True)
+    actor = create_test_user(
+        db, username="move.without.reauth", is_root_admin=True, is_admin=True
+    )
     target = create_test_user(db, username="protected.move", event_id=first_event.id)
 
     response = _make_client(db, actor).put(
@@ -551,8 +581,8 @@ def test_delete_user_requires_reauth(db, admin_client):
 
 def test_delete_used_user_requires_signed_workflow(db, reauth_admin_client):
     """Re-authentication cannot bypass the evidence workflow for used accounts."""
-    event, _ = create_test_event(db, name="Evt")
-    user = create_test_user(db, username="to_delete2", event_id=event.id)
+    actor = db.query(User).filter(User.username == "reauth.admin").one()
+    user = create_test_user(db, username="to_delete2", event_id=actor.event_id)
     r = reauth_admin_client.delete(f"/api/v1/admin/users/{user.id}")
     assert r.status_code == 409
     assert r.json()["detail"]["code"] == "SIGNED_DELETION_REQUIRED"
@@ -560,11 +590,11 @@ def test_delete_used_user_requires_signed_workflow(db, reauth_admin_client):
 
 def test_delete_unused_invitation_with_reauth(db, reauth_admin_client):
     """A never-activated, unlinked invitation can be removed directly."""
-    event, _ = create_test_event(db, name="Unused Invitation Event")
+    actor = db.query(User).filter(User.username == "reauth.admin").one()
     user = create_test_user(
         db,
         username="unused.invitation",
-        event_id=event.id,
+        event_id=actor.event_id,
         is_activated=False,
     )
 

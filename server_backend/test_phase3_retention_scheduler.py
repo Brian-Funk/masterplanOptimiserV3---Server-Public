@@ -244,9 +244,9 @@ def test_one_cycle_enforces_every_automated_database_retention_class(db):
 
 
 def test_admin_event_contract_exposes_materialised_deadline_and_inventory(
-    db, root_client
+    db, reauth_root_client
 ):
-    response = root_client.post(
+    response = reauth_root_client.post(
         "/api/v1/admin/events",
         json={
             "name": "Synthetic scheduled event",
@@ -261,7 +261,7 @@ def test_admin_event_contract_exposes_materialised_deadline_and_inventory(
     assert event["purge_due_at"].startswith("2026-10-31T00:00:00")
     assert event["purge_case_request_id"] is None
 
-    status = root_client.get("/api/v1/admin/retention/status")
+    status = reauth_root_client.get("/api/v1/admin/retention/status")
     assert status.status_code == 200
     body = status.json()
     assert body["format"] == "mp-opt-retention-status-v1"

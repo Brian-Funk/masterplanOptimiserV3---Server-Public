@@ -202,7 +202,7 @@ def test_public_link_management_is_root_or_own_event_issuer_only(
 
     other_event, _ = create_test_event(db, name="Other Event")
     _seed_schedule(db, other_event.id)
-    assert _create_link(issuer_http, other_event.id).status_code == 403
+    assert _create_link(issuer_http, other_event.id).status_code == 404
 
 
 def test_dual_role_issuer_remains_scoped_to_own_event(db):
@@ -220,7 +220,7 @@ def test_dual_role_issuer_remains_scoped_to_own_event(db):
     client = _make_client(db, user)
 
     assert _create_link(client, own_event.id).status_code == 201
-    assert _create_link(client, other_event.id).status_code == 403
+    assert _create_link(client, other_event.id).status_code == 404
 
 
 def test_link_creation_validates_expiry_description_and_current_views(

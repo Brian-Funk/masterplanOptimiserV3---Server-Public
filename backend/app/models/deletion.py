@@ -51,6 +51,16 @@ class DeletionCase(Base):
     # concurrent scheduler workers and survives deletion of the live event row.
     event_purge_key = Column(String(36), nullable=True, unique=True, index=True)
     instance_id = Column(String(36), nullable=False, index=True)
+    controller_id = Column(
+        Integer,
+        ForeignKey("controllers.id", ondelete="RESTRICT"),
+        nullable=False,
+        default=1,
+        index=True,
+    )
+    # Durable tenant attribution intentionally survives removal of the live
+    # event row.  It is not a foreign key for that reason.
+    event_id = Column(Integer, nullable=True, index=True)
     event_evidence_id = Column(String(36), nullable=False, index=True)
     # Operator convenience only. It is excluded from signed evidence and
     # cleared when the case completes.

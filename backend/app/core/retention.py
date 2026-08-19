@@ -20,6 +20,7 @@ from app.core.ha_witness import require_write_permit
 from app.core.sessions import cleanup_expired_sessions
 from app.core.snapshots import _prune_old_snapshots
 from app.db.database import SessionLocal
+from app.core.database_tenancy import root_service_context
 from app.models.audit import AuditLog
 from app.models.deletion import DeletionCase
 from app.models.event import Event
@@ -33,6 +34,8 @@ from app.models.user import (
     PasskeyCeremony,
     PasskeyChallenge,
 )
+from app.models.tenancy import EventGovernanceConfiguration, OperatorPolicyPublication
+from app.core.tenancy import TENANCY_HOSTED, tenancy_mode
 
 
 logger = logging.getLogger("retention.scheduler")
@@ -79,7 +82,7 @@ def materialise_event_purge_deadline(
     *,
     force: bool = False,
 ) -> datetime | None:
-    """Persist one explicit controller-selected deadline for an event."""
+    """Persist the one fixed operator-selected deadline for an event."""
 
     if event.purge_case_request_id:
         return event.purge_due_at
@@ -89,7 +92,24 @@ def materialise_event_purge_deadline(
         return None
     if event.purge_due_at is not None and not force:
         return event.purge_due_at
-    grace_days = runtime_settings.get_int("event_purge_grace_days", db)
+    if tenancy_mode(db) == TENANCY_HOSTED:
+        governance = db.get(EventGovernanceConfiguration, event.id)
+        if governance is None:
+            raise ValueError("Hosted events require an event governance configuration")
+        publication = db.query(OperatorPolicyPublication).filter(
+            OperatorPolicyPublication.version == governance.operator_policy_version
+        ).first()
+        if publication is None:
+            raise ValueError("Hosted event operator policy is unavailable")
+        try:
+            published_policy = json.loads(publication.content_json)
+            grace_days = int(published_policy["fixed_retention_days"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "Hosted operator policy has no valid fixed retention period"
+            ) from exc
+    else:
+        grace_days = runtime_settings.get_int("event_purge_grace_days", db)
     event.purge_grace_days = grace_days
     event.purge_due_at = event_purge_due_at(event.end_date, grace_days)
     return event.purge_due_at
@@ -229,6 +249,7 @@ def run_retention_cycle_once(
         return {"non_holder_skipped": 1}
     require_write_permit(force_refresh=True)
     db = session_factory()
+    root_service_context(db, scope="retention_worker")
     try:
         return run_retention_cycle(db, now=now)
     except Exception as exc:

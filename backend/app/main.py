@@ -21,6 +21,7 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.core.permissions import enforce_permissions_middleware
+from app.core.database_tenancy import root_service_context
 from app.core.rate_limit import limiter
 from app.api.v1.router import api_router
 from app.db.database import engine, Base, SessionLocal
@@ -216,6 +217,7 @@ async def enforce_active_writer(request: Request, call_next):
                 )
             return await call_next(request)
         db = SessionLocal()
+        root_service_context(db, scope="ha_readiness")
         try:
             readiness = assess_readiness(db)
         except Exception:
@@ -349,6 +351,7 @@ async def health_check():
     db_ok = False
     try:
         db = SessionLocal()
+        root_service_context(db, scope="health")
         db.execute(text("SELECT 1"))
         db.close()
         db_ok = True
@@ -369,6 +372,7 @@ async def ha_ready():
     """Return 200 only for the current writable cluster generation."""
 
     db = SessionLocal()
+    root_service_context(db, scope="ha_status")
     try:
         readiness = assess_readiness(db)
         if readiness.ready:
@@ -461,6 +465,15 @@ async def startup_event():
         PrivacyActionReceipt,
     )
     from app.models.retention import RetentionSchedulerState  # noqa
+    from app.models.tenancy import (  # noqa
+        Controller,
+        ControllerGovernanceProfile,
+        ControllerGovernancePublication,
+        EventGovernanceConfiguration,
+        EventMembership,
+        InstanceOperatorProfile,
+        OperatorPolicyPublication,
+    )
 
     # A peer process stays healthy enough for monitoring and promotion, but it
     # must not perform *any* schema, cleanup or bootstrap writes. Committed
@@ -468,6 +481,7 @@ async def startup_event():
     # verify the replicated database/evidence pair before reporting healthy.
     if is_ha_enabled() and not control_witness_ready():
         verification_db = SessionLocal()
+        root_service_context(verification_db, scope="startup_verification")
         try:
             from app.core.evidence import verify_existing
             verify_existing(verification_db)
@@ -479,6 +493,7 @@ async def startup_event():
 
     if settings.BLUE_GREEN_STAGING:
         verification_db = SessionLocal()
+        root_service_context(verification_db, scope="blue_green_verification")
         try:
             from app.core.evidence import verify_existing
             verify_existing(verification_db)
@@ -495,10 +510,13 @@ async def startup_event():
     print("[Startup] Database tables created / verified")
 
     db = SessionLocal()
+    root_service_context(db, scope="startup")
     try:
         # Create default root admin
         from app.core.security import create_default_admin
-        create_default_admin(db)
+        root = create_default_admin(db)
+        from app.core.tenancy import ensure_default_tenancy
+        ensure_default_tenancy(db, root_user_id=root.id)
 
         # Evidence initialisation is idempotent and mandatory.
         from app.core.evidence import initialise as initialise_evidence

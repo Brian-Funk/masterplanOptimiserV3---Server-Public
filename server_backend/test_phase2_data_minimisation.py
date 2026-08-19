@@ -12,6 +12,7 @@ from app.models.published import (
     PublishedPersonUnavailability,
     PublishedTask,
 )
+from app.core.tenancy import assign_event_membership
 from server_backend.conftest import _make_client, create_test_event, create_test_user
 from server_backend.test_governance import PROFILE, _root_with_reauth
 
@@ -144,14 +145,15 @@ def test_participant_and_offline_contracts_expose_only_linked_identity(db):
     db.commit()
     participant = create_test_user(db, username="linked.person", event_id=event.id)
     participant.linked_person_id = 1
+    assign_event_membership(db, participant, event, linked_person_id=1)
     db.commit()
     client = _make_client(db, participant)
 
     live = client.get(f"/api/v1/calendar/{event.id}")
     assert live.status_code == 200
     live_body = live.json()
-    assert [person["external_person_id"] for person in live_body["persons"]] == [1]
-    assert [row["person_id"] for row in live_body["unavailabilities"]] == [1]
+    assert [person["external_person_id"] for person in live_body["persons"]] == [1, 2]
+    assert [row["person_id"] for row in live_body["unavailabilities"]] == [1, 2]
     assert [row["person_id"] for row in live_body["tasks"][0]["attendees"]] == [1, 2]
     assert [
         row["person_id"]
@@ -170,8 +172,8 @@ def test_participant_and_offline_contracts_expose_only_linked_identity(db):
     offline = client.get(f"/api/v1/calendar/{event.id}/offline")
     assert offline.status_code == 200
     offline_body = offline.json()
-    assert [person["external_person_id"] for person in offline_body["persons"]] == [1]
-    assert [row["person_id"] for row in offline_body["unavailabilities"]] == [1]
+    assert [person["external_person_id"] for person in offline_body["persons"]] == [1, 2]
+    assert [row["person_id"] for row in offline_body["unavailabilities"]] == [1, 2]
     assert [row["person_id"] for row in offline_body["tasks"][0]["attendees"]] == [1]
     assert [
         row["person_id"]

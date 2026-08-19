@@ -37,6 +37,10 @@ def test_create_activation_link(db, admin_client):
     user = create_test_user(
         db, username="needs_link", event_id=event.id, is_activated=False,
     )
+    admin_client = _make_client(
+        db,
+        create_test_user(db, username="needs_link.admin", event_id=event.id, is_admin=True),
+    )
 
     r = admin_client.post(f"/api/v1/admin/users/{user.id}/activation-link")
     assert r.status_code == 200
@@ -134,7 +138,7 @@ def test_create_activation_link_issuer_scoped(db):
 
     # Different event → 403
     r2 = client.post(f"/api/v1/admin/users/{user_other.id}/activation-link")
-    assert r2.status_code == 403
+    assert r2.status_code == 404
 
 
 # ── GET /admin/users/{id}/activation-links ──
@@ -145,6 +149,10 @@ def test_get_activation_link_status(db, admin_client):
     event, _ = create_test_event(db, name="Evt")
     user = create_test_user(
         db, username="link_status", event_id=event.id, is_activated=False,
+    )
+    admin_client = _make_client(
+        db,
+        create_test_user(db, username="link_status.admin", event_id=event.id, is_admin=True),
     )
     # Create a link first
     admin_client.post(f"/api/v1/admin/users/{user.id}/activation-link")
@@ -167,6 +175,10 @@ def test_batch_activation_links(db, admin_client):
     )
     create_test_user(
         db, username="batch2", event_id=event.id, is_activated=False,
+    )
+    admin_client = _make_client(
+        db,
+        create_test_user(db, username="batch.admin", event_id=event.id, is_admin=True),
     )
 
     r = admin_client.post("/api/v1/admin/batch-activation-links", json={
@@ -281,6 +293,10 @@ def test_invalidate_activation_link(db, admin_client):
     user = create_test_user(
         db, username="inv_link", event_id=event.id, is_activated=False,
     )
+    admin_client = _make_client(
+        db,
+        create_test_user(db, username="inv_link.admin", event_id=event.id, is_admin=True),
+    )
     admin_client.post(f"/api/v1/admin/users/{user.id}/activation-link")
 
     # Get link ID
@@ -306,6 +322,10 @@ def test_activation_validate_token(db, admin_client):
     event, _ = create_test_event(db, name="Evt")
     user = create_test_user(
         db, username="activate_me", event_id=event.id, is_activated=False,
+    )
+    admin_client = _make_client(
+        db,
+        create_test_user(db, username="activate.admin", event_id=event.id, is_admin=True),
     )
     r = admin_client.post(f"/api/v1/admin/users/{user.id}/activation-link")
     activation_url = r.json()["activation_url"]

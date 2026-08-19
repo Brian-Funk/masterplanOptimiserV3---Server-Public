@@ -15,6 +15,11 @@ const validUntil = "2026-07-30T12:30:00.000Z";
 const beforeExpiry = new Date("2026-07-30T10:00:00.000Z");
 
 const payload = {
+  offline_contract_version: "mp-opt-offline-calendar-v5",
+  controller_public_id: "07096118-e64c-4b89-a7c9-1f26d6198719",
+  controller_trust_entity_id: "ctl-0123456789abcdef",
+  event_ref: "9d492121-5a09-4e8a-a0a9-3c873af85928",
+  membership_id: 12,
   event_id: 7,
   event_name: "Cached Event",
   start_date: "2026-07-30",
@@ -166,7 +171,7 @@ describe("offlineCalendarCache", () => {
     await expect(
       getOfflineCalendarPayload<typeof payload>(12, 7, beforeExpiry),
     ).resolves.toMatchObject({
-      schema_version: 4,
+      schema_version: 5,
       user_id: 12,
       event_id: 7,
       cached_at: cachedAt,

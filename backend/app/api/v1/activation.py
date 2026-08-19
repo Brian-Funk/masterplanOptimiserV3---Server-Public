@@ -6,6 +6,7 @@ from typing import Literal, Optional
 
 from app.core.activation import INITIAL_SETUP, validate_activation_token
 from app.core.activation_consent import ActivationConsentError, resolve_activation_consent
+from app.core.database_tenancy import authenticated_subject_context, bounded_event_id_context
 from app.core.rate_limit import client_ip_rate_key, limiter, runtime_limit
 from app.db.database import get_db
 from app.models.user import User
@@ -48,8 +49,13 @@ def validate_token(
     if link is None:
         return ActivationValidateResponse(valid=False)
 
+    authenticated_subject_context(db, link.user_id)
     user = db.query(User).filter(User.id == link.user_id).first()
     if not user or not user.is_active:
+        return ActivationValidateResponse(valid=False)
+    if user.event_id is not None and bounded_event_id_context(
+        db, scope="activation", event_id=user.event_id
+    ) is None:
         return ActivationValidateResponse(valid=False)
 
     processing_consent = None

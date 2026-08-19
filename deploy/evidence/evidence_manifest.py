@@ -58,6 +58,9 @@ SAFE_ENUM_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 RECORD_TYPES = frozenset(
     {
         "instance.initialised",
+        "controller.evidence_initialised",
+        "controller.governance_published",
+        "operator.hosted_tenancy_enabled",
         "key.rotated",
         "trust_key.registered",
         "trust_key.rotated",
@@ -65,6 +68,7 @@ RECORD_TYPES = frozenset(
         "commissioning.recovery_key_acknowledged",
         "commissioning.completed",
         "account.processing_consent_recorded",
+        "account.processing_disclosure_acknowledged",
         "desktop.policy_acknowledged",
         "data_subject.deletion.requested",
         "data_subject.deletion.withdrawn",
@@ -254,6 +258,21 @@ PAYLOAD_FIELDS = frozenset(
         "evidence_workflow_type",
         "evidence_workflow_id",
         "evidence_operation_type",
+        "mode",
+        "controller_public_ids",
+        "event_count",
+        "controller_public_id",
+        "controller_trust_entity_id",
+        "legacy_chain_head_sha256",
+        "operator_chain_id",
+        "operator_policy_version",
+        "operator_policy_sha256",
+        "controller_policy_version",
+        "controller_policy_sha256",
+        "confirmation_type",
+        "legal_basis_code",
+        "event_notice_revision",
+        "event_notice_sha256",
     }
 )
 UUID_FIELDS = frozenset(
@@ -274,6 +293,8 @@ UUID_FIELDS = frozenset(
         "processor_assignment_id",
         "local_resolution_id",
         "peer_snapshot_resolution_id",
+        "controller_public_id",
+        "operator_chain_id",
     }
 )
 HASH_FIELDS = frozenset(
@@ -322,6 +343,10 @@ HASH_FIELDS = frozenset(
         "peer_snapshot_resolution_sha256",
         "peer_resolution_digest",
         "original_final_receipt_sha256",
+        "legacy_chain_head_sha256",
+        "operator_policy_sha256",
+        "controller_policy_sha256",
+        "event_notice_sha256",
     }
 )
 TIMESTAMP_FIELDS = frozenset(
@@ -500,6 +525,21 @@ def _validate_payload(value: Any, *, path: str = "payload") -> None:
             elif field == "controller_id":
                 if not isinstance(item, str) or not re.fullmatch(r"ctl-[a-z0-9]{8,48}", item):
                     raise EvidenceError(f"{child_path} must be a controller ID")
+            elif field == "controller_trust_entity_id":
+                if not isinstance(item, str) or not re.fullmatch(r"ctl-[0-9a-f]{16}", item):
+                    raise EvidenceError(
+                        f"{child_path} must be a controller trust-entity ID"
+                    )
+            elif field == "mode":
+                if item != "hosted-multi-controller":
+                    raise EvidenceError(f"{child_path} must identify hosted multi-controller mode")
+            elif field == "event_count":
+                if (
+                    not isinstance(item, int)
+                    or isinstance(item, bool)
+                    or not 0 <= item <= 1_000_000
+                ):
+                    raise EvidenceError(f"{child_path} must be a bounded event count")
             elif field == "pull_request_number":
                 if not isinstance(item, int) or isinstance(item, bool) or not 1 <= item <= 2147483647:
                     raise EvidenceError(f"{child_path} must be a positive pull request number")
@@ -534,8 +574,14 @@ def _validate_payload(value: Any, *, path: str = "payload") -> None:
                             raise EvidenceError(
                                 f"{child_path}[{index}] must be a lower-case SHA-256 digest"
                             )
+                    elif field == "controller_public_ids":
+                        _canonical_uuid(entry, f"{child_path}[{index}]")
                     elif not isinstance(entry, str) or not SAFE_ENUM_RE.fullmatch(entry):
                         raise EvidenceError(f"{child_path} entries must be bounded enums")
+                if field == "controller_public_ids" and item != sorted(set(item)):
+                    raise EvidenceError(
+                        f"{child_path} must contain unique UUIDs in deterministic order"
+                    )
             elif isinstance(item, str):
                 if field == "error_code" and not SAFE_ENUM_RE.fullmatch(item):
                     raise EvidenceError(f"{child_path} must be an enumerated error code")

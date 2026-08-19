@@ -97,7 +97,7 @@ def test_issuer_can_only_view_own_event_web_edits(db, issuer_client):
     other = client.get(f"/api/v1/admin/events/{other_event.id}/web-edits")
 
     assert own.status_code == 200
-    assert other.status_code == 403
+    assert other.status_code == 404
 
 
 def test_calendar_response_includes_web_edit_metadata_for_editors(db):

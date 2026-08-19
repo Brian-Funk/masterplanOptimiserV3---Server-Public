@@ -25,6 +25,12 @@ from app.core.audit import audit
 from app.core.evidence import EvidenceUnavailable, append_record, initialise
 from app.core.evidence_identity import CanonicalEvidenceIdentity
 from app.core.governance import current_policy_identity
+from app.core.features import require_event_feature
+from app.core.database_tenancy import (
+    DatabaseTenantContext,
+    apply_database_tenant_context,
+    bounded_event_service_context,
+)
 from app.core.operator_evidence import (
     DESKTOP_EVIDENCE_NAMESPACE,
     PROCESSOR_EVENT_REGISTRATION_FORMAT,
@@ -516,6 +522,9 @@ def _authenticate_event(request: Request, db: Session) -> Event:
         raise HTTPException(status_code=401, detail="Empty Bearer token")
 
     secret_hash = _hash_secret(secret)
+    apply_database_tenant_context(
+        db, DatabaseTenantContext(scope="publisher_lookup")
+    )
     event = (
         db.query(Event)
         .filter(Event.publish_secret_hash == secret_hash)
@@ -523,6 +532,12 @@ def _authenticate_event(request: Request, db: Session) -> Event:
     )
     if event is None:
         raise HTTPException(status_code=401, detail="Invalid publish secret")
+    bounded_event_service_context(
+        db,
+        scope="publisher",
+        event_id=event.id,
+        controller_id=event.controller_id,
+    )
     if settings.HA_MODE == "ha":
         pending_protection = db.query(HAProtectionOperation).filter(
             HAProtectionOperation.resource_type == "event",
@@ -578,6 +593,7 @@ def _processor_key_for_event(
     db: Session, event: Event, *, entity_id: str, requested_key_id: str,
 ) -> tuple[ProcessorIdentity, EvidenceKey]:
     identity = db.query(ProcessorIdentity).filter(
+        ProcessorIdentity.controller_id == event.controller_id,
         ProcessorIdentity.event_evidence_id == event.evidence_id,
         ProcessorIdentity.entity_id == entity_id,
         ProcessorIdentity.status == "active",
@@ -587,6 +603,7 @@ def _processor_key_for_event(
     key = db.query(EvidenceKey).filter(
         EvidenceKey.key_id == requested_key_id,
         EvidenceKey.entity_id == identity.entity_id,
+        EvidenceKey.controller_id == event.controller_id,
         EvidenceKey.role == "processor",
         EvidenceKey.activated_at.isnot(None),
         EvidenceKey.revoked_at.is_(None),
@@ -620,7 +637,10 @@ def begin_processor_event_enrolment(
             ProcessorIdentity.instance_id == state.instance_id,
             ProcessorIdentity.entity_id == body.entity_id,
         ).first()
-        if identity is not None and identity.event_evidence_id != event.evidence_id:
+        if identity is not None and (
+            identity.event_evidence_id != event.evidence_id
+            or identity.controller_id != event.controller_id
+        ):
             raise TrustEvidenceError("this processor identity is immutably assigned to another event")
         existing_key = db.query(EvidenceKey).filter(EvidenceKey.key_id == identifier).first()
         if existing_key is not None and identity is not None and identity.active_key_id == identifier:
@@ -633,6 +653,7 @@ def begin_processor_event_enrolment(
             previous = db.query(EvidenceKey).filter(
                 EvidenceKey.key_id == body.supersedes_key_id,
                 EvidenceKey.entity_id == body.entity_id,
+                EvidenceKey.controller_id == event.controller_id,
                 EvidenceKey.role == "processor",
                 EvidenceKey.revoked_at.is_(None),
             ).first()
@@ -642,6 +663,7 @@ def begin_processor_event_enrolment(
             raise TrustEvidenceError("new processor enrolment cannot include a rotation reason")
         duplicate = db.query(EvidenceKeyRegistrationChallenge).filter(
             EvidenceKeyRegistrationChallenge.key_id == identifier,
+            EvidenceKeyRegistrationChallenge.controller_id == event.controller_id,
             EvidenceKeyRegistrationChallenge.event_evidence_id == event.evidence_id,
             EvidenceKeyRegistrationChallenge.used_at.is_(None),
         ).first()
@@ -673,6 +695,7 @@ def begin_processor_event_enrolment(
         challenge = EvidenceKeyRegistrationChallenge(
             challenge_id=document["challenge_id"], purpose=purpose,
             instance_id=state.instance_id, entity_id=body.entity_id,
+            controller_id=event.controller_id,
             event_id=event.id, event_evidence_id=event.evidence_id,
             event_display_name=event.name, display_label=body.display_label,
             public_key=public, public_key_sha256=fingerprint, key_id=identifier,
@@ -705,6 +728,7 @@ def submit_processor_event_proof(
         validate_processor_event_registration(body.challenge)
         challenge = db.query(EvidenceKeyRegistrationChallenge).filter(
             EvidenceKeyRegistrationChallenge.challenge_id == challenge_id,
+            EvidenceKeyRegistrationChallenge.controller_id == event.controller_id,
             EvidenceKeyRegistrationChallenge.event_evidence_id == event.evidence_id,
             EvidenceKeyRegistrationChallenge.used_at.is_(None),
         ).first()
@@ -720,7 +744,10 @@ def submit_processor_event_proof(
             return {"status": "pending_root_approval", "challenge_id": challenge.challenge_id, "key_id": challenge.key_id}
         challenge.possession_proof_sha256 = verify_signature(body.challenge, body.proof, challenge.public_key)
         if challenge.purpose == "rotate":
-            previous = db.query(EvidenceKey).filter(EvidenceKey.key_id == challenge.supersedes_key_id).first()
+            previous = db.query(EvidenceKey).filter(
+                EvidenceKey.key_id == challenge.supersedes_key_id,
+                EvidenceKey.controller_id == event.controller_id,
+            ).first()
             if previous is None:
                 raise TrustEvidenceError("the superseded processor key is unavailable")
             if challenge.rotation_reason == "routine" and body.previous_proof is None:
@@ -739,10 +766,12 @@ def submit_processor_event_proof(
 def processor_event_key_status(request: Request, db: Session = Depends(get_db)):
     event = _authenticate_event(request, db)
     identities = db.query(ProcessorIdentity).filter(
+        ProcessorIdentity.controller_id == event.controller_id,
         ProcessorIdentity.event_evidence_id == event.evidence_id,
     ).order_by(ProcessorIdentity.created_at).all()
     pending = db.query(EvidenceKeyRegistrationChallenge).filter(
         EvidenceKeyRegistrationChallenge.event_evidence_id == event.evidence_id,
+        EvidenceKeyRegistrationChallenge.controller_id == event.controller_id,
         EvidenceKeyRegistrationChallenge.possession_proof_sha256.isnot(None),
         EvidenceKeyRegistrationChallenge.used_at.is_(None),
     ).all()
@@ -782,7 +811,7 @@ def record_processor_policy_acknowledgement(
             document, instance_id=key.instance_id, event_ref=event.evidence_id,
             entity_id=identity.entity_id, row_key_id=key.key_id, fingerprint=key.public_key_sha256,
         )
-        current = current_policy_identity(db)
+        current = current_policy_identity(db, event_id=event.id)
         if current is None or document.get("policy_version") != current[0] or document.get("policy_sha256") != current[1]:
             raise TrustEvidenceError("the permitted-data policy changed; review its current version")
         acknowledged_at = datetime.fromisoformat(str(document["acknowledged_at"]).replace("Z", "+00:00"))
@@ -806,7 +835,9 @@ def record_processor_policy_acknowledgement(
                 "evidence_package_sha256": existing.evidence_package_sha256,
             }
         row = ProcessorPolicyAcknowledgement(
-            instance_id=key.instance_id, event_evidence_id=event.evidence_id,
+            instance_id=key.instance_id, controller_id=event.controller_id,
+            event_id=event.id,
+            event_evidence_id=event.evidence_id,
             entity_id=identity.entity_id, key_id=key.key_id,
             policy_version=current[0], policy_sha256=current[1],
             document_json=rendered.decode("utf-8"), document_sha256=document_digest,
@@ -827,6 +858,8 @@ def record_processor_policy_acknowledgement(
                 "evidence_package_sha256": package_digest,
                 "public_key_sha256": key.public_key_sha256,
             },
+            controller_id=event.controller_id,
+            event_id=event.id,
         )
         db.commit()
         return {
@@ -849,10 +882,11 @@ def current_processor_policy_acknowledgement(
     """Return the Server-authoritative acknowledgement for this event and policy."""
 
     event = _authenticate_event(request, db)
-    current = current_policy_identity(db)
+    current = current_policy_identity(db, event_id=event.id)
     if current is None:
         return {"acknowledged": False, "policy_version": None, "policy_sha256": None}
     row = db.query(ProcessorPolicyAcknowledgement).filter(
+        ProcessorPolicyAcknowledgement.controller_id == event.controller_id,
         ProcessorPolicyAcknowledgement.event_evidence_id == event.evidence_id,
         ProcessorPolicyAcknowledgement.policy_version == current[0],
         ProcessorPolicyAcknowledgement.policy_sha256 == current[1],
@@ -893,6 +927,7 @@ def publish(
     Date-scoped publish replaces only the requested published days.
     """
     event = _authenticate_event(request, db)
+    require_event_feature(event.id, "desktop_publishing", db)
     _require_publishing_allowed(event)
     incoming_schedule_day_range = (
         payload.event.schedule_day_range

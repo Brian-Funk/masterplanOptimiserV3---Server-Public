@@ -13,10 +13,12 @@ def _activate_processor(db, event):
         public_key_sha256="f" * 64,
         instance_id="11111111-1111-4111-8111-111111111111",
         entity_id="prc-synthetic0001", role="processor",
+        controller_id=event.controller_id, event_id=event.id,
         activated_at=datetime.now(timezone.utc),
     )
     identity = ProcessorIdentity(
         instance_id=key.instance_id, entity_id=key.entity_id, event_id=event.id,
+        controller_id=event.controller_id,
         event_evidence_id=event.evidence_id, event_display_name=event.name,
         status="active", active_key_id=key.key_id,
         activated_at=datetime.now(timezone.utc),
@@ -24,12 +26,36 @@ def _activate_processor(db, event):
     db.add_all([key, identity]); db.flush()
 
 
+def _managed_event(db):
+    """Return the exact event belonging to the event-scoped admin fixture."""
+
+    from app.models.event import Event
+    from app.models.user import User
+
+    admin = db.query(User).filter(User.username == "reauth.admin").one()
+    return db.get(Event, admin.event_id)
+
+
+def _reauth_root(db):
+    return _make_client(
+        db,
+        create_test_user(
+            db,
+            username="gdpr.root",
+            display_name="GDPR Root",
+            is_root_admin=True,
+            is_admin=True,
+        ),
+        reauth=True,
+    )
+
+
 # ── GET /admin/users/{id}/export ──
 
 
 def test_gdpr_export(db, reauth_admin_client):
     """A recently re-authenticated admin can export user data."""
-    event, _ = create_test_event(db, name="Evt")
+    event = _managed_event(db)
     user = create_test_user(db, username="exportme", event_id=event.id)
 
     r = reauth_admin_client.get(f"/api/v1/admin/users/{user.id}/export")
@@ -48,7 +74,7 @@ def test_gdpr_export_not_found(db, reauth_admin_client):
 
 def test_gdpr_export_regular_user_blocked(db):
     """Regular users cannot access GDPR export."""
-    event, _ = create_test_event(db, name="Evt")
+    event, _ = create_test_event(db, name="Blocked export")
     user = create_test_user(db, username="noexport", event_id=event.id)
     client = _make_client(db, user)
 
@@ -72,7 +98,7 @@ def test_gdpr_export_requires_reauthentication(db, admin_client):
 
 def test_gdpr_anonymise_server_only_user_is_ready_for_live_purge(db, reauth_admin_client):
     """A server-only account skips the inapplicable desktop work order."""
-    event, _ = create_test_event(db, name="Evt")
+    event = _managed_event(db)
     user = create_test_user(db, username="anonme", event_id=event.id)
 
     r = reauth_admin_client.delete(f"/api/v1/admin/users/{user.id}/gdpr-delete")
@@ -231,10 +257,8 @@ def test_event_erasure_detail_includes_temporary_operator_label(db):
     assert response.json()["event_name"] == "Readable Deletion Event"
 
 
-def test_gdpr_anonymise_activated_unassigned_account_uses_instance_scope(
-    db, reauth_admin_client,
-):
-    """An activated account without an event can still enter signed erasure."""
+def test_root_anonymises_activated_unassigned_account_with_instance_scope(db):
+    """Only root may administer an account outside every event boundary."""
     import uuid
 
     from app.models.deletion import DeletionCase, DesktopDeletionWorkOrder
@@ -242,7 +266,7 @@ def test_gdpr_anonymise_activated_unassigned_account_uses_instance_scope(
 
     user = create_test_user(db, username="unassigned.used", event_id=None)
 
-    response = reauth_admin_client.delete(
+    response = _reauth_root(db).delete(
         f"/api/v1/admin/users/{user.id}/gdpr-delete"
     )
 
@@ -283,7 +307,7 @@ def test_gdpr_anonymise_removes_event_linked_identity_and_audit_name(db, reauth_
         TaskEdit,
     )
 
-    event, _ = create_test_event(db, name="Deletion Event")
+    event = _managed_event(db)
     _activate_processor(db, event)
     person = PublishedPerson(
         event_id=event.id, external_person_id=77,
@@ -498,7 +522,7 @@ def test_duplicate_deletion_request_is_idempotent(db):
 def test_gdpr_delete_keeps_case_link_until_server_only_purge(db, reauth_admin_client):
     from app.models.deletion import DeletionCase
 
-    event, _ = create_test_event(db, name="Deletion evidence")
+    event = _managed_event(db)
     user = create_test_user(db, username="delete.evidence", event_id=event.id)
     client = _make_client(db, user, reauth=True)
     request_id = client.post("/api/v1/user/request-deletion").json()["request_id"]
@@ -525,7 +549,7 @@ def test_root_cannot_request_self_deletion(db, root_client):
 def test_dismiss_deletion_request(db, reauth_admin_client):
     """Admin can dismiss a pending deletion request."""
     from datetime import datetime, timezone
-    event, _ = create_test_event(db, name="Evt")
+    event = _managed_event(db)
     user = create_test_user(db, username="dismiss_target", event_id=event.id)
     client = _make_client(db, user, reauth=True)
     request_id = client.post("/api/v1/user/request-deletion").json()["request_id"]
@@ -545,7 +569,7 @@ def test_dismiss_deletion_request(db, reauth_admin_client):
 
 def test_dismiss_no_pending_request(db, reauth_admin_client):
     """Dismissing when no request is pending → 409."""
-    event, _ = create_test_event(db, name="Evt")
+    event = _managed_event(db)
     user = create_test_user(db, username="no_request", event_id=event.id)
 
     r = reauth_admin_client.delete(f"/api/v1/admin/users/{user.id}/deletion-request")

@@ -30,7 +30,7 @@ AUDIT_ACTIONS = frozenset({
     "auth.reauth", "auth.reauth_failed", "auth.session_revoke", "calendar.commit",
     "calendar.task_edit", "calendar.task_revert", "event.create", "event.import_setup",
     "commissioning.recovery_completed", "commissioning.completed",
-    "event.regenerate_secret", "evidence.export", "evidence.initialise", "evidence.verify",
+    "event.regenerate_secret", "evidence.export", "evidence.controller_export", "evidence.initialise", "evidence.verify",
     "evidence.trust_key.challenge", "evidence.trust_key.proof_verified",
     "evidence.trust_key.root_authorised", "evidence.trust_key.register",
     "evidence.trust_key.rotate", "evidence.trust_key.revoke",
@@ -46,7 +46,10 @@ AUDIT_ACTIONS = frozenset({
     "gdpr.resolve_backups", "gdpr.resolve_outstanding_actions", "gdpr.withdraw_deletion",
     "general_schedule.publish", "governance.data_policy_acknowledged",
     "governance.draft_saved", "governance.event_override_saved",
-    "governance.published", "ha.protection.retry", "ha.replication_requested",
+    "governance.published", "operator.profile_saved", "operator.policy_published",
+    "controller.create", "controller.update", "controller.governance_saved",
+    "controller.governance_published", "tenancy.mode_changed",
+    "ha.protection.retry", "ha.replication_requested",
     "history.delete", "history.restore", "history.update", "passkey.auth_failed",
     "passkey.bootstrap", "passkey.bootstrap_failed", "passkey.delete",
     "passkey.duplicate_denied", "passkey.register", "passkey.registration_failed",
@@ -60,7 +63,7 @@ AUDIT_ACTIONS = frozenset({
 AUDIT_RESOURCE_TYPES = frozenset({
     "activation_email_delivery", "activation_link", "announcement", "credential",
     "deletion_request", "event", "evidence", "governance_publication", "ha_cluster",
-    "instance", "public_schedule_link", "publish_snapshot", "published_task",
+    "instance", "operator", "controller", "public_schedule_link", "publish_snapshot", "published_task",
     "settings", "user",
 })
 AUDIT_OUTCOMES = frozenset({"success", "denied", "error"})
@@ -129,6 +132,8 @@ def audit(
     detail: Optional[str] = None,
     request: Optional[Request] = None,
     outcome: str = "success",
+    controller_id: Optional[int] = None,
+    event_id: Optional[int] = None,
 ) -> AuditLog:
     """Create one schema-bound, minimised audit entry (uncommitted)."""
     if action not in AUDIT_ACTIONS:
@@ -141,6 +146,16 @@ def audit(
     if request is not None:
         ip_hash = _hash_ip(request.client.host if request.client else None)
 
+    if user is not None and not user.is_root_admin and event_id is None:
+        event_id = user.event_id
+    if event_id is not None and controller_id is None:
+        from app.models.event import Event
+
+        event = db.get(Event, event_id)
+        if event is None:
+            raise ValueError("audit event does not exist")
+        controller_id = event.controller_id
+
     entry = AuditLog(
         user_id=user.id if user else None,
         username=None,
@@ -151,6 +166,8 @@ def audit(
         detail=_canonical_detail(detail),
         ip_hash=ip_hash,
         outcome=outcome,
+        controller_id=controller_id,
+        event_id=event_id,
     )
     db.add(entry)
     return entry

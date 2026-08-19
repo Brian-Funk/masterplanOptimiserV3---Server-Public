@@ -37,6 +37,7 @@ import { SnapshotComparisonModal } from "@/components/SnapshotComparisonModal";
 import { MobileActionSheet } from "@/components/MobileActionSheet";
 import { ComplianceEvidenceTab } from "@/components/ComplianceEvidenceTab";
 import { AdminNavigation, type AdminTab } from "@/components/AdminNavigation";
+import { ControllerTenancyTab } from "@/components/ControllerTenancyTab";
 import { PermittedDataInputNotice } from "@/components/PermittedDataInputNotice";
 import {
   canManagePublicScheduleLinks,
@@ -152,6 +153,8 @@ function activationQrPath(
 // ---------------------------------------------------------------------------
 interface Event {
   id: number;
+  controller_public_id?: string | null;
+  controller_name?: string | null;
   name: string;
   location: string | null;
   start_date: string | null;
@@ -166,6 +169,14 @@ interface Event {
   protection_state?: string | null;
   protection_stage?: string | null;
   protection_error_code?: string | null;
+}
+
+interface ControllerOption {
+  public_id: string;
+  display_name: string;
+  status: "draft" | "active" | "suspended" | "retired";
+  latest_governance_version: number | null;
+  latest_governance_sha256: string | null;
 }
 
 interface AdminUser {
@@ -283,6 +294,7 @@ function createBulkUserDraft(): BulkUserDraft {
 
 const ADMIN_TABS: AdminTab[] = [
   "events",
+  "tenancy",
   "users",
   "announcements",
   "history",
@@ -321,7 +333,7 @@ function resolveAdminTab(
   if (!requested || !ADMIN_TABS.includes(requested as AdminTab)) return fallback;
 
   const requestedTab = requested as AdminTab;
-  if (!user.is_root_admin && ["security", "privacy", "ha"].includes(requestedTab)) {
+  if (!user.is_root_admin && ["tenancy", "security", "privacy", "ha"].includes(requestedTab)) {
     return fallback;
   }
   if (issuerOnly && ["events", "audit"].includes(requestedTab)) return fallback;
@@ -591,6 +603,9 @@ function AdminPageContent() {
             onOpenPrivacy={() => setTab("privacy")}
           />
         )}
+        {tab === "tenancy" && user?.is_root_admin && (
+          <ControllerTenancyTab events={events} />
+        )}
         {tab === "users" && (
           <UsersTab
             users={users}
@@ -656,7 +671,11 @@ function EventsTab({
     location: "",
     start_date: "",
     end_date: "",
+    controller_public_id: "",
   });
+  const [hostedMode, setHostedMode] = useState(false);
+  const [controllers, setControllers] = useState<ControllerOption[]>([]);
+  const [importControllerPublicId, setImportControllerPublicId] = useState("");
   const [createdSecret, setCreatedSecret] = useState("");
   const [eventPolicyAcknowledged, setEventPolicyAcknowledged] = useState(false);
   const [eventPolicy, setEventPolicy] = useState<{
@@ -733,9 +752,54 @@ function EventsTab({
   }, [monitorSecretProtection]);
 
   useEffect(() => {
-    apiFetch("/api/v1/governance/public")
+    Promise.all([
+      apiFetch("/api/v1/admin/tenancy"),
+      apiFetch("/api/v1/admin/controllers"),
+    ]).then(async ([tenancyResponse, controllerResponse]) => {
+      const tenancy = tenancyResponse.ok ? await tenancyResponse.json() : null;
+      const rows = controllerResponse.ok
+        ? await controllerResponse.json() as ControllerOption[]
+        : [];
+      const isHosted = tenancy?.configured_mode === "hosted-multi-controller";
+      setHostedMode(isHosted);
+      setControllers(rows);
+      const firstActive = rows.find((item) => item.status === "active")?.public_id || "";
+      setNewEvent((current) => ({
+        ...current,
+        controller_public_id: current.controller_public_id || firstActive,
+      }));
+      setImportControllerPublicId((current) => current || firstActive);
+    }).catch(() => {
+      setHostedMode(false);
+      setControllers([]);
+    });
+  }, []);
+
+  useEffect(() => {
+    setEventPolicyAcknowledged(false);
+    const controllerId = newEvent.controller_public_id;
+    const path = hostedMode && controllerId
+      ? `/api/v1/legal/controllers/${controllerId}`
+      : "/api/v1/governance/public";
+    apiFetch(path)
       .then((response) => response.ok ? response.json() : null)
       .then((policy) => {
+        if (hostedMode) {
+          if (policy?.version && policy.sha256 && policy.policy) {
+            setEventPolicy({
+              version: policy.version,
+              sha256: policy.sha256,
+              controller: policy.policy.legal_name || "The selected controller",
+              purpose: policy.policy.governance?.permitted_data?.purpose
+                || "Operational event scheduling and access management",
+              allowed: policy.policy.governance?.permitted_data?.allowed || [],
+              unsupported: policy.policy.governance?.permitted_data?.unsupported || [],
+            });
+          } else {
+            setEventPolicy(null);
+          }
+          return;
+        }
         if (policy?.configured && policy.version && policy.content_sha256) {
           setEventPolicy({
             version: policy.version,
@@ -745,13 +809,23 @@ function EventsTab({
             allowed: policy.permitted_data?.allowed || [],
             unsupported: policy.permitted_data?.unsupported || [],
           });
+        } else {
+          setEventPolicy(null);
         }
       })
       .catch(() => setEventPolicy(null));
-  }, []);
+  }, [hostedMode, newEvent.controller_public_id]);
 
   const handleCreate = async () => {
     if (!newEvent.name.trim()) return;
+    if (hostedMode && !newEvent.controller_public_id) {
+      setEventError("Select an active legal controller before creating the event.");
+      return;
+    }
+    if (hostedMode && !eventPolicy) {
+      setEventError("Publish the selected controller's governance before creating the event.");
+      return;
+    }
     if (dateRangeError) {
       setEventError(dateRangeError);
       return;
@@ -766,6 +840,7 @@ function EventsTab({
         location: newEvent.location || null,
         start_date: newEvent.start_date || null,
         end_date: newEvent.end_date || null,
+        controller_public_id: newEvent.controller_public_id || null,
         policy_version: eventPolicyAcknowledged ? eventPolicy?.version : null,
         policy_sha256: eventPolicyAcknowledged ? eventPolicy?.sha256 : null,
         publish_secret: publishSecret,
@@ -801,7 +876,13 @@ function EventsTab({
       } else {
         setCreatedSecret(data.publish_secret || publishSecret);
       }
-      setNewEvent({ name: "", location: "", start_date: "", end_date: "" });
+      setNewEvent((current) => ({
+        name: "",
+        location: "",
+        start_date: "",
+        end_date: "",
+        controller_public_id: current.controller_public_id,
+      }));
       setEventPolicyAcknowledged(false);
       setShowCreate(false);
       onRefresh();
@@ -980,6 +1061,10 @@ function EventsTab({
     try {
       const text = await file.text();
       const payload = JSON.parse(text);
+      if (hostedMode && !importControllerPublicId) {
+        throw new Error("Select an active legal controller before importing the setup.");
+      }
+      if (hostedMode) payload.controller_public_id = importControllerPublicId;
       const publishSecret = randomSecret();
       const idempotencyKey = newIdempotencyKey();
       payload.publish_secret = publishSecret;
@@ -1104,6 +1189,21 @@ function EventsTab({
             Upload a JSON file exported from the desktop app to create an event
             with users.
           </p>
+          {hostedMode && (
+            <label className="mb-3 block text-sm font-medium text-gray-700 dark:text-gray-200">
+              Legal controller
+              <select
+                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-900"
+                value={importControllerPublicId}
+                onChange={(event) => setImportControllerPublicId(event.target.value)}
+              >
+                <option value="">Select controller</option>
+                {controllers.filter((item) => item.status === "active").map((item) => (
+                  <option key={item.public_id} value={item.public_id}>{item.display_name}</option>
+                ))}
+              </select>
+            </label>
+          )}
           <input
             type="file"
             accept=".json"
@@ -1197,6 +1297,24 @@ function EventsTab({
       {showCreate && (
         <Card className="p-4 mb-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+            {hostedMode && (
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 sm:col-span-2">
+                Legal controller
+                <select
+                  className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-900"
+                  value={newEvent.controller_public_id}
+                  onChange={(event) => setNewEvent((current) => ({
+                    ...current,
+                    controller_public_id: event.target.value,
+                  }))}
+                >
+                  <option value="">Select controller</option>
+                  {controllers.filter((item) => item.status === "active").map((item) => (
+                    <option key={item.public_id} value={item.public_id}>{item.display_name}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             <Input
               label="Participant-visible event name"
               value={newEvent.name}
@@ -1254,7 +1372,9 @@ function EventsTab({
             variant="primary"
             size="sm"
             onClick={handleCreate}
-            disabled={creating || Boolean(dateRangeError) || !newEvent.name.trim() || (Boolean(eventPolicy) && !eventPolicyAcknowledged)}
+            disabled={creating || Boolean(dateRangeError) || !newEvent.name.trim()
+              || (hostedMode && (!newEvent.controller_public_id || !eventPolicy))
+              || (Boolean(eventPolicy) && !eventPolicyAcknowledged)}
           >
             {creating ? "Creating and protecting on standby..." : "Create Event"}
           </Button>
@@ -1312,6 +1432,11 @@ function EventsTab({
                       ? `${fmtDate(ev.start_date)} → ${fmtDate(ev.end_date)}`
                       : fmtDate(ev.start_date) || "No dates"}
                   </p>
+                  {isRootAdmin && ev.controller_name && (
+                    <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      Controller: {ev.controller_name}
+                    </p>
+                  )}
                   {ev.status === "securing" && (
                     <div className="mt-1">
                       <p className="text-xs font-medium text-blue-700 dark:text-blue-300" role="status">

@@ -132,7 +132,9 @@ def test_delete_snapshot_admin_only(db):
     """A re-authenticated admin can delete a snapshot."""
     event, _ = create_test_event(db, name="Evt")
     _create_snapshot(db, event.id, version=1)
-    admin = create_test_user(db, username="delete.snapshot", is_admin=True)
+    admin = create_test_user(
+        db, username="delete.snapshot", is_admin=True, event_id=event.id,
+    )
     client = _make_client(db, admin, reauth=True)
 
     r = client.delete(f"/api/v1/admin/events/{event.id}/history/1")
@@ -143,7 +145,9 @@ def test_delete_snapshot_frozen_blocked(db):
     """Cannot delete a frozen snapshot."""
     event, _ = create_test_event(db, name="Evt")
     _create_snapshot(db, event.id, version=1, frozen=True)
-    admin = create_test_user(db, username="delete.frozen", is_admin=True)
+    admin = create_test_user(
+        db, username="delete.frozen", is_admin=True, event_id=event.id,
+    )
     client = _make_client(db, admin, reauth=True)
 
     r = client.delete(f"/api/v1/admin/events/{event.id}/history/1")

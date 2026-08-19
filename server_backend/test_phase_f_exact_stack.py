@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 from app.models.deletion import DeletionCase
+from app.core.tenancy import assign_event_membership
 from server_backend.conftest import _make_client, _raw_client, create_test_event, create_test_user
 
 
@@ -56,6 +57,7 @@ def test_current_format_publication_participant_organiser_and_deletion_flow(db) 
         event_id=event.id,
     )
     participant.linked_person_id = 73
+    assign_event_membership(db, participant, event, linked_person_id=73)
     participant.evidence_subject_id = subject_id
     organiser = create_test_user(
         db,

@@ -39,6 +39,7 @@ from app.models.deletion import DeletionCase
 from app.core.sessions import _hash_token
 from app.core.rate_limit import limiter
 from app.core.config import settings
+from app.core.tenancy import assign_event_membership, ensure_default_tenancy
 
 from fastapi.testclient import TestClient
 
@@ -110,6 +111,8 @@ def db() -> Generator[Session, None, None]:
     limiter.reset()
     session = TestingSessionLocal()
     try:
+        ensure_default_tenancy(session)
+        session.commit()
         yield session
     finally:
         session.close()
@@ -151,11 +154,13 @@ def create_test_event(
     db: Session,
     name: str = "Test Event",
     publish_secret: str | None = None,
+    controller_id: int = 1,
 ) -> tuple[Event, str]:
     """Create an event and return (event, raw_publish_secret)."""
     raw_secret = publish_secret or secrets.token_urlsafe(48)
     secret_hash = hashlib.sha256(raw_secret.encode()).hexdigest()
     event = Event(
+        controller_id=controller_id,
         name=name,
         status="draft",
         publish_secret_hash=secret_hash,
@@ -192,6 +197,12 @@ def create_test_user(
         is_activated=is_activated,
     )
     db.add(user)
+    db.flush()
+    if not is_root_admin and event_id is not None:
+        event = db.get(Event, event_id)
+        if event is None:
+            raise ValueError("Test user event does not exist")
+        assign_event_membership(db, user, event)
     db.commit()
     db.refresh(user)
     return user
@@ -313,6 +324,21 @@ def root_client(db: Session) -> Client:
         is_root_admin=True, is_admin=True, event_id=None,
     )
     return _make_client(db, user)
+
+
+@pytest.fixture
+def reauth_root_client(db: Session) -> Client:
+    """Client authenticated as root with a recent passkey proof."""
+    create_test_event(db, name="Reauthenticated Root Event")
+    user = create_test_user(
+        db,
+        username="reauth.root",
+        display_name="Reauthenticated Root",
+        is_root_admin=True,
+        is_admin=True,
+        event_id=None,
+    )
+    return _make_client(db, user, reauth=True)
 
 
 @pytest.fixture

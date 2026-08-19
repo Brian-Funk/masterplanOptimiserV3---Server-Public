@@ -33,6 +33,7 @@ def _controller_key(db) -> EvidenceKey:
         public_key_sha256=digest,
         instance_id=stable_instance_id(db),
         entity_id="ctl-commissioning01",
+        controller_id=1,
         role="controller",
         activated_at=datetime.now(timezone.utc),
         trust_establishment_sha256="b" * 64,

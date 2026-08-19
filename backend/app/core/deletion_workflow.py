@@ -25,7 +25,13 @@ from app.models.deletion import (
     DeletionSubjectScope,
     DesktopDeletionWorkOrder,
 )
-from app.models.evidence import BackupInventoryRecord, PrivacyActionReceipt
+from app.models.evidence import (
+    BackupInventoryRecord,
+    EvidenceKey,
+    EvidenceKeyRegistrationChallenge,
+    PrivacyActionReceipt,
+    ProcessorIdentity,
+)
 from app.models.event import Event
 from app.models.notification import PushSubscription
 from app.models.published import (
@@ -697,6 +703,25 @@ def purge_event_live_data(db: Session, job: DeletionCase, event: Event) -> None:
         DesktopDeletionWorkOrder.case_id == job.id,
     ):
         work_order.event_id = None
+    # The event-specific Desktop trust assignment ends with the event, while
+    # its non-secret provenance remains available to root for evidence and
+    # deletion verification.  Revoke before the FK clears the event scope so
+    # no active processor identity can become unscoped.
+    for identity in db.query(ProcessorIdentity).filter(
+        ProcessorIdentity.event_id == event.id,
+    ):
+        identity.status = "revoked"
+        identity.revoked_at = now
+    for key in db.query(EvidenceKey).filter(
+        EvidenceKey.role == "processor",
+        EvidenceKey.event_id == event.id,
+    ):
+        if key.revoked_at is None:
+            key.revoked_at = now
+            key.revocation_reason = "role_changed"
+    db.query(EvidenceKeyRegistrationChallenge).filter(
+        EvidenceKeyRegistrationChallenge.event_id == event.id,
+    ).delete(synchronize_session=False)
     db.delete(event)
     db.flush()
     job.live_data_purged_at = now
