@@ -14,6 +14,8 @@ export interface PresentedFieldDefinition {
 export interface PresentableTask {
   name: string;
   task_type_name?: string | null;
+  location_name?: string | null;
+  location_address?: string | null;
   attendees: PresentedAttendee[];
   field_assignments?: Record<string, PresentedAttendee[]> | null;
   field_values?: Record<string, unknown> | null;
@@ -34,6 +36,12 @@ export interface TaskOperationalField {
   value: string;
   secondary?: string;
   href?: string;
+}
+
+export interface TaskLocation {
+  fieldId: string | null;
+  name: string;
+  address?: string;
 }
 
 function safeHttpUrl(value: string): string | null {
@@ -88,6 +96,49 @@ export function taskTypeBadge(task: PresentableTask): string | null {
     : typeName;
 }
 
+/**
+ * Return the task's structured location route. Published location fields take
+ * precedence over the legacy top-level location so the same place is never
+ * rendered twice.
+ */
+export function taskLocations(task: PresentableTask): TaskLocation[] {
+  const values = task.field_values ?? {};
+  const structured: TaskLocation[] = [];
+  for (const definition of task.field_definitions ?? []) {
+    if (definition.type !== "location") continue;
+    const raw = values[definition.id];
+    if (raw === null || raw === undefined || raw === "") continue;
+    const location = typeof raw === "object" && raw !== null
+      ? raw as { name?: unknown; address?: unknown }
+      : { name: raw };
+    const name = String(location.name ?? "").trim();
+    if (!name) continue;
+    const address = String(location.address ?? "").trim();
+    structured.push({
+      fieldId: definition.id,
+      name,
+      ...(address ? { address } : {}),
+    });
+  }
+  if (structured.length > 0) return structured;
+
+  const name = task.location_name?.trim();
+  if (!name) return [];
+  const address = task.location_address?.trim();
+  return [{
+    fieldId: null,
+    name,
+    ...(address ? { address } : {}),
+  }];
+}
+
+export function taskLocationRoute(task: PresentableTask): string | null {
+  const locations = taskLocations(task);
+  return locations.length > 0
+    ? locations.map((location) => location.name).join(" → ")
+    : null;
+}
+
 /** Convert each bounded non-allocation field into one labelled display row. */
 export function taskOperationalFields(
   task: PresentableTask,
@@ -95,7 +146,13 @@ export function taskOperationalFields(
   const values = task.field_values ?? {};
   const rows: TaskOperationalField[] = [];
   for (const definition of task.field_definitions ?? []) {
-    if (definition.type === "persons_list") continue;
+    if (
+      definition.type === "persons_list"
+      || definition.type === "capabilities_list"
+      || definition.type === "location"
+      || definition.type === "start_end_time"
+      || definition.type === "time_range"
+    ) continue;
     const raw = values[definition.id];
     if (raw === null || raw === undefined || raw === "") continue;
 
@@ -118,46 +175,8 @@ export function taskOperationalFields(
         fieldId: definition.id,
         label: definition.name,
         type: definition.type,
-        value: String(candidate.text || candidate.url),
+        value: href,
         href,
-      });
-      continue;
-    }
-    if (definition.type === "location") {
-      const location = typeof raw === "object" && raw !== null
-        ? raw as { name?: unknown; address?: unknown }
-        : { name: raw };
-      const name = String(location.name ?? "").trim();
-      if (name) rows.push({
-        fieldId: definition.id,
-        label: definition.name,
-        type: definition.type,
-        value: name,
-        secondary: location.address ? String(location.address) : undefined,
-      });
-      continue;
-    }
-    if (definition.type === "capabilities_list" && Array.isArray(raw)) {
-      const value = raw.map(String).filter(Boolean).join(", ");
-      if (value) rows.push({
-        fieldId: definition.id,
-        label: definition.name,
-        type: definition.type,
-        value,
-      });
-      continue;
-    }
-    if (
-      (definition.type === "start_end_time" || definition.type === "time_range")
-      && typeof raw === "object"
-      && raw !== null
-    ) {
-      const range = raw as { start?: unknown; end?: unknown };
-      if (range.start !== undefined && range.end !== undefined) rows.push({
-        fieldId: definition.id,
-        label: definition.name,
-        type: definition.type,
-        value: `${String(range.start)} – ${String(range.end)}`,
       });
       continue;
     }

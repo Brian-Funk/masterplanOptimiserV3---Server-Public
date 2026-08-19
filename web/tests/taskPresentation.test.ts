@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   taskAllocations,
+  taskLocationRoute,
+  taskLocations,
   taskOperationalFields,
   taskTypeBadge,
 } from "@/lib/taskPresentation";
@@ -72,12 +74,42 @@ describe("task presentation", () => {
     expect(taskOperationalFields(structuredTask)).toEqual([
       { fieldId: "first_note", label: "Field_A", type: "text", value: "First paragraph\nSecond paragraph" },
       { fieldId: "second_note", label: "Field_B", type: "text", value: "Another value" },
-      { fieldId: "handbook", label: "Reference", type: "link", value: "Handbook", href: "https://example.test/handbook" },
-      { fieldId: "room", label: "Meeting place", type: "location", value: "Assembly Hall", secondary: "Synthetic Street 1" },
-      { fieldId: "required", label: "Capabilities", type: "capabilities_list", value: "Chairing, Minutes" },
+      { fieldId: "handbook", label: "Reference", type: "link", value: "https://example.test/handbook", href: "https://example.test/handbook" },
       { fieldId: "duration", label: "Duration", type: "duration", value: "45" },
-      { fieldId: "window", label: "Window", type: "start_end_time", value: "09:00 – 10:00" },
     ]);
+  });
+
+  it("presents structured locations once as an ordered route", () => {
+    const routeTask = {
+      ...structuredTask,
+      location_name: "Legacy duplicate",
+      field_values: {
+        ...structuredTask.field_values,
+        destination: { name: "HSLU", address: "Synthetic Street 2" },
+      },
+      field_definitions: [
+        ...structuredTask.field_definitions,
+        { id: "destination", name: "Destination", type: "location" },
+      ],
+    };
+    expect(taskLocationRoute(routeTask)).toBe("Assembly Hall → HSLU");
+    expect(taskLocations(routeTask)).toEqual([
+      { fieldId: "room", name: "Assembly Hall", address: "Synthetic Street 1" },
+      { fieldId: "destination", name: "HSLU", address: "Synthetic Street 2" },
+    ]);
+  });
+
+  it("falls back to the legacy top-level location", () => {
+    expect(taskLocations({
+      name: "Legacy location",
+      attendees: [],
+      location_name: "Hostel",
+      location_address: "Synthetic Street 3",
+    })).toEqual([{
+      fieldId: null,
+      name: "Hostel",
+      address: "Synthetic Street 3",
+    }]);
   });
 
   it("omits a redundant task-type badge", () => {
