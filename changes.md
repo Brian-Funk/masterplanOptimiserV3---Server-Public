@@ -7,6 +7,8 @@
   every authenticated task view.
 - Render multiple locations as one ordered route with address links, and show
   non-location references using their exact safe URL as the link text.
+- Keep root desktop user-management event, search and sort filters on the
+  Users tab, including browser back and forward navigation.
 
 ## 3.9.17 — 19 August 2026
 

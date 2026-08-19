@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState, useEffect, useCallback } from "react";
+import { Suspense, useState, useEffect, useCallback, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
 import { useServiceAvailability } from "@/contexts/ServiceAvailabilityContext";
@@ -557,6 +557,10 @@ function AdminPageContent() {
                 const value = e.target.value ? Number(e.target.value) : "";
                 setSelectedEvent(value);
                 const nextParams = new URLSearchParams(queryString);
+                // Keep the current section authoritative while the event
+                // context changes. Without this, a stale URL update can drop
+                // `tab=users` and resolve the root view back to Events.
+                nextParams.set("tab", tab);
                 if (value) {
                   nextParams.set("event", String(value));
                 } else {
@@ -593,6 +597,7 @@ function AdminPageContent() {
             events={events}
             onRefresh={fetchData}
             selectedEventId={selectedEvent}
+            queryString={queryString}
             isIssuerOnly={!!isIssuerOnly}
             isRootAdmin={!!user?.is_root_admin}
             onOpenPrivacy={() => setTab("privacy")}
@@ -1467,6 +1472,7 @@ function UsersTab({
   events,
   onRefresh,
   selectedEventId,
+  queryString,
   isIssuerOnly,
   isRootAdmin,
   onOpenPrivacy,
@@ -1475,10 +1481,13 @@ function UsersTab({
   events: Event[];
   onRefresh: () => void;
   selectedEventId: number | "";
+  queryString: string;
   isIssuerOnly: boolean;
   isRootAdmin: boolean;
   onOpenPrivacy: () => void;
 }) {
+  const router = useRouter();
+  const initialUserParams = new URLSearchParams(queryString);
   const [showCreate, setShowCreate] = useState(false);
   const [newUser, setNewUser] = useState({
     username: "",
@@ -1548,8 +1557,12 @@ function UsersTab({
     message: string;
   } | null>(null);
   const [tagInput, setTagInput] = useState<Record<number, string>>({});
-  const [filterTag, setFilterTag] = useState<string>("");
-  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [filterTag, setFilterTag] = useState<string>(
+    () => initialUserParams.get("user_filter") || "",
+  );
+  const [searchQuery, setSearchQuery] = useState<string>(
+    () => initialUserParams.get("user_q") || "",
+  );
   const [massTagInput, setMassTagInput] = useState("");
   const [massTagBusy, setMassTagBusy] = useState(false);
   const [tagManagerOpen, setTagManagerOpen] = useState(false);
@@ -1560,7 +1573,10 @@ function UsersTab({
     userId: number;
     message: string;
   } | null>(null);
-  const [sortBy, setSortBy] = useState<"name" | "status" | "recent">("name");
+  const [sortBy, setSortBy] = useState<"name" | "status" | "recent">(() => {
+    const requested = initialUserParams.get("user_sort");
+    return requested === "status" || requested === "recent" ? requested : "name";
+  });
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [batchLinks, setBatchLinks] = useState<
     Array<{
@@ -1604,27 +1620,42 @@ function UsersTab({
   } | null>(null);
 
   const [persons, setPersons] = useState<Record<number, PublishedPerson[]>>({});
+  const currentQueryRef = useRef(queryString);
+  const lastWrittenQueryRef = useRef<string | null>(null);
+  currentQueryRef.current = queryString;
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
+    if (lastWrittenQueryRef.current === queryString) {
+      lastWrittenQueryRef.current = null;
+      return;
+    }
+    const params = new URLSearchParams(queryString);
     setSearchQuery(params.get("user_q") || "");
     setFilterTag(params.get("user_filter") || "");
     const requestedSort = params.get("user_sort");
-    if (requestedSort === "status" || requestedSort === "recent") setSortBy(requestedSort);
-  }, []);
+    setSortBy(
+      requestedSort === "status" || requestedSort === "recent"
+        ? requestedSort
+        : "name",
+    );
+  }, [queryString]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const url = new URL(window.location.href);
-    if (searchQuery) url.searchParams.set("user_q", searchQuery);
-    else url.searchParams.delete("user_q");
-    if (filterTag) url.searchParams.set("user_filter", filterTag);
-    else url.searchParams.delete("user_filter");
-    if (sortBy !== "name") url.searchParams.set("user_sort", sortBy);
-    else url.searchParams.delete("user_sort");
-    window.history.replaceState({}, "", url);
-  }, [searchQuery, filterTag, sortBy]);
+    const currentQuery = currentQueryRef.current;
+    const nextParams = new URLSearchParams(currentQuery);
+    nextParams.set("tab", "users");
+    if (searchQuery) nextParams.set("user_q", searchQuery);
+    else nextParams.delete("user_q");
+    if (filterTag) nextParams.set("user_filter", filterTag);
+    else nextParams.delete("user_filter");
+    if (sortBy !== "name") nextParams.set("user_sort", sortBy);
+    else nextParams.delete("user_sort");
+    const nextQuery = nextParams.toString();
+    if (nextQuery !== currentQuery) {
+      lastWrittenQueryRef.current = nextQuery;
+      router.replace(`/admin?${nextQuery}`, { scroll: false });
+    }
+  }, [filterTag, router, searchQuery, sortBy]);
 
   useEffect(() => {
     setSelectedIds(new Set());
