@@ -15,6 +15,8 @@ import { TASK_COLORS, ALERT_COLOR } from "@/lib/colors";
 import { describeWebEditTask } from "@/lib/webEditConfidence";
 import {
   taskAllocations,
+  taskLocationRoute,
+  taskLocations,
   taskOperationalFields,
   taskTypeBadge,
 } from "@/lib/taskPresentation";
@@ -371,6 +373,8 @@ export function TaskDetailModal({
   };
 
   const allocations = taskAllocations(task);
+  const locations = taskLocations(task);
+  const locationRoute = taskLocationRoute(task);
   const editableAssignmentFields = getStructuredAssignmentFields(task);
   const hasStructuredAssignments = editableAssignmentFields.length > 0;
   const operationalFields = taskOperationalFields(task);
@@ -831,24 +835,25 @@ export function TaskDetailModal({
                 </p>
               </div>
 
-              {task.location_name ? (
+              {locationRoute ? (
                 <div>
                   <h4 className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-1">
                     Location
                   </h4>
                   <p className="text-sm text-gray-900 dark:text-gray-100">
-                    {task.location_name}
+                    {locationRoute}
                   </p>
-                  {task.location_address && (
+                  {locations.map((location) => location.address ? (
                     <a
-                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(task.location_address)}`}
+                      key={`${location.fieldId ?? "legacy"}-${location.address}`}
+                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(location.address)}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-xs text-blue-600 dark:text-blue-400 hover:underline block"
+                      className="block text-xs text-blue-600 hover:underline dark:text-blue-400"
                     >
-                      {task.location_address}
+                      {location.address}
                     </a>
-                  )}
+                  ) : null)}
                 </div>
               ) : null}
 

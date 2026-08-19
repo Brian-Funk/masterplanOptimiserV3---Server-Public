@@ -197,6 +197,48 @@ describe("Admin users", () => {
     expect(eventContext).toHaveValue("");
   });
 
+  it("keeps the root Users tab active while event and search filters change", async () => {
+    mockNavigation.searchParams = new URLSearchParams("tab=users");
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/events") return jsonResponse([event]);
+      if (path === "/api/v1/admin/users") return jsonResponse([{
+        ...issuerUser,
+        id: 21,
+        display_name: "Brian Example",
+        username: "brian.example",
+        is_issuer: false,
+      }]);
+      return jsonResponse([]);
+    });
+
+    const user = userEvent.setup();
+    const { rerender } = render(<AdminPage />);
+    const eventContext = await screen.findByLabelText("Event context");
+    expect(screen.getByPlaceholderText("Search users...")).toBeInTheDocument();
+
+    await user.selectOptions(eventContext, "7");
+    expect(mockReplace).toHaveBeenCalledWith("/admin?tab=users&event=7");
+
+    mockNavigation.searchParams = new URLSearchParams("tab=users&event=7");
+    rerender(<AdminPage />);
+    const search = await screen.findByPlaceholderText("Search users...");
+    await user.type(search, "B");
+
+    await waitFor(() => expect(mockReplace).toHaveBeenCalledWith(
+      "/admin?tab=users&event=7&user_q=B",
+      { scroll: false },
+    ));
+    expect(screen.getByText("Brian Example")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New Event" })).not.toBeInTheDocument();
+
+    mockNavigation.searchParams = new URLSearchParams("tab=users&event=7&user_q=B");
+    rerender(<AdminPage />);
+    mockNavigation.searchParams = new URLSearchParams("tab=users&event=7");
+    rerender(<AdminPage />);
+    await waitFor(() => expect(search).toHaveValue(""));
+    expect(screen.getByPlaceholderText("Search users...")).toBeInTheDocument();
+  });
+
   it("starts an accountable event deletion case instead of calling direct deletion", async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === "/api/v1/admin/events") return jsonResponse([event]);

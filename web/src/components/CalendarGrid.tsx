@@ -6,6 +6,7 @@ import { layoutCalendarIntervals } from "@/lib/calendarIntervalLayout";
 import { describeWebEditTask } from "@/lib/webEditConfidence";
 import {
   taskAllocations,
+  taskLocationRoute,
   taskOperationalFields,
 } from "@/lib/taskPresentation";
 import {
@@ -142,12 +143,7 @@ function CalendarGridCard({
 
   const allocations = taskAllocations(task);
   const operationalFields = taskOperationalFields(task);
-  const locationValues = operationalFields
-    .filter((field) => field.type === "location")
-    .map((field) => field.value);
-  const locationDisplay = locationValues.length > 0
-    ? locationValues.join(" · ")
-    : task.location_name || null;
+  const locationDisplay = taskLocationRoute(task);
   const webEditDescription = task.has_web_edit ? describeWebEditTask(task) : "";
 
   return (
