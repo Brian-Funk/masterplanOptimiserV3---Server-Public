@@ -216,12 +216,17 @@ mp_queue_ha_replication() {
 # parents.  Existing ancestors are validation boundaries and are never
 # replaced or re-owned here.
 mp_create_private_owner_directory_chain() {
-    local directory="${1:-}" parent owner
+    local directory="${1:-}" parent owner resolved mode
     [ -n "$directory" ] && [ "${directory#/}" != "$directory" ] || return 1
+    resolved="$(realpath -m -- "$directory" 2>/dev/null)" || return 1
+    [ "$resolved" = "$directory" ] || return 1
     owner="$(id -u):$(id -g)"
     if [ -e "$directory" ] || [ -L "$directory" ]; then
         [ -d "$directory" ] && [ ! -L "$directory" ] \
-            && [ "$(stat -c '%u:%g' "$directory" 2>/dev/null)" = "$owner" ]
+            && [ "$(stat -c '%u:%g' "$directory" 2>/dev/null)" = "$owner" ] \
+            || return 1
+        mode="$(stat -c '%a' "$directory" 2>/dev/null)" || return 1
+        (( (8#$mode & 0022) == 0 ))
         return
     fi
     parent="$(dirname -- "$directory")"

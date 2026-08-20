@@ -142,6 +142,34 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_initialise_paths_rejects_writable_fresh_host_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            home = root / "deploy-home"
+            home.mkdir(mode=0o700)
+            unsafe = home / ".config"
+            unsafe.mkdir(mode=0o770)
+            unsafe.chmod(0o770)
+            script = r'''
+                set -Eeuo pipefail
+                export HOME="$1"
+                export MP_HOME="$HOME/.config/mp-opt-server"
+                export MP_STATE="$HOME/.local/state/mp-opt-server"
+                export MP_SNAPSHOTS="$HOME/masterplan-snapshots"
+                export MP_AUDIT_FILE="$MP_STATE/management.log"
+                export MP_LOCK_FILE="$MP_STATE/management.lock"
+                source "$2/deploy/management/common.sh"
+                ! mp_initialise_paths
+                test ! -e "$MP_HOME"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(home), str(ROOT)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def invoke(
         self,
         environment: dict[str, str],
