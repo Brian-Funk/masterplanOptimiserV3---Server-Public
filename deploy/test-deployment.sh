@@ -1373,9 +1373,16 @@ internal_finalize_peer() {
          and ((.completed // []) | index("application_deployed") != null)' \
         "$setup_state" >/dev/null 2>&1 \
         && [ "$(jq -r '.current_commit // empty' "$MP_TEST_STATE_FILE" 2>/dev/null || true)" = "$target" ]; then
-        mp_compose_init
-        "${MP_COMPOSE[@]}" exec -T backend python -c \
-            'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=5).read()' >/dev/null
+        # Receiver activation replaces the Backend container immediately before
+        # peer finalisation.  Compose returning from that replacement does not
+        # prove that Uvicorn has bound its socket yet, so use the same bounded
+        # local Backend readiness contract as candidate activation.  A single
+        # immediate probe made conversion and replacement depend on startup
+        # timing even though the accepted bundle was already durable.
+        mp_wait_for_backend_health 45 || {
+            ui_error "The exact candidate peer Backend did not become healthy within the bounded startup window."
+            return 1
+        }
         # A candidate peer is complete only after the accepted receiver copy
         # and its exact candidate activation are durably represented in the
         # same checkpoint plan.  Older finalisers set state=complete after
@@ -1402,9 +1409,10 @@ internal_finalize_peer() {
         '.state == "in_progress" and (.mode | IN("ha-join","replace-node"))
          and .campaign_commit == $target
          and ((.completed // []) | index("joined") != null)' "$setup_state" >/dev/null || return 1
-    mp_compose_init
-    "${MP_COMPOSE[@]}" exec -T backend python -c \
-        'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=5).read()' >/dev/null
+    mp_wait_for_backend_health 45 || {
+        ui_error "The exact candidate peer Backend did not become healthy within the bounded startup window."
+        return 1
+    }
     plan="$(jq -n '{base:"",target:"",full:true,migrations:false,components:["backend","frontend","caddy","database","tools","operations"]}')"
     write_state "$target" "" "$plan" ""
     temporary="$(mktemp "$MP_STATE/setup-state.XXXXXX")"
