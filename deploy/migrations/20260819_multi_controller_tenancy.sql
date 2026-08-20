@@ -398,10 +398,17 @@ DECLARE
     membership_found boolean;
     hosted boolean;
 BEGIN
-    target_user_id := CASE
-        WHEN TG_TABLE_NAME = 'users' THEN COALESCE(NEW.id, OLD.id)
-        ELSE COALESCE(NEW.user_id, OLD.user_id)
-    END;
+    -- NEW and OLD are anonymous records whose fields depend on the table that
+    -- fired the trigger.  A CASE expression still resolves both record-field
+    -- references while evaluating the expression, so NEW.user_id is invalid
+    -- when the trigger fires for users.  Keep the table-specific projections
+    -- in separate PL/pgSQL branches so only fields belonging to the active
+    -- trigger relation are accessed.
+    IF TG_TABLE_NAME = 'users' THEN
+        target_user_id := COALESCE(NEW.id, OLD.id);
+    ELSE
+        target_user_id := COALESCE(NEW.user_id, OLD.user_id);
+    END IF;
     SELECT * INTO account FROM users WHERE id = target_user_id;
     IF NOT FOUND THEN
         IF TG_OP = 'DELETE' THEN

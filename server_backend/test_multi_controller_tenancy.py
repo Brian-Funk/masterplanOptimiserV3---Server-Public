@@ -447,6 +447,19 @@ def test_migration_reconciles_constraints_already_created_by_fresh_metadata():
         assert migration.index(drop) < migration.index(add)
 
 
+def test_membership_projection_trigger_uses_relation_specific_record_fields():
+    """Fresh root creation must not resolve child-table fields on ``users``."""
+
+    migration = open(
+        "deploy/migrations/20260819_multi_controller_tenancy.sql",
+        encoding="utf-8",
+    ).read()
+    assert "IF TG_TABLE_NAME = 'users' THEN" in migration
+    assert "target_user_id := COALESCE(NEW.id, OLD.id);" in migration
+    assert "target_user_id := COALESCE(NEW.user_id, OLD.user_id);" in migration
+    assert "target_user_id := CASE" not in migration
+
+
 def test_operator_publication_rolls_back_when_evidence_cannot_be_sealed(
     db, monkeypatch
 ):
