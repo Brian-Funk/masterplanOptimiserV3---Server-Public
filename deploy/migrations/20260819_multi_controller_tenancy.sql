@@ -563,6 +563,13 @@ SET controller_id = event.controller_id
 FROM events AS event
 WHERE consent.event_id = event.id
   AND consent.controller_id IS NULL;
+-- Historical single-controller installations could activate an account before
+-- assigning it to an event.  Those immutable disclosures still belong to the
+-- deterministic compatibility controller and must not make this migration
+-- fail before hosted-mode preflight can report the missing membership.
+UPDATE account_processing_consents
+SET controller_id = 1
+WHERE controller_id IS NULL;
 CREATE INDEX IF NOT EXISTS ix_account_processing_consents_controller
     ON account_processing_consents(controller_id);
 ALTER TABLE account_processing_consents ALTER COLUMN controller_id SET NOT NULL;

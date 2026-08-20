@@ -414,6 +414,15 @@ def test_migration_contains_forced_rls_for_material_tenant_tables():
     assert "mp_opt_rls_event_id()" in migration
     assert "mp_opt_rls_controller_id()" in migration
     assert "evidence_record_sha256 VARCHAR(64) UNIQUE" in migration
+    legacy_consent_backfill = (
+        "UPDATE account_processing_consents\n"
+        "SET controller_id = 1\n"
+        "WHERE controller_id IS NULL;"
+    )
+    assert legacy_consent_backfill in migration
+    assert migration.index(legacy_consent_backfill) < migration.index(
+        "ALTER TABLE account_processing_consents ALTER COLUMN controller_id SET NOT NULL"
+    )
 
 
 def test_operator_publication_rolls_back_when_evidence_cannot_be_sealed(
