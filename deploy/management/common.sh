@@ -1096,7 +1096,12 @@ mp_compose_init() {
 }
 
 mp_compose_init_existing_runtime() {
-    mp_validate_action_profile_permissions ha || return 1
+    local permission_profile="${1:-ha}"
+    case "$permission_profile" in
+        deployment|ha|snapshot|evidence) ;;
+        *) return 1 ;;
+    esac
+    mp_validate_action_profile_permissions "$permission_profile" || return 1
     mp_compose_build_command
 }
 
@@ -1138,7 +1143,13 @@ mp_root_bootstrap_database_is_disabled() {
 
 mp_root_bootstrap_is_disabled_existing_runtime() {
     [ -f "$MP_ROOT/.env" ] && [ ! -L "$MP_ROOT/.env" ] || return 1
-    mp_compose_init_existing_runtime || return 1
+    # Root commissioning is supported in both standalone and HA modes.  The
+    # generic validation-only Compose helper defaults to the stricter HA
+    # profile for lease, replication and snapshot workers, but standalone
+    # reconciliation must not require an HA home that intentionally does not
+    # exist.  The deployment profile still validates runtime paths and every
+    # protected application secret without attempting permission repair.
+    mp_compose_init_existing_runtime deployment || return 1
     "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null \
         | grep -qx db || return 1
     mp_wait_for_database 30 || return 1

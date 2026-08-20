@@ -296,11 +296,19 @@ class SnapshotServiceSafetyTests(unittest.TestCase):
 
     def test_lease_promotion_validates_without_sudo_permission_repair(self) -> None:
         validation_only = function_body(COMMON_SOURCE, "mp_compose_init_existing_runtime")
-        self.assertIn("mp_validate_action_profile_permissions ha", validation_only)
+        self.assertIn('local permission_profile="${1:-ha}"', validation_only)
+        self.assertIn('mp_validate_action_profile_permissions "$permission_profile"', validation_only)
         self.assertIn("mp_compose_build_command", validation_only)
         self.assertNotIn("mp_prepare_runtime_permissions", validation_only)
         self.assertIn("mp_compose_init_existing_runtime", PROMOTE_SOURCE)
         self.assertNotIn("mp_compose_init\n", PROMOTE_SOURCE)
+
+    def test_standalone_root_reconciliation_uses_deployment_permission_profile(self) -> None:
+        root_disabled = function_body(
+            COMMON_SOURCE, "mp_root_bootstrap_is_disabled_existing_runtime"
+        )
+        self.assertIn("mp_compose_init_existing_runtime deployment", root_disabled)
+        self.assertNotIn("mp_compose_init_existing_runtime ||", root_disabled)
 
     def test_validation_only_compose_init_runs_with_no_privilege_escalation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
