@@ -1893,6 +1893,13 @@ mp_setup_reconcile_primary_campaign_pin() {
 mp_setup_establish_initial_writer_identity() {
     local generation holder
     mp_load_ha_config || return 1
+    # Conversion creates the bounded HA node token before the long-running HA
+    # services are installed. Establish the authoritative runtime contract
+    # now so the one-shot lease agent can use the same validation-only
+    # promotion path as the hardened service (notably node_token group-read
+    # access for the fixed Backend identity).
+    mp_prepare_runtime_permissions \
+        || { ui_error "The HA runtime permission contract could not be established before writer activation."; return 1; }
     generation="$(jq -r '.generation // 0' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
     holder="$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
     # A standalone-to-HA conversion installs the node identity before it
