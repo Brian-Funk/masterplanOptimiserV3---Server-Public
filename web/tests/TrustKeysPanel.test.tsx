@@ -58,8 +58,9 @@ describe("TrustKeysPanel", () => {
     expect(await screen.findByText("Controller trust")).toBeInTheDocument();
     expect(screen.getByText("Root passkey")).toBeInTheDocument();
     expect(screen.getByText("Instance evidence key")).toBeInTheDocument();
-    expect(screen.getByText("Primary workstation")).toBeInTheDocument();
-    expect(screen.getByText("Backup workstation")).toBeInTheDocument();
+    // These rows are populated by the asynchronous trust-key requests.
+    expect(await screen.findByText("Primary workstation")).toBeInTheDocument();
+    expect(await screen.findByText("Backup workstation")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Approve this event assignment" }));
     await waitFor(() => expect(mockStartAuthentication).toHaveBeenCalled());

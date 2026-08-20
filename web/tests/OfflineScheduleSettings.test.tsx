@@ -6,10 +6,14 @@ import { OfflineScheduleSettings } from "@/components/OfflineScheduleSettings";
 const mocks = vi.hoisted(() => ({
   apiFetch: vi.fn(), enabled: vi.fn(), setEnabled: vi.fn(), store: vi.fn(),
   clear: vi.fn(), clearMarker: vi.fn(), commitMarker: vi.fn(),
+  user: { id: 9, event_id: 3, offline_access_ttl_hours: 24 },
 }));
 
 vi.mock("@/contexts/AuthContext", () => ({
-  useAuth: () => ({ user: { id: 9, event_id: 3, offline_access_ttl_hours: 24 } }),
+  // AuthContext keeps the authenticated user identity stable across renders.
+  // Returning a new object here retriggers the component's user-change effect
+  // after its successful local state update, which does not model production.
+  useAuth: () => ({ user: mocks.user }),
 }));
 vi.mock("@/lib/api", () => ({ apiFetch: mocks.apiFetch }));
 vi.mock("@/lib/offlineCalendarCache", () => ({
@@ -26,9 +30,17 @@ vi.mock("@/lib/offlineAccess", () => ({
 
 describe("OfflineScheduleSettings", () => {
   beforeEach(() => {
-    Object.values(mocks).forEach((mock) => mock.mockReset());
+    [
+      mocks.apiFetch,
+      mocks.enabled,
+      mocks.setEnabled,
+      mocks.store,
+      mocks.clear,
+      mocks.clearMarker,
+      mocks.commitMarker,
+    ].forEach((mock) => mock.mockReset());
     mocks.enabled.mockReturnValue(false);
-    mocks.store.mockResolvedValue({ schema_version: 3 });
+    mocks.store.mockResolvedValue({ schema_version: 6 });
     mocks.clear.mockResolvedValue(undefined);
     mocks.apiFetch.mockResolvedValue({ ok: true, json: async () => ({ event_id: 3 }) });
   });
