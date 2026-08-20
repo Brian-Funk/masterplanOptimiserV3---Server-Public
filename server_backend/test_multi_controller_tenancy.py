@@ -9,6 +9,7 @@ from pathlib import Path
 import uuid
 
 import pytest
+from sqlalchemy import text
 
 from app.models.deletion import DeletionCase
 from app.models.evidence import ControllerEvidenceChainState, EvidenceKey, EvidenceOperation
@@ -25,6 +26,7 @@ from app.models.tenancy import (
     OperatorPolicyPublication,
 )
 from app.core.retention import materialise_event_purge_deadline
+from app.core.tenancy import hosted_mode_preflight
 from server_backend.conftest import create_test_event, create_test_user, _make_client
 
 
@@ -64,6 +66,22 @@ def _seed_unavailability(db, event, *, person_id: int, first_name: str):
         end_datetime="2027-07-20T10:00:00+02:00",
     ))
     db.commit()
+
+
+def test_hosted_preflight_rejects_unsafe_controller_trust_identity(db):
+    controller = db.get(Controller, 1)
+    assert controller is not None
+    db.execute(text(
+        "UPDATE controllers SET trust_entity_id = '../unsafe' WHERE id = 1"
+    ))
+    db.commit()
+    db.expire_all()
+
+    blockers = hosted_mode_preflight(db)["blockers"]
+    assert {
+        "code": "controller_trust_identity_invalid",
+        "controller": controller.public_id,
+    } in blockers
 
 
 def test_non_root_roles_cannot_enumerate_other_event_or_controller(db):
@@ -510,6 +528,16 @@ def test_root_can_configure_controller_enable_hosted_mode_and_create_event(db):
     client = _make_client(db, root, reauth=True)
     controller = db.get(Controller, 1)
     assert controller is not None
+    # The production migration preserves the established controller signing
+    # identity.  Such identities predate the new 16-hex default but already
+    # satisfy the bounded controller trust contract.
+    db.execute(text(
+        "UPDATE controllers SET trust_entity_id = 'ctl-controller000001' WHERE id = 1"
+    ))
+    db.commit()
+    db.expire_all()
+    controller = db.get(Controller, 1)
+    assert controller.trust_entity_id == "ctl-controller000001"
 
     operator_saved = client.put("/api/v1/admin/operator", json={
         "operator_type": "organisation",

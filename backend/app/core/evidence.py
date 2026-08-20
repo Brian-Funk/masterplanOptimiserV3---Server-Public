@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.governance import stable_instance_id
+from app.core.operator_evidence import TrustEvidenceError, validate_entity
 from app.models.governance import InstanceGovernanceProfile
 from app.models.server_setting import ServerSetting
 from app.models.evidence import (
@@ -157,9 +158,11 @@ def ensure_directories() -> None:
 def _controller_evidence_home(controller: Controller) -> Path:
     """Return a controller directory without accepting a filesystem name from input."""
 
-    if not re.fullmatch(r"ctl-[0-9a-f]{16}", controller.trust_entity_id):
-        raise EvidenceUnavailable("The controller trust identity is invalid")
-    return evidence_home() / "controllers" / controller.trust_entity_id
+    try:
+        trust_entity_id = validate_entity("controller", controller.trust_entity_id)
+    except TrustEvidenceError as exc:
+        raise EvidenceUnavailable("The controller trust identity is invalid") from exc
+    return evidence_home() / "controllers" / trust_entity_id
 
 
 def _ensure_controller_directories(controller: Controller) -> Path:

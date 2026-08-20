@@ -163,9 +163,11 @@ def _challenge_controller(
 def _archive_trust_directory(controller: Controller | None = None) -> Path:
     if controller is None:
         return evidence_home() / "archive-trust"
-    if not re.fullmatch(r"ctl-[0-9a-f]{16}", controller.trust_entity_id):
-        raise TrustEvidenceError("the controller trust identity is invalid")
-    return evidence_home() / "controllers" / controller.trust_entity_id / "archive-trust"
+    try:
+        trust_entity_id = validate_entity("controller", controller.trust_entity_id)
+    except TrustEvidenceError as exc:
+        raise TrustEvidenceError("the controller trust identity is invalid") from exc
+    return evidence_home() / "controllers" / trust_entity_id / "archive-trust"
 
 
 def _archive_controller(db: Session, public_id: str | None) -> Controller:

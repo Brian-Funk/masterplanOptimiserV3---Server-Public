@@ -298,7 +298,7 @@ class Settings(BaseSettings):
                 raise ValueError("Fine-grained GitHub token path must be an absolute protected path")
             if self.EVIDENCE_GIT_PROTECTION_ACK_VERSION != "1":
                 raise ValueError("Evidence repository protection must be acknowledged before enabling archival")
-            if not re.fullmatch(r"ctl-[a-z0-9]{16}", self.EVIDENCE_CONTROLLER_ID):
+            if not re.fullmatch(r"ctl-[a-z0-9]{8,48}", self.EVIDENCE_CONTROLLER_ID):
                 raise ValueError("Evidence controller ID is invalid")
             try:
                 allowed_instance = UUID(self.EVIDENCE_ALLOWED_INSTANCE_ID)

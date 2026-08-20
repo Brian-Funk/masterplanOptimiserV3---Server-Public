@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.operator_evidence import TrustEvidenceError, validate_entity
 from app.models.event import Event
 from app.models.governance import EventGovernanceOverride, InstanceGovernanceProfile
 from app.models.server_setting import ServerSetting
@@ -270,6 +271,13 @@ def hosted_mode_preflight(db: Session) -> dict[str, object]:
     if not controllers:
         blockers.append({"code": "controller_missing"})
     for controller in controllers:
+        try:
+            validate_entity("controller", controller.trust_entity_id)
+        except TrustEvidenceError:
+            blockers.append({
+                "code": "controller_trust_identity_invalid",
+                "controller": controller.public_id,
+            })
         if controller.status != "active":
             blockers.append({"code": "controller_not_active", "controller": controller.public_id})
         if db.get(ControllerGovernanceProfile, controller.id) is None:

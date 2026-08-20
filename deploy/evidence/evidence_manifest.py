@@ -527,7 +527,7 @@ def _validate_payload(value: Any, *, path: str = "payload") -> None:
                 if not isinstance(item, str) or not re.fullmatch(r"ctl-[a-z0-9]{8,48}", item):
                     raise EvidenceError(f"{child_path} must be a controller ID")
             elif field == "controller_trust_entity_id":
-                if not isinstance(item, str) or not re.fullmatch(r"ctl-[0-9a-f]{16}", item):
+                if not isinstance(item, str) or not re.fullmatch(r"ctl-[a-z0-9]{8,48}", item):
                     raise EvidenceError(
                         f"{child_path} must be a controller trust-entity ID"
                     )

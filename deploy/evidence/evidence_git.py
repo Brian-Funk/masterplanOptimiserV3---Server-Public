@@ -26,7 +26,7 @@ import evidence_manifest
 CONTROLLER_FORMAT = "mp-opt-controller-trust-v1"
 PROCESSOR_FORMAT = "mp-opt-processor-trust-v1"
 INSTANCE_FORMAT = "mp-opt-instance-trust-v1"
-CONTROLLER_ID_RE = re.compile(r"^ctl-[a-z0-9]{16}$")
+CONTROLLER_ID_RE = re.compile(r"^ctl-[a-z0-9]{8,48}$")
 PROCESSOR_ID_RE = re.compile(r"^proc-[a-z0-9]{16}$")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:/+()]{0,127}$")
