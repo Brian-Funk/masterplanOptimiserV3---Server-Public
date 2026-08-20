@@ -425,6 +425,28 @@ def test_migration_contains_forced_rls_for_material_tenant_tables():
     )
 
 
+def test_migration_reconciles_constraints_already_created_by_fresh_metadata():
+    """A blank deployment creates ORM metadata before applying migrations."""
+
+    migration = open(
+        "deploy/migrations/20260819_multi_controller_tenancy.sql",
+        encoding="utf-8",
+    ).read()
+    for table, constraint in (
+        ("data_policy_acknowledgements", "ck_data_policy_ack_controller_scope"),
+        ("data_policy_acknowledgements", "fk_data_policy_ack_event_controller"),
+        ("evidence_keys", "ck_evidence_key_controller_scope"),
+        ("evidence_keys", "ck_evidence_key_event_scope"),
+    ):
+        drop = (
+            f"ALTER TABLE {table}\n"
+            f"    DROP CONSTRAINT IF EXISTS {constraint};"
+        )
+        add = f"ADD CONSTRAINT {constraint}"
+        assert drop in migration
+        assert migration.index(drop) < migration.index(add)
+
+
 def test_operator_publication_rolls_back_when_evidence_cannot_be_sealed(
     db, monkeypatch
 ):

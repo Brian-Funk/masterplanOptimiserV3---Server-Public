@@ -541,8 +541,12 @@ WHERE acknowledgement.event_id = event.id
   AND acknowledgement.controller_id IS NULL;
 CREATE INDEX IF NOT EXISTS ix_data_policy_ack_controller
     ON data_policy_acknowledgements(controller_id);
+ALTER TABLE data_policy_acknowledgements
+    DROP CONSTRAINT IF EXISTS ck_data_policy_ack_controller_scope;
 ALTER TABLE data_policy_acknowledgements ADD CONSTRAINT ck_data_policy_ack_controller_scope
     CHECK (event_id IS NULL OR controller_id IS NOT NULL);
+ALTER TABLE data_policy_acknowledgements
+    DROP CONSTRAINT IF EXISTS fk_data_policy_ack_event_controller;
 ALTER TABLE data_policy_acknowledgements
     ADD CONSTRAINT fk_data_policy_ack_event_controller
     FOREIGN KEY (event_id, controller_id)
@@ -623,10 +627,14 @@ FROM processor_identities AS identity
 WHERE key.role = 'processor'
   AND key.entity_id = identity.entity_id
   AND key.event_id IS NULL;
+ALTER TABLE evidence_keys
+    DROP CONSTRAINT IF EXISTS ck_evidence_key_controller_scope;
 ALTER TABLE evidence_keys ADD CONSTRAINT ck_evidence_key_controller_scope CHECK (
     (role = 'instance' AND controller_id IS NULL)
     OR (role IN ('controller', 'processor') AND controller_id IS NOT NULL)
 );
+ALTER TABLE evidence_keys
+    DROP CONSTRAINT IF EXISTS ck_evidence_key_event_scope;
 ALTER TABLE evidence_keys ADD CONSTRAINT ck_evidence_key_event_scope CHECK (
     (role = 'processor' AND (event_id IS NOT NULL OR revoked_at IS NOT NULL))
     OR (role IN ('instance', 'controller') AND event_id IS NULL)
