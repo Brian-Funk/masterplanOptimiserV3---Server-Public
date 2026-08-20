@@ -228,6 +228,11 @@ def require_user_management_access(target_user: User, current_user: User) -> Non
     Only root may manage another root, global administrator, or issuer account.
     Issuers may manage ordinary users only within their own event.
     """
+    # Resolve the tenant boundary before the account hierarchy. Otherwise a
+    # foreign root/admin/issuer identifier would return 403 while a foreign
+    # ordinary identifier returns 404, leaking the target's existence/role.
+    if not current_user.is_root_admin:
+        require_same_event(target_user, current_user)
     if target_user.is_root_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -240,7 +245,6 @@ def require_user_management_access(target_user: User, current_user: User) -> Non
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only root admin can manage privileged accounts",
         )
-    require_same_event(target_user, current_user)
 
 
 def require_event_access(event_id: int, current_user: User, db: Session) -> Event:

@@ -264,7 +264,10 @@ def _resolve_hosted_activation_mail_governance(
         policy_version=controller_publication.version,
         policy_sha256=controller_publication.content_sha256,
         privacy_url=f"{origin}/api/v1/legal/events/{event.evidence_id}/privacy.html",
-        rights_url=f"{origin}/api/v1/legal/controllers/{controller.public_id}",
+        rights_url=(
+            f"{origin}/api/v1/legal/controllers/{controller.public_id}"
+            f"/versions/{controller_publication.version}/rights.html"
+        ),
         event_privacy_url=f"{origin}/api/v1/legal/events/{event.evidence_id}/privacy.html",
         event_name=event.name,
     )

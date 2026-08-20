@@ -255,6 +255,8 @@ def create_announcement(
         req.event_id = admin.event_id
     require_event_access(req.event_id, admin, db)
     require_data_policy_acknowledgement(admin, req.event_id, db)
+    if req.push:
+        require_event_feature(req.event_id, "push_notifications", db)
     ann = Announcement(
         event_id=req.event_id,
         title=req.title,

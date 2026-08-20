@@ -423,7 +423,7 @@ def test_gdpr_anonymise_removes_event_linked_identity_and_audit_name(db, reauth_
 
 
 def test_gdpr_anonymise_root_blocked(db, reauth_admin_client):
-    """Cannot anonymise root admin."""
+    """An event administrator cannot discover or anonymise the root account."""
     from app.models.user import User
     root = db.query(User).filter(User.username == "root.admin").first()
     if not root:
@@ -432,7 +432,7 @@ def test_gdpr_anonymise_root_blocked(db, reauth_admin_client):
         )
 
     r = reauth_admin_client.delete(f"/api/v1/admin/users/{root.id}/gdpr-delete")
-    assert r.status_code == 403
+    assert r.status_code == 404
 
 
 # ── POST /user/request-deletion ──

@@ -146,8 +146,15 @@ def _challenge_controller(
         if mode == TENANCY_SINGLE and controller.id == 1 and existing is None and pending is None:
             # A fresh single-controller installation historically let the
             # controller-key package choose this identity during commissioning.
-            controller.trust_entity_id = entity_id
-            db.flush()
+            controller._allow_initial_trust_identity_binding = True
+            try:
+                controller.trust_entity_id = entity_id
+                db.flush()
+            finally:
+                controller.__dict__.pop(
+                    "_allow_initial_trust_identity_binding",
+                    None,
+                )
         else:
             raise TrustEvidenceError("the trust identity belongs to another controller")
     return controller

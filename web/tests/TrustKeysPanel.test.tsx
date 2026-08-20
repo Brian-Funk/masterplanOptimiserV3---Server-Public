@@ -19,6 +19,12 @@ describe("TrustKeysPanel", () => {
     mockStartAuthentication.mockReset();
     mockStartAuthentication.mockResolvedValue({ id: "credential" });
     mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/admin/controllers") return json([{
+        public_id: "controller-example",
+        trust_entity_id: "ctl-example0001",
+        display_name: "Synthetic Controller",
+        status: "active",
+      }]);
       if (path === "/api/v1/admin/evidence/trust-keys") return json([{
         instance_id: "instance-example", entity_id: "ctl-example0001", key_id: "ek-controller000001", role: "controller",
         public_key_sha256: "c".repeat(64), validity_status: "active", created_at: null,
@@ -36,7 +42,7 @@ describe("TrustKeysPanel", () => {
         entity_id: "prc-pending0001", display_label: "Backup workstation", key_id: "ek-fedcba0987654321",
         public_key_sha256: "b".repeat(64), purpose: "register", expires_at: "2026-08-03T20:10:00Z",
       }]);
-      if (path === "/api/v1/admin/evidence/trust-keys/archive-trust") return json({
+      if (path === "/api/v1/admin/evidence/trust-keys/archive-trust?controller_public_id=controller-example") return json({
         ready: false, message: "Select the active controller key once to authorise portable evidence archives.",
       });
       if (path.endsWith("/root-authorisation/begin")) return json({ options: JSON.stringify({ challenge: "example" }), ceremony_id: "ceremony-example" });

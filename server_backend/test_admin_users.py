@@ -407,14 +407,14 @@ def test_update_user_issuer_blocked_event_reassignment(db):
 
 
 def test_update_user_cannot_modify_root(db, admin_client):
-    """Cannot modify root admin user."""
+    """An event administrator cannot discover or modify the root account."""
     root = create_test_user(
         db, username="root.protected", is_root_admin=True, is_admin=True,
     )
     r = admin_client.put(f"/api/v1/admin/users/{root.id}", json={
         "display_name": "Hacked",
     })
-    assert r.status_code == 403
+    assert r.status_code == 404
 
 
 def test_update_issuer_cross_event_blocked(db):
@@ -605,7 +605,7 @@ def test_delete_unused_invitation_with_reauth(db, reauth_admin_client):
 
 
 def test_delete_root_admin_blocked(db, reauth_admin_client):
-    """Cannot delete root admin."""
+    """An event administrator cannot discover or delete the root account."""
     from app.models.user import User
     root = db.query(User).filter(User.username == "root.admin").first()
     if not root:
@@ -613,7 +613,7 @@ def test_delete_root_admin_blocked(db, reauth_admin_client):
             db, username="root.admin", is_root_admin=True, is_admin=True,
         )
     r = reauth_admin_client.delete(f"/api/v1/admin/users/{root.id}")
-    assert r.status_code == 403
+    assert r.status_code == 404
 
 
 

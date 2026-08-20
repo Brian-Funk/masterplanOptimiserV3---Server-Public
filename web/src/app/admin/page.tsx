@@ -604,7 +604,14 @@ function AdminPageContent() {
           />
         )}
         {tab === "tenancy" && user?.is_root_admin && (
-          <ControllerTenancyTab events={events} />
+          <ControllerTenancyTab
+            events={events.filter(
+              (event): event is Event & {
+                controller_public_id: string;
+                controller_name: string;
+              } => Boolean(event.controller_public_id && event.controller_name),
+            )}
+          />
         )}
         {tab === "users" && (
           <UsersTab

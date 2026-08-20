@@ -8,7 +8,8 @@ import pytest
 from app.core.audit import AUDIT_ACTIONS, audit
 from app.core import sessions
 from app.models.audit import AuditLog
-from server_backend.conftest import create_test_user
+from app.models.tenancy import Controller
+from server_backend.conftest import create_test_event, create_test_user
 
 
 def test_audit_uses_pseudonymous_actor_and_canonical_json(db):
@@ -64,6 +65,39 @@ def test_new_audit_rows_do_not_persist_denormalised_username(db):
 
     row = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
     assert row.username is None
+
+
+def test_root_audit_derives_controller_and_event_from_tenant_resource(db):
+    controller = Controller(
+        code="audit-controller",
+        display_name="Audit Controller",
+        status="active",
+    )
+    db.add(controller)
+    db.commit()
+    event, _ = create_test_event(
+        db,
+        "Audit Event",
+        controller_id=controller.id,
+    )
+    target = create_test_user(db, username="audit.target", event_id=event.id)
+    root = create_test_user(
+        db,
+        username="audit.root",
+        is_root_admin=True,
+        is_admin=True,
+    )
+
+    entry = audit(
+        db,
+        user=root,
+        action="user.update",
+        resource_type="user",
+        resource_id=target.id,
+    )
+
+    assert entry.controller_id == controller.id
+    assert entry.event_id == event.id
 
 
 def test_audit_ip_hash_column_accepts_the_versioned_hmac(monkeypatch):

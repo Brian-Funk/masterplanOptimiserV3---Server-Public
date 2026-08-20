@@ -68,7 +68,11 @@ from app.core.ha_replication import (
 )
 from app.core.ha_witness import HAWritePermitError
 from app.core.retention import materialise_event_purge_deadline, retention_status
-from app.core.features import FEATURE_ALIASES, require_event_feature
+from app.core.features import (
+    FEATURE_ALIASES,
+    require_event_feature,
+    validate_hosted_event_features,
+)
 from app.core.governance import current_policy_identity, require_current_policy_identity
 from app.core.tenancy import (
     TENANCY_HOSTED,
@@ -1045,8 +1049,13 @@ def create_event(
                 status_code=409,
                 detail="The selected controller governance chain is incomplete",
             )
-        features_json = json.dumps(
+        selected_features = validate_hosted_event_features(
             body.enabled_optional_features,
+            operator_publication,
+            controller_publication,
+        )
+        features_json = json.dumps(
+            selected_features,
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -1310,9 +1319,7 @@ def regenerate_event_secret(
     db: Session = Depends(get_db),
 ):
     """Regenerate the publish secret for an event. Returns the new secret ONCE."""
-    event = db.query(Event).filter(Event.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
+    event = require_event_access(event_id, admin, db)
     if event.purge_case_request_id:
         raise HTTPException(
             status_code=409,
@@ -1746,9 +1753,7 @@ def update_user(
         if tenancy_mode(db) == TENANCY_HOSTED:
             raise HTTPException(status_code=409, detail="Hosted accounts require an event membership")
     if event_field_supplied and body.event_id is not None:
-        event = db.query(Event).filter(Event.id == body.event_id).first()
-        if event is None:
-            raise HTTPException(status_code=404, detail="Event not found")
+        event = require_event_access(body.event_id, admin, db)
 
     event_changed = event_field_supplied and body.event_id != user.event_id
     if event_changed:
@@ -3186,9 +3191,7 @@ def delete_event(
     db: Session = Depends(get_db),
 ):
     """Reject direct deletion in favour of the accountable case workflow."""
-    event = db.query(Event).filter(Event.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
+    require_event_access(event_id, admin, db)
     raise HTTPException(
         status_code=409,
         detail={
@@ -3313,12 +3316,19 @@ def import_setup(
     operator_publication = None
     controller_publication = None
     if tenancy_mode(db) == TENANCY_HOSTED:
-        operator_publication = db.query(OperatorPolicyPublication).order_by(
-            OperatorPolicyPublication.version.desc()
-        ).first()
         controller_publication = db.query(ControllerGovernancePublication).filter(
             ControllerGovernancePublication.controller_id == controller.id
         ).order_by(ControllerGovernancePublication.version.desc()).first()
+        operator_publication = (
+            db.query(OperatorPolicyPublication).filter(
+                OperatorPolicyPublication.version
+                == controller_publication.operator_policy_version,
+                OperatorPolicyPublication.content_sha256
+                == controller_publication.operator_policy_sha256,
+            ).first()
+            if controller_publication is not None
+            else None
+        )
         if operator_publication is None or controller_publication is None:
             raise HTTPException(
                 status_code=409,
@@ -3362,8 +3372,13 @@ def import_setup(
     db.flush()  # Get event.id
     materialise_event_purge_deadline(event, db)
     if operator_publication is not None and controller_publication is not None:
-        features_json = json.dumps(
+        selected_features = validate_hosted_event_features(
             body.enabled_optional_features,
+            operator_publication,
+            controller_publication,
+        )
+        features_json = json.dumps(
+            selected_features,
             sort_keys=True,
             separators=(",", ":"),
         )

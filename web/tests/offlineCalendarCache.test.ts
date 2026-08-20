@@ -15,11 +15,12 @@ const validUntil = "2026-07-30T12:30:00.000Z";
 const beforeExpiry = new Date("2026-07-30T10:00:00.000Z");
 
 const payload = {
-  offline_contract_version: "mp-opt-offline-calendar-v5",
+  offline_contract_version: "mp-opt-offline-calendar-v6",
   controller_public_id: "07096118-e64c-4b89-a7c9-1f26d6198719",
   controller_trust_entity_id: "ctl-0123456789abcdef",
   event_ref: "9d492121-5a09-4e8a-a0a9-3c873af85928",
   membership_id: 12,
+  linked_person_id: 1,
   event_id: 7,
   event_name: "Cached Event",
   start_date: "2026-07-30",
@@ -171,7 +172,7 @@ describe("offlineCalendarCache", () => {
     await expect(
       getOfflineCalendarPayload<typeof payload>(12, 7, beforeExpiry),
     ).resolves.toMatchObject({
-      schema_version: 5,
+      schema_version: 6,
       user_id: 12,
       event_id: 7,
       cached_at: cachedAt,
@@ -226,7 +227,7 @@ describe("offlineCalendarCache", () => {
     })).toThrow(/unsupported field/);
   });
 
-  it("allows assignment names but rejects another directory identity or availability", () => {
+  it("allows event-wide unavailability identities but rejects unrelated directory entries", () => {
     expect(() => participantSafeOfflineCalendarPayload({
       ...payload,
       tasks: [{
@@ -251,16 +252,20 @@ describe("offlineCalendarCache", () => {
         ...payload.persons,
         { id: 2, external_person_id: 2, first_name: "Other", last_name: "Person" },
       ],
-    })).toThrow(/another person's directory identity/);
-    expect(() => participantSafeOfflineCalendarPayload({
-      ...payload,
       unavailabilities: [{
         person_id: 2,
         working_date: "2026-07-30",
         start: "2026-07-30T08:00:00",
         end: "2026-07-30T09:00:00",
       }],
-    })).toThrow(/another person's directory identity/);
+    })).not.toThrow();
+    expect(() => participantSafeOfflineCalendarPayload({
+      ...payload,
+      persons: [
+        ...payload.persons,
+        { id: 3, external_person_id: 3, first_name: "Unrelated", last_name: "Person" },
+      ],
+    })).toThrow(/unrelated to event unavailability/);
   });
 
   it("rejects duplicate or inconsistent structured allocations", () => {
@@ -358,7 +363,7 @@ describe("offlineCalendarCache", () => {
     await expect(
       storeOfflineCalendarPayload(12, 7, payload, cachedAt, validUntil, beforeExpiry),
     ).rejects.toMatchObject({ code: "storage_unavailable" });
-    expect(localStorage.getItem("mp-opt-offline-calendar-enabled:v2:12")).toBe("true");
+    expect(localStorage.getItem("mp-opt-offline-calendar-enabled:v3:12")).toBe("true");
   });
 
   it("reports an IndexedDB write failure", async () => {

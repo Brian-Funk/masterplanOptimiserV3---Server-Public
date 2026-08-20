@@ -7,6 +7,11 @@
 
 BEGIN;
 
+-- SHA-256 migration identities use PostgreSQL's reviewed cryptographic
+-- extension. The official Server PostgreSQL image includes it, but a fresh
+-- database must activate it explicitly before the first digest() call.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 CREATE TABLE IF NOT EXISTS controllers (
     id SERIAL PRIMARY KEY,
     public_id VARCHAR(36) NOT NULL UNIQUE,
@@ -67,6 +72,7 @@ CREATE TABLE IF NOT EXISTS instance_operator_profiles (
     security_summary TEXT NOT NULL,
     subprocessors_json TEXT NOT NULL DEFAULT '[]',
     hosting_regions_json TEXT NOT NULL DEFAULT '[]',
+    supported_optional_features_json TEXT NOT NULL DEFAULT '[]',
     fixed_retention_days INTEGER NOT NULL CHECK (
         fixed_retention_days BETWEEN 1 AND 3650
     ),
@@ -108,10 +114,15 @@ CREATE TABLE IF NOT EXISTS operator_policy_publications (
     content_sha256 VARCHAR(64) NOT NULL UNIQUE,
     source_json TEXT NOT NULL DEFAULT '{}',
     source_sha256 VARCHAR(64) NOT NULL,
+    evidence_record_sha256 VARCHAR(64) UNIQUE,
     published_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     published_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     supersedes_version INTEGER
 );
+ALTER TABLE operator_policy_publications
+    ADD COLUMN IF NOT EXISTS evidence_record_sha256 VARCHAR(64) UNIQUE;
+ALTER TABLE instance_operator_profiles
+    ADD COLUMN IF NOT EXISTS supported_optional_features_json TEXT NOT NULL DEFAULT '[]';
 
 -- Preserve the exact latest legacy publication as a migration reference. It is
 -- explicitly marked as combined and must be replaced before hosted mode can be
@@ -163,11 +174,14 @@ CREATE TABLE IF NOT EXISTS controller_governance_profiles (
     processor_summary TEXT NOT NULL,
     rights_summary TEXT NOT NULL,
     terms_summary TEXT NOT NULL,
+    permitted_optional_features_json TEXT NOT NULL DEFAULT '[]',
     structured_json TEXT NOT NULL DEFAULT '{}',
     accepted_operator_policy_version INTEGER,
     accepted_operator_policy_sha256 VARCHAR(64),
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE controller_governance_profiles
+    ADD COLUMN IF NOT EXISTS permitted_optional_features_json TEXT NOT NULL DEFAULT '[]';
 
 INSERT INTO controller_governance_profiles (
     controller_id, controller_type, legal_name, postal_address, country,
@@ -696,8 +710,26 @@ CREATE OR REPLACE FUNCTION mp_opt_reject_controller_identity_change()
 RETURNS trigger LANGUAGE plpgsql AS $immutable_controller_identity$
 BEGIN
     IF OLD.public_id IS DISTINCT FROM NEW.public_id
-       OR OLD.trust_entity_id IS DISTINCT FROM NEW.trust_entity_id
        OR OLD.code IS DISTINCT FROM NEW.code THEN
+        RAISE EXCEPTION 'controller public trust identity is immutable';
+    END IF;
+    IF OLD.trust_entity_id IS DISTINCT FROM NEW.trust_entity_id THEN
+        IF OLD.id = 1
+           AND COALESCE(
+               (SELECT value FROM server_settings WHERE key = 'tenancy_mode'),
+               'single-controller'
+           ) = 'single-controller'
+           AND NOT EXISTS (
+               SELECT 1 FROM evidence_keys
+               WHERE controller_id = OLD.id AND role = 'controller'
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM evidence_key_registration_challenges
+               WHERE controller_id = OLD.id AND role = 'controller'
+                 AND used_at IS NULL
+           ) THEN
+            RETURN NEW;
+        END IF;
         RAISE EXCEPTION 'controller public trust identity is immutable';
     END IF;
     RETURN NEW;

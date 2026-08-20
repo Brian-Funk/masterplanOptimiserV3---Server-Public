@@ -60,6 +60,7 @@ RECORD_TYPES = frozenset(
         "instance.initialised",
         "controller.evidence_initialised",
         "controller.governance_published",
+        "operator.policy_published",
         "operator.hosted_tenancy_enabled",
         "key.rotated",
         "trust_key.registered",

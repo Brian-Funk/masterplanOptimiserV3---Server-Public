@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.api.v1.publish import _authenticate_event, _require_publishing_allowed
 from app.core.audit import audit
 from app.core.event_dates import require_valid_event_date_range
+from app.core.features import require_event_feature
 from app.core.rate_limit import limiter, runtime_limit
 from app.core.retention import materialise_event_purge_deadline
 from app.core.schedule_days import (
@@ -229,6 +230,7 @@ def publish_general_schedule(
 ):
     """Receive public General Schedule items through normal publish-secret auth."""
     event = _authenticate_event(request, db)
+    require_event_feature(event.id, "desktop_publishing", db)
     _require_publishing_allowed(event)
     incoming_schedule_day_range = (
         payload.event.schedule_day_range

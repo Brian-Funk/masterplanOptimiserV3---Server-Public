@@ -230,11 +230,12 @@ class OfflinePublicScheduleItemOut(BaseModel):
 class OfflineCalendarResponse(BaseModel):
     """Fail-closed calendar contract that may be retained in IndexedDB."""
 
-    offline_contract_version: str = "mp-opt-offline-calendar-v5"
+    offline_contract_version: str = "mp-opt-offline-calendar-v6"
     controller_public_id: str
     controller_trust_entity_id: str
     event_ref: str
     membership_id: int
+    linked_person_id: Optional[int] = None
     event_id: int
     event_name: str
     start_date: Optional[str] = None
@@ -948,6 +949,7 @@ def _offline_calendar_response(
         controller_trust_entity_id=controller.trust_entity_id,
         event_ref=event.evidence_id,
         membership_id=membership.id,
+        linked_person_id=membership.linked_person_id,
         event_id=calendar.event_id,
         event_name=calendar.event_name,
         start_date=calendar.start_date,

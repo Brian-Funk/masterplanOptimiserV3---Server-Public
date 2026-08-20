@@ -138,7 +138,7 @@ def test_offline_calendar_keeps_old_scope_until_revised_policy_is_published(db):
     data = offline.json()
     assert set(data) == {
         "offline_contract_version", "controller_public_id",
-        "controller_trust_entity_id", "event_ref", "membership_id",
+        "controller_trust_entity_id", "event_ref", "membership_id", "linked_person_id",
         "event_id", "event_name", "start_date", "end_date", "day_aliases",
         "schedule_day_range", "tasks", "persons", "public_schedule_categories",
         "public_schedule_views", "public_schedule_items", "unavailabilities",

@@ -11,6 +11,10 @@ from app.core.tenancy import TENANCY_HOSTED, tenancy_mode
 from app.models.event import Event
 from app.models.governance import EventGovernanceOverride, GovernancePublication
 from app.models.tenancy import EventGovernanceConfiguration
+from app.models.tenancy import (
+    ControllerGovernancePublication,
+    OperatorPolicyPublication,
+)
 
 
 FEATURE_ALIASES = {
@@ -20,6 +24,70 @@ FEATURE_ALIASES = {
     "push_notifications": "push_notifications",
     "desktop_publishing": "desktop_publishing",
 }
+
+
+def _published_features(content_json: str, field: str) -> frozenset[str]:
+    try:
+        document = json.loads(content_json)
+    except (TypeError, ValueError):
+        return frozenset()
+    if not isinstance(document, dict):
+        return frozenset()
+    values = document.get(field)
+    if not isinstance(values, list):
+        return frozenset()
+    return frozenset(
+        value
+        for value in values
+        if isinstance(value, str) and value in FEATURE_ALIASES
+    )
+
+
+def hosted_feature_ceiling(
+    operator_publication: OperatorPolicyPublication,
+    controller_publication: ControllerGovernancePublication,
+) -> frozenset[str]:
+    """Return the immutable operator/controller feature intersection."""
+
+    if (
+        controller_publication.operator_policy_version
+        != operator_publication.version
+        or controller_publication.operator_policy_sha256
+        != operator_publication.content_sha256
+    ):
+        return frozenset()
+    operator_features = _published_features(
+        operator_publication.content_json,
+        "supported_optional_features",
+    )
+    controller_features = _published_features(
+        controller_publication.content_json,
+        "permitted_optional_features",
+    )
+    return operator_features & controller_features
+
+
+def validate_hosted_event_features(
+    selected: list[str] | set[str] | frozenset[str],
+    operator_publication: OperatorPolicyPublication,
+    controller_publication: ControllerGovernancePublication,
+) -> list[str]:
+    """Return selected features or fail before storing an invalid contract."""
+
+    unavailable = sorted(set(selected) - hosted_feature_ceiling(
+        operator_publication,
+        controller_publication,
+    ))
+    if unavailable:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "event_feature_not_permitted",
+                "features": unavailable,
+                "message": "One or more event features are outside the immutable operator/controller policy.",
+            },
+        )
+    return sorted(set(selected))
 
 
 def enabled_event_features(event_id: int, db: Session) -> frozenset[str]:
@@ -34,7 +102,24 @@ def enabled_event_features(event_id: int, db: Session) -> frozenset[str]:
             values = json.loads(config.enabled_optional_features_json or "[]")
         except (TypeError, ValueError):
             return frozenset()
-        return frozenset(str(item) for item in values if isinstance(item, str))
+        selected = frozenset(
+            str(item)
+            for item in values
+            if isinstance(item, str) and item in FEATURE_ALIASES
+        )
+        operator_publication = db.query(OperatorPolicyPublication).filter(
+            OperatorPolicyPublication.version == config.operator_policy_version
+        ).first()
+        controller_publication = db.query(ControllerGovernancePublication).filter(
+            ControllerGovernancePublication.controller_id == event.controller_id,
+            ControllerGovernancePublication.version == config.controller_policy_version,
+        ).first()
+        if operator_publication is None or controller_publication is None:
+            return frozenset()
+        return selected & hosted_feature_ceiling(
+            operator_publication,
+            controller_publication,
+        )
 
     override = db.get(EventGovernanceOverride, event_id)
     if override is not None:

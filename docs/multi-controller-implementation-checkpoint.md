@@ -33,40 +33,54 @@ in the shared EYP workspace.
 - Root UI foundation for operator/controller/event context and controller-bound
   trust keys; offline cache identity includes controller, event, membership and
   policy identities.
+- Operator/controller/event feature policy is resolved as an immutable
+  intersection before each optional operation. Hosted publishing, SMTP, push,
+  public links and offline storage all fail closed outside that intersection.
+- Activation and mail disclosures now link to event-specific privacy plus
+  immutable controller privacy/rights/processor documents and immutable
+  operator privacy/subprocessor/security documents.
+- Offline payload/cache schema v6 reflects the event-wide unavailability
+  contract and invalidates the older, narrower opt-in without silently
+  extending local storage.
+- Foreign privileged and ordinary account identifiers are indistinguishable to
+  every non-root administrator. Event secret rotation, direct deletion and
+  account reassignment are now protected by the same exact-event boundary.
 
 ## Most recent local verification
 
-- Multi-controller, activation-email and imported-retention focused suite:
-  **50 passed**.
-- Broader route matrix covering calendar, history, public links, notifications,
-  deletion/export, web edits and event scoping: **89 passed** at the preceding
-  checkpoint.
-- Authentication/passkey/admin activation focused suite: **116 passed** at the
-  preceding checkpoint.
-- Controller evidence/evidence export focused suite: **27 passed** at the
-  preceding checkpoint.
+- Core API and security group: **328 passed, 1 skipped**. This includes
+  activation, administration, calendars/offline data, deletion/export,
+  governance, history, notifications, passkeys, public links, publishing,
+  web edits and the cross-controller route matrix.
+- Evidence, deployment-contract and lifecycle group: **214 passed, 2 skipped**.
+- Frontend: **65 files / 378 tests passed**; ESLint passed; the complete Next.js
+  production build and all 29 static routes passed.
+- Python bytecode compilation and `git diff --check` passed.
+- The published-migration digest test now hashes the canonical Git LF bytes, so
+  Windows checkout conversion cannot falsely report a released-blob change.
+
+The remaining local shell-test failures all originate before product code runs:
+this Windows host's WSL launcher returns `E_ACCESSDENIED`, and it cannot create
+unprivileged test symlinks. Those exact tests remain mandatory in Linux CI and
+on the staging nodes.
 
 These are SQLite/local contract tests. They are not a substitute for the
 required PostgreSQL migration/RLS and real two-node commissioning runs.
 
 ## Required continuation before PR readiness
 
-1. Complete the remaining endpoint/service audit, especially background jobs,
-   controller-specific evidence export/archive behavior, deletion decisions,
-   operator publication evidence and all optional-feature gates.
-2. Run the migration against real PostgreSQL and directly prove forced RLS with
+1. Run the migration against real PostgreSQL and directly prove forced RLS with
    root, event, publisher, public and worker contexts.
-3. Complete root and non-root UI tests, public legal-centre tests and accessibility
-   coverage; run the full frontend production build.
-4. Run the complete backend, PostgreSQL, migration, HA, commissioning, deletion,
+2. Run the complete PostgreSQL, migration, HA, commissioning, management-shell,
+   deletion,
    evidence, CSP, dependency, licensing and documentation suites.
-5. Perform a security diff review and resolve every reportable finding.
-6. Push qualified iterations to this development branch and open a PR without
+3. Perform a security diff review and resolve every reportable finding.
+4. Push qualified iterations to this development branch and open a PR without
    merging it.
-7. Reconfigure and operate Commissioning-Private exclusively with enrolled
+5. Reconfigure and operate Commissioning-Private exclusively with enrolled
    staging aliases `mp-opt-stage-node-c` and `mp-opt-stage-node-d`. Production
    Nodes A and B are prohibited targets.
-8. Re-run the existing commissioning scenario catalogue on the exact immutable
+6. Re-run the existing commissioning scenario catalogue on the exact immutable
    AMD64 candidate bundle, then achieve five consecutive clean fresh-HA runs.
    Any product or acceptance-truth change resets the streak.
 

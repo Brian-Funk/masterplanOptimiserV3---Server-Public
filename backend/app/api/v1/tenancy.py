@@ -23,6 +23,7 @@ from app.core.database_tenancy import (
     bounded_event_service_context,
 )
 from app.core.governance import stable_instance_id
+from app.core.features import validate_hosted_event_features
 from app.core.evidence import (
     EvidenceUnavailable,
     append_record,
@@ -71,6 +72,33 @@ OPTIONAL_FEATURES = frozenset(
 def _canonical(value: object) -> tuple[str, str]:
     rendered = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return rendered, hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _immutable_legal_html(
+    *,
+    title: str,
+    body: str,
+    content_sha256: str,
+) -> HTMLResponse:
+    """Return a bounded immutable legal document without mutable site chrome."""
+    document = (
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>{html.escape(title)}</title></head><body><main>{body}</main></body></html>"
+    )
+    return HTMLResponse(
+        document,
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+            "ETag": f'"{content_sha256}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+def _paragraph(value: object) -> str:
+    return f"<p>{html.escape(str(value or ''))}</p>"
 
 
 def _json_object(value: str, *, field: str) -> dict[str, object]:
@@ -140,6 +168,7 @@ class OperatorProfileIn(BaseModel):
     security_summary: str = Field(min_length=1, max_length=5000)
     subprocessors: list[OperatorSubprocessorIn] = Field(max_length=100)
     hosting_regions: list[str] = Field(min_length=1, max_length=50)
+    supported_optional_features: list[str] = Field(max_length=20)
     fixed_retention_days: int = Field(ge=1, le=3650)
     dpa_url: str | None = Field(None, max_length=500)
     subprocessor_schedule_url: str | None = Field(None, max_length=500)
@@ -153,6 +182,16 @@ class OperatorProfileIn(BaseModel):
         if any(not re.fullmatch(r"[A-Z0-9][A-Z0-9-]{1,31}", item) for item in normalised):
             raise ValueError("Hosting region codes are invalid")
         return sorted(normalised)
+
+    @field_validator("supported_optional_features")
+    @classmethod
+    def valid_supported_features(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("Supported optional features must be unique")
+        unsupported = sorted(set(value) - OPTIONAL_FEATURES)
+        if unsupported:
+            raise ValueError(f"Unsupported optional features: {', '.join(unsupported)}")
+        return sorted(value)
 
     @field_validator("dpa_url", "subprocessor_schedule_url")
     @classmethod
@@ -192,9 +231,20 @@ class ControllerProfileIn(BaseModel):
     processor_summary: str = Field(min_length=1, max_length=5000)
     rights_summary: str = Field(min_length=1, max_length=5000)
     terms_summary: str = Field(min_length=1, max_length=5000)
+    permitted_optional_features: list[str] = Field(max_length=20)
     governance: dict[str, object]
     accepted_operator_policy_version: int = Field(ge=1)
     accepted_operator_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("permitted_optional_features")
+    @classmethod
+    def valid_permitted_features(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("Controller optional features must be unique")
+        unsupported = sorted(set(value) - OPTIONAL_FEATURES)
+        if unsupported:
+            raise ValueError(f"Unsupported optional features: {', '.join(unsupported)}")
+        return sorted(value)
 
 
 class ControllerPublicationIn(BaseModel):
@@ -235,6 +285,10 @@ def _operator_out(profile: InstanceOperatorProfile) -> dict[str, object]:
         "security_summary": profile.security_summary,
         "subprocessors": _json_array(profile.subprocessors_json, field="subprocessors"),
         "hosting_regions": _json_array(profile.hosting_regions_json, field="hosting regions"),
+        "supported_optional_features": _json_array(
+            profile.supported_optional_features_json,
+            field="supported optional features",
+        ),
         "fixed_retention_days": profile.fixed_retention_days,
         "dpa_url": profile.dpa_url,
         "subprocessor_schedule_url": profile.subprocessor_schedule_url,
@@ -350,6 +404,9 @@ def save_operator(
     values = body.model_dump()
     profile.subprocessors_json = _canonical(values.pop("subprocessors"))[0]
     profile.hosting_regions_json = _canonical(values.pop("hosting_regions"))[0]
+    profile.supported_optional_features_json = _canonical(
+        values.pop("supported_optional_features")
+    )[0]
     for field, value in values.items():
         setattr(profile, field, str(value) if field == "privacy_contact_email" else value)
     audit(db, user=root, action="operator.profile_saved", resource_type="operator")
@@ -387,9 +444,38 @@ def publish_operator(
         supersedes_version=latest.version if latest else None,
     )
     db.add(publication)
+    db.flush()
+    try:
+        publication.evidence_record_sha256 = append_record(
+            db,
+            workflow_type="operator_governance",
+            workflow_id=stable_instance_id(db),
+            operation_type=f"policy_published_v{publication.version}",
+            record_type="operator.policy_published",
+            payload={
+                "operator_policy_version": publication.version,
+                "operator_policy_sha256": publication.content_sha256,
+                "document_sha256": publication.content_sha256,
+                "status": "published",
+            },
+        )
+    except EvidenceUnavailable as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "OPERATOR_EVIDENCE_UNAVAILABLE",
+                "message": "The operator policy was not published because its evidence could not be sealed.",
+            },
+        ) from exc
     audit(db, user=root, action="operator.policy_published", resource_type="operator")
     db.commit()
-    return {"version": publication.version, "sha256": publication.content_sha256, "unchanged": False}
+    return {
+        "version": publication.version,
+        "sha256": publication.content_sha256,
+        "evidence_record_sha256": publication.evidence_record_sha256,
+        "unchanged": False,
+    }
 
 
 @admin_router.get("/controllers")
@@ -481,6 +567,10 @@ def get_controller_governance(
         "processor_summary": profile.processor_summary,
         "rights_summary": profile.rights_summary,
         "terms_summary": profile.terms_summary,
+        "permitted_optional_features": _json_array(
+            profile.permitted_optional_features_json,
+            field="controller optional features",
+        ),
         "governance": _json_object(profile.structured_json, field="controller governance"),
         "accepted_operator_policy_version": profile.accepted_operator_policy_version,
         "accepted_operator_policy_sha256": profile.accepted_operator_policy_sha256,
@@ -507,6 +597,23 @@ def save_controller_governance(
         db.add(profile)
     values = body.model_dump()
     profile.structured_json = _canonical(values.pop("governance"))[0]
+    permitted_features = values.pop("permitted_optional_features")
+    operator_content = _json_object(
+        operator_publication.content_json,
+        field="operator publication",
+    )
+    supported_features = set(operator_content.get("supported_optional_features") or [])
+    unavailable = sorted(set(permitted_features) - supported_features)
+    if unavailable:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "controller_feature_not_supported",
+                "features": unavailable,
+                "message": "The hosting operator does not support one or more selected controller features.",
+            },
+        )
+    profile.permitted_optional_features_json = _canonical(permitted_features)[0]
     for field, value in values.items():
         setattr(profile, field, str(value) if field == "privacy_contact_email" else value)
     audit(
@@ -562,6 +669,10 @@ def publish_controller_governance(
         "processor_summary": profile.processor_summary,
         "rights_summary": profile.rights_summary,
         "terms_summary": profile.terms_summary,
+        "permitted_optional_features": _json_array(
+            profile.permitted_optional_features_json,
+            field="controller optional features",
+        ),
         "governance": _json_object(profile.structured_json, field="controller governance"),
         "operator_policy": {
             "version": operator_publication.version,
@@ -672,8 +783,22 @@ def save_event_governance(
     ).first()
     if operator_publication is None or controller_publication is None:
         raise HTTPException(status_code=409, detail="Referenced governance publication is unavailable")
+    if (
+        controller_publication.operator_policy_version != operator_publication.version
+        or controller_publication.operator_policy_sha256
+        != operator_publication.content_sha256
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="The controller publication does not accept the selected operator policy",
+        )
+    selected_features = validate_hosted_event_features(
+        body.enabled_optional_features,
+        operator_publication,
+        controller_publication,
+    )
     config = db.get(EventGovernanceConfiguration, event.id)
-    features_json = _canonical(body.enabled_optional_features)[0]
+    features_json = _canonical(selected_features)[0]
     routing_json = _canonical(body.contact_routing)[0]
     content_sha256 = event_governance_identity(
         event_notice=body.event_notice,
@@ -773,6 +898,49 @@ def public_operator_version(version: int, db: Session = Depends(get_db)):
     }
 
 
+@public_router.get(
+    "/operator/versions/{version}/{section}.html",
+    response_class=HTMLResponse,
+)
+def public_operator_document(
+    version: int,
+    section: Literal["privacy", "processors", "security"],
+    db: Session = Depends(get_db),
+):
+    value = public_operator_version(version, db)
+    policy = value["policy"]
+    name = str(policy["operator_legal_name"])
+    if section == "privacy":
+        body = (
+            f"<h1>{html.escape(name)} — hosting privacy information</h1>"
+            "<p>The hosting operator is a technically privileged processor/service provider. "
+            "It can access hosted data through the application, infrastructure, database, backups, and recovery tooling.</p>"
+            "<h2>Privacy contact</h2>"
+            + _paragraph(policy.get("privacy_contact_email"))
+            + "<h2>Hosting regions</h2>"
+            + _paragraph(", ".join(str(item) for item in policy.get("hosting_regions", [])))
+        )
+    elif section == "processors":
+        items = []
+        for item in policy.get("subprocessors", []):
+            if not isinstance(item, dict):
+                continue
+            display_name = html.escape(str(item.get("display_name") or "Subprocessor"))
+            purposes = ", ".join(str(code) for code in item.get("purpose_codes", []))
+            items.append(f"<li><strong>{display_name}</strong>: {html.escape(purposes)}</li>")
+        body = f"<h1>{html.escape(name)} — subprocessors</h1><ul>{''.join(items)}</ul>"
+    else:
+        body = (
+            f"<h1>{html.escape(name)} — technical security</h1>"
+            + _paragraph(policy.get("security_summary"))
+        )
+    return _immutable_legal_html(
+        title=f"{name} — {section}",
+        body=body,
+        content_sha256=str(value["sha256"]),
+    )
+
+
 def _public_controller_publication(
     controller: Controller,
     db: Session,
@@ -833,6 +1001,61 @@ def public_controller_version(
     return _public_controller_publication(controller, db, version=version)
 
 
+@public_router.get(
+    "/controllers/{public_id}/versions/{version}/{section}.html",
+    response_class=HTMLResponse,
+)
+def public_controller_document(
+    public_id: str,
+    version: int,
+    section: Literal["privacy", "rights", "processors"],
+    db: Session = Depends(get_db),
+):
+    value = public_controller_version(public_id, version, db)
+    policy = value["policy"]
+    name = str(policy["legal_name"])
+    if section == "privacy":
+        body = (
+            f"<h1>{html.escape(name)} — privacy notice</h1>"
+            "<h2>Legal controller</h2>"
+            + _paragraph(name)
+            + _paragraph(policy.get("postal_address"))
+            + "<h2>Privacy contact</h2>"
+            + _paragraph(policy.get("privacy_contact_email"))
+            + "<h2>Supervisory authority</h2>"
+            + _paragraph(policy.get("supervisory_authority_name"))
+        )
+    elif section == "rights":
+        body = (
+            f"<h1>{html.escape(name)} — exercising your rights</h1>"
+            + _paragraph(policy.get("rights_summary"))
+            + "<h2>Contact</h2>"
+            + _paragraph(policy.get("privacy_contact_email"))
+        )
+    else:
+        operator_policy = policy.get("operator_policy") or {}
+        operator_version = operator_policy.get("version") if isinstance(operator_policy, dict) else None
+        operator_link = (
+            f"/api/v1/legal/operator/versions/{int(operator_version)}/processors.html"
+            if isinstance(operator_version, int)
+            else None
+        )
+        body = (
+            f"<h1>{html.escape(name)} — processors</h1>"
+            + _paragraph(policy.get("processor_summary"))
+            + (
+                f"<p><a href='{html.escape(operator_link, quote=True)}'>Hosting operator and subprocessor schedule</a></p>"
+                if operator_link
+                else ""
+            )
+        )
+    return _immutable_legal_html(
+        title=f"{name} — {section}",
+        body=body,
+        content_sha256=str(value["sha256"]),
+    )
+
+
 @public_router.get("/events/{event_evidence_id}")
 def public_event_legal(event_evidence_id: str, db: Session = Depends(get_db)):
     apply_database_tenant_context(
@@ -884,15 +1107,33 @@ def public_event_legal(event_evidence_id: str, db: Session = Depends(get_db)):
 def public_event_privacy_html(event_evidence_id: str, db: Session = Depends(get_db)):
     value = public_event_legal(event_evidence_id, db)
     event = value["event"]
-    controller = value["controller"]["policy"]
-    operator = value["operator"]["policy"]
+    controller_value = value["controller"]
+    operator_value = value["operator"]
+    controller = controller_value["policy"]
+    operator = operator_value["policy"]
+    controller_base = (
+        f"/api/v1/legal/controllers/{controller_value['public_id']}"
+        f"/versions/{controller_value['version']}"
+    )
+    operator_base = f"/api/v1/legal/operator/versions/{operator_value['version']}"
     return HTMLResponse(
         "<!doctype html><html><head><meta charset='utf-8'><title>Privacy notice</title></head><body>"
         f"<h1>{html.escape(str(event['name']))}</h1>"
         f"<h2>Legal controller</h2><p>{html.escape(str(controller['legal_name']))}</p>"
         f"<p>{html.escape(str(controller['postal_address']))}</p>"
+        f"<p><a href='{html.escape(controller_base + '/privacy.html', quote=True)}'>Controller privacy notice</a> | "
+        f"<a href='{html.escape(controller_base + '/rights.html', quote=True)}'>Exercise your rights</a> | "
+        f"<a href='{html.escape(controller_base + '/processors.html', quote=True)}'>Controller processors</a></p>"
         f"<h2>Hosting operator / processor</h2><p>{html.escape(str(operator['operator_legal_name']))}</p>"
         "<p>The hosting operator has privileged technical access for provisioning, security, support and recovery. "
         "All authenticated event accounts can see event unavailability; other events and public visitors cannot.</p>"
-        f"<p>{html.escape(str(event.get('notice') or ''))}</p></body></html>"
+        f"<p><a href='{html.escape(operator_base + '/privacy.html', quote=True)}'>Hosting privacy information</a> | "
+        f"<a href='{html.escape(operator_base + '/processors.html', quote=True)}'>Subprocessor schedule</a> | "
+        f"<a href='{html.escape(operator_base + '/security.html', quote=True)}'>Technical security</a></p>"
+        f"<h2>Event-specific notice</h2><p>{html.escape(str(event.get('notice') or ''))}</p></body></html>",
+        headers={
+            "Cache-Control": "no-cache",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+            "X-Content-Type-Options": "nosniff",
+        },
     )

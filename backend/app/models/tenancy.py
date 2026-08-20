@@ -60,6 +60,7 @@ class InstanceOperatorProfile(Base):
     security_summary = Column(Text, nullable=False)
     subprocessors_json = Column(Text, nullable=False, default="[]")
     hosting_regions_json = Column(Text, nullable=False, default="[]")
+    supported_optional_features_json = Column(Text, nullable=False, default="[]")
     fixed_retention_days = Column(Integer, nullable=False)
     dpa_url = Column(String(500), nullable=True)
     subprocessor_schedule_url = Column(String(500), nullable=True)
@@ -82,6 +83,7 @@ class OperatorPolicyPublication(Base):
     content_sha256 = Column(String(64), nullable=False, unique=True)
     source_json = Column(Text, nullable=False, default="{}")
     source_sha256 = Column(String(64), nullable=False)
+    evidence_record_sha256 = Column(String(64), nullable=True, unique=True)
     published_by_id = Column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -156,6 +158,7 @@ class ControllerGovernanceProfile(Base):
     processor_summary = Column(Text, nullable=False)
     rights_summary = Column(Text, nullable=False)
     terms_summary = Column(Text, nullable=False)
+    permitted_optional_features_json = Column(Text, nullable=False, default="[]")
     structured_json = Column(Text, nullable=False, default="{}")
     accepted_operator_policy_version = Column(Integer, nullable=True)
     accepted_operator_policy_sha256 = Column(String(64), nullable=True)
@@ -292,7 +295,7 @@ class EventMembership(Base):
 
 
 def _immutable_controller_identity(target, value, oldvalue, initiator):
-    """Keep controller URLs and trust anchors stable after persistence."""
+    """Keep controller URLs and codes stable after persistence."""
 
     del initiator
     if (
@@ -304,7 +307,22 @@ def _immutable_controller_identity(target, value, oldvalue, initiator):
     return value
 
 
-for _identity_attribute in (Controller.public_id, Controller.trust_entity_id, Controller.code):
+def _immutable_controller_trust_identity(target, value, oldvalue, initiator):
+    """Permit only the reviewed fresh single-controller trust-key binding."""
+
+    del initiator
+    if getattr(target, "_allow_initial_trust_identity_binding", False):
+        return value
+    if (
+        target.id is not None
+        and oldvalue not in (NO_VALUE, NEVER_SET, None)
+        and value != oldvalue
+    ):
+        raise ValueError("Controller public trust identity is immutable")
+    return value
+
+
+for _identity_attribute in (Controller.public_id, Controller.code):
     sqlalchemy_event.listen(
         _identity_attribute,
         "set",
@@ -312,3 +330,11 @@ for _identity_attribute in (Controller.public_id, Controller.trust_entity_id, Co
         retval=True,
         active_history=True,
     )
+
+sqlalchemy_event.listen(
+    Controller.trust_entity_id,
+    "set",
+    _immutable_controller_trust_identity,
+    retval=True,
+    active_history=True,
+)

@@ -173,7 +173,7 @@ def _hosted_disclosure(user: User, db: Session) -> ActivationConsentDisclosure:
             "privacy_url": f"{origin}/api/v1/legal/events/{event.evidence_id}/privacy.html",
             "rights_url": (
                 f"{origin}/api/v1/legal/controllers/{controller.public_id}"
-                f"/versions/{controller_publication.version}"
+                f"/versions/{controller_publication.version}/rights.html"
             ),
             "event_privacy_url": f"{origin}/api/v1/legal/events/{event.evidence_id}/privacy.html",
             "event_notice": config.event_notice,

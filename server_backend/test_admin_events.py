@@ -247,7 +247,7 @@ def test_delete_event_requires_reauth(db, admin_client):
 
 def test_delete_event_requires_accountable_case(db, reauth_admin_client):
     """Direct event deletion cannot bypass the accountable erasure workflow."""
-    event, _ = create_test_event(db, name="Cascade Evt")
+    event = db.query(Event).filter(Event.name == "Reauth Event").one()
     user = create_test_user(db, username="evt_user", event_id=event.id)
     user_id = user.id
 
@@ -267,7 +267,7 @@ def test_delete_event_requires_accountable_case(db, reauth_admin_client):
 
 def test_rejected_direct_delete_preserves_privileged_accounts(db, reauth_admin_client):
     """A rejected shortcut leaves privileged accounts and sessions unchanged."""
-    event, _ = create_test_event(db, name="Privileged Event")
+    event = db.query(Event).filter(Event.name == "Reauth Event").one()
     privileged = create_test_user(
         db,
         username="event.issuer",
@@ -297,7 +297,8 @@ def test_delete_event_not_found(db, reauth_admin_client):
 
 def test_regenerate_secret(db, reauth_admin_client):
     """Admin with reauth can regenerate an event's publish secret."""
-    event, old_secret = create_test_event(db, name="Regen Evt")
+    event = db.query(Event).filter(Event.name == "Reauth Event").one()
+    old_secret = event.publish_secret_hash
     new_value = "n" * 48
     r = reauth_admin_client.post(
         f"/api/v1/admin/events/{event.id}/regenerate-secret",

@@ -238,6 +238,8 @@ def controller_for_event(db: Session, event_id: int) -> Controller | None:
 def hosted_mode_preflight(db: Session) -> dict[str, object]:
     """Return bounded blockers; hosted mode may be enabled only when empty."""
 
+    from app.core.features import hosted_feature_ceiling
+
     blockers: list[dict[str, object]] = []
 
     operator = db.get(InstanceOperatorProfile, 1)
@@ -252,6 +254,17 @@ def hosted_mode_preflight(db: Session) -> dict[str, object]:
         blockers.append({"code": "operator_policy_missing"})
     elif "legacy_combined_operator_controller" in operator_publication.content_json:
         blockers.append({"code": "operator_policy_requires_review"})
+    elif not operator_publication.evidence_record_sha256:
+        blockers.append({"code": "operator_policy_evidence_missing"})
+    else:
+        try:
+            operator_document = json.loads(operator_publication.content_json)
+        except (TypeError, ValueError):
+            operator_document = None
+        if not isinstance(operator_document, dict) or not isinstance(
+            operator_document.get("supported_optional_features"), list
+        ):
+            blockers.append({"code": "operator_feature_policy_missing"})
 
     controllers = db.query(Controller).order_by(Controller.id).all()
     if not controllers:
@@ -269,6 +282,23 @@ def hosted_mode_preflight(db: Session) -> dict[str, object]:
         )
         if publication is None:
             blockers.append({"code": "controller_policy_missing", "controller": controller.public_id})
+        else:
+            if not publication.evidence_record_sha256:
+                blockers.append({
+                    "code": "controller_policy_evidence_missing",
+                    "controller": controller.public_id,
+                })
+            try:
+                controller_document = json.loads(publication.content_json)
+            except (TypeError, ValueError):
+                controller_document = None
+            if not isinstance(controller_document, dict) or not isinstance(
+                controller_document.get("permitted_optional_features"), list
+            ):
+                blockers.append({
+                    "code": "controller_feature_policy_missing",
+                    "controller": controller.public_id,
+                })
 
     unmapped_events = db.query(Event).filter(Event.controller_id.is_(None)).count()
     if unmapped_events:
@@ -289,6 +319,23 @@ def hosted_mode_preflight(db: Session) -> dict[str, object]:
         ).first()
         if operator_policy is None or controller_policy is None:
             blockers.append({"code": "event_governance_chain_incomplete", "event_ref": event.evidence_id})
+            continue
+        try:
+            selected_features = set(json.loads(config.enabled_optional_features_json))
+        except (TypeError, ValueError):
+            selected_features = {"__invalid_feature_document__"}
+        unavailable = sorted(
+            selected_features - hosted_feature_ceiling(
+                operator_policy,
+                controller_policy,
+            )
+        )
+        if unavailable:
+            blockers.append({
+                "code": "event_feature_policy_mismatch",
+                "event_ref": event.evidence_id,
+                "features": unavailable,
+            })
 
     non_root_users = db.query(User).filter(User.is_root_admin.is_(False)).all()
     for user in non_root_users:

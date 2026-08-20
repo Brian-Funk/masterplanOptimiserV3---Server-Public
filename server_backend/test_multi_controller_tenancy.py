@@ -15,10 +15,12 @@ from app.models.evidence import ControllerEvidenceChainState, EvidenceKey, Evide
 from app.models.server_setting import ServerSetting
 from app.core import evidence
 from app.core.database_tenancy import root_service_context
+from app.core.features import enabled_event_features
 from app.core.config import settings
 from app.models.published import PublishedPerson, PublishedPersonUnavailability
 from app.models.tenancy import (
     Controller,
+    ControllerGovernancePublication,
     EventGovernanceConfiguration,
     OperatorPolicyPublication,
 )
@@ -85,6 +87,57 @@ def test_non_root_roles_cannot_enumerate_other_event_or_controller(db):
             assert users.status_code == 200
             assert {item["event_id"] for item in users.json()} == {event_a1.id}
         assert client.get("/api/v1/admin/controllers").status_code == 403
+
+
+def test_foreign_privileged_account_ids_do_not_leak_role_or_existence(db):
+    controller_a = _controller(db, "role-probe-a", "Role Probe A")
+    controller_b = _controller(db, "role-probe-b", "Role Probe B")
+    event_a, _ = create_test_event(db, "Role Probe A1", controller_id=controller_a.id)
+    event_b, _ = create_test_event(db, "Role Probe B1", controller_id=controller_b.id)
+    _, client = _event_account(db, event_a, username="role.probe.admin", role="admin")
+    foreign_admin = create_test_user(
+        db,
+        username="foreign.event.admin",
+        event_id=event_b.id,
+        is_admin=True,
+    )
+    foreign_ordinary = create_test_user(
+        db,
+        username="foreign.event.member",
+        event_id=event_b.id,
+    )
+
+    for target in (foreign_admin, foreign_ordinary):
+        response = client.get(f"/api/v1/admin/users/{target.id}/export")
+        assert response.status_code == 404
+        assert response.json()["detail"] == "User not found"
+
+
+def test_event_admin_cannot_move_users_or_mutate_foreign_event_secrets(db):
+    controller_a = _controller(db, "mutation-a", "Mutation A")
+    controller_b = _controller(db, "mutation-b", "Mutation B")
+    event_a, _ = create_test_event(db, "Mutation A1", controller_id=controller_a.id)
+    event_b, _ = create_test_event(db, "Mutation B1", controller_id=controller_b.id)
+    _, client = _event_account(db, event_a, username="mutation.admin", role="admin")
+    own_user = create_test_user(db, username="mutation.member", event_id=event_a.id)
+
+    moved = client.put(
+        f"/api/v1/admin/users/{own_user.id}",
+        json={"event_id": event_b.id},
+    )
+    assert moved.status_code == 404
+    db.refresh(own_user)
+    assert own_user.event_id == event_a.id
+
+    regenerated = client.post(
+        f"/api/v1/admin/events/{event_b.id}/regenerate-secret",
+        json={
+            "publish_secret": "z" * 48,
+            "idempotency_key": "cross-tenant-secret-mutation-0001",
+        },
+    )
+    assert regenerated.status_code == 404
+    assert client.delete(f"/api/v1/admin/events/{event_b.id}").status_code == 404
 
 
 def test_every_authenticated_event_account_sees_all_event_unavailability_only(db):
@@ -258,6 +311,64 @@ def test_hosted_smtp_activation_is_event_feature_gated(db):
     assert response.json()["detail"]["code"] == "event_feature_unavailable"
 
 
+def test_hosted_features_are_operator_controller_event_intersection(db):
+    controller = _controller(db, "features-controller", "Features Controller")
+    event, _ = create_test_event(db, "Feature Event", controller_id=controller.id)
+    operator_content = json.dumps({
+        "supported_optional_features": [
+            "desktop_publishing",
+            "push_notifications",
+        ],
+    }, sort_keys=True, separators=(",", ":"))
+    controller_content = json.dumps({
+        "permitted_optional_features": [
+            "desktop_publishing",
+            "smtp_activation",
+        ],
+    }, sort_keys=True, separators=(",", ":"))
+    operator = OperatorPolicyPublication(
+        version=21,
+        content_json=operator_content,
+        content_sha256=hashlib.sha256(operator_content.encode()).hexdigest(),
+        source_json="{}",
+        source_sha256=hashlib.sha256(b"{}").hexdigest(),
+        evidence_record_sha256="2" * 64,
+    )
+    db.add(operator)
+    db.flush()
+    db.add(ControllerGovernancePublication(
+        controller_id=controller.id,
+        version=9,
+        content_json=controller_content,
+        content_sha256=hashlib.sha256(controller_content.encode()).hexdigest(),
+        source_json="{}",
+        source_sha256=hashlib.sha256(b"{}").hexdigest(),
+        operator_policy_version=operator.version,
+        operator_policy_sha256=operator.content_sha256,
+        evidence_record_sha256="3" * 64,
+    ))
+    db.add(EventGovernanceConfiguration(
+        event_id=event.id,
+        controller_id=controller.id,
+        event_notice=None,
+        enabled_optional_features_json=json.dumps([
+            "desktop_publishing",
+            "push_notifications",
+            "smtp_activation",
+        ]),
+        contact_routing_json="{}",
+        operator_policy_version=21,
+        controller_policy_version=9,
+        revision=1,
+        content_sha256="4" * 64,
+    ))
+    mode = db.query(ServerSetting).filter(ServerSetting.key == "tenancy_mode").one()
+    mode.value = "hosted-multi-controller"
+    db.commit()
+
+    assert enabled_event_features(event.id, db) == frozenset({"desktop_publishing"})
+
+
 def test_privileged_non_root_route_matrix_hides_every_foreign_tenant(db):
     """Issuer/admin routes hide same-controller and other-controller events alike."""
 
@@ -302,6 +413,46 @@ def test_migration_contains_forced_rls_for_material_tenant_tables():
     assert "processor_identities', 'processor_policy_acknowledgements'" in migration
     assert "mp_opt_rls_event_id()" in migration
     assert "mp_opt_rls_controller_id()" in migration
+    assert "evidence_record_sha256 VARCHAR(64) UNIQUE" in migration
+
+
+def test_operator_publication_rolls_back_when_evidence_cannot_be_sealed(
+    db, monkeypatch
+):
+    root = create_test_user(
+        db,
+        username="operator.failure.root",
+        display_name="Operator Failure Root",
+        is_root_admin=True,
+        is_admin=True,
+    )
+    client = _make_client(db, root, reauth=True)
+    saved = client.put("/api/v1/admin/operator", json={
+        "operator_type": "organisation",
+        "operator_legal_name": "Evidence Failure Host",
+        "operator_postal_address": "3 Test Street, 8000 Zurich",
+        "operator_country": "CH",
+        "privacy_contact_email": "privacy@failure-host.example.com",
+        "service_description": "Synthetic operator policy failure test.",
+        "security_summary": "Synthetic security statement.",
+        "subprocessors": [],
+        "hosting_regions": ["CH"],
+        "supported_optional_features": [],
+        "fixed_retention_days": 90,
+        "dpa_url": None,
+        "subprocessor_schedule_url": None,
+    })
+    assert saved.status_code == 200, saved.text
+
+    def unavailable(*_args, **_kwargs):
+        raise evidence.EvidenceUnavailable("synthetic evidence failure")
+
+    monkeypatch.setattr("app.api.v1.tenancy.append_record", unavailable)
+    response = client.post("/api/v1/admin/operator/publications", json={})
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "OPERATOR_EVIDENCE_UNAVAILABLE"
+    assert db.query(OperatorPolicyPublication).count() == 0
 
 
 def test_root_can_configure_controller_enable_hosted_mode_and_create_event(db):
@@ -333,6 +484,10 @@ def test_root_can_configure_controller_enable_hosted_mode_and_create_event(db):
             "privacy_url": "https://mail.example.test/privacy",
         }],
         "hosting_regions": ["CH"],
+        "supported_optional_features": [
+            "desktop_publishing",
+            "smtp_activation",
+        ],
         "fixed_retention_days": 90,
         "dpa_url": "https://operator.example.test/dpa",
         "subprocessor_schedule_url": "https://operator.example.test/subprocessors",
@@ -341,6 +496,14 @@ def test_root_can_configure_controller_enable_hosted_mode_and_create_event(db):
     operator_published = client.post("/api/v1/admin/operator/publications", json={})
     assert operator_published.status_code == 201, operator_published.text
     operator_identity = operator_published.json()
+    assert len(operator_identity["evidence_record_sha256"]) == 64
+    stored_operator_publication = db.query(OperatorPolicyPublication).filter(
+        OperatorPolicyPublication.version == operator_identity["version"]
+    ).one()
+    assert (
+        stored_operator_publication.evidence_record_sha256
+        == operator_identity["evidence_record_sha256"]
+    )
 
     activated = client.patch(
         f"/api/v1/admin/controllers/{controller.public_id}",
@@ -374,6 +537,10 @@ def test_root_can_configure_controller_enable_hosted_mode_and_create_event(db):
             "processor_summary": "The hosting operator processes data on behalf of this controller.",
             "rights_summary": "Contact the controller to exercise applicable rights.",
             "terms_summary": "Operational event accounts are event-scoped.",
+            "permitted_optional_features": [
+                "desktop_publishing",
+                "smtp_activation",
+            ],
             "governance": {
                 "permitted_data": {
                     "purpose": "Coordinate NSC Glarus",
@@ -448,6 +615,39 @@ def test_root_can_configure_controller_enable_hosted_mode_and_create_event(db):
     assert body["controller"]["policy"]["legal_name"] == "Synthetic Event Controller"
     assert body["operator"]["policy"]["operator_legal_name"] == "Synthetic Hosting Cooperative"
     assert body["enabled_optional_features"] == ["desktop_publishing", "smtp_activation"]
+
+    event_privacy = client.get(
+        f"/api/v1/legal/events/{event['evidence_id']}/privacy.html"
+    )
+    assert event_privacy.status_code == 200, event_privacy.text
+    assert "Synthetic Event Controller" in event_privacy.text
+    assert "Synthetic Hosting Cooperative" in event_privacy.text
+    assert (
+        f"/api/v1/legal/controllers/{controller.public_id}/versions/1/rights.html"
+        in event_privacy.text
+    )
+    assert "/api/v1/legal/operator/versions/1/processors.html" in event_privacy.text
+    assert event_privacy.headers["cache-control"] == "no-cache"
+
+    rights = client.get(
+        f"/api/v1/legal/controllers/{controller.public_id}/versions/1/rights.html"
+    )
+    assert rights.status_code == 200, rights.text
+    assert "Contact the controller to exercise applicable rights." in rights.text
+    assert "Synthetic Hosting Cooperative" not in rights.text
+    assert "immutable" in rights.headers["cache-control"]
+    assert rights.headers["etag"] == f'"{controller_identity["sha256"]}"'
+
+    processors = client.get(
+        f"/api/v1/legal/controllers/{controller.public_id}/versions/1/processors.html"
+    )
+    assert processors.status_code == 200, processors.text
+    assert "/api/v1/legal/operator/versions/1/processors.html" in processors.text
+
+    operator_privacy = client.get("/api/v1/legal/operator/versions/1/privacy.html")
+    assert operator_privacy.status_code == 200, operator_privacy.text
+    assert "technically privileged processor/service provider" in operator_privacy.text
+    assert "Synthetic Event Controller" not in operator_privacy.text
 
 
 def test_hosted_evidence_is_split_into_controller_chains(db):

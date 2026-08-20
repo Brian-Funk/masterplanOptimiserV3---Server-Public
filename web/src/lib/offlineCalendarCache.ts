@@ -1,10 +1,10 @@
 "use client";
 
 const DB_NAME = "mp-opt-offline-calendar";
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 const STORE_NAME = "calendar-payloads";
-const CACHE_SCHEMA_VERSION = 5;
-const OPT_IN_PREFIX = "mp-opt-offline-calendar-enabled:v2:";
+const CACHE_SCHEMA_VERSION = 6;
+const OPT_IN_PREFIX = "mp-opt-offline-calendar-enabled:v3:";
 
 type StorageErrorCode =
   | "storage_unavailable"
@@ -76,6 +76,7 @@ const CALENDAR_KEYS = new Set([
   "controller_trust_entity_id",
   "event_ref",
   "membership_id",
+  "linked_person_id",
   "event_id",
   "event_name",
   "start_date",
@@ -206,7 +207,7 @@ export function assertParticipantSafeOfflineCalendarPayload(
   }
   assertOnlyKeys(payload, CALENDAR_KEYS, "calendar");
   if (
-    payload.offline_contract_version !== "mp-opt-offline-calendar-v5" ||
+    payload.offline_contract_version !== "mp-opt-offline-calendar-v6" ||
     typeof payload.controller_public_id !== "string" ||
     payload.controller_public_id.length === 0 ||
     typeof payload.controller_trust_entity_id !== "string" ||
@@ -215,6 +216,10 @@ export function assertParticipantSafeOfflineCalendarPayload(
     payload.event_ref.length === 0 ||
     !Number.isInteger(payload.membership_id) ||
     Number(payload.membership_id) <= 0 ||
+    !(
+      payload.linked_person_id === null
+      || (Number.isInteger(payload.linked_person_id) && Number(payload.linked_person_id) > 0)
+    ) ||
     !Number.isInteger(payload.data_policy_version) ||
     Number(payload.data_policy_version) <= 0 ||
     typeof payload.data_policy_sha256 !== "string" ||
@@ -374,6 +379,7 @@ export function assertParticipantSafeOfflineCalendarPayload(
   if (payload.unavailabilities !== undefined && !Array.isArray(payload.unavailabilities)) {
     throw new OfflineCalendarStorageError("unsafe_payload", "Offline unavailability data is invalid.");
   }
+  const unavailablePersonIds = new Set<number>();
   for (const intervalValue of payload.unavailabilities ?? []) {
     if (!isRecord(intervalValue)) {
       throw new OfflineCalendarStorageError("unsafe_payload", "An offline unavailability is invalid.");
@@ -382,13 +388,19 @@ export function assertParticipantSafeOfflineCalendarPayload(
     if (!Number.isInteger(intervalValue.person_id)) {
       throw new OfflineCalendarStorageError("unsafe_payload", "An offline unavailability is invalid.");
     }
-    directoryIdentityIds.add(intervalValue.person_id as number);
+    unavailablePersonIds.add(intervalValue.person_id as number);
   }
 
-  if (directoryIdentityIds.size > 1) {
+  const linkedPersonId = payload.linked_person_id as number | null;
+  const permittedDirectoryIds = new Set(unavailablePersonIds);
+  if (linkedPersonId !== null) permittedDirectoryIds.add(linkedPersonId);
+  if (
+    [...directoryIdentityIds].some((personId) => !permittedDirectoryIds.has(personId))
+    || [...unavailablePersonIds].some((personId) => !directoryIdentityIds.has(personId))
+  ) {
     throw new OfflineCalendarStorageError(
       "unsafe_payload",
-      "The offline calendar contains another person's directory identity or availability.",
+      "The offline calendar contains a directory identity unrelated to event unavailability.",
     );
   }
 

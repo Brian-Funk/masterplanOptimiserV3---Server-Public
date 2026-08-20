@@ -114,7 +114,8 @@ const user = {
 };
 
 const cachedCalendar = {
-  offline_contract_version: "mp-opt-offline-calendar-v5",
+  offline_contract_version: "mp-opt-offline-calendar-v6",
+  linked_person_id: null,
   controller_public_id: futureMarker.controller_public_id,
   controller_trust_entity_id: futureMarker.controller_trust_entity_id,
   event_ref: futureMarker.event_ref,

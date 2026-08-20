@@ -151,9 +151,9 @@ def test_draft_is_private_and_publication_is_immutable(db):
     storage = public["storage"]
     assert "IndexedDB offline calendar response" in storage["offline_schedule"]
     assert "names attached to authenticated task allocations" in storage["offline_schedule"]
-    assert "linked directory identity" in storage["offline_schedule"]
+    assert "all authenticated accounts in this event" in storage["offline_schedule"]
     assert "complete people directory" in storage["offline_schedule"]
-    assert "other people's unavailability" in storage["offline_schedule"]
+    assert "private contact details" in storage["offline_schedule"]
     assert "server-bounded expiry" in storage["offline_schedule"]
     assert "never stores authenticated API responses" in storage["application_shell"]
     assert "localStorage" in storage["preferences"]
@@ -393,7 +393,7 @@ def test_public_legal_notice_is_readable_without_javascript_and_escapes_controll
     assert "fetch(" not in response.text
     assert 'href="/rights"' in response.text
     assert "IndexedDB offline calendar response" in response.text
-    assert "linked directory identity" in response.text
+    assert "all authenticated accounts in this event" in response.text
     assert "names attached to authenticated task allocations" in response.text
     assert "sessionStorage" in response.text
 
