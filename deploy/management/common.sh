@@ -210,12 +210,35 @@ mp_queue_ha_replication() {
     mv "$temporary" "$MP_ROOT/runtime/ha-requests/${job}.json"
 }
 
+# Create a missing owner-controlled parent chain without following substituted
+# symlinks.  Fresh hosts do not necessarily have XDG's .config or .local/state
+# directories yet, while cleanup intentionally removes empty application
+# parents.  Existing ancestors are validation boundaries and are never
+# replaced or re-owned here.
+mp_create_private_owner_directory_chain() {
+    local directory="${1:-}" parent owner
+    [ -n "$directory" ] && [ "${directory#/}" != "$directory" ] || return 1
+    owner="$(id -u):$(id -g)"
+    if [ -e "$directory" ] || [ -L "$directory" ]; then
+        [ -d "$directory" ] && [ ! -L "$directory" ] \
+            && [ "$(stat -c '%u:%g' "$directory" 2>/dev/null)" = "$owner" ]
+        return
+    fi
+    parent="$(dirname -- "$directory")"
+    [ "$parent" != "$directory" ] || return 1
+    mp_create_private_owner_directory_chain "$parent" || return 1
+    mkdir -- "$directory" || return 1
+    chmod 700 -- "$directory"
+}
+
 # Initialise protected operator-owned working directories.
 mp_initialise_paths() {
-    local path owner
+    local path parent owner
     umask 077
     owner="$(id -u):$(id -g)"
     for path in "$MP_HOME" "$MP_STATE" "$MP_SNAPSHOTS"; do
+        parent="$(dirname -- "$path")"
+        mp_create_private_owner_directory_chain "$parent" || return 1
         if [ -e "$path" ] || [ -L "$path" ]; then
             [ -d "$path" ] && [ ! -L "$path" ] \
                 && [ "$(stat -c '%u:%g' "$path" 2>/dev/null)" = "$owner" ] \

@@ -69,6 +69,79 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             "MP_DEPLOYMENT_POLICY_FILE": str(policy),
         }
 
+    def test_initialise_paths_creates_missing_fresh_host_parents(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            home = root / "deploy-home"
+            home.mkdir(mode=0o700)
+            script = r'''
+                set -Eeuo pipefail
+                export HOME="$1"
+                export MP_HOME="$HOME/.config/mp-opt-server"
+                export MP_STATE="$HOME/.local/state/mp-opt-server"
+                export MP_SNAPSHOTS="$HOME/masterplan-snapshots"
+                export MP_AUDIT_FILE="$MP_STATE/management.log"
+                export MP_LOCK_FILE="$MP_STATE/management.lock"
+                source "$2/deploy/management/common.sh"
+                test ! -e "$HOME/.config"
+                test ! -e "$HOME/.local"
+                mp_initialise_paths
+                for path in \
+                    "$HOME/.config" \
+                    "$HOME/.config/mp-opt-server" \
+                    "$HOME/.local" \
+                    "$HOME/.local/state" \
+                    "$HOME/.local/state/mp-opt-server" \
+                    "$HOME/masterplan-snapshots"
+                do
+                    test -d "$path"
+                    test ! -L "$path"
+                    test "$(stat -c '%u:%g' "$path")" = "$(id -u):$(id -g)"
+                done
+                test "$(stat -c '%a' "$HOME/.config")" = 700
+                test "$(stat -c '%a' "$HOME/.local/state")" = 700
+                test "$(stat -c '%a' "$MP_HOME")" = 700
+                test "$(stat -c '%a' "$MP_STATE")" = 700
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(home), str(ROOT)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_initialise_paths_rejects_substituted_fresh_host_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            home = root / "deploy-home"
+            outside = root / "outside"
+            home.mkdir(mode=0o700)
+            outside.mkdir(mode=0o700)
+            (home / ".config").symlink_to(outside, target_is_directory=True)
+            script = r'''
+                set -Eeuo pipefail
+                export HOME="$1"
+                export MP_HOME="$HOME/.config/mp-opt-server"
+                export MP_STATE="$HOME/.local/state/mp-opt-server"
+                export MP_SNAPSHOTS="$HOME/masterplan-snapshots"
+                export MP_AUDIT_FILE="$MP_STATE/management.log"
+                export MP_LOCK_FILE="$MP_STATE/management.lock"
+                source "$2/deploy/management/common.sh"
+                ! mp_initialise_paths
+                test ! -e "$3/mp-opt-server"
+            '''
+            result = subprocess.run(
+                [
+                    "bash", "-Eeuo", "pipefail", "-c", script, "bash",
+                    str(home), str(ROOT), str(outside),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def invoke(
         self,
         environment: dict[str, str],
