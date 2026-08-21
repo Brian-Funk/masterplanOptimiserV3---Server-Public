@@ -747,7 +747,8 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                     "dns.propagate", "peer.pair", "bundle.capture", "bundle.transfer",
                     "bundle.restore", "bundle.verify", "bundle.acknowledge",
                     "root.passkey-register", "recovery.download", "recovery.reselect",
-                    "controller.download-or-import", "governance.save",
+                    "controller.download-or-import", "controller.possession-proof",
+                    "controller.root-authorise", "governance.save",
                     "governance.preview", "governance.publish",
                     "smtp.deliver-and-receive", "commissioning.finalise",
                     "evidence.verify",
@@ -1367,7 +1368,8 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
             "peer.pair", "bundle.capture", "bundle.transfer", "bundle.restore",
             "bundle.verify", "bundle.acknowledge", "root.passkey-register",
             "recovery.download", "recovery.reselect",
-            "controller.download-or-import", "governance.save", "governance.preview",
+            "controller.download-or-import", "controller.possession-proof",
+            "controller.root-authorise", "governance.save", "governance.preview",
             "governance.publish", "smtp.deliver-and-receive",
             "commissioning.finalise",
             "evidence.verify",
@@ -1390,7 +1392,6 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         declared = (
             "witness.deploy-code",
             "witness.bind-secrets", "dns.create",
-            "controller.possession-proof", "controller.root-authorise",
             "smtp.authenticate", "smtp.dns-verify",
         )
         for transition in declared:

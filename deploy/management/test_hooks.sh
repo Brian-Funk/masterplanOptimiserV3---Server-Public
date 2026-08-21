@@ -39,8 +39,8 @@ readonly MP_SETUP_TEST_HOOK_TRANSITION_SPECS='[
   {"transition":"recovery.download","driver":"browser","wired":true},
   {"transition":"recovery.reselect","driver":"browser","wired":true},
   {"transition":"controller.download-or-import","driver":"browser","wired":true},
-  {"transition":"controller.possession-proof","driver":"browser","wired":false},
-  {"transition":"controller.root-authorise","driver":"browser","wired":false},
+  {"transition":"controller.possession-proof","driver":"browser","wired":true},
+  {"transition":"controller.root-authorise","driver":"browser","wired":true},
   {"transition":"governance.save","driver":"browser","wired":true},
   {"transition":"governance.preview","driver":"browser","wired":true},
   {"transition":"governance.publish","driver":"browser","wired":true},
@@ -55,7 +55,8 @@ readonly MP_SETUP_TEST_HOOK_TRANSITIONS='[
   "backend.activate","caddy.activate","witness.register-primary","dns.propagate",
   "peer.pair","bundle.capture","bundle.transfer","bundle.restore","bundle.verify",
   "bundle.acknowledge","root.passkey-register","recovery.download","recovery.reselect",
-  "controller.download-or-import","governance.save","governance.preview",
+  "controller.download-or-import","controller.possession-proof",
+  "controller.root-authorise","governance.save","governance.preview",
   "governance.publish","smtp.deliver-and-receive","commissioning.finalise",
   "evidence.verify"
 ]'
