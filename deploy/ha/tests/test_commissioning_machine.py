@@ -89,6 +89,115 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             "MP_DEPLOYMENT_POLICY_FILE": str(policy),
         }
 
+    def test_structured_snapshot_replays_without_duplicate_creation_and_verifies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            script = r'''
+                set -Eeuo pipefail
+                export MP_STATE="$1/state"
+                export MP_SNAPSHOTS="$1/snapshots"
+                export MP_MACHINE_SNAPSHOT_RECEIPTS="$MP_STATE/snapshot-machine-receipts"
+                mkdir -m 0700 "$MP_STATE" "$MP_SNAPSHOTS"
+                source "$2/deploy/management/machine_snapshots.sh"
+                mp_machine_require_local_owner() { return 0; }
+                mp_setup_test_hook_policy() { return 0; }
+                mp_setup_execution_acquire() { return 0; }
+                mp_setup_execution_release() { return 0; }
+                mp_initialise_paths() { return 0; }
+                mp_create_private_owner_directory_chain() { mkdir -p "$1"; chmod 700 "$1"; }
+                mp_machine_validate_regular_file() {
+                    test -f "$1" && test ! -L "$1" \
+                        && test "$(stat -c '%u:%a' "$1")" = "$(id -u):$2"
+                }
+                mp_secure_remove_file() { test -z "${1:-}" || rm -f -- "$1"; }
+                mp_snapshot_receipt_is_v2() {
+                    jq -e '.format == "mp-opt-snapshot-receipt-v2"' \
+                        "$1/receipt.json" >/dev/null
+                }
+                mp_snapshot_create() {
+                    local type="$1" name="$2" directory archive_hash count
+                    count=0; test ! -f "$MP_STATE/create-count" \
+                        || count="$(cat "$MP_STATE/create-count")"
+                    printf '%s\n' "$((count + 1))" > "$MP_STATE/create-count"
+                    directory="$MP_SNAPSHOTS/20260821T120000Z_${type}_${name}"
+                    mkdir -m 0700 "$directory"
+                    printf 'encrypted fixture' > "$directory/snapshot.tar.age"
+                    archive_hash="$(sha256sum "$directory/snapshot.tar.age" | awk '{print $1}')"
+                    printf '%s  snapshot.tar.age\n' "$archive_hash" > "$directory/archive.sha256"
+                    jq -n --arg type "$type" --arg name "$name" --arg hash "$archive_hash" '
+                      {format:"mp-opt-snapshot-receipt-v2",type:$type,name:$name,
+                       created_at:"2026-08-21T12:00:00Z",archive_sha256:$hash,
+                       archive_size:17,verification:"encrypted",recovery_status:"key-required",
+                       encryption:{scheme:"age-x25519",recipient:"age1fixture",
+                         recipient_sha256:("a"*64),recovery_key_id:"fixture"},
+                       storage:{local:"hash-verified",off_server:"not-copied"}}' \
+                       > "$directory/receipt.json"
+                    chmod 600 "$directory"/*
+                    printf '%s\n' "$directory"
+                }
+                mp_setup_machine_identity_file() {
+                    local target
+                    target="$(mktemp "$MP_STATE/identity.XXXXXX")"
+                    chmod 600 "$target"; printf '%s\n' "$1" > "$target"
+                    printf '%s\n' "$target"
+                }
+                mp_snapshot_verify_path() {
+                    local directory="$1" identity="$2" temporary
+                    test "$(stat -c '%a' "$identity")" = 600
+                    grep -q '^AGE-SECRET-KEY-1' "$identity"
+                    temporary="$(mktemp "$directory/receipt.XXXXXX")"
+                    jq '.verification="deep-verified" | .recovery_status="recoverable"
+                        | .storage.local="deep-verified"' "$directory/receipt.json" > "$temporary"
+                    chmod 600 "$temporary"; mv "$temporary" "$directory/receipt.json"
+                }
+                request='{"format":"mp-opt-snapshot-machine-request-v1","action":"create","idempotency_key":"12345678-1234-4234-8234-123456789abc:snapshot-create","values":{"type":"full","name":"acceptance"}}'
+                first="$(mp_machine_snapshot_action create <<< "$request")"
+                second="$(mp_machine_snapshot_action create <<< "$request")"
+                test "$(cat "$MP_STATE/create-count")" = 1
+                test "$(jq -r .snapshot_ref <<< "$first")" = "$(jq -r .snapshot_ref <<< "$second")"
+                reference="$(jq -r .snapshot_ref <<< "$first")"
+                verify="$(jq -cn --arg ref "$reference" '{format:"mp-opt-snapshot-machine-request-v1",
+                  action:"verify",idempotency_key:"12345678-1234-4234-8234-123456789abc:snapshot-verify",
+                  values:{snapshot_ref:$ref,recovery_identity:("AGE-SECRET-KEY-1"+("A"*40))}}')"
+                verified="$(mp_machine_snapshot_action verify <<< "$verify")"
+                test "$(jq -r .verification <<< "$verified")" = deep-verified
+                test "$(jq -r .recovery_status <<< "$verified")" = recoverable
+                ! grep -R 'AGE-SECRET-KEY' "$MP_MACHINE_SNAPSHOT_RECEIPTS" "$MP_SNAPSHOTS"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(root), str(ROOT)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_structured_snapshot_production_policy_creates_no_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            script = r'''
+                set -Eeuo pipefail
+                export MP_STATE="$1/state"
+                export MP_SNAPSHOTS="$1/snapshots"
+                export MP_MACHINE_SNAPSHOT_RECEIPTS="$MP_STATE/snapshot-machine-receipts"
+                mkdir -m 0700 "$MP_STATE" "$MP_SNAPSHOTS"
+                source "$2/deploy/management/machine_snapshots.sh"
+                mp_machine_require_local_owner() { return 0; }
+                mp_setup_test_hook_policy() { return 1; }
+                request='{"format":"mp-opt-snapshot-machine-request-v1","action":"create","idempotency_key":"12345678-1234-4234-8234-123456789abc:snapshot-create","values":{"type":"full","name":"acceptance"}}'
+                status=0; mp_machine_snapshot_action create <<< "$request" >/dev/null || status=$?
+                test "$status" = 77
+                test ! -e "$MP_MACHINE_SNAPSHOT_RECEIPTS"
+                test -z "$(find "$MP_SNAPSHOTS" -mindepth 1 -print -quit)"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(root), str(ROOT)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_initialise_paths_creates_missing_fresh_host_parents(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             root = Path(directory_name)
@@ -1065,10 +1174,10 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
     def test_machine_adapter_has_bounded_commands_and_no_secret_inputs(self) -> None:
         source = MACHINE.read_text(encoding="utf-8")
         for command in (
-            "validate", "plan", "start", "stage-candidate", "status", "events",
+            "capabilities", "validate", "plan", "start", "stage-candidate", "status", "events",
             "stage-migration", "stage-recovery", "artifact", "deployment",
             "reconcile", "advance", "cancel", "handoff", "cleanup-provider",
-            "evidence-git", "test-hook",
+            "evidence-git", "snapshot", "test-hook",
         ):
             self.assertIn(command, source)
         self.assertNotIn("--secret", source)
@@ -1096,6 +1205,34 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertNotIn("printf '%s' \"$token\"", adapter)
         self.assertEqual(evidence.count("mp_evidence_git_apply_verified_configuration"), 2)
         self.assertEqual(evidence.count("mp_evidence_git_disable_configuration"), 2)
+
+    def test_machine_capability_inventory_is_truthful_and_secret_free(self) -> None:
+        source = MACHINE.read_text(encoding="utf-8")
+        capabilities = source[
+            source.index("mp_machine_capabilities()"):
+            source.index("mp_machine_require_local_owner()")
+        ]
+        self.assertIn("mp-opt-commissioning-machine-capabilities-v1", capabilities)
+        self.assertIn("MP_SETUP_TEST_HOOK_TRANSITION_SPECS", capabilities)
+        self.assertIn('snapshot:{create:($policy=="test")', capabilities)
+        self.assertIn("handover:false", capabilities)
+        self.assertIn("automatic_failover:false", capabilities)
+        self.assertIn('production_policy_test_mutations:false', capabilities)
+        self.assertNotIn("token", capabilities.lower())
+
+    def test_snapshot_machine_adapter_uses_real_snapshot_operations_and_protected_receipts(self) -> None:
+        source = (ROOT / "deploy/management/machine_snapshots.sh").read_text(encoding="utf-8")
+        self.assertIn("mp_snapshot_create", source)
+        self.assertIn("mp_snapshot_verify_path", source)
+        self.assertIn("mp_setup_execution_acquire", source)
+        self.assertIn("mp_setup_test_hook_policy || return 77", source)
+        self.assertIn('for file in receipt.json snapshot.tar.age archive.sha256', source)
+        self.assertIn('= "$owner:600"', source)
+        self.assertIn("mp-opt-snapshot-machine-receipt-v1", source)
+        self.assertIn('state="$4"', source)
+        self.assertIn('state:$state', source)
+        self.assertIn("mp_setup_machine_identity_file", source)
+        self.assertNotIn("printf '%s' \"$identity", source)
 
     def test_plan_and_status_disclose_lifecycle_coverage_and_remaining_gaps(self) -> None:
         source = MACHINE.read_text(encoding="utf-8")

@@ -43,6 +43,8 @@ source "$MP_ROOT/deploy/management/evidence.sh"
 source "$MP_ROOT/deploy/management/setup_v2.sh"
 # shellcheck source=management/test_hooks.sh
 source "$MP_ROOT/deploy/management/test_hooks.sh"
+# shellcheck source=management/machine_snapshots.sh
+source "$MP_ROOT/deploy/management/machine_snapshots.sh"
 
 readonly MP_MACHINE_OK=0
 readonly MP_MACHINE_WAITING=10
@@ -69,6 +71,36 @@ mp_machine_error() {
         --argjson exit_code "$exit_code" \
         '{format:"mp-opt-commissioning-error-v1",ok:false,error:{code:$code,message:$message},exit_code:$exit_code}'
     exit "$exit_code"
+}
+
+mp_machine_capabilities() {
+    local policy
+    mp_machine_require_local_owner || return 77
+    policy="$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)"
+    case "$policy" in production|test) ;; *) return 65 ;; esac
+    jq -cn --arg policy "$policy" \
+        --argjson transition_specs "$MP_SETUP_TEST_HOOK_TRANSITION_SPECS" \
+        --argjson boundaries "$MP_SETUP_TEST_HOOK_BOUNDARIES" '
+      {format:"mp-opt-commissioning-machine-capabilities-v1",
+       deployment_policy:$policy,host_local_only:true,
+       commands:["capabilities","validate","plan","start","stage-candidate","stage-migration",
+         "stage-recovery","artifact","deployment","advance","status","events",
+         "reconcile","cancel","handoff","cleanup-provider","evidence-git","snapshot","test-hook"],
+       setup_modes:["standalone-new","ha-primary-new","ha-join","convert-ha",
+         "replace-primary","replace-node","full-restore"],
+       interruption:{boundaries:$boundaries,transitions:$transition_specs,
+         executable_count:($transition_specs|map(select(.wired))|length),
+         declared_count:($transition_specs|length)},
+       operations:{
+         candidate_stage:true,signed_lifecycle:true,candidate_lifecycle:true,
+         portable_migration:true,portable_recovery:true,
+         evidence_git:{status:($policy=="test"),configure:($policy=="test"),
+           retry:($policy=="test"),disable:($policy=="test")},
+         provider_cleanup:($policy=="test"),
+         snapshot:{create:($policy=="test"),verify:($policy=="test"),
+           list:($policy=="test"),export:false,import:false,restore:false},
+         handover:false,automatic_failover:false,retention_as_of:false},
+       production_policy_test_mutations:false}'
 }
 
 mp_machine_require_local_owner() {
@@ -1104,10 +1136,58 @@ mp_machine_evidence_git_action() {
 
 command_name="${1:-}"
 [ -n "$command_name" ] || mp_machine_error INVALID_ARGUMENT \
-    "Usage: mp-opt setup validate|plan|start|stage-candidate|stage-migration|stage-recovery|artifact|deployment|advance|status|events|reconcile|cancel|handoff|cleanup-provider|evidence-git|test-hook"
+    "Usage: mp-opt setup capabilities|validate|plan|start|stage-candidate|stage-migration|stage-recovery|artifact|deployment|advance|status|events|reconcile|cancel|handoff|cleanup-provider|evidence-git|snapshot|test-hook"
 shift || true
 
 case "$command_name" in
+    snapshot)
+        snapshot_action="${1:-}"; [ -n "$snapshot_action" ] || mp_machine_error INVALID_ARGUMENT \
+            "snapshot requires list, create or verify"
+        shift || true
+        case "$snapshot_action" in
+          list)
+            [ "${1:-}" != --json ] || shift
+            [ "$#" -eq 0 ] || mp_machine_error INVALID_ARGUMENT "snapshot list accepts only --json"
+            status=0; output="$(mp_machine_snapshot_list)" || status=$?
+            ;;
+          create|verify)
+            input_stdin=false
+            while [ "$#" -gt 0 ]; do
+                case "$1" in --input-stdin) input_stdin=true; shift ;; --json) shift ;;
+                  *) mp_machine_error INVALID_ARGUMENT "Unsupported snapshot argument: $1" ;;
+                esac
+            done
+            [ "$input_stdin" = true ] || mp_machine_error INVALID_ARGUMENT \
+                "snapshot ${snapshot_action} requires --input-stdin"
+            status=0; output="$(mp_machine_snapshot_action "$snapshot_action")" || status=$?
+            ;;
+          *) mp_machine_error INVALID_ARGUMENT "snapshot requires list, create or verify" ;;
+        esac
+        case "$status" in
+          0) printf '%s\n' "$output" ;;
+          20) mp_machine_error SNAPSHOT_NOT_READY \
+            "The encrypted snapshot operation failed safely and remains retryable." "$MP_MACHINE_ATTENTION" ;;
+          75) mp_machine_error EXECUTION_BUSY "Another operation holds the execution lease." "$MP_MACHINE_BUSY" ;;
+          77) mp_machine_error TEST_POLICY_REQUIRED \
+            "Structured snapshot automation is available only to the local owner under test policy." "$MP_MACHINE_UNAUTHORISED" ;;
+          64|65) mp_machine_error INVALID_INPUT \
+            "The snapshot request, identity, archive, or receipt is invalid." "$MP_MACHINE_INVALID" ;;
+          *) mp_machine_error SNAPSHOT_FAILED \
+            "The snapshot operation failed closed." "$MP_MACHINE_ATTENTION" ;;
+        esac
+        ;;
+    capabilities)
+        [ "${1:-}" != --json ] || shift
+        [ "$#" -eq 0 ] || mp_machine_error INVALID_ARGUMENT "capabilities accepts only --json"
+        status=0; output="$(mp_machine_capabilities)" || status=$?
+        case "$status" in
+          0) printf '%s\n' "$output" ;;
+          77) mp_machine_error LOCAL_OWNER_REQUIRED \
+            "Machine capabilities require the protected state owner." "$MP_MACHINE_UNAUTHORISED" ;;
+          *) mp_machine_error INVALID_STATE \
+            "Machine capabilities could not be derived safely." "$MP_MACHINE_INVALID" ;;
+        esac
+        ;;
     evidence-git)
         evidence_action="${1:-}"; [ -n "$evidence_action" ] || mp_machine_error INVALID_ARGUMENT \
             "evidence-git requires status, configure, retry or disable"
