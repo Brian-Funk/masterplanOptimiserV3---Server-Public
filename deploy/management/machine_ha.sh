@@ -95,14 +95,9 @@ mp_machine_ha_record_receipt() {
 mp_machine_ha_action() {
     local action="$1" input request_sha idempotency run_id receipt current
     local expected_holder expected_generation result status=0 target next
+    local local_node_id peer_node_id
     mp_machine_require_local_owner || return 77
     mp_setup_test_hook_policy || return 77
-    # mp_machine_ha_status is evaluated in a command substitution below, so any
-    # configuration it loads is confined to that subshell.  Load and validate
-    # the same configuration in the action shell before using HA_NODE_ID or
-    # HA_PEER_NODE_ID for the mutation guards.
-    mp_load_ha_config || return 65
-    [ "$HA_ROLE" = dynamic ] || return 65
     mp_machine_ha_prepare_receipts || return $?
     input="$(mktemp "$MP_STATE/ha-machine-input.XXXXXX")" || return 1
     chmod 600 "$input"; MP_MACHINE_INPUT_FILE="$input"
@@ -128,12 +123,17 @@ mp_machine_ha_action() {
     mp_lock || return 75
     export MP_MANAGEMENT_LOCK_HELD=1
     current="$(mp_machine_ha_status)" || return $?
+    # Status is the validated authoritative identity projection for this
+    # action.  It is evaluated in a subshell, so configuration variables loaded
+    # there must not be read from the parent shell.
+    local_node_id="$(jq -er .local_node_id <<< "$current")" || return 65
+    peer_node_id="$(jq -er .peer_node_id <<< "$current")" || return 65
     expected_holder="$(jq -er .values.expected_holder "$input")"
     expected_generation="$(jq -er .values.expected_generation "$input")"
     if [ "$action" = handover ]; then
         target="$(jq -er .values.target_node_id "$input")" || return 64
-        if [ "$expected_holder" = "$HA_NODE_ID" ] \
-          && [ "$target" = "$HA_PEER_NODE_ID" ] \
+        if [ "$expected_holder" = "$local_node_id" ] \
+          && [ "$target" = "$peer_node_id" ] \
           && jq -e --arg target "$target" --argjson expected "$expected_generation" '
           .holder_node_id == $target and .generation == ($expected + 1)
           and .automatic_failover == false' <<< "$current" >/dev/null; then
@@ -160,7 +160,7 @@ mp_machine_ha_action() {
         || return 20
     case "$action" in
       readiness)
-        [ "$expected_holder" = "$HA_NODE_ID" ] || return 20
+        [ "$expected_holder" = "$local_node_id" ] || return 20
         mp_ha_active_verification_readiness >/dev/null || status=20
         [ "$status" -ne 0 ] || result="$(jq -cn --arg holder "$expected_holder" \
           --argjson generation "$expected_generation" \
@@ -168,11 +168,11 @@ mp_machine_ha_action() {
             holder_node_id:$holder,generation:$generation}')"
         ;;
       handover)
-        [ "$expected_holder" = "$HA_NODE_ID" ] || return 20
+        [ "$expected_holder" = "$local_node_id" ] || return 20
         result="$(mp_ha_planned_switchover_apply "$target")" || status=$?
         ;;
       automatic)
-        [ "$expected_holder" = "$HA_NODE_ID" ] || return 20
+        [ "$expected_holder" = "$local_node_id" ] || return 20
         result="$(mp_ha_automatic_failover_apply "$next")" || status=$?
         ;;
       *) return 64 ;;

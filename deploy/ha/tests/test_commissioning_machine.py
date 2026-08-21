@@ -1581,7 +1581,8 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         )
         self.assertIn('($nodes | length) == 2', MACHINE_HA)
         self.assertIn('([$nodes[].node_id] | sort) == ([$node,$peer] | sort)', MACHINE_HA)
-        self.assertIn('[ "$expected_holder" = "$HA_NODE_ID" ]', MACHINE_HA)
+        self.assertIn('local_node_id="$(jq -er .local_node_id <<< "$current")"', MACHINE_HA)
+        self.assertIn('[ "$expected_holder" = "$local_node_id" ]', MACHINE_HA)
 
     def test_snapshot_machine_adapter_uses_real_snapshot_operations_and_protected_receipts(self) -> None:
         source = (ROOT / "deploy/management/machine_snapshots.sh").read_text(encoding="utf-8")
