@@ -11,6 +11,7 @@ MP_SETUP_TEST_HOOK_ARMED="${MP_SETUP_TEST_HOOK_ARMED:-${MP_SETUP_TEST_HOOK_DIR}/
 MP_SETUP_TEST_HOOK_TRIGGERED="${MP_SETUP_TEST_HOOK_TRIGGERED:-${MP_SETUP_TEST_HOOK_DIR}/triggered.jsonl}"
 MP_SETUP_TEST_HOOK_LOCK="${MP_SETUP_TEST_HOOK_LOCK:-${MP_SETUP_TEST_HOOK_DIR}/lock}"
 MP_SETUP_TEST_HOOK_RECEIPTS="${MP_SETUP_TEST_HOOK_RECEIPTS:-${MP_SETUP_TEST_HOOK_DIR}/transition-receipts}"
+MP_SETUP_TEST_HOOK_DRIVER_CHECKPOINTS="${MP_SETUP_TEST_HOOK_DRIVER_CHECKPOINTS:-${MP_SETUP_TEST_HOOK_DIR}/driver-checkpoints}"
 
 # Keep the complete reviewed transition catalogue beside the executable
 # subset.  A transition is advertised in `transitions` only after its named
@@ -19,10 +20,10 @@ MP_SETUP_TEST_HOOK_RECEIPTS="${MP_SETUP_TEST_HOOK_RECEIPTS:-${MP_SETUP_TEST_HOOK
 readonly MP_SETUP_TEST_HOOK_TRANSITION_SPECS='[
   {"transition":"artifact.acquire","driver":"coordinator","wired":true},
   {"transition":"artifact.images-activate","driver":"server-checkpoint","wired":true},
-  {"transition":"database.create","driver":"deployment-script","wired":false},
-  {"transition":"database.migrate","driver":"deployment-script","wired":false},
-  {"transition":"backend.activate","driver":"deployment-script","wired":false},
-  {"transition":"caddy.activate","driver":"deployment-script","wired":false},
+  {"transition":"database.create","driver":"deployment-script","wired":true},
+  {"transition":"database.migrate","driver":"deployment-script","wired":true},
+  {"transition":"backend.activate","driver":"deployment-script","wired":true},
+  {"transition":"caddy.activate","driver":"deployment-script","wired":true},
   {"transition":"witness.deploy-code","driver":"server-checkpoint","wired":false},
   {"transition":"witness.bind-secrets","driver":"server-checkpoint","wired":false},
   {"transition":"witness.register-primary","driver":"server-checkpoint","wired":true},
@@ -50,7 +51,8 @@ readonly MP_SETUP_TEST_HOOK_TRANSITION_SPECS='[
   {"transition":"evidence.verify","driver":"server-checkpoint","wired":true}
 ]'
 readonly MP_SETUP_TEST_HOOK_TRANSITIONS='[
-  "artifact.acquire","artifact.images-activate","witness.register-primary","dns.propagate",
+  "artifact.acquire","artifact.images-activate","database.create","database.migrate",
+  "backend.activate","caddy.activate","witness.register-primary","dns.propagate",
   "peer.pair","bundle.acknowledge","smtp.deliver-and-receive",
   "evidence.verify"
 ]'
@@ -112,6 +114,15 @@ mp_setup_test_hook_prepare() {
             || return 77
     else
         mkdir -m 700 "$MP_SETUP_TEST_HOOK_RECEIPTS" || return 1
+    fi
+    if [ -e "$MP_SETUP_TEST_HOOK_DRIVER_CHECKPOINTS" ] \
+        || [ -L "$MP_SETUP_TEST_HOOK_DRIVER_CHECKPOINTS" ]; then
+        [ -d "$MP_SETUP_TEST_HOOK_DRIVER_CHECKPOINTS" ] \
+            && [ ! -L "$MP_SETUP_TEST_HOOK_DRIVER_CHECKPOINTS" ] \
+            && [ "$(stat -c '%u:%a' "$MP_SETUP_TEST_HOOK_DRIVER_CHECKPOINTS" 2>/dev/null)" = "$owner:700" ] \
+            || return 77
+    else
+        mkdir -m 700 "$MP_SETUP_TEST_HOOK_DRIVER_CHECKPOINTS" || return 1
     fi
     if [ -e "$MP_SETUP_TEST_HOOK_LOCK" ] || [ -L "$MP_SETUP_TEST_HOOK_LOCK" ]; then
         [ -f "$MP_SETUP_TEST_HOOK_LOCK" ] && [ ! -L "$MP_SETUP_TEST_HOOK_LOCK" ] \
@@ -288,6 +299,100 @@ mp_setup_test_hook_record_transition_receipt() {
         && sync -f "$temporary" 2>/dev/null && mv "$temporary" "$receipt" \
         && sync -f "$MP_SETUP_TEST_HOOK_RECEIPTS" 2>/dev/null \
         || { rm -f "$temporary"; return 1; }
+}
+
+mp_setup_test_hook_driver_checkpoint_path() {
+    local run_id="$1" transition="$2" checkpoint="$3" idempotency_key="$4" digest
+    digest="$(printf '%s\0%s\0%s\0%s' "$run_id" "$transition" "$checkpoint" \
+        "$idempotency_key" | sha256sum | awk '{print $1}')" || return 1
+    printf '%s/%s.json\n' "$MP_SETUP_TEST_HOOK_DRIVER_CHECKPOINTS" "$digest"
+}
+
+mp_setup_test_hook_driver_checkpoint_matches() {
+    local transition="$1" checkpoint="$2" idempotency_key="$3" run_id path owner
+    mp_setup_test_hook_validate_enabled "" || return $?
+    run_id="$(jq -r .run_id "$MP_SETUP_TEST_HOOK_ENABLED")" || return 65
+    path="$(mp_setup_test_hook_driver_checkpoint_path "$run_id" "$transition" \
+        "$checkpoint" "$idempotency_key")" || return 1
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    owner="$(stat -c '%u' "$MP_STATE")" || return 77
+    [ "$(stat -c '%u:%a' "$path" 2>/dev/null)" = "$owner:600" ] || return 77
+    jq -e --arg run "$run_id" --arg transition "$transition" \
+        --arg checkpoint "$checkpoint" --arg key_hash \
+        "$(printf '%s' "$idempotency_key" | sha256sum | awk '{print $1}')" '
+        .format == "mp-opt-commissioning-driver-checkpoint-v1"
+        and .run_id == $run and .transition == $transition
+        and .checkpoint == $checkpoint and .idempotency_key_sha256 == $key_hash
+        and (.completed_at | type == "string")
+    ' "$path" >/dev/null 2>&1
+}
+
+mp_setup_test_hook_record_driver_checkpoint() {
+    local transition="$1" checkpoint="$2" idempotency_key="$3" run_id path document
+    local temporary key_hash
+    mp_setup_test_hook_prepare || return $?
+    if mp_setup_test_hook_driver_checkpoint_matches \
+        "$transition" "$checkpoint" "$idempotency_key"; then
+        return 0
+    fi
+    run_id="$(jq -r .run_id "$MP_SETUP_TEST_HOOK_ENABLED")" || return 65
+    path="$(mp_setup_test_hook_driver_checkpoint_path "$run_id" "$transition" \
+        "$checkpoint" "$idempotency_key")" || return 1
+    [ ! -e "$path" ] && [ ! -L "$path" ] || return 65
+    key_hash="$(printf '%s' "$idempotency_key" | sha256sum | awk '{print $1}')" || return 1
+    document="$(jq -cn --arg run "$run_id" --arg transition "$transition" \
+        --arg checkpoint "$checkpoint" --arg key_hash "$key_hash" \
+        --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        {format:"mp-opt-commissioning-driver-checkpoint-v1",run_id:$run,
+         transition:$transition,checkpoint:$checkpoint,idempotency_key_sha256:$key_hash,
+         completed_at:$at}')" || return 1
+    temporary="$(mktemp "$MP_SETUP_TEST_HOOK_DRIVER_CHECKPOINTS/.checkpoint.XXXXXX")" \
+        || return 1
+    printf '%s\n' "$document" > "$temporary" && chmod 600 "$temporary" \
+        && sync -f "$temporary" 2>/dev/null && mv "$temporary" "$path" \
+        && sync -f "$MP_SETUP_TEST_HOOK_DRIVER_CHECKPOINTS" 2>/dev/null \
+        || { rm -f "$temporary"; return 1; }
+}
+
+# Wrap one deployment/HA/coordinator-owned real side effect. The exact command
+# is passed as argv; no command string is evaluated. A durable side-effect
+# receipt and a separate driver checkpoint make all four crash windows
+# distinguishable without fabricating product state.
+mp_setup_test_hook_run_driver_transition() {
+    local transition="$1" checkpoint="$2" idempotency_key="$3" status=0
+    shift 3
+    [ "$#" -gt 0 ] || return 64
+    if [ ! -s "$MP_SETUP_TEST_HOOK_ENABLED" ]; then
+        "$@"
+        return $?
+    fi
+    mp_setup_test_hook_transition "$transition" || return 64
+    mp_setup_test_hook_should_wrap "$transition" "$checkpoint" \
+        "$idempotency_key" || status=$?
+    case "$status" in
+        0) ;;
+        1) "$@"; return $? ;;
+        *) return "$status" ;;
+    esac
+    if mp_setup_test_hook_driver_checkpoint_matches \
+        "$transition" "$checkpoint" "$idempotency_key"; then
+        return 0
+    fi
+    if ! mp_setup_test_hook_receipt_matches \
+        "$transition" "$checkpoint" "$idempotency_key"; then
+        mp_setup_test_hook_reach_named "$transition" before-side-effect || return $?
+        "$@" || return $?
+        mp_setup_test_hook_reach_named "$transition" \
+            after-side-effect-before-receipt || return $?
+        mp_setup_test_hook_record_transition_receipt "$transition" \
+            "$checkpoint" "$idempotency_key" || return $?
+    fi
+    mp_setup_test_hook_reach_named "$transition" \
+        after-receipt-before-checkpoint || return $?
+    mp_setup_test_hook_record_driver_checkpoint "$transition" \
+        "$checkpoint" "$idempotency_key" || return $?
+    mp_setup_test_hook_reach_named "$transition" \
+        after-checkpoint-before-next-action
 }
 
 mp_setup_test_hook_enable() {

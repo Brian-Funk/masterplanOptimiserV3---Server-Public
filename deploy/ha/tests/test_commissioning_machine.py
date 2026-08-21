@@ -741,7 +741,9 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             self.assertEqual(
                 capability_body["transitions"],
                 [
-                    "artifact.acquire", "artifact.images-activate", "witness.register-primary",
+                    "artifact.acquire", "artifact.images-activate", "database.create",
+                    "database.migrate", "backend.activate", "caddy.activate",
+                    "witness.register-primary",
                     "dns.propagate", "peer.pair", "bundle.acknowledge",
                     "smtp.deliver-and-receive", "evidence.verify",
                 ],
@@ -1376,8 +1378,7 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
     def test_fault_hook_catalog_keeps_unwired_transitions_out_of_executable_list(self) -> None:
         source = (ROOT / "deploy/management/test_hooks.sh").read_text(encoding="utf-8")
         declared = (
-            "database.create", "database.migrate",
-            "backend.activate", "caddy.activate", "witness.deploy-code",
+            "witness.deploy-code",
             "witness.bind-secrets", "dns.create", "bundle.capture",
             "bundle.transfer", "bundle.restore", "bundle.verify",
             "root.passkey-register", "recovery.download", "recovery.reselect",
@@ -1397,6 +1398,38 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         ]
         for transition in declared:
             self.assertNotIn(f'"{transition}"', executable_block)
+
+    def test_candidate_deployment_reaches_each_wired_driver_transition(self) -> None:
+        hooks = (ROOT / "deploy/management/test_hooks.sh").read_text(encoding="utf-8")
+        deployment = (ROOT / "deploy/test-deployment.sh").read_text(encoding="utf-8")
+        setup = (ROOT / "deploy/management/setup_v2.sh").read_text(encoding="utf-8")
+        for transition in (
+            "database.create", "database.migrate", "backend.activate", "caddy.activate",
+        ):
+            self.assertIn(
+                f'{{"transition":"{transition}","driver":"deployment-script","wired":true}}',
+                hooks,
+            )
+            self.assertIn(f"candidate_driver_transition {transition}", deployment)
+        self.assertIn("mp_setup_test_hook_run_driver_transition", hooks)
+        database_callback = deployment[
+            deployment.index("candidate_database_create()"):
+            deployment.index("candidate_database_migrate()")
+        ]
+        compose_activate = deployment[deployment.index("compose_activate()") :]
+        self.assertIn('stop backend', database_callback)
+        self.assertNotIn('stop backend', compose_activate.split(
+            "candidate_driver_transition database.create", 1
+        )[0])
+        self.assertIn(
+            "export MP_SETUP_MACHINE_CHECKPOINT MP_SETUP_MACHINE_IDEMPOTENCY_KEY",
+            setup,
+        )
+        self.assertIn("candidate_apply_status=0", setup)
+        self.assertIn(
+            '[ "$candidate_apply_status" -ne 197 ] || return 197',
+            setup,
+        )
 
     def test_lifecycle_inputs_are_streamed_and_receipts_are_secret_free(self) -> None:
         source = MACHINE.read_text(encoding="utf-8")

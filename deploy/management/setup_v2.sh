@@ -1033,6 +1033,7 @@ mp_setup_machine_advance_one() {
     fi
     MP_SETUP_MACHINE_CHECKPOINT="$checkpoint"
     MP_SETUP_MACHINE_IDEMPOTENCY_KEY="$idempotency_key"
+    export MP_SETUP_MACHINE_CHECKPOINT MP_SETUP_MACHINE_IDEMPOTENCY_KEY
     if declare -F mp_setup_test_hook_transition_for_checkpoint >/dev/null; then
         fault_transition="$(mp_setup_test_hook_transition_for_checkpoint "$checkpoint")"
     fi
@@ -1313,12 +1314,20 @@ mp_setup_machine_advance_one() {
                 mp_setup_state_mark application_deployed
             elif [ "$lane" = unsigned ] \
                 && [ -s "$MP_STATE/test-deployments/candidate/receipt.json" ]; then
+                local candidate_apply_status=0
                 [ "$(jq -r '.commit // empty' "$MP_STATE/test-deployments/candidate/receipt.json")" \
                     = "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")" ] || return 65
-                if ! jq -c '.values.registry' "$input_file" \
+                jq -c '.values.registry' "$input_file" \
                     | "$MP_ROOT/deploy/test-deployment.sh" apply-prebuilt \
                         "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")" \
-                        --fresh-commissioning --registry-credentials-stdin; then
+                        --fresh-commissioning --registry-credentials-stdin \
+                    || candidate_apply_status=$?
+                if [ "$candidate_apply_status" -ne 0 ]; then
+                    # A test-policy-only adjacent fault deliberately exits 197.
+                    # Preserve that exact status so the private controller can
+                    # classify the interruption and exercise deterministic
+                    # resume instead of recording a generic deployment error.
+                    [ "$candidate_apply_status" -ne 197 ] || return 197
                     local failed_stage failure_code
                     failed_stage="$(tr -cd 'a-z0-9-' \
                         < "$MP_STATE/test-deployments/current-stage" 2>/dev/null \

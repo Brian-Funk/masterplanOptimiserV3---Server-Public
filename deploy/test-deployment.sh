@@ -22,6 +22,8 @@ source "$MP_TEST_OPERATIONS_ROOT/management/common.sh"
 source "$MP_TEST_OPERATIONS_ROOT/management/snapshots.sh"
 # shellcheck source=management/ha.sh
 source "$MP_TEST_OPERATIONS_ROOT/management/ha.sh"
+# shellcheck source=management/test_hooks.sh
+source "$MP_TEST_OPERATIONS_ROOT/management/test_hooks.sh"
 
 MP_TEST_HOME="${MP_TEST_HOME:-$HOME/.local/share/mp-opt-test-deploy}"
 MP_TEST_SOURCE="$MP_TEST_HOME/source"
@@ -838,6 +840,57 @@ ensure_optional_compose_secret_sources() {
     fi
 }
 
+candidate_database_create() {
+    local fresh_commissioning="$1"
+    # Stopping the previous Backend is part of the database-activation side
+    # effect: migrations must never race an older process. Keep it inside the
+    # adjacent fault boundary so "before side effect" truly precedes every
+    # mutation owned by this transition.
+    set_apply_stage stop-old-backend
+    "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
+    set_apply_stage database
+    "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate db || return $?
+    mp_wait_for_database 30 || return $?
+    [ "$fresh_commissioning" != true ] || assert_fresh_database_content
+}
+
+candidate_database_migrate() {
+    local fresh_commissioning="$1" precommission_retarget="$2"
+    set_apply_stage base-schema
+    mp_ensure_base_schema || return $?
+    set_apply_stage migrations
+    mp_apply_migrations || return $?
+    if [ "$fresh_commissioning" = true ] \
+        && { [ "$precommission_retarget" != true ] \
+            || ! jq -e '((.completed // []) | index("application_deployed") != null)' \
+                "${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" >/dev/null 2>&1; }; then
+        set_apply_stage fresh-commissioning
+        mp_initialise_fresh_commissioning_state || return $?
+    fi
+    set_apply_stage schema-contract
+    mp_verify_database_schema_contract
+}
+
+candidate_backend_activate() {
+    "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend
+}
+
+candidate_caddy_activate() {
+    "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate caddy
+}
+
+candidate_driver_transition() {
+    local transition="$1"
+    shift
+    if [ -n "${MP_SETUP_MACHINE_IDEMPOTENCY_KEY:-}" ] \
+        && [ "${MP_SETUP_MACHINE_CHECKPOINT:-}" = application_deployed ]; then
+        mp_setup_test_hook_run_driver_transition "$transition" \
+            "$MP_SETUP_MACHINE_CHECKPOINT" "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" "$@"
+    else
+        "$@"
+    fi
+}
+
 compose_activate() {
     local components="$1" fresh_commissioning="${2:-false}" precommission_retarget="${3:-false}"
     local domain attempt role routing_ready=false
@@ -849,34 +902,19 @@ compose_activate() {
     mp_compose_validate
     if grep -qw database <<< "$components"; then
         # Contract migrations must never run while an older backend is alive.
-        set_apply_stage stop-old-backend
-        "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
-        set_apply_stage database
-        "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate db
-        mp_wait_for_database 30
-        [ "$fresh_commissioning" != true ] || assert_fresh_database_content
-        set_apply_stage base-schema
-        mp_ensure_base_schema
-        set_apply_stage migrations
-        mp_apply_migrations
-        if [ "$fresh_commissioning" = true ] \
-            && { [ "$precommission_retarget" != true ] \
-                || ! jq -e '((.completed // []) | index("application_deployed") != null)' \
-                    "${MP_SETUP_V2_STATE:-$MP_STATE/setup-state-v2.json}" >/dev/null 2>&1; }; then
-            set_apply_stage fresh-commissioning
-            mp_initialise_fresh_commissioning_state
-        fi
-        set_apply_stage schema-contract
-        mp_verify_database_schema_contract
+        candidate_driver_transition database.create \
+            candidate_database_create "$fresh_commissioning"
+        candidate_driver_transition database.migrate \
+            candidate_database_migrate "$fresh_commissioning" "$precommission_retarget"
     fi
     set_apply_stage activation
     if grep -qw backend <<< "$components" || grep -qw database <<< "$components" \
         || grep -qw operations <<< "$components"; then
-        "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate backend
+        candidate_driver_transition backend.activate candidate_backend_activate
     fi
     if grep -qw caddy <<< "$components" || grep -qw frontend <<< "$components" \
         || grep -qw operations <<< "$components"; then
-        "${MP_COMPOSE[@]}" up -d --no-deps --force-recreate caddy
+        candidate_driver_transition caddy.activate candidate_caddy_activate
     fi
     set_apply_stage public-health
     mp_load_ha_config >/dev/null 2>&1 || true
