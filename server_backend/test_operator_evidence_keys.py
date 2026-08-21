@@ -34,7 +34,7 @@ from app.models.evidence import (
     RootActionAuthorisation,
 )
 from app.models.governance import GovernancePublication
-from app.models.user import WebAuthnCredential
+from app.models.user import PasskeyCeremony, WebAuthnCredential
 from deploy.management.instance_key import InstanceKeyError, commission, compare, verify
 from server_backend.conftest import _make_client, create_test_event, create_test_user
 from server_backend.test_governance import PROFILE, PUBLICATION_CONFIRMATION
@@ -171,6 +171,68 @@ def test_proof_precedes_single_use_exact_root_passkey_activation(db, monkeypatch
     )
     assert replay.status_code == 409
     assert "private" not in json.dumps(activated["key"]).lower()
+
+
+def test_root_authorisation_begin_recovers_the_exact_live_ceremony(db):
+    client, _root_user, _credential = _root(db)
+    private, public = _keypair()
+    challenge = _begin(client, public, "controller", "ctl-synthetic0001")
+    proof = client.post(
+        f"{BASE}/trust-keys/proofs",
+        json={"challenge": challenge, "proof": _proof(private, challenge)},
+    )
+    assert proof.status_code == 200, proof.text
+
+    first = client.post(
+        f"{BASE}/trust-keys/{challenge['challenge_id']}/root-authorisation/begin",
+        json={},
+    )
+    assert first.status_code == 200, first.text
+    second = client.post(
+        f"{BASE}/trust-keys/{challenge['challenge_id']}/root-authorisation/begin",
+        json={},
+    )
+    assert second.status_code == 200, second.text
+    assert second.json() == first.json()
+    assert db.query(PasskeyCeremony).filter(
+        PasskeyCeremony.purpose == "trust_key_activation"
+    ).count() == 1
+
+
+def test_root_authorisation_begin_rejects_cross_session_or_expired_recovery(db):
+    client, _root_user, _credential = _root(db)
+    private, public = _keypair()
+    challenge = _begin(client, public, "controller", "ctl-synthetic0001")
+    proof = client.post(
+        f"{BASE}/trust-keys/proofs",
+        json={"challenge": challenge, "proof": _proof(private, challenge)},
+    )
+    assert proof.status_code == 200, proof.text
+    first = client.post(
+        f"{BASE}/trust-keys/{challenge['challenge_id']}/root-authorisation/begin",
+        json={},
+    )
+    assert first.status_code == 200, first.text
+
+    other_client, _other_root, _other_credential = _root(db)
+    wrong_session = other_client.post(
+        f"{BASE}/trust-keys/{challenge['challenge_id']}/root-authorisation/begin",
+        json={},
+    )
+    assert wrong_session.status_code == 409
+    assert "another context" in wrong_session.json()["detail"]["message"]
+
+    ceremony = db.query(PasskeyCeremony).filter(
+        PasskeyCeremony.id == first.json()["ceremony_id"]
+    ).one()
+    ceremony.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db.commit()
+    expired = client.post(
+        f"{BASE}/trust-keys/{challenge['challenge_id']}/root-authorisation/begin",
+        json={},
+    )
+    assert expired.status_code == 409
+    assert "expired" in expired.json()["detail"]["message"]
 
 
 def test_wrong_proof_expired_challenge_and_changed_instance_are_rejected(db):

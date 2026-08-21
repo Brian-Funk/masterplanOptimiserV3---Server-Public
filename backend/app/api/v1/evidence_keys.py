@@ -54,7 +54,7 @@ from app.models.evidence import (
     RootActionAuthorisation,
 )
 from app.models.tenancy import Controller
-from app.models.user import User, WebAuthnCredential
+from app.models.user import PasskeyCeremony, User, WebAuthnCredential
 
 
 logger = logging.getLogger(__name__)
@@ -97,6 +97,59 @@ def _as_utc(value: datetime) -> datetime:
 
 def _reject(exc: Exception) -> HTTPException:
     return HTTPException(status_code=409, detail={"code": "TRUST_EVIDENCE_REJECTED", "message": str(exc)})
+
+
+def _recover_root_authorisation(
+    *,
+    challenge: EvidenceKeyRegistrationChallenge,
+    root: User,
+    session_id: int,
+    db: Session,
+) -> dict[str, Any]:
+    """Return one exact, live trust-key WebAuthn ceremony after a lost reply.
+
+    The response can be reconstructed from durable state without creating a
+    second ceremony. Every account, session, purpose and action binding is
+    revalidated before the stored challenge is disclosed again.
+    """
+
+    ceremony = db.query(PasskeyCeremony).filter(
+        PasskeyCeremony.id == challenge.root_ceremony_id,
+    ).first()
+    if ceremony is None:
+        raise TrustEvidenceError("the root authorisation ceremony is unavailable")
+    if (
+        ceremony.purpose != TRUST_KEY_ACTIVATION
+        or ceremony.user_id != root.id
+        or ceremony.session_id != session_id
+        or ceremony.activation_link_id is not None
+    ):
+        raise TrustEvidenceError("the root authorisation ceremony belongs to another context")
+    now = datetime.now(timezone.utc)
+    if ceremony.consumed_at is not None:
+        raise TrustEvidenceError("the root authorisation ceremony was already used")
+    if _as_utc(ceremony.expires_at) < now:
+        raise TrustEvidenceError("the root authorisation ceremony has expired")
+    try:
+        action = json.loads(ceremony.action_json or "null")
+        rendered = canonical_json(action)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise TrustEvidenceError("the root authorisation action is invalid") from exc
+    if not isinstance(action, dict) or action.get("challenge_id") != challenge.challenge_id:
+        raise TrustEvidenceError("the root authorisation ceremony is bound to another action")
+    if ceremony.action_sha256 != hashlib.sha256(rendered).hexdigest():
+        raise TrustEvidenceError("the root authorisation action digest changed")
+    options = generate_authentication_options(
+        rp_id=settings.WEBAUTHN_RP_ID,
+        challenge=base64url_to_bytes(ceremony.challenge),
+        user_verification=UserVerificationRequirement.REQUIRED,
+    )
+    return {
+        "options": options_to_json(options),
+        "ceremony_id": ceremony.id,
+        "action": action,
+        "action_sha256": ceremony.action_sha256,
+    }
 
 
 def _active_role_key(
@@ -622,10 +675,18 @@ def begin_root_authorisation(
         raise _reject(TrustEvidenceError("verified proof of possession is required before root authorisation"))
     if _as_utc(challenge.expires_at) < datetime.now(timezone.utc):
         raise _reject(TrustEvidenceError("the trust-key challenge has expired"))
-    if challenge.root_ceremony_id is not None:
-        raise _reject(TrustEvidenceError("root authorisation was already started"))
     auth_session = getattr(root, "_auth_session", None)
     if auth_session is None: raise HTTPException(status_code=401, detail="Session expired or invalid")
+    if challenge.root_ceremony_id is not None:
+        try:
+            return _recover_root_authorisation(
+                challenge=challenge,
+                root=root,
+                session_id=auth_session.id,
+                db=db,
+            )
+        except TrustEvidenceError as exc:
+            raise _reject(exc) from exc
     options = generate_authentication_options(
         rp_id=settings.WEBAUTHN_RP_ID,
         user_verification=UserVerificationRequirement.REQUIRED,
@@ -664,7 +725,12 @@ def begin_root_authorisation(
     )
     challenge.root_ceremony_id = ceremony.id
     db.commit()
-    return {"options": options_to_json(options), "ceremony_id": ceremony.id, "action": action, "action_sha256": digest}
+    return _recover_root_authorisation(
+        challenge=challenge,
+        root=root,
+        session_id=auth_session.id,
+        db=db,
+    )
 
 
 @router.post("/trust-keys/{challenge_id}/root-authorisation/complete")
