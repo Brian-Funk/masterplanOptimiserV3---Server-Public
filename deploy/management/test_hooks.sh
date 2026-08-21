@@ -24,10 +24,10 @@ readonly MP_SETUP_TEST_HOOK_TRANSITION_SPECS='[
   {"transition":"database.migrate","driver":"deployment-script","wired":true},
   {"transition":"backend.activate","driver":"deployment-script","wired":true},
   {"transition":"caddy.activate","driver":"deployment-script","wired":true},
-  {"transition":"witness.deploy-code","driver":"server-checkpoint","wired":false},
-  {"transition":"witness.bind-secrets","driver":"server-checkpoint","wired":false},
+  {"transition":"witness.deploy-code","driver":"server-checkpoint","wired":true},
+  {"transition":"witness.bind-secrets","driver":"server-checkpoint","wired":true},
   {"transition":"witness.register-primary","driver":"server-checkpoint","wired":true},
-  {"transition":"dns.create","driver":"server-checkpoint","wired":false},
+  {"transition":"dns.create","driver":"server-checkpoint","wired":true},
   {"transition":"dns.propagate","driver":"server-checkpoint","wired":true},
   {"transition":"peer.pair","driver":"server-checkpoint","wired":true},
   {"transition":"bundle.capture","driver":"ha-script","wired":true},
@@ -44,20 +44,22 @@ readonly MP_SETUP_TEST_HOOK_TRANSITION_SPECS='[
   {"transition":"governance.save","driver":"browser","wired":true},
   {"transition":"governance.preview","driver":"browser","wired":true},
   {"transition":"governance.publish","driver":"browser","wired":true},
-  {"transition":"smtp.authenticate","driver":"server-checkpoint","wired":false},
-  {"transition":"smtp.dns-verify","driver":"server-checkpoint","wired":false},
+  {"transition":"smtp.authenticate","driver":"server-checkpoint","wired":true},
+  {"transition":"smtp.dns-verify","driver":"server-checkpoint","wired":true},
   {"transition":"smtp.deliver-and-receive","driver":"server-checkpoint","wired":true},
   {"transition":"commissioning.finalise","driver":"browser","wired":true},
   {"transition":"evidence.verify","driver":"server-checkpoint","wired":true}
 ]'
 readonly MP_SETUP_TEST_HOOK_TRANSITIONS='[
   "artifact.acquire","artifact.images-activate","database.create","database.migrate",
-  "backend.activate","caddy.activate","witness.register-primary","dns.propagate",
+  "backend.activate","caddy.activate","witness.deploy-code","witness.bind-secrets",
+  "witness.register-primary","dns.create","dns.propagate",
   "peer.pair","bundle.capture","bundle.transfer","bundle.restore","bundle.verify",
   "bundle.acknowledge","root.passkey-register","recovery.download","recovery.reselect",
   "controller.download-or-import","controller.possession-proof",
   "controller.root-authorise","governance.save","governance.preview",
-  "governance.publish","smtp.deliver-and-receive","commissioning.finalise",
+  "governance.publish","smtp.authenticate","smtp.dns-verify",
+  "smtp.deliver-and-receive","commissioning.finalise",
   "evidence.verify"
 ]'
 readonly MP_SETUP_TEST_HOOK_BOUNDARIES='[
@@ -71,7 +73,6 @@ readonly MP_SETUP_TEST_HOOK_CHECKPOINT_MAP='[
   {"checkpoint":"joined","transition":"peer.pair"},
   {"checkpoint":"paired","transition":"peer.pair"},
   {"checkpoint":"replicated","transition":"bundle.acknowledge"},
-  {"checkpoint":"smtp_verified","transition":"smtp.deliver-and-receive"},
   {"checkpoint":"validated","transition":"evidence.verify"}
 ]'
 

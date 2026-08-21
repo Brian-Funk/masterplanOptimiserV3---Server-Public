@@ -382,6 +382,7 @@ mp_ha_verify_smtp_both_nodes() {
     local recipient="${2:-}" correlation_id="${3:-}" recipient_b64 send_message local_node peer_node require_delivery="${1:-optional}" delivery_sent=false
     local -a correlation_args=()
     mp_load_ha_config || return 1
+    [[ "$require_delivery" =~ ^(optional|required|authenticate-only)$ ]] || return 65
     [ -z "$correlation_id" ] || correlation_args=(--correlation-id "$correlation_id")
     [ "$HA_ROLE" = "dynamic" ] || { ui_error "Symmetric HA is not configured."; return 1; }
     [[ "$HA_NODE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
@@ -417,7 +418,8 @@ mp_ha_verify_smtp_both_nodes() {
     if [ "$local_ready" = true ] && [ "$peer_ready" = true ] \
         && [ -n "$local_fingerprint" ] && [ "$local_fingerprint" = "$peer_fingerprint" ] \
         && { [ "$require_delivery" = required ] \
-            || ui_confirm "SMTP delivery" "Both origins authenticate with the same protected SMTP configuration. Send one token-free delivery test from each origin?"; }; then
+            || { [ "$require_delivery" = optional ] \
+                && ui_confirm "SMTP delivery" "Both origins authenticate with the same protected SMTP configuration. Send one token-free delivery test from each origin?"; }; }; then
         [ -n "$recipient" ] \
             || recipient="$(ui_input "SMTP delivery" "Test recipient email")" \
             || recipient=""

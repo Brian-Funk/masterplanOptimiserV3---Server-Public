@@ -743,13 +743,15 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 [
                     "artifact.acquire", "artifact.images-activate", "database.create",
                     "database.migrate", "backend.activate", "caddy.activate",
-                    "witness.register-primary",
+                    "witness.deploy-code", "witness.bind-secrets",
+                    "witness.register-primary", "dns.create",
                     "dns.propagate", "peer.pair", "bundle.capture", "bundle.transfer",
                     "bundle.restore", "bundle.verify", "bundle.acknowledge",
                     "root.passkey-register", "recovery.download", "recovery.reselect",
                     "controller.download-or-import", "controller.possession-proof",
                     "controller.root-authorise", "governance.save",
                     "governance.preview", "governance.publish",
+                    "smtp.authenticate", "smtp.dns-verify",
                     "smtp.deliver-and-receive", "commissioning.finalise",
                     "evidence.verify",
                 ],
@@ -1364,13 +1366,15 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
     def test_fault_hook_contract_advertises_only_instrumented_transitions_and_boundaries(self) -> None:
         source = (ROOT / "deploy/management/test_hooks.sh").read_text(encoding="utf-8")
         transitions = (
-            "artifact.images-activate", "witness.register-primary", "dns.propagate",
+            "artifact.images-activate", "witness.deploy-code", "witness.bind-secrets",
+            "witness.register-primary", "dns.create", "dns.propagate",
             "peer.pair", "bundle.capture", "bundle.transfer", "bundle.restore",
             "bundle.verify", "bundle.acknowledge", "root.passkey-register",
             "recovery.download", "recovery.reselect",
             "controller.download-or-import", "controller.possession-proof",
             "controller.root-authorise", "governance.save", "governance.preview",
-            "governance.publish", "smtp.deliver-and-receive",
+            "governance.publish", "smtp.authenticate", "smtp.dns-verify",
+            "smtp.deliver-and-receive",
             "commissioning.finalise",
             "evidence.verify",
         )
@@ -1387,24 +1391,66 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertNotIn("curl ", source)
         self.assertNotIn("http", source.lower())
 
-    def test_fault_hook_catalog_keeps_unwired_transitions_out_of_executable_list(self) -> None:
+    def test_fault_hook_catalog_wires_every_declared_transition(self) -> None:
         source = (ROOT / "deploy/management/test_hooks.sh").read_text(encoding="utf-8")
-        declared = (
+        newly_wired = (
             "witness.deploy-code",
             "witness.bind-secrets", "dns.create",
             "smtp.authenticate", "smtp.dns-verify",
         )
-        for transition in declared:
+        for transition in newly_wired:
             self.assertIn(
-                f'{{"transition":"{transition}"',
+                f'{{"transition":"{transition}","driver":"server-checkpoint","wired":true}}',
                 source,
             )
         executable_block = source[
             source.index("readonly MP_SETUP_TEST_HOOK_TRANSITIONS="):
             source.index("readonly MP_SETUP_TEST_HOOK_BOUNDARIES=")
         ]
-        for transition in declared:
-            self.assertNotIn(f'"{transition}"', executable_block)
+        for transition in newly_wired:
+            self.assertIn(f'"{transition}"', executable_block)
+
+    def test_machine_worker_and_smtp_side_effects_use_adjacent_driver_hooks(self) -> None:
+        machine_witness = SETUP[
+            SETUP.index("mp_setup_witness_operation_receipt_path()"):
+            SETUP.index("mp_setup_verify_smtp_and_dns()")
+        ]
+        self.assertIn(
+            "mp_setup_test_hook_run_driver_transition witness.deploy-code witness_bootstrap",
+            SETUP,
+        )
+        self.assertIn(
+            "mp_setup_test_hook_run_driver_transition witness.bind-secrets witness_bootstrap",
+            SETUP,
+        )
+        self.assertIn(
+            '"$tools_image" secret bulk /run/mp-opt-witness-secrets.json',
+            SETUP,
+        )
+        self.assertNotIn("--secrets-file /run/mp-opt-witness-secrets.json", machine_witness)
+        self.assertLess(
+            machine_witness.index("mp_setup_record_cloudflare_resource"),
+            machine_witness.index(
+                "mp_setup_test_hook_run_driver_transition witness.bind-secrets"
+            ),
+        )
+        self.assertIn(
+            "mp_setup_test_hook_run_driver_transition dns.create witness_ready",
+            SETUP,
+        )
+        for transition in (
+            "smtp.authenticate", "smtp.deliver-and-receive", "smtp.dns-verify",
+        ):
+            self.assertIn(
+                f"mp_setup_test_hook_run_driver_transition {transition} smtp_verified",
+                SETUP,
+            )
+        self.assertIn("mp_ha_verify_smtp_both_nodes authenticate-only", SETUP)
+        self.assertIn("mp_setup_smtp_delivery_receipt", SETUP)
+        self.assertNotIn(
+            '{"checkpoint":"smtp_verified","transition":"smtp.deliver-and-receive"}',
+            (ROOT / "deploy/management/test_hooks.sh").read_text(encoding="utf-8"),
+        )
 
     def test_candidate_deployment_reaches_each_wired_driver_transition(self) -> None:
         hooks = (ROOT / "deploy/management/test_hooks.sh").read_text(encoding="utf-8")
