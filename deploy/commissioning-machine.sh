@@ -45,6 +45,8 @@ source "$MP_ROOT/deploy/management/setup_v2.sh"
 source "$MP_ROOT/deploy/management/test_hooks.sh"
 # shellcheck source=management/machine_snapshots.sh
 source "$MP_ROOT/deploy/management/machine_snapshots.sh"
+# shellcheck source=management/machine_retention.sh
+source "$MP_ROOT/deploy/management/machine_retention.sh"
 
 readonly MP_MACHINE_OK=0
 readonly MP_MACHINE_WAITING=10
@@ -85,7 +87,7 @@ mp_machine_capabilities() {
        deployment_policy:$policy,host_local_only:true,
        commands:["capabilities","validate","plan","start","stage-candidate","stage-migration",
          "stage-recovery","artifact","deployment","advance","status","events",
-         "reconcile","cancel","handoff","cleanup-provider","evidence-git","snapshot","test-hook"],
+         "reconcile","cancel","handoff","cleanup-provider","evidence-git","snapshot","retention","test-hook"],
        setup_modes:["standalone-new","ha-primary-new","ha-join","convert-ha",
          "replace-primary","replace-node","full-restore"],
        interruption:{boundaries:$boundaries,transitions:$transition_specs,
@@ -99,7 +101,7 @@ mp_machine_capabilities() {
          provider_cleanup:($policy=="test"),
          snapshot:{create:($policy=="test"),verify:($policy=="test"),
            list:($policy=="test"),export:false,import:false,restore:false},
-         handover:false,automatic_failover:false,retention_as_of:false},
+         handover:false,automatic_failover:false,retention_as_of:($policy=="test")},
        production_policy_test_mutations:false}'
 }
 
@@ -1136,10 +1138,36 @@ mp_machine_evidence_git_action() {
 
 command_name="${1:-}"
 [ -n "$command_name" ] || mp_machine_error INVALID_ARGUMENT \
-    "Usage: mp-opt setup capabilities|validate|plan|start|stage-candidate|stage-migration|stage-recovery|artifact|deployment|advance|status|events|reconcile|cancel|handoff|cleanup-provider|evidence-git|snapshot|test-hook"
+    "Usage: mp-opt setup capabilities|validate|plan|start|stage-candidate|stage-migration|stage-recovery|artifact|deployment|advance|status|events|reconcile|cancel|handoff|cleanup-provider|evidence-git|snapshot|retention|test-hook"
 shift || true
 
 case "$command_name" in
+    retention)
+        retention_action="${1:-}"; [ "$retention_action" = run-as-of ] \
+            || mp_machine_error INVALID_ARGUMENT "retention requires run-as-of"
+        shift || true
+        input_stdin=false
+        while [ "$#" -gt 0 ]; do
+            case "$1" in --input-stdin) input_stdin=true; shift ;; --json) shift ;;
+              *) mp_machine_error INVALID_ARGUMENT "Unsupported retention argument: $1" ;;
+            esac
+        done
+        [ "$input_stdin" = true ] || mp_machine_error INVALID_ARGUMENT \
+            "retention run-as-of requires --input-stdin"
+        status=0; output="$(mp_machine_retention_run_as_of)" || status=$?
+        case "$status" in
+          0) printf '%s\n' "$output" ;;
+          20) mp_machine_error RETENTION_NOT_READY \
+            "The bounded retention cycle failed safely and remains retryable." "$MP_MACHINE_ATTENTION" ;;
+          75) mp_machine_error EXECUTION_BUSY "Another operation holds the execution lease." "$MP_MACHINE_BUSY" ;;
+          77) mp_machine_error TEST_POLICY_REQUIRED \
+            "Synthetic retention time is available only to the local owner under test policy." "$MP_MACHINE_UNAUTHORISED" ;;
+          64|65) mp_machine_error INVALID_INPUT \
+            "The retention request or durable receipt is invalid." "$MP_MACHINE_INVALID" ;;
+          *) mp_machine_error RETENTION_FAILED \
+            "The retention adapter failed closed." "$MP_MACHINE_ATTENTION" ;;
+        esac
+        ;;
     snapshot)
         snapshot_action="${1:-}"; [ -n "$snapshot_action" ] || mp_machine_error INVALID_ARGUMENT \
             "snapshot requires list, create or verify"

@@ -6,6 +6,7 @@ import json
 import hashlib
 import io
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -189,6 +190,60 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 test "$status" = 77
                 test ! -e "$MP_MACHINE_SNAPSHOT_RECEIPTS"
                 test -z "$(find "$MP_SNAPSHOTS" -mindepth 1 -print -quit)"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(root), str(ROOT)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_retention_as_of_is_idempotent_and_production_policy_creates_no_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            script = r'''
+                set -Eeuo pipefail
+                export MP_STATE="$1/state"
+                export MP_MACHINE_RETENTION_RECEIPTS="$MP_STATE/retention-machine-receipts"
+                mkdir -m 0700 "$MP_STATE"
+                source "$2/deploy/management/machine_retention.sh"
+                mp_machine_require_local_owner() { return 0; }
+                mp_setup_test_hook_policy() { return 0; }
+                mp_setup_execution_acquire() { return 0; }
+                mp_setup_execution_release() { return 0; }
+                mp_initialise_paths() { return 0; }
+                mp_create_private_owner_directory_chain() { mkdir -p "$1"; chmod 700 "$1"; }
+                mp_machine_validate_regular_file() {
+                    test -f "$1" && test ! -L "$1" \
+                        && test "$(stat -c '%u:%a' "$1")" = "$(id -u):$2"
+                }
+                mp_secure_remove_file() { test -z "${1:-}" || rm -f -- "$1"; }
+                mp_machine_retention_execute() {
+                    local mode="$1" as_of="$2" count=0
+                    test ! -f "$MP_STATE/run-count" || count="$(cat "$MP_STATE/run-count")"
+                    if test "$mode" = run; then
+                        count=$((count + 1)); printf '%s\n' "$count" > "$MP_STATE/run-count"
+                    fi
+                    jq -cn --arg as_of "$as_of" --arg mode "$mode" '
+                      {format:"mp-opt-retention-machine-result-v1",
+                       state:(if $mode == "run" then "completed" else "not-completed" end),
+                       as_of:$as_of,counts:{event_purge_cases_started:1},reconciled:false}'
+                }
+                request='{"format":"mp-opt-retention-machine-request-v1","action":"run-as-of","idempotency_key":"12345678-1234-4234-8234-123456789abc:retention","values":{"as_of":"2029-01-02T03:04:05Z"}}'
+                first="$(mp_machine_retention_run_as_of <<< "$request")"
+                second="$(mp_machine_retention_run_as_of <<< "$request")"
+                test "$(cat "$MP_STATE/run-count")" = 1
+                test "$(jq -S . <<< "$first")" = "$(jq -S . <<< "$second")"
+                test "$(jq -r .counts.event_purge_cases_started <<< "$first")" = 1
+
+                export MP_STATE="$1/production-state"
+                export MP_MACHINE_RETENTION_RECEIPTS="$MP_STATE/retention-machine-receipts"
+                mkdir -m 0700 "$MP_STATE"
+                mp_setup_test_hook_policy() { return 1; }
+                status=0; mp_machine_retention_run_as_of <<< "$request" >/dev/null || status=$?
+                test "$status" = 77
+                test ! -e "$MP_MACHINE_RETENTION_RECEIPTS"
             '''
             result = subprocess.run(
                 ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(root), str(ROOT)],
@@ -1177,7 +1232,7 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
             "capabilities", "validate", "plan", "start", "stage-candidate", "status", "events",
             "stage-migration", "stage-recovery", "artifact", "deployment",
             "reconcile", "advance", "cancel", "handoff", "cleanup-provider",
-            "evidence-git", "snapshot", "test-hook",
+            "evidence-git", "snapshot", "retention", "test-hook",
         ):
             self.assertIn(command, source)
         self.assertNotIn("--secret", source)
@@ -1215,6 +1270,7 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("mp-opt-commissioning-machine-capabilities-v1", capabilities)
         self.assertIn("MP_SETUP_TEST_HOOK_TRANSITION_SPECS", capabilities)
         self.assertIn('snapshot:{create:($policy=="test")', capabilities)
+        self.assertIn('retention_as_of:($policy=="test")', capabilities)
         self.assertIn("handover:false", capabilities)
         self.assertIn("automatic_failover:false", capabilities)
         self.assertIn('production_policy_test_mutations:false', capabilities)
@@ -1233,6 +1289,25 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn('state:$state', source)
         self.assertIn("mp_setup_machine_identity_file", source)
         self.assertNotIn("printf '%s' \"$identity", source)
+
+    def test_retention_machine_adapter_uses_the_real_cycle_and_protected_receipts(self) -> None:
+        source = (ROOT / "deploy/management/machine_retention.sh").read_text(encoding="utf-8")
+        self.assertIn("run_retention_cycle_once(now=when)", source)
+        self.assertIn("retention_status(db)", source)
+        self.assertIn("mp_setup_execution_acquire", source)
+        self.assertIn("mp_setup_test_hook_policy || return 77", source)
+        self.assertIn("mp-opt-retention-machine-receipt-v1", source)
+        self.assertIn("request_sha256", source)
+        self.assertIn("mp_machine_validate_regular_file", source)
+        self.assertNotIn("--as-of", source)
+        embedded = re.search(
+            r"program='(?P<program>.*?)'\n    MP_RETENTION_AS_OF=",
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(embedded)
+        compile(embedded.group("program"), "retention-machine-adapter", "exec")
+        self.assertIn("from app.db.database import SessionLocal", embedded.group("program"))
 
     def test_plan_and_status_disclose_lifecycle_coverage_and_remaining_gaps(self) -> None:
         source = MACHINE.read_text(encoding="utf-8")
