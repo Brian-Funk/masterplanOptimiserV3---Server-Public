@@ -15,6 +15,7 @@ import tarfile
 import zipfile
 
 from deploy import candidate_bundle
+from deploy.ha import cloudflare_worker_script
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -23,6 +24,25 @@ SETUP = (ROOT / "deploy/management/setup_v2.sh").read_text(encoding="utf-8")
 COMMON = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
 MANAGE = (ROOT / "manage.sh").read_text(encoding="utf-8")
 BOOTSTRAP = (ROOT / "deploy/setup-server.sh").read_text(encoding="utf-8")
+
+
+class CloudflareWorkerScriptTests(unittest.TestCase):
+    def test_observe_uses_settings_but_delete_targets_the_script(self) -> None:
+        account = "a" * 32
+        worker = "mp-opt-ha-mpopt12345"
+        base = (
+            "https://api.cloudflare.com/client/v4/accounts/"
+            f"{account}/workers/scripts/{worker}"
+        )
+
+        self.assertEqual(
+            cloudflare_worker_script.worker_api_url("observe", account, worker),
+            f"{base}/settings",
+        )
+        self.assertEqual(
+            cloudflare_worker_script.worker_api_url("delete", account, worker),
+            base,
+        )
 
 
 def state_document(*, state: str = "in_progress") -> dict[str, object]:

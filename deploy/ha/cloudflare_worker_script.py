@@ -9,6 +9,17 @@ import urllib.error
 import urllib.request
 
 
+def worker_api_url(action: str, account_id: str, worker_name: str) -> str:
+    base = (
+        "https://api.cloudflare.com/client/v4/accounts/"
+        f"{account_id}/workers/scripts/{worker_name}"
+    )
+    # Module Workers can return 404 from the content endpoint even while the
+    # script exists. Settings is the same exact-resource existence probe used
+    # by the commissioning controller; deletion still targets the script.
+    return f"{base}/settings" if action == "observe" else base
+
+
 def main() -> int:
     if len(sys.argv) != 4 or sys.argv[1] not in {"observe", "delete"}:
         return 64
@@ -20,10 +31,7 @@ def main() -> int:
     token = sys.stdin.read(4097)
     if not 32 <= len(token) <= 4096 or "\n" in token or "\r" in token:
         return 64
-    url = (
-        "https://api.cloudflare.com/client/v4/accounts/"
-        f"{account_id}/workers/scripts/{worker_name}"
-    )
+    url = worker_api_url(action, account_id, worker_name)
     request = urllib.request.Request(
         url,
         method="GET" if action == "observe" else "DELETE",
