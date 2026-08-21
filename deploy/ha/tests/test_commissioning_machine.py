@@ -1314,6 +1314,8 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
             'mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed',
             opening,
         )
+        self.assertIn('witness_rc=0', opening)
+        self.assertIn('[ "$witness_rc" -eq 10 ] && return 10', opening)
 
         replicated = advance[advance.index("        replicated)") :]
         replicated = replicated[: replicated.index("        ha_services_activated)")]

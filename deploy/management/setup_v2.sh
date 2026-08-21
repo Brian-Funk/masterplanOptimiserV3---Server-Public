@@ -625,7 +625,7 @@ mp_setup_machine_import_recovery_package() {
 }
 
 mp_setup_machine_open_replacement() {
-    local pair body token response pending replacement_tmp lane campaign
+    local pair body token response pending replacement_tmp lane campaign witness_rc=0
     mp_load_ha_config || return 1
     [ "$HA_ROLE" = dynamic ] || return 65
     mp_require_active_or_standalone || return 65
@@ -649,7 +649,12 @@ mp_setup_machine_open_replacement() {
     jq -n --arg node "$HA_NODE_ID" --arg target "$HA_PEER_NODE_ID" --arg pair "$pair" \
         '{node_id:$node,target_node_id:$target,pairing_secret:$pair}' > "$body" || return 1
     response="$(mp_setup_witness_call pair-open "$HA_WITNESS_URL" "$HA_CLUSTER_ID" "$token" "$body")" \
-        || { rm -f "$body"; unset pair token; return 1; }
+        || witness_rc=$?
+    if [ "$witness_rc" -ne 0 ]; then
+        rm -f "$body"; unset pair token
+        [ "$witness_rc" -eq 10 ] && return 10
+        return 1
+    fi
     rm -f "$body"; unset token
     jq -e '.pairing_open == true' <<< "$response" >/dev/null 2>&1 || return 1
     lane="$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")"
@@ -3027,7 +3032,7 @@ mp_setup_join_node_machine() {
 }
 
 mp_setup_replace_standby() {
-    local pair body token response join_code domain pending replacement_tmp lane campaign
+    local pair body token response join_code domain pending replacement_tmp lane campaign witness_rc=0
     mp_load_ha_config || return 1
     [ "$HA_ROLE" = dynamic ] || { ui_error "This server is not an HA node."; return 1; }
     mp_require_active_or_standalone || return 1
@@ -3054,7 +3059,16 @@ mp_setup_replace_standby() {
     jq -n --arg node "$HA_NODE_ID" --arg target "$HA_PEER_NODE_ID" --arg pair "$pair" \
         '{node_id:$node,target_node_id:$target,pairing_secret:$pair}' > "$body"
     response="$(mp_setup_witness_call pair-open "$HA_WITNESS_URL" "$HA_CLUSTER_ID" "$token" "$body")" \
-        || { rm -f "$body"; unset pair token; return 1; }
+        || witness_rc=$?
+    if [ "$witness_rc" -ne 0 ]; then
+        rm -f "$body"; unset pair token
+        if [ "$witness_rc" -eq 10 ]; then
+            ui_message "Waiting for the old standby lease" \
+                "The witness still sees a recent heartbeat from the old standby. Keep it powered off and resume setup after the bounded lease expires."
+            return 10
+        fi
+        return 1
+    fi
     jq -e '.pairing_open == true' <<< "$response" >/dev/null || return 1
     domain="$(mp_env_get DOMAIN)" || return 1
     if [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)" = test ]; then
