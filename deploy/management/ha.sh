@@ -357,10 +357,20 @@ mp_ha_send_alert() {
 }
 
 mp_ha_replicate_now() {
+    local replication_status=0 replication_job_id=""
+    local -a replication_args=()
     mp_load_ha_config || return 1
     [ "$HA_ROLE" = "dynamic" ] || { ui_error "Symmetric HA is not configured."; return 1; }
+    if [ -n "${MP_SETUP_MACHINE_IDEMPOTENCY_KEY:-}" ]; then
+        replication_job_id="setup-$(printf '%s' "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
+            | sha256sum | awk '{print substr($1,1,40)}')"
+        replication_args=("$replication_job_id")
+    fi
     ui_run_command "Replicate now" "Capturing, encrypting and verifying the complete application state" \
-        "$MP_ROOT/deploy/ha/replicate_now.sh" || return 1
+        "$MP_ROOT/deploy/ha/replicate_now.sh" "${replication_args[@]}" \
+        || replication_status=$?
+    [ "$replication_status" -ne 197 ] || return 197
+    [ "$replication_status" -eq 0 ] || return 1
     ui_message "Replication complete" "The peer accepted the complete hash-verified application state."
 }
 

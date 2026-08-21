@@ -625,6 +625,52 @@ class ReplicationBundleTests(unittest.TestCase):
             with self.subTest(path=path.name):
                 self.assertIn(marker, path.read_text(encoding="utf-8"))
 
+    def test_first_copy_hooks_wrap_real_capture_transfer_restore_and_acceptance(self) -> None:
+        sender = (HA_DIR / "replicate_now.sh").read_text(encoding="utf-8")
+        receiver = (HA_DIR / "receive_replication_bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "mp_setup_test_hook_run_driver_transition bundle.capture", sender
+        )
+        self.assertIn(
+            "mp_setup_test_hook_run_driver_transition bundle.transfer", sender
+        )
+        self.assertIn(
+            "mp_setup_test_hook_run_driver_transition bundle.restore", receiver
+        )
+        for boundary in (
+            "before-side-effect",
+            "after-side-effect-before-receipt",
+            "after-receipt-before-checkpoint",
+            "after-checkpoint-before-next-action",
+        ):
+            self.assertIn(
+                f"mp_setup_test_hook_reach_named bundle.verify {boundary}",
+                receiver,
+            )
+        verification_boundary = receiver.index("bundle.verify before-side-effect")
+        self.assertLess(
+            verification_boundary,
+            receiver.index('"${MP_COMPOSE[@]}" stop backend', verification_boundary),
+        )
+        self.assertLess(
+            receiver.index("bundle.verify after-side-effect-before-receipt"),
+            receiver.index('> "$stage/receiver.json"'),
+        )
+        self.assertLess(
+            receiver.index('install -m 0600 "$stage/receiver.json"'),
+            receiver.index("bundle.verify after-receipt-before-checkpoint"),
+        )
+        self.assertLess(
+            receiver.index("database_swap_started=false"),
+            receiver.index("bundle.verify after-checkpoint-before-next-action"),
+        )
+        self.assertIn('[ "$ssh_status" -ne 197 ] || return 197', sender)
+        self.assertIn("if peer_confirms_bundle; then", sender)
+        self.assertIn("mp-opt-ha-captured-bundle-v1", sender)
+        self.assertIn('rm -rf "$stage/manifest.json" "$stage/payload"', sender)
+
 
 if __name__ == "__main__":
     unittest.main()

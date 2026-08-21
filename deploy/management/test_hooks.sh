@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Test-policy-only commissioning interruption hooks.
 #
-# This file is sourced only by the host-local setup machine adapter. It has no
+# This file is sourced only by host-local management and HA scripts. It has no
 # network route and no container mount. Production policy is rejected before any
 # test state is created or inspected.
 
@@ -30,10 +30,10 @@ readonly MP_SETUP_TEST_HOOK_TRANSITION_SPECS='[
   {"transition":"dns.create","driver":"server-checkpoint","wired":false},
   {"transition":"dns.propagate","driver":"server-checkpoint","wired":true},
   {"transition":"peer.pair","driver":"server-checkpoint","wired":true},
-  {"transition":"bundle.capture","driver":"ha-script","wired":false},
-  {"transition":"bundle.transfer","driver":"ha-script","wired":false},
-  {"transition":"bundle.restore","driver":"ha-script","wired":false},
-  {"transition":"bundle.verify","driver":"ha-script","wired":false},
+  {"transition":"bundle.capture","driver":"ha-script","wired":true},
+  {"transition":"bundle.transfer","driver":"ha-script","wired":true},
+  {"transition":"bundle.restore","driver":"ha-script","wired":true},
+  {"transition":"bundle.verify","driver":"ha-script","wired":true},
   {"transition":"bundle.acknowledge","driver":"server-checkpoint","wired":true},
   {"transition":"root.passkey-register","driver":"browser","wired":false},
   {"transition":"recovery.download","driver":"browser","wired":false},
@@ -53,7 +53,8 @@ readonly MP_SETUP_TEST_HOOK_TRANSITION_SPECS='[
 readonly MP_SETUP_TEST_HOOK_TRANSITIONS='[
   "artifact.acquire","artifact.images-activate","database.create","database.migrate",
   "backend.activate","caddy.activate","witness.register-primary","dns.propagate",
-  "peer.pair","bundle.acknowledge","smtp.deliver-and-receive",
+  "peer.pair","bundle.capture","bundle.transfer","bundle.restore","bundle.verify",
+  "bundle.acknowledge","smtp.deliver-and-receive",
   "evidence.verify"
 ]'
 readonly MP_SETUP_TEST_HOOK_BOUNDARIES='[

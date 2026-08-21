@@ -1374,7 +1374,10 @@ mp_setup_machine_advance_one() {
                         "Node B is not bound to the exact candidate identity, so no replication bundle was sent." || true
                     return 1
                 }
-                mp_ha_replicate_now || return 1
+                local replication_status=0
+                mp_ha_replicate_now || replication_status=$?
+                [ "$replication_status" -ne 197 ] || return 197
+                [ "$replication_status" -eq 0 ] || return 1
                 mp_setup_record_first_verified_bundle >/dev/null 2>&1 || return 1
             fi
             mp_setup_finalize_fresh_unsigned_peer || return 1

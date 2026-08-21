@@ -41,6 +41,12 @@ peer_confirms_bundle() {
         confirmed_operations="$(jq -c '[.protection_operations[]?] | sort_by(.mutation_sequence)' <<< "$receiver" 2>/dev/null)"
         [ "$expected_operations" = "$confirmed_operations" ] || return 1
     fi
+    # The peer may have accepted and fsynced the receiver receipt immediately
+    # before an injected crash window or a lost SSH acknowledgement. Reconcile
+    # the expiring witness transfer guard here as the receiver would have done;
+    # failure remains harmless because the guard has a bounded expiry.
+    python3 "$MP_ROOT/deploy/ha/witness_control.py" complete-transfer \
+        "$job_id" "$archive_hash" >/dev/null 2>&1 || true
     return 0
 }
 
@@ -76,6 +82,8 @@ assert_current_holder() {
 
 # shellcheck source=../management/common.sh
 source "$MP_ROOT/deploy/management/common.sh"
+# shellcheck source=../management/test_hooks.sh
+source "$MP_ROOT/deploy/management/test_hooks.sh"
 if ! mp_compose_init_existing_runtime \
     || ! mp_validate_action_profile_permissions evidence; then
     echo "The installed runtime permission contract is unsafe; replication did not start." >&2
@@ -112,7 +120,29 @@ mkdir -p "$MP_HA_STATE/outgoing"
 chmod 700 "$MP_HA_STATE" "$MP_HA_STATE/outgoing"
 exec 9>"$MP_HA_STATE/replication.lock"
 flock -n 9 || { echo "Replication is already running." >&2; exit 75; }
-stage="$(mktemp -d "$MP_HA_STATE/outgoing/.stage.XXXXXX")"
+hook_checkpoint="${MP_SETUP_MACHINE_CHECKPOINT:-replicated}"
+hook_key="${MP_SETUP_MACHINE_IDEMPOTENCY_KEY:-$job_id}"
+hook_stage=false
+if mp_setup_test_hook_policy && [ -s "$MP_SETUP_TEST_HOOK_ENABLED" ]; then
+    mp_setup_test_hook_prepare || exit $?
+    mp_setup_test_hook_validate_enabled "" || exit $?
+    hook_stage=true
+fi
+if [ "$hook_stage" = true ]; then
+    hook_stage_digest="$(printf '%s\0%s' "$job_id" "$hook_key" \
+        | sha256sum | awk '{print substr($1,1,40)}')"
+    stage="$MP_HA_STATE/outgoing/.setup-$hook_stage_digest"
+    if [ -e "$stage" ] || [ -L "$stage" ]; then
+        [ -d "$stage" ] && [ ! -L "$stage" ] \
+            && [ "$(stat -c '%u:%a' "$stage")" = "$(id -u):700" ] \
+            || { echo "The resumable replication stage is unsafe." >&2; exit 77; }
+    else
+        mkdir -m 700 "$stage"
+        sync -f "$MP_HA_STATE/outgoing" 2>/dev/null || exit 1
+    fi
+else
+    stage="$(mktemp -d "$MP_HA_STATE/outgoing/.stage.XXXXXX")"
+fi
 snapshot_input=""
 snapshot_pid=""
 accepted_receipt=""
@@ -124,13 +154,51 @@ cleanup() {
     fi
     [ -z "$snapshot_pid" ] || wait "$snapshot_pid" 2>/dev/null || true
     [ -z "$accepted_receipt" ] || rm -f -- "$accepted_receipt"
-    rm -rf "$stage"
+    if [ "$result" -ne 197 ] || [ "$hook_stage" != true ]; then
+        rm -rf "$stage"
+    fi
     exit "$result"
 }
 trap cleanup EXIT
-mkdir -p "$stage/payload/database" "$stage/payload/config/secrets" \
-    "$stage/payload/recovery" "$stage/payload/evidence"
-chmod -R go-rwx "$stage"
+
+load_captured_bundle() {
+    local receipt="$stage/capture.json" expected_release
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] \
+        && [ "$(stat -c '%u:%a' "$receipt")" = "$(id -u):600" ] || return 1
+    expected_release="$(mp_release_hash)" || return 1
+    jq -e --arg bundle "$job_id" --arg cluster "$HA_CLUSTER_ID" \
+        --arg source "$HA_NODE_ID" --arg target "$HA_PEER_NODE_ID" \
+        --arg release "$expected_release" --argjson generation "$generation" '
+        type == "object"
+        and ((keys | sort) == ["bundle_id","captured_at","cluster_id","format","generation","release_hash","sha256","source_node_id","target_node_id"])
+        and .format == "mp-opt-ha-captured-bundle-v1"
+        and .bundle_id == $bundle and .cluster_id == $cluster
+        and .source_node_id == $source and .target_node_id == $target
+        and .release_hash == $release and .generation == $generation
+        and (.sha256 | test("^[0-9a-f]{64}$"))
+        and (.captured_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+    ' "$receipt" >/dev/null 2>&1 || return 65
+    [ -f "$stage/bundle.age" ] && [ ! -L "$stage/bundle.age" ] \
+        && [ "$(stat -c '%u:%a' "$stage/bundle.age")" = "$(id -u):600" ] \
+        || return 65
+    archive_hash="$(jq -r .sha256 "$receipt")"
+    [ "$(sha256sum "$stage/bundle.age" | awk '{print $1}')" = "$archive_hash" ] \
+        || return 65
+    release="$expected_release"
+    capture_completed_ms="$(date +%s%3N)"
+}
+
+capture_bundle() {
+    local capture_receipt="$stage/capture.json" temporary
+    if [ -e "$capture_receipt" ] || [ -L "$capture_receipt" ]; then
+        load_captured_bundle
+        return $?
+    fi
+    [ -z "$(find "$stage" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+        || { echo "The incomplete resumable replication stage is not empty." >&2; return 65; }
+    mkdir -p "$stage/payload/database" "$stage/payload/config/secrets" \
+        "$stage/payload/recovery" "$stage/payload/evidence"
+    chmod -R go-rwx "$stage"
 
 mp_wait_for_database 30 \
     || { echo "The final local database process did not become ready for replication." >&2; exit 1; }
@@ -248,34 +316,68 @@ tar -C "$stage" -cf - manifest.json payload \
     | age -r "$recipient" -o "$stage/bundle.age"
 archive_hash="$(sha256sum "$stage/bundle.age" | awk '{print $1}')"
 capture_completed_ms="$(date +%s%3N)"
-assert_current_holder
-set +e
-response="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$HA_PEER_SSH" \
-    "/opt/masterplan/deploy/ha/receive_replication_bundle.sh '$job_id' '$archive_hash'" \
-    < "$stage/bundle.age")"
-ssh_status="$?"
-transfer_completed_ms="$(date +%s%3N)"
-set -e
-if [ "$ssh_status" -ne 0 ] || [ "$response" != "ACCEPTED:$job_id:$archive_hash" ]; then
+rm -rf "$stage/manifest.json" "$stage/payload"
+temporary="$(mktemp "$stage/.capture.XXXXXX")" || return 1
+jq -n --arg bundle "$job_id" --arg sha256 "$archive_hash" \
+    --arg source "$HA_NODE_ID" --arg target "$HA_PEER_NODE_ID" \
+    --arg cluster "$HA_CLUSTER_ID" \
+    --arg release "$release" --arg captured "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson generation "$generation" \
+    '{format:"mp-opt-ha-captured-bundle-v1",bundle_id:$bundle,sha256:$sha256,cluster_id:$cluster,
+      source_node_id:$source,target_node_id:$target,release_hash:$release,
+      generation:$generation,captured_at:$captured}' > "$temporary" \
+    && chmod 600 "$temporary" && sync -f "$stage/bundle.age" 2>/dev/null \
+    && sync -f "$temporary" 2>/dev/null && mv "$temporary" "$capture_receipt" \
+    && sync -f "$stage" 2>/dev/null \
+    || { rm -f "$temporary"; return 1; }
+}
+
+mp_setup_test_hook_run_driver_transition bundle.capture "$hook_checkpoint.capture" \
+    "$hook_key" capture_bundle || exit $?
+load_captured_bundle || { echo "The captured replication bundle receipt is invalid." >&2; exit 1; }
+transfer_bundle() {
     if peer_confirms_bundle; then
         response="ACCEPTED:$job_id:$archive_hash"
-        ssh_status=0
+        return 0
     fi
-fi
-if [ "$ssh_status" -eq 255 ]; then
-    echo "The replication peer is unreachable." >&2
-    exit 20
-fi
-if [ "$ssh_status" -eq 75 ]; then
-    echo "The replication peer is completing a management operation." >&2
-    exit 23
-fi
-if [ "$ssh_status" -ne 0 ]; then
-    echo "The replication peer rejected the copy." >&2
-    exit 21
-fi
-[ "$response" = "ACCEPTED:$job_id:$archive_hash" ] \
-    || { echo "The replication acknowledgement was invalid." >&2; exit 22; }
+    assert_current_holder
+    set +e
+    response="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$HA_PEER_SSH" \
+        "/opt/masterplan/deploy/ha/receive_replication_bundle.sh '$job_id' '$archive_hash'" \
+        < "$stage/bundle.age")"
+    ssh_status="$?"
+    set -e
+    # A peer-side adjacent hook deliberately exits 197. Preserve that exact
+    # result before lost-ack reconciliation so the controller observes the
+    # requested crash window. The protected encrypted stage is retained and a
+    # retry first reconciles the authoritative peer acceptance receipt.
+    [ "$ssh_status" -ne 197 ] || return 197
+    if [ "$ssh_status" -ne 0 ] || [ "$response" != "ACCEPTED:$job_id:$archive_hash" ]; then
+        if peer_confirms_bundle; then
+            response="ACCEPTED:$job_id:$archive_hash"
+            ssh_status=0
+        fi
+    fi
+    if [ "$ssh_status" -eq 255 ]; then
+        echo "The replication peer is unreachable." >&2
+        return 20
+    fi
+    if [ "$ssh_status" -eq 75 ]; then
+        echo "The replication peer is completing a management operation." >&2
+        return 23
+    fi
+    if [ "$ssh_status" -ne 0 ]; then
+        echo "The replication peer rejected the copy." >&2
+        return 21
+    fi
+    [ "$response" = "ACCEPTED:$job_id:$archive_hash" ] \
+        || { echo "The replication acknowledgement was invalid." >&2; return 22; }
+}
+
+mp_setup_test_hook_run_driver_transition bundle.transfer "$hook_checkpoint.transfer" \
+    "$hook_key" transfer_bundle || exit $?
+response="ACCEPTED:$job_id:$archive_hash"
+transfer_completed_ms="$(date +%s%3N)"
 update_operation_stage verifying
 accepted_receipt="$(mktemp "$MP_ROOT/runtime/ha-last-accepted-bundle.XXXXXX")"
 jq -n --arg bundle "$job_id" --arg sha256 "$archive_hash" \

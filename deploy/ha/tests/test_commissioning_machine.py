@@ -744,7 +744,8 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                     "artifact.acquire", "artifact.images-activate", "database.create",
                     "database.migrate", "backend.activate", "caddy.activate",
                     "witness.register-primary",
-                    "dns.propagate", "peer.pair", "bundle.acknowledge",
+                    "dns.propagate", "peer.pair", "bundle.capture", "bundle.transfer",
+                    "bundle.restore", "bundle.verify", "bundle.acknowledge",
                     "smtp.deliver-and-receive", "evidence.verify",
                 ],
             )
@@ -1359,7 +1360,8 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         source = (ROOT / "deploy/management/test_hooks.sh").read_text(encoding="utf-8")
         transitions = (
             "artifact.images-activate", "witness.register-primary", "dns.propagate",
-            "peer.pair", "bundle.acknowledge", "smtp.deliver-and-receive",
+            "peer.pair", "bundle.capture", "bundle.transfer", "bundle.restore",
+            "bundle.verify", "bundle.acknowledge", "smtp.deliver-and-receive",
             "evidence.verify",
         )
         boundaries = (
@@ -1379,8 +1381,7 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         source = (ROOT / "deploy/management/test_hooks.sh").read_text(encoding="utf-8")
         declared = (
             "witness.deploy-code",
-            "witness.bind-secrets", "dns.create", "bundle.capture",
-            "bundle.transfer", "bundle.restore", "bundle.verify",
+            "witness.bind-secrets", "dns.create",
             "root.passkey-register", "recovery.download", "recovery.reselect",
             "controller.download-or-import", "controller.possession-proof",
             "controller.root-authorise", "governance.save", "governance.preview",
@@ -1675,6 +1676,15 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
             replicated.index("mp_ha_replicate_now"),
         )
         self.assertIn("PEER_CANDIDATE_IDENTITY_MISMATCH", replicated)
+
+    def test_machine_first_copy_uses_stable_job_and_preserves_adjacent_fault_status(self) -> None:
+        ha = (ROOT / "deploy/management/ha.sh").read_text(encoding="utf-8")
+        replicated = SETUP[SETUP.index("        replicated)") :]
+        replicated = replicated[: replicated.index("        ha_services_activated)")]
+        self.assertIn("MP_SETUP_MACHINE_IDEMPOTENCY_KEY", ha)
+        self.assertIn('replication_args=("$replication_job_id")', ha)
+        self.assertIn('[ "$replication_status" -ne 197 ] || return 197', ha)
+        self.assertIn('[ "$replication_status" -ne 197 ] || return 197', replicated)
 
     def test_operations_only_debug_retry_does_not_recreate_services_before_first_copy(self) -> None:
         deployment = (ROOT / "deploy/test-deployment.sh").read_text(encoding="utf-8")
