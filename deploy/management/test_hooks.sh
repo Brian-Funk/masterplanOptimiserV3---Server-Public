@@ -35,26 +35,28 @@ readonly MP_SETUP_TEST_HOOK_TRANSITION_SPECS='[
   {"transition":"bundle.restore","driver":"ha-script","wired":true},
   {"transition":"bundle.verify","driver":"ha-script","wired":true},
   {"transition":"bundle.acknowledge","driver":"server-checkpoint","wired":true},
-  {"transition":"root.passkey-register","driver":"browser","wired":false},
-  {"transition":"recovery.download","driver":"browser","wired":false},
-  {"transition":"recovery.reselect","driver":"browser","wired":false},
-  {"transition":"controller.download-or-import","driver":"browser","wired":false},
+  {"transition":"root.passkey-register","driver":"browser","wired":true},
+  {"transition":"recovery.download","driver":"browser","wired":true},
+  {"transition":"recovery.reselect","driver":"browser","wired":true},
+  {"transition":"controller.download-or-import","driver":"browser","wired":true},
   {"transition":"controller.possession-proof","driver":"browser","wired":false},
   {"transition":"controller.root-authorise","driver":"browser","wired":false},
-  {"transition":"governance.save","driver":"browser","wired":false},
-  {"transition":"governance.preview","driver":"browser","wired":false},
-  {"transition":"governance.publish","driver":"browser","wired":false},
+  {"transition":"governance.save","driver":"browser","wired":true},
+  {"transition":"governance.preview","driver":"browser","wired":true},
+  {"transition":"governance.publish","driver":"browser","wired":true},
   {"transition":"smtp.authenticate","driver":"server-checkpoint","wired":false},
   {"transition":"smtp.dns-verify","driver":"server-checkpoint","wired":false},
   {"transition":"smtp.deliver-and-receive","driver":"server-checkpoint","wired":true},
-  {"transition":"commissioning.finalise","driver":"browser","wired":false},
+  {"transition":"commissioning.finalise","driver":"browser","wired":true},
   {"transition":"evidence.verify","driver":"server-checkpoint","wired":true}
 ]'
 readonly MP_SETUP_TEST_HOOK_TRANSITIONS='[
   "artifact.acquire","artifact.images-activate","database.create","database.migrate",
   "backend.activate","caddy.activate","witness.register-primary","dns.propagate",
   "peer.pair","bundle.capture","bundle.transfer","bundle.restore","bundle.verify",
-  "bundle.acknowledge","smtp.deliver-and-receive",
+  "bundle.acknowledge","root.passkey-register","recovery.download","recovery.reselect",
+  "controller.download-or-import","governance.save","governance.preview",
+  "governance.publish","smtp.deliver-and-receive","commissioning.finalise",
   "evidence.verify"
 ]'
 readonly MP_SETUP_TEST_HOOK_BOUNDARIES='[

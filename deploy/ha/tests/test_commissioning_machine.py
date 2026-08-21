@@ -746,7 +746,11 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                     "witness.register-primary",
                     "dns.propagate", "peer.pair", "bundle.capture", "bundle.transfer",
                     "bundle.restore", "bundle.verify", "bundle.acknowledge",
-                    "smtp.deliver-and-receive", "evidence.verify",
+                    "root.passkey-register", "recovery.download", "recovery.reselect",
+                    "controller.download-or-import", "governance.save",
+                    "governance.preview", "governance.publish",
+                    "smtp.deliver-and-receive", "commissioning.finalise",
+                    "evidence.verify",
                 ],
             )
             self.assertEqual(len(capability_body["declared_transitions"]), 31)
@@ -1361,7 +1365,11 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         transitions = (
             "artifact.images-activate", "witness.register-primary", "dns.propagate",
             "peer.pair", "bundle.capture", "bundle.transfer", "bundle.restore",
-            "bundle.verify", "bundle.acknowledge", "smtp.deliver-and-receive",
+            "bundle.verify", "bundle.acknowledge", "root.passkey-register",
+            "recovery.download", "recovery.reselect",
+            "controller.download-or-import", "governance.save", "governance.preview",
+            "governance.publish", "smtp.deliver-and-receive",
+            "commissioning.finalise",
             "evidence.verify",
         )
         boundaries = (
@@ -1382,11 +1390,8 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         declared = (
             "witness.deploy-code",
             "witness.bind-secrets", "dns.create",
-            "root.passkey-register", "recovery.download", "recovery.reselect",
-            "controller.download-or-import", "controller.possession-proof",
-            "controller.root-authorise", "governance.save", "governance.preview",
-            "governance.publish", "smtp.authenticate", "smtp.dns-verify",
-            "commissioning.finalise",
+            "controller.possession-proof", "controller.root-authorise",
+            "smtp.authenticate", "smtp.dns-verify",
         )
         for transition in declared:
             self.assertIn(
