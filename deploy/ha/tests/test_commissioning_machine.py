@@ -560,6 +560,16 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                     "smtp.deliver-and-receive", "evidence.verify",
                 ],
             )
+            self.assertEqual(len(capability_body["declared_transitions"]), 31)
+            self.assertEqual(len(capability_body["transition_specs"]), 31)
+            self.assertEqual(
+                {
+                    item["transition"]
+                    for item in capability_body["transition_specs"]
+                    if item["wired"]
+                },
+                set(capability_body["transitions"]),
+            )
             self.assertEqual(len(capability_body["boundaries"]), 4)
             self.assertIn(
                 {"checkpoint": "replicated", "transition": "bundle.acknowledge"},
@@ -1057,7 +1067,8 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         for command in (
             "validate", "plan", "start", "stage-candidate", "status", "events",
             "stage-migration", "stage-recovery", "artifact", "deployment",
-            "reconcile", "advance", "cancel", "handoff", "cleanup-provider", "test-hook",
+            "reconcile", "advance", "cancel", "handoff", "cleanup-provider",
+            "evidence-git", "test-hook",
         ):
             self.assertIn(command, source)
         self.assertNotIn("--secret", source)
@@ -1065,6 +1076,26 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("MP_MACHINE_BUSY=30", source)
         self.assertIn("idempotency_key", source)
         self.assertIn("setup-machine-input", COMMON)
+
+    def test_evidence_git_machine_adapter_reuses_shared_mutation_and_keeps_tokens_on_stdin(self) -> None:
+        source = MACHINE.read_text(encoding="utf-8")
+        evidence = (ROOT / "deploy/management/evidence.sh").read_text(encoding="utf-8")
+        adapter = source[source.index("mp_machine_evidence_git_status()") :]
+        adapter = adapter[: adapter.index('command_name="${1:-}"')]
+        self.assertIn("mp_evidence_git_apply_verified_configuration", adapter)
+        self.assertIn("mp_evidence_git_disable_configuration", adapter)
+        self.assertIn("mp_setup_test_hook_policy || return 77", adapter)
+        self.assertGreaterEqual(adapter.count("mp_setup_test_hook_policy || return 77"), 2)
+        self.assertIn("mp_setup_execution_acquire", adapter)
+        self.assertIn("mp_machine_prepare_evidence_git_receipts", adapter)
+        self.assertIn("mp-opt-evidence-git-machine-receipt-v1", source)
+        self.assertIn("mp-opt-evidence-git-machine-receipt-v1", adapter)
+        self.assertIn("request_sha256", adapter)
+        self.assertIn('jq -jr .values.token "$input" > "$token_file"', adapter)
+        self.assertNotIn("--token ", adapter)
+        self.assertNotIn("printf '%s' \"$token\"", adapter)
+        self.assertEqual(evidence.count("mp_evidence_git_apply_verified_configuration"), 2)
+        self.assertEqual(evidence.count("mp_evidence_git_disable_configuration"), 2)
 
     def test_plan_and_status_disclose_lifecycle_coverage_and_remaining_gaps(self) -> None:
         source = MACHINE.read_text(encoding="utf-8")
@@ -1099,6 +1130,31 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("mp_setup_test_hook_record_transition_receipt", SETUP)
         self.assertNotIn("curl ", source)
         self.assertNotIn("http", source.lower())
+
+    def test_fault_hook_catalog_keeps_unwired_transitions_out_of_executable_list(self) -> None:
+        source = (ROOT / "deploy/management/test_hooks.sh").read_text(encoding="utf-8")
+        declared = (
+            "artifact.acquire", "database.create", "database.migrate",
+            "backend.activate", "caddy.activate", "witness.deploy-code",
+            "witness.bind-secrets", "dns.create", "bundle.capture",
+            "bundle.transfer", "bundle.restore", "bundle.verify",
+            "root.passkey-register", "recovery.download", "recovery.reselect",
+            "controller.download-or-import", "controller.possession-proof",
+            "controller.root-authorise", "governance.save", "governance.preview",
+            "governance.publish", "smtp.authenticate", "smtp.dns-verify",
+            "commissioning.finalise",
+        )
+        for transition in declared:
+            self.assertIn(
+                f'{{"transition":"{transition}"',
+                source,
+            )
+        executable_block = source[
+            source.index("readonly MP_SETUP_TEST_HOOK_TRANSITIONS="):
+            source.index("readonly MP_SETUP_TEST_HOOK_BOUNDARIES=")
+        ]
+        for transition in declared:
+            self.assertNotIn(f'"{transition}"', executable_block)
 
     def test_lifecycle_inputs_are_streamed_and_receipts_are_secret_free(self) -> None:
         source = MACHINE.read_text(encoding="utf-8")

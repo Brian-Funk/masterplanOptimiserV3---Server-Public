@@ -12,10 +12,43 @@ MP_SETUP_TEST_HOOK_TRIGGERED="${MP_SETUP_TEST_HOOK_TRIGGERED:-${MP_SETUP_TEST_HO
 MP_SETUP_TEST_HOOK_LOCK="${MP_SETUP_TEST_HOOK_LOCK:-${MP_SETUP_TEST_HOOK_DIR}/lock}"
 MP_SETUP_TEST_HOOK_RECEIPTS="${MP_SETUP_TEST_HOOK_RECEIPTS:-${MP_SETUP_TEST_HOOK_DIR}/transition-receipts}"
 
-# Only transitions reached from the real commissioning control flow are
-# advertised.  Adding a name here requires an adjacent invocation in
-# mp_setup_machine_advance_one; the private lab must never mistake a remotely
-# callable simulation for a process interruption at the actual boundary.
+# Keep the complete reviewed transition catalogue beside the executable
+# subset.  A transition is advertised in `transitions` only after its named
+# driver reaches the real side effect.  This prevents the private laboratory
+# from confusing a planned adapter with executable interruption coverage.
+readonly MP_SETUP_TEST_HOOK_TRANSITION_SPECS='[
+  {"transition":"artifact.acquire","driver":"coordinator","wired":false},
+  {"transition":"artifact.images-activate","driver":"server-checkpoint","wired":true},
+  {"transition":"database.create","driver":"deployment-script","wired":false},
+  {"transition":"database.migrate","driver":"deployment-script","wired":false},
+  {"transition":"backend.activate","driver":"deployment-script","wired":false},
+  {"transition":"caddy.activate","driver":"deployment-script","wired":false},
+  {"transition":"witness.deploy-code","driver":"server-checkpoint","wired":false},
+  {"transition":"witness.bind-secrets","driver":"server-checkpoint","wired":false},
+  {"transition":"witness.register-primary","driver":"server-checkpoint","wired":true},
+  {"transition":"dns.create","driver":"server-checkpoint","wired":false},
+  {"transition":"dns.propagate","driver":"server-checkpoint","wired":true},
+  {"transition":"peer.pair","driver":"server-checkpoint","wired":true},
+  {"transition":"bundle.capture","driver":"ha-script","wired":false},
+  {"transition":"bundle.transfer","driver":"ha-script","wired":false},
+  {"transition":"bundle.restore","driver":"ha-script","wired":false},
+  {"transition":"bundle.verify","driver":"ha-script","wired":false},
+  {"transition":"bundle.acknowledge","driver":"server-checkpoint","wired":true},
+  {"transition":"root.passkey-register","driver":"browser","wired":false},
+  {"transition":"recovery.download","driver":"browser","wired":false},
+  {"transition":"recovery.reselect","driver":"browser","wired":false},
+  {"transition":"controller.download-or-import","driver":"browser","wired":false},
+  {"transition":"controller.possession-proof","driver":"browser","wired":false},
+  {"transition":"controller.root-authorise","driver":"browser","wired":false},
+  {"transition":"governance.save","driver":"browser","wired":false},
+  {"transition":"governance.preview","driver":"browser","wired":false},
+  {"transition":"governance.publish","driver":"browser","wired":false},
+  {"transition":"smtp.authenticate","driver":"server-checkpoint","wired":false},
+  {"transition":"smtp.dns-verify","driver":"server-checkpoint","wired":false},
+  {"transition":"smtp.deliver-and-receive","driver":"server-checkpoint","wired":true},
+  {"transition":"commissioning.finalise","driver":"browser","wired":false},
+  {"transition":"evidence.verify","driver":"server-checkpoint","wired":true}
+]'
 readonly MP_SETUP_TEST_HOOK_TRANSITIONS='[
   "artifact.images-activate","witness.register-primary","dns.propagate",
   "peer.pair","bundle.acknowledge","smtp.deliver-and-receive",
@@ -134,13 +167,16 @@ mp_setup_test_hook_capabilities() {
         run_id="$(jq -r .run_id "$MP_SETUP_TEST_HOOK_ENABLED")"
     fi
     jq -cn --argjson transitions "$MP_SETUP_TEST_HOOK_TRANSITIONS" \
+        --argjson transition_specs "$MP_SETUP_TEST_HOOK_TRANSITION_SPECS" \
         --argjson boundaries "$MP_SETUP_TEST_HOOK_BOUNDARIES" \
         --argjson checkpoint_map "$MP_SETUP_TEST_HOOK_CHECKPOINT_MAP" \
         --argjson enabled "$enabled" --arg run "$run_id" '
         {format:"mp-opt-commissioning-test-hooks-v1",enabled:$enabled,
          environment:"commissioning-candidate",scope:"host-local-machine-interface",
          active_run_id:(if $run == "" then null else $run end),
-         one_shot:true,transitions:$transitions,boundaries:$boundaries,
+         one_shot:true,transitions:$transitions,
+         declared_transitions:($transition_specs | map(.transition)),
+         transition_specs:$transition_specs,boundaries:$boundaries,
          checkpoint_map:$checkpoint_map}
     '
 }

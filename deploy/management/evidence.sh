@@ -163,6 +163,65 @@ mp_evidence_git_test_file() {
         --token-file "$token_file"
 }
 
+# Commit an already verified repository/token tuple.  Both the interactive TUI
+# and the host-local machine adapter use this function so that automation never
+# grows a second evidence-archive configuration implementation.  The caller is
+# responsible for validating the repository through mp_evidence_git_test_file
+# and for obtaining the explicit protection acknowledgement.
+mp_evidence_git_apply_verified_configuration() {
+    local staged="$1" owner="$2" repository="$3" repository_id="$4"
+    local branch="$5" controller_id="$6" instance_id="$7" schedule="$8"
+    local fingerprint
+    [ -f "$staged" ] && [ ! -L "$staged" ] \
+        && [ "$(stat -c '%u:%a' "$staged" 2>/dev/null)" = "$(id -u):600" ] \
+        || return 65
+    [[ "$owner" =~ ^[A-Za-z0-9._-]{1,100}$ ]] \
+        && [[ "$repository" =~ ^[A-Za-z0-9._-]{1,100}$ ]] \
+        && [[ "$repository_id" =~ ^[0-9]+$ ]] \
+        && [[ "$branch" =~ ^[A-Za-z0-9._/-]{1,100}$ ]] \
+        && [[ "$controller_id" =~ ^ctl-[a-z0-9]{8,48}$ ]] \
+        && [[ "$instance_id" =~ ^[0-9a-f-]{36}$ ]] \
+        && [[ "$schedule" =~ ^[0-9]+$ ]] && [ "$schedule" -ge 60 ] && [ "$schedule" -le 86400 ] \
+        || return 64
+    [ "${repository,,}" != "masterplanoptimiserv3---evidence-public" ] || return 65
+    mp_create_private_owner_directory_chain "$MP_ROOT/secrets" \
+        && chmod 700 "$MP_ROOT/secrets" || return 1
+    fingerprint="fgp-$(sha256sum "$staged" | awk '{print substr($1,1,16)}')"
+    mv -f "$staged" "$MP_EVIDENCE_GITHUB_TOKEN" || return 1
+    chmod 600 "$MP_EVIDENCE_GITHUB_TOKEN" || return 1
+    mp_env_set EVIDENCE_GIT_REPOSITORY_OWNER "$owner"
+    mp_env_set EVIDENCE_GIT_REPOSITORY_NAME "$repository"
+    mp_env_set EVIDENCE_GIT_REPOSITORY_ID "$repository_id"
+    mp_env_set EVIDENCE_GIT_DEFAULT_BRANCH "$branch"
+    mp_env_set EVIDENCE_CONTROLLER_ID "$controller_id"
+    mp_env_set EVIDENCE_ALLOWED_INSTANCE_ID "$instance_id"
+    mp_env_set EVIDENCE_GIT_UPLOAD_SCHEDULE_SECONDS "$schedule"
+    mp_env_set EVIDENCE_GITHUB_TOKEN_FINGERPRINT "$fingerprint"
+    mp_env_set EVIDENCE_GIT_PROTECTION_ACK_VERSION "1"
+    mp_env_set EVIDENCE_GIT_ARCHIVE_ENABLED "true"
+    mp_audit "evidence.git-token.configure" "success" "${owner}/${repository}:${fingerprint}"
+    jq -cn --arg owner "$owner" --arg repository "$repository" \
+        --arg repository_id "$repository_id" --arg branch "$branch" \
+        --arg fingerprint "$fingerprint" --arg controller_id "$controller_id" \
+        '{format:"mp-opt-evidence-git-configuration-v1",enabled:true,
+          repository:{owner:$owner,name:$repository,id:$repository_id,default_branch:$branch},
+          token_fingerprint:$fingerprint,controller_id:$controller_id}'
+}
+
+mp_evidence_git_disable_configuration() {
+    local staged
+    mp_create_private_owner_directory_chain "$MP_ROOT/secrets" \
+        && chmod 700 "$MP_ROOT/secrets" || return 1
+    staged="$(mktemp "$MP_ROOT/secrets/.evidence-github-token.XXXXXX")" || return 1
+    : > "$staged" && chmod 600 "$staged" \
+        && mv -f "$staged" "$MP_EVIDENCE_GITHUB_TOKEN" || return 1
+    mp_env_set EVIDENCE_GIT_ARCHIVE_ENABLED "false"
+    mp_env_set EVIDENCE_GITHUB_TOKEN_FINGERPRINT "unconfigured"
+    mp_audit "evidence.git-token.delete" "success" "automatic-archive-disabled"
+    jq -cn '{format:"mp-opt-evidence-git-configuration-v1",enabled:false,
+      token_fingerprint:"unconfigured"}'
+}
+
 mp_evidence_git_configure() {
     local token repeat owner repository branch controller_id instance_id schedule
     local staged result repository_id fingerprint bundle_controller_id
@@ -196,7 +255,8 @@ mp_evidence_git_configure() {
         ui_error "The entries do not match or are not a Fine-grained GitHub personal access token. Classic tokens are not supported."
         return 1
     fi
-    mkdir -p "$MP_ROOT/secrets" && chmod 700 "$MP_ROOT/secrets" || return 1
+    mp_create_private_owner_directory_chain "$MP_ROOT/secrets" \
+        && chmod 700 "$MP_ROOT/secrets" || return 1
     staged="$(mktemp "$MP_ROOT/secrets/.evidence-github-token.XXXXXX")" || return 1
     chmod 600 "$staged" || { rm -f "$staged"; return 1; }
     printf '%s' "$token" > "$staged" || { rm -f "$staged"; return 1; }
@@ -212,20 +272,9 @@ mp_evidence_git_configure() {
         rm -f "$staged"
         return 1
     fi
-    fingerprint="fgp-$(sha256sum "$staged" | awk '{print substr($1,1,16)}')"
-    mv -f "$staged" "$MP_EVIDENCE_GITHUB_TOKEN" || return 1
-    chmod 600 "$MP_EVIDENCE_GITHUB_TOKEN" || return 1
-    mp_env_set EVIDENCE_GIT_REPOSITORY_OWNER "$owner"
-    mp_env_set EVIDENCE_GIT_REPOSITORY_NAME "$repository"
-    mp_env_set EVIDENCE_GIT_REPOSITORY_ID "$repository_id"
-    mp_env_set EVIDENCE_GIT_DEFAULT_BRANCH "$branch"
-    mp_env_set EVIDENCE_CONTROLLER_ID "$controller_id"
-    mp_env_set EVIDENCE_ALLOWED_INSTANCE_ID "$instance_id"
-    mp_env_set EVIDENCE_GIT_UPLOAD_SCHEDULE_SECONDS "$schedule"
-    mp_env_set EVIDENCE_GITHUB_TOKEN_FINGERPRINT "$fingerprint"
-    mp_env_set EVIDENCE_GIT_PROTECTION_ACK_VERSION "1"
-    mp_env_set EVIDENCE_GIT_ARCHIVE_ENABLED "true"
-    mp_audit "evidence.git-token.configure" "success" "${owner}/${repository}:${fingerprint}"
+    result="$(mp_evidence_git_apply_verified_configuration "$staged" "$owner" "$repository" \
+        "$repository_id" "$branch" "$controller_id" "$instance_id" "$schedule")" || return $?
+    fingerprint="$(jq -er .token_fingerprint <<< "$result")" || return 1
     ui_message "Evidence Git archive" "Access verified and the Fine-grained GitHub personal access token was stored with owner-only permissions. Restart the backend to enable the durable uploader."
 }
 
@@ -241,15 +290,10 @@ mp_evidence_git_test_saved() {
 }
 
 mp_evidence_git_disable() {
-    local staged
     ui_require_phrase "Disable automatic evidence archival" \
         "This deletes the stored Fine-grained GitHub personal access token. The local ledger and manual export remain available." \
         "DISABLE EVIDENCE ARCHIVAL" || return 1
-    staged="$(mktemp "$MP_ROOT/secrets/.evidence-github-token.XXXXXX")" || return 1
-    : > "$staged" && chmod 600 "$staged" && mv -f "$staged" "$MP_EVIDENCE_GITHUB_TOKEN" || return 1
-    mp_env_set EVIDENCE_GIT_ARCHIVE_ENABLED "false"
-    mp_env_set EVIDENCE_GITHUB_TOKEN_FINGERPRINT "unconfigured"
-    mp_audit "evidence.git-token.delete" "success" "automatic-archive-disabled"
+    mp_evidence_git_disable_configuration >/dev/null || return $?
     ui_message "Evidence Git archive" "The token was deleted and automatic archival is disabled."
 }
 
