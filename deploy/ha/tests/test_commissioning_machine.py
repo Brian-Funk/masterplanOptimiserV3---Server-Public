@@ -741,7 +741,7 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             self.assertEqual(
                 capability_body["transitions"],
                 [
-                    "artifact.images-activate", "witness.register-primary",
+                    "artifact.acquire", "artifact.images-activate", "witness.register-primary",
                     "dns.propagate", "peer.pair", "bundle.acknowledge",
                     "smtp.deliver-and-receive", "evidence.verify",
                 ],
@@ -1376,7 +1376,7 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
     def test_fault_hook_catalog_keeps_unwired_transitions_out_of_executable_list(self) -> None:
         source = (ROOT / "deploy/management/test_hooks.sh").read_text(encoding="utf-8")
         declared = (
-            "artifact.acquire", "database.create", "database.migrate",
+            "database.create", "database.migrate",
             "backend.activate", "caddy.activate", "witness.deploy-code",
             "witness.bind-secrets", "dns.create", "bundle.capture",
             "bundle.transfer", "bundle.restore", "bundle.verify",

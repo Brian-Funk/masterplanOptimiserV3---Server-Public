@@ -17,7 +17,7 @@ MP_SETUP_TEST_HOOK_RECEIPTS="${MP_SETUP_TEST_HOOK_RECEIPTS:-${MP_SETUP_TEST_HOOK
 # driver reaches the real side effect.  This prevents the private laboratory
 # from confusing a planned adapter with executable interruption coverage.
 readonly MP_SETUP_TEST_HOOK_TRANSITION_SPECS='[
-  {"transition":"artifact.acquire","driver":"coordinator","wired":false},
+  {"transition":"artifact.acquire","driver":"coordinator","wired":true},
   {"transition":"artifact.images-activate","driver":"server-checkpoint","wired":true},
   {"transition":"database.create","driver":"deployment-script","wired":false},
   {"transition":"database.migrate","driver":"deployment-script","wired":false},
@@ -50,7 +50,7 @@ readonly MP_SETUP_TEST_HOOK_TRANSITION_SPECS='[
   {"transition":"evidence.verify","driver":"server-checkpoint","wired":true}
 ]'
 readonly MP_SETUP_TEST_HOOK_TRANSITIONS='[
-  "artifact.images-activate","witness.register-primary","dns.propagate",
+  "artifact.acquire","artifact.images-activate","witness.register-primary","dns.propagate",
   "peer.pair","bundle.acknowledge","smtp.deliver-and-receive",
   "evidence.verify"
 ]'
