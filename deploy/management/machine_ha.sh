@@ -97,6 +97,12 @@ mp_machine_ha_action() {
     local expected_holder expected_generation result status=0 target next
     mp_machine_require_local_owner || return 77
     mp_setup_test_hook_policy || return 77
+    # mp_machine_ha_status is evaluated in a command substitution below, so any
+    # configuration it loads is confined to that subshell.  Load and validate
+    # the same configuration in the action shell before using HA_NODE_ID or
+    # HA_PEER_NODE_ID for the mutation guards.
+    mp_load_ha_config || return 65
+    [ "$HA_ROLE" = dynamic ] || return 65
     mp_machine_ha_prepare_receipts || return $?
     input="$(mktemp "$MP_STATE/ha-machine-input.XXXXXX")" || return 1
     chmod 600 "$input"; MP_MACHINE_INPUT_FILE="$input"
