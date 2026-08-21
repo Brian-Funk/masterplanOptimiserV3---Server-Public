@@ -996,7 +996,14 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             })
             prefix = MACHINE.read_text(encoding="utf-8").split('command_name="${1:-}"', 1)[0]
             script = prefix + r'''
-                mp_setup_verify_smtp_and_dns_machine() { :; }
+                smtp_test_effect() { printf 'called\n' >> "$MP_STATE/effect-count"; }
+                mp_setup_verify_smtp_and_dns_machine() {
+                    local key
+                    key="smtp-delivery-$(printf '%s' "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
+                        | sha256sum | awk '{print $1}')"
+                    mp_setup_test_hook_run_driver_transition \
+                        smtp.deliver-and-receive smtp_verified "$key" smtp_test_effect
+                }
                 mp_machine_advance_command
             '''
             interrupted = subprocess.run(
@@ -1006,12 +1013,16 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             self.assertEqual(interrupted.returncode, 197, interrupted.stderr)
             state = json.loads((Path(environment["MP_STATE"]) / "setup-state-v2.json").read_text())
             self.assertEqual(state["state"], "in_progress")
-            self.assertIn("smtp_verified", state["completed"])
+            self.assertNotIn("smtp_verified", state["completed"])
             resumed = subprocess.run(
                 ["bash", "-Eeuo", "pipefail", "-c", script], input=request,
                 env=environment, text=True, capture_output=True, check=False,
             )
             self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertEqual(
+                (Path(environment["MP_STATE"]) / "effect-count").read_text().splitlines(),
+                ["called"],
+            )
             state = json.loads((Path(environment["MP_STATE"]) / "setup-state-v2.json").read_text())
             self.assertEqual(state["state"], "complete")
 
@@ -1157,6 +1168,7 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 mp_require_commands() { :; }
                 mp_validate_email_address() { :; }
                 mp_ha_role() { printf standalone; }
+                mp_setup_smtp_authenticate_machine() { :; }
                 mp_send_smtp_test_to() {
                     local count=0
                     [ ! -s "$SEND_COUNT" ] || count="$(cat "$SEND_COUNT")"

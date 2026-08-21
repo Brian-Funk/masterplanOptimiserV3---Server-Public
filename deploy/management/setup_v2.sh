@@ -20,6 +20,20 @@ MP_SETUP_V2_ARTIFACTS="${MP_SETUP_V2_ARTIFACTS:-$MP_STATE/setup-artifacts}"
 MP_SETUP_V2_FULL_LOSS_AUTH="${MP_SETUP_V2_FULL_LOSS_AUTH:-$MP_STATE/setup-full-loss-authorization.json}"
 MP_SETUP_V2_PROVIDER_RESOURCE="${MP_SETUP_V2_PROVIDER_RESOURCE:-$MP_STATE/cloudflare-provider-resource.json}"
 
+# The machine adapter loads the test-policy hook module after this shared
+# setup implementation and replaces this fallback with the guarded adjacent
+# transition driver.  The interactive TUI and focused helpers intentionally
+# do not load test-hook state; for them, execute the same operation directly.
+# Keeping the fallback here prevents test-only instrumentation from becoming
+# a runtime dependency of normal commissioning.
+if ! declare -F mp_setup_test_hook_run_driver_transition >/dev/null; then
+    mp_setup_test_hook_run_driver_transition() {
+        [ "$#" -ge 4 ] || return 64
+        shift 3
+        "$@"
+    }
+fi
+
 mp_setup_record_cloudflare_resource() {
     local cluster="$1" account="$2" worker="$3" witness="$4" zone="$5" domain="$6" temporary host
     [[ "$cluster" =~ ^mp-opt-[0-9a-f-]{36}$ ]] || return 65
