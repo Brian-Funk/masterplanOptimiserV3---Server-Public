@@ -47,6 +47,8 @@ source "$MP_ROOT/deploy/management/test_hooks.sh"
 source "$MP_ROOT/deploy/management/machine_snapshots.sh"
 # shellcheck source=management/machine_retention.sh
 source "$MP_ROOT/deploy/management/machine_retention.sh"
+# shellcheck source=management/machine_ha.sh
+source "$MP_ROOT/deploy/management/machine_ha.sh"
 
 readonly MP_MACHINE_OK=0
 readonly MP_MACHINE_WAITING=10
@@ -87,7 +89,7 @@ mp_machine_capabilities() {
        deployment_policy:$policy,host_local_only:true,
        commands:["capabilities","validate","plan","start","stage-candidate","stage-migration",
          "stage-recovery","artifact","deployment","advance","status","events",
-         "reconcile","cancel","handoff","cleanup-provider","evidence-git","snapshot","retention","test-hook"],
+         "reconcile","cancel","handoff","cleanup-provider","evidence-git","snapshot","retention","ha","test-hook"],
        setup_modes:["standalone-new","ha-primary-new","ha-join","convert-ha",
          "replace-primary","replace-node","full-restore"],
        interruption:{boundaries:$boundaries,transitions:$transition_specs,
@@ -102,7 +104,9 @@ mp_machine_capabilities() {
          snapshot:{create:($policy=="test"),verify:($policy=="test"),
            list:($policy=="test"),export:($policy=="test"),
            import:($policy=="test"),restore:false},
-         handover:false,automatic_failover:false,retention_as_of:($policy=="test")},
+         handover:($policy=="test"),automatic_failover:($policy=="test"),
+         ha_status:true,ha_readiness:($policy=="test"),
+         retention_as_of:($policy=="test")},
        production_policy_test_mutations:false}'
 }
 
@@ -154,6 +158,23 @@ mp_machine_validate() {
                 and (.result | type == "object")' "$receipt" >/dev/null 2>&1 || return 65
         done < <(find -P "$MP_MACHINE_EVIDENCE_GIT_RECEIPTS" \
             -maxdepth 1 -mindepth 1 -print0)
+    fi
+    if [ -e "$MP_MACHINE_HA_RECEIPTS" ] || [ -L "$MP_MACHINE_HA_RECEIPTS" ]; then
+        [ -d "$MP_MACHINE_HA_RECEIPTS" ] \
+            && [ ! -L "$MP_MACHINE_HA_RECEIPTS" ] \
+            && [ "$(stat -c '%u:%a' "$MP_MACHINE_HA_RECEIPTS" 2>/dev/null)" \
+                = "$(id -u):700" ] || return 77
+        while IFS= read -r -d '' receipt; do
+            [[ "$(basename "$receipt")" =~ ^[0-9a-f]{64}\.json$ ]] || return 77
+            mp_machine_validate_regular_file "$receipt" 600 || return 77
+            jq -e '.format == "mp-opt-ha-machine-receipt-v1"
+                and (.request_sha256 | test("^[0-9a-f]{64}$"))
+                and (.action | IN("readiness","handover","automatic"))
+                and (.run_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
+                and (.completed_at | type == "string")
+                and (.result | type == "object")' "$receipt" >/dev/null 2>&1 \
+                || return 65
+        done < <(find -P "$MP_MACHINE_HA_RECEIPTS" -maxdepth 1 -mindepth 1 -print0)
     fi
     if [ -e "$MP_SETUP_TEST_HOOK_DIR" ] || [ -L "$MP_SETUP_TEST_HOOK_DIR" ]; then
         [ "$policy" = test ] && [ -d "$MP_SETUP_TEST_HOOK_DIR" ] \
@@ -1149,10 +1170,52 @@ mp_machine_evidence_git_action() {
 
 command_name="${1:-}"
 [ -n "$command_name" ] || mp_machine_error INVALID_ARGUMENT \
-    "Usage: mp-opt setup capabilities|validate|plan|start|stage-candidate|stage-migration|stage-recovery|artifact|deployment|advance|status|events|reconcile|cancel|handoff|cleanup-provider|evidence-git|snapshot|retention|test-hook"
+    "Usage: mp-opt setup capabilities|validate|plan|start|stage-candidate|stage-migration|stage-recovery|artifact|deployment|advance|status|events|reconcile|cancel|handoff|cleanup-provider|evidence-git|snapshot|retention|ha|test-hook"
 shift || true
 
 case "$command_name" in
+    ha)
+        ha_action="${1:-}"; [ -n "$ha_action" ] || mp_machine_error INVALID_ARGUMENT \
+            "ha requires status, readiness, handover or automatic"
+        shift || true
+        case "$ha_action" in
+          status)
+            [ "${1:-}" != --json ] || shift
+            [ "$#" -eq 0 ] || mp_machine_error INVALID_ARGUMENT \
+                "ha status accepts only --json"
+            status=0; output="$(mp_machine_ha_status)" || status=$?
+            ;;
+          readiness|handover|automatic)
+            input_stdin=false
+            while [ "$#" -gt 0 ]; do
+                case "$1" in --input-stdin) input_stdin=true; shift ;; --json) shift ;;
+                  *) mp_machine_error INVALID_ARGUMENT "Unsupported ha argument: $1" ;;
+                esac
+            done
+            [ "$input_stdin" = true ] || mp_machine_error INVALID_ARGUMENT \
+                "ha ${ha_action} requires --input-stdin"
+            status=0; output="$(mp_machine_ha_action "$ha_action")" || status=$?
+            ;;
+          *) mp_machine_error INVALID_ARGUMENT \
+              "ha requires status, readiness, handover or automatic" ;;
+        esac
+        case "$status" in
+          0) printf '%s\n' "$output" ;;
+          20) mp_machine_error HA_NOT_READY \
+            "The exact HA transition is not ready and no unverified ownership change was accepted." \
+            "$MP_MACHINE_ATTENTION" ;;
+          75) mp_machine_error EXECUTION_BUSY \
+            "Another setup or management operation holds the execution lease." "$MP_MACHINE_BUSY" ;;
+          77) mp_machine_error TEST_POLICY_REQUIRED \
+            "HA mutation automation is available only to the local owner under test policy." \
+            "$MP_MACHINE_UNAUTHORISED" ;;
+          64|65) mp_machine_error INVALID_INPUT \
+            "The HA request, expected generation, node identity, or durable receipt is invalid." \
+            "$MP_MACHINE_INVALID" ;;
+          *) mp_machine_error HA_ACTION_FAILED \
+            "The HA action failed closed and remains safely diagnosable." "$MP_MACHINE_ATTENTION" ;;
+        esac
+        ;;
     retention)
         retention_action="${1:-}"; [ "$retention_action" = run-as-of ] \
             || mp_machine_error INVALID_ARGUMENT "retention requires run-as-of"

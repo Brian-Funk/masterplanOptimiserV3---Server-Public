@@ -21,6 +21,8 @@ from deploy.ha import cloudflare_worker_script
 
 ROOT = Path(__file__).resolve().parents[3]
 MACHINE = ROOT / "deploy/commissioning-machine.sh"
+MACHINE_HA = (ROOT / "deploy/management/machine_ha.sh").read_text(encoding="utf-8")
+HA_MANAGEMENT = (ROOT / "deploy/management/ha.sh").read_text(encoding="utf-8")
 SETUP = (ROOT / "deploy/management/setup_v2.sh").read_text(encoding="utf-8")
 COMMON = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
 MANAGE = (ROOT / "manage.sh").read_text(encoding="utf-8")
@@ -842,6 +844,221 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             for name in ("enabled.json", "triggered.jsonl", "lock"):
                 self.assertEqual((hook_dir / name).stat().st_mode & 0o777, 0o600)
 
+    def test_ha_mutation_is_denied_under_production_policy_before_state_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            request = {
+                "format": "mp-opt-ha-machine-request-v1",
+                "action": "automatic",
+                "run_id": "12345678-1234-4234-8234-123456789abc",
+                "idempotency_key": "ha-production-denial-0001",
+                "values": {
+                    "expected_holder": "node-a",
+                    "expected_generation": 1,
+                    "state": "enabled",
+                },
+            }
+            denied = self.invoke(
+                environment,
+                "ha",
+                "automatic",
+                "--input-stdin",
+                "--json",
+                input_document=json.dumps(request),
+            )
+            self.assertEqual(denied.returncode, 50, denied.stderr)
+            self.assertEqual(
+                json.loads(denied.stdout)["error"]["code"], "TEST_POLICY_REQUIRED"
+            )
+            self.assertFalse(
+                (Path(environment["MP_STATE"]) / "ha-machine-receipts").exists()
+            )
+
+    def test_ha_handover_receipt_replays_without_repeating_shared_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            self.enable_test_policy(environment)
+            prefix = MACHINE.read_text(encoding="utf-8").split(
+                'command_name="${1:-}"', 1
+            )[0]
+            script = prefix + r'''
+                mp_machine_ha_status() {
+                  jq -cn '{format:"mp-opt-ha-machine-status-v1",mode:"ha",
+                    local_node_id:"node-a",peer_node_id:"node-b",
+                    holder_node_id:"node-a",generation:3,routing_ready:true,
+                    automatic_failover:false,nodes:[
+                      {node_id:"node-a",healthy:true},
+                      {node_id:"node-b",healthy:true}]}'
+                }
+                mp_ha_planned_switchover_apply() {
+                  local count=0
+                  test ! -f "$MP_STATE/handover-count" \
+                    || count="$(cat "$MP_STATE/handover-count")"
+                  printf '%s\n' "$((count + 1))" > "$MP_STATE/handover-count"
+                  jq -cn '{format:"mp-opt-ha-handover-result-v1",
+                    source_node_id:"node-a",target_node_id:"node-b",
+                    previous_generation:3,generation:4,routing_ready:true,
+                    automatic_failover:false}'
+                }
+                mp_machine_ha_action handover
+            '''
+            request = json.dumps({
+                "format": "mp-opt-ha-machine-request-v1",
+                "action": "handover",
+                "run_id": "12345678-1234-4234-8234-123456789abc",
+                "idempotency_key": "ha-handover-replay-0001",
+                "values": {
+                    "expected_holder": "node-a",
+                    "expected_generation": 3,
+                    "target_node_id": "node-b",
+                },
+            })
+            first = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                input=request,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            replay = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                input=request,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(replay.returncode, 0, replay.stderr)
+            self.assertEqual(
+                (Path(environment["MP_STATE"]) / "handover-count").read_text().strip(),
+                "1",
+            )
+            self.assertEqual(json.loads(first.stdout), json.loads(replay.stdout))
+
+    def test_ha_handover_reconciles_lost_receipt_without_repeating_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            self.enable_test_policy(environment)
+            prefix = MACHINE.read_text(encoding="utf-8").split(
+                'command_name="${1:-}"', 1
+            )[0]
+            script = prefix + r'''
+                mp_machine_ha_status() {
+                  jq -cn '{format:"mp-opt-ha-machine-status-v1",mode:"ha",
+                    local_node_id:"node-a",peer_node_id:"node-b",
+                    holder_node_id:"node-b",generation:4,routing_ready:false,
+                    automatic_failover:false,nodes:[
+                      {node_id:"node-a",healthy:true},
+                      {node_id:"node-b",healthy:true}]}'
+                }
+                mp_ha_planned_switchover_apply() {
+                  touch "$MP_STATE/handover-was-repeated"
+                  return 1
+                }
+                mp_machine_ha_action handover
+            '''
+            request = json.dumps({
+                "format": "mp-opt-ha-machine-request-v1",
+                "action": "handover",
+                "run_id": "12345678-1234-4234-8234-123456789abc",
+                "idempotency_key": "ha-handover-lost-receipt-0001",
+                "values": {
+                    "expected_holder": "node-a",
+                    "expected_generation": 3,
+                    "target_node_id": "node-b",
+                },
+            })
+            reconciled = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                input=request,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(reconciled.returncode, 0, reconciled.stderr)
+            document = json.loads(reconciled.stdout)
+            self.assertTrue(document["reconciled"])
+            self.assertEqual(document["source_node_id"], "node-a")
+            self.assertEqual(document["target_node_id"], "node-b")
+            self.assertEqual(document["generation"], 4)
+            self.assertFalse(
+                (Path(environment["MP_STATE"]) / "handover-was-repeated").exists()
+            )
+
+    def test_ha_automatic_reconciles_witness_config_split_before_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            self.enable_test_policy(environment)
+            prefix = MACHINE.read_text(encoding="utf-8").split(
+                'command_name="${1:-}"', 1
+            )[0]
+            script = prefix + r'''
+                MP_ROOT="$MP_STATE/fake-root"
+                mkdir -p "$MP_ROOT/runtime"
+                jq -cn '{holder_node_id:"node-a",generation:3,
+                  routing_ready:true,automatic_failover:true}' \
+                  > "$MP_ROOT/runtime/ha-control.json"
+                mp_machine_ha_status() {
+                  jq -cn '{format:"mp-opt-ha-machine-status-v1",mode:"ha",
+                    local_node_id:"node-a",peer_node_id:"node-b",
+                    holder_node_id:"node-a",generation:3,routing_ready:true,
+                    automatic_failover:true,nodes:[
+                      {node_id:"node-a",healthy:true},
+                      {node_id:"node-b",healthy:true}]}'
+                }
+                mp_load_ha_config() {
+                  HA_ROLE=dynamic
+                  HA_NODE_ID=node-a
+                  HA_PEER_NODE_ID=node-b
+                  HA_AUTOMATIC_FAILOVER=disabled
+                }
+                mp_require_active_or_standalone() { return 0; }
+                mp_ha_set_config_value() {
+                  printf '%s\n' "$2" > "$MP_STATE/automatic-config-value"
+                }
+                mp_audit() { return 0; }
+                mp_machine_ha_action automatic
+            '''
+            request = json.dumps({
+                "format": "mp-opt-ha-machine-request-v1",
+                "action": "automatic",
+                "run_id": "12345678-1234-4234-8234-123456789abc",
+                "idempotency_key": "ha-automatic-config-reconcile-0001",
+                "values": {
+                    "expected_holder": "node-a",
+                    "expected_generation": 3,
+                    "state": "enabled",
+                },
+            })
+            reconciled = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                input=request,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(reconciled.returncode, 0, reconciled.stderr)
+            document = json.loads(reconciled.stdout)
+            self.assertEqual(document["state"], "enabled")
+            self.assertEqual(document["holder_node_id"], "node-a")
+            self.assertEqual(document["generation"], 3)
+            self.assertEqual(
+                (Path(environment["MP_STATE"]) / "automatic-config-value")
+                .read_text(encoding="ascii").strip(),
+                "enabled",
+            )
+            self.assertEqual(
+                len(list(
+                    (Path(environment["MP_STATE"]) / "ha-machine-receipts")
+                    .glob("*.json")
+                )),
+                1,
+            )
+
     def test_fault_hook_rejects_wrong_identity_and_can_disarm_exact_arm(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             environment = self.environment(Path(directory_name))
@@ -1276,7 +1493,7 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
             "capabilities", "validate", "plan", "start", "stage-candidate", "status", "events",
             "stage-migration", "stage-recovery", "artifact", "deployment",
             "reconcile", "advance", "cancel", "handoff", "cleanup-provider",
-            "evidence-git", "snapshot", "retention", "test-hook",
+            "evidence-git", "snapshot", "retention", "ha", "test-hook",
         ):
             self.assertIn(command, source)
         self.assertNotIn("--secret", source)
@@ -1318,10 +1535,53 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn('import:($policy=="test")', capabilities)
         self.assertIn('restore:false', capabilities)
         self.assertIn('retention_as_of:($policy=="test")', capabilities)
-        self.assertIn("handover:false", capabilities)
-        self.assertIn("automatic_failover:false", capabilities)
+        self.assertIn('handover:($policy=="test")', capabilities)
+        self.assertIn('automatic_failover:($policy=="test")', capabilities)
+        self.assertIn("ha_status:true", capabilities)
+        self.assertIn('ha_readiness:($policy=="test")', capabilities)
         self.assertIn('production_policy_test_mutations:false', capabilities)
         self.assertNotIn("token", capabilities.lower())
+
+    def test_ha_machine_adapter_is_test_policy_only_idempotent_and_reuses_shared_actions(self) -> None:
+        self.assertIn("mp_setup_test_hook_policy", MACHINE_HA)
+        self.assertIn("mp_setup_execution_acquire", MACHINE_HA)
+        self.assertIn("mp_lock", MACHINE_HA)
+        self.assertIn("mp_machine_ha_record_receipt", MACHINE_HA)
+        self.assertIn("mp-opt-ha-machine-receipt-v1", MACHINE_HA)
+        self.assertIn("request_sha256", MACHINE_HA)
+        self.assertIn("expected_generation", MACHINE_HA)
+        self.assertIn("expected_holder", MACHINE_HA)
+        self.assertIn("mp_ha_planned_switchover_apply", MACHINE_HA)
+        self.assertIn("mp_ha_automatic_failover_apply", MACHINE_HA)
+        self.assertNotIn("ui_require_phrase", MACHINE_HA)
+        self.assertNotIn("ui_confirm", MACHINE_HA)
+        automatic = HA_MANAGEMENT[
+            HA_MANAGEMENT.index("mp_ha_automatic_failover()"):
+            HA_MANAGEMENT.index("mp_ha_automatic_failover_apply()")
+        ]
+        handover = HA_MANAGEMENT[
+            HA_MANAGEMENT.index("mp_ha_planned_switchover()"):
+        ]
+        self.assertIn("mp_ha_automatic_failover_apply", automatic)
+        self.assertIn("mp_ha_planned_switchover_apply", handover)
+        automatic_apply = HA_MANAGEMENT[
+            HA_MANAGEMENT.index("mp_ha_automatic_failover_apply()"):
+            HA_MANAGEMENT.index("mp_ha_planned_switchover_apply()")
+        ]
+        provider_branch_end = automatic_apply.index(
+            '    if [ "$configured" != "$next" ]; then'
+        )
+        self.assertGreater(
+            provider_branch_end,
+            automatic_apply.index('    if [ "$current" != "$next" ]; then'),
+        )
+        self.assertIn(
+            'mp_ha_set_config_value HA_AUTOMATIC_FAILOVER "$next"',
+            automatic_apply[provider_branch_end:],
+        )
+        self.assertIn('($nodes | length) == 2', MACHINE_HA)
+        self.assertIn('([$nodes[].node_id] | sort) == ([$node,$peer] | sort)', MACHINE_HA)
+        self.assertIn('[ "$expected_holder" = "$HA_NODE_ID" ]', MACHINE_HA)
 
     def test_snapshot_machine_adapter_uses_real_snapshot_operations_and_protected_receipts(self) -> None:
         source = (ROOT / "deploy/management/machine_snapshots.sh").read_text(encoding="utf-8")
