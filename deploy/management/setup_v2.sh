@@ -1238,9 +1238,10 @@ mp_setup_machine_advance_one() {
                             "$MP_SETUP_WITNESS_ADMIN_TOKEN" \
                             || { rm -f "$body" "$bootstrap_error"; return 20; }
                         repair_attempted=true
+                        [ "$attempt" -eq 20 ] || sleep 3
                         continue
                     fi
-                    if ! grep -Eq 'remote API returned HTTP (404|429|500|502|503|504)([^0-9]|$)|provider error 1042([^0-9]|$)' \
+                    if ! grep -Eq 'remote API returned HTTP (401|404|429|500|502|503|504)([^0-9]|$)|provider error 1042([^0-9]|$)' \
                         "$bootstrap_error"; then
                         break
                     fi
@@ -2934,9 +2935,10 @@ mp_setup_primary_create() {
                     || { rm -f "$body" "$bootstrap_error"; \
                         unset node_token pairing_secret MP_SETUP_WITNESS_ADMIN_TOKEN; return 1; }
                 repair_attempted=true
+                [ "$attempt" -eq 20 ] || sleep 3
                 continue
             fi
-            if ! grep -Eq 'remote API returned HTTP (404|429|500|502|503|504)([^0-9]|$)|provider error 1042([^0-9]|$)' \
+            if ! grep -Eq 'remote API returned HTTP (401|404|429|500|502|503|504)([^0-9]|$)|provider error 1042([^0-9]|$)' \
                 "$bootstrap_error"; then
                 break
             fi
