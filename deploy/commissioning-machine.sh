@@ -100,7 +100,8 @@ mp_machine_capabilities() {
            retry:($policy=="test"),disable:($policy=="test")},
          provider_cleanup:($policy=="test"),
          snapshot:{create:($policy=="test"),verify:($policy=="test"),
-           list:($policy=="test"),export:false,import:false,restore:false},
+           list:($policy=="test"),export:($policy=="test"),
+           import:($policy=="test"),restore:false},
          handover:false,automatic_failover:false,retention_as_of:($policy=="test")},
        production_policy_test_mutations:false}'
 }
@@ -672,11 +673,14 @@ mp_machine_stage_migration_snapshot() {
 }
 
 mp_machine_read_artifact() {
-    local ticket="$1" directory receipt package expected owner run_id status
+    local ticket="$1" directory receipt package expected owner run_id status kind expected_name
     [[ "$ticket" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
         || return 64
     mp_machine_require_local_owner || return 77
+    mp_machine_snapshot_validate_artifact_root || return 77
     directory="$MP_SETUP_V2_ARTIFACTS/$ticket"; receipt="$directory/receipt.json"
+    [ "$(readlink -f "$(dirname "$directory")" 2>/dev/null)" \
+        = "$(readlink -f "$MP_SETUP_V2_ARTIFACTS" 2>/dev/null)" ] || return 65
     [ -d "$directory" ] && [ ! -L "$directory" ] \
         && [ "$(stat -c '%a' "$directory" 2>/dev/null)" = 700 ] \
         && [ -f "$receipt" ] && [ ! -L "$receipt" ] \
@@ -685,12 +689,19 @@ mp_machine_read_artifact() {
     [ "$(stat -c '%u' "$directory")" = "$owner" ] \
         && [ "$(stat -c '%u' "$receipt")" = "$owner" ] || return 77
     jq -e --arg ticket "$ticket" '.format == "mp-opt-machine-artifact-v1"
-        and .kind == "migration-snapshot" and .ticket == $ticket
+        and (.kind | IN("migration-snapshot","portable-snapshot")) and .ticket == $ticket
         and (.package_sha256 | test("^[0-9a-f]{64}$"))
         and (.package_size | type == "number" and . >= 1 and . <= 4294967296)' \
         "$receipt" >/dev/null 2>&1 || return 65
+    kind="$(jq -r .kind "$receipt")"
+    if [ "$kind" = migration-snapshot ]; then
+        expected_name=migration.mpopt-snapshot
+    else
+        expected_name=portable.mpopt-snapshot
+        jq -e '.snapshot_ref | type == "string"' "$receipt" >/dev/null || return 65
+    fi
     package="$(jq -r .package_path "$receipt")"
-    [ "$(readlink -f "$package")" = "$(readlink -f "$directory")/migration.mpopt-snapshot" ] \
+    [ "$(readlink -f "$package")" = "$(readlink -f "$directory")/$expected_name" ] \
         && [ -f "$package" ] && [ ! -L "$package" ] \
         && [ "$(stat -c '%u:%a' "$package")" = "$owner:600" ] || return 65
     [ "$(stat -c %s "$package")" = "$(jq -r .package_size "$receipt")" ] || return 65
@@ -1170,7 +1181,7 @@ case "$command_name" in
         ;;
     snapshot)
         snapshot_action="${1:-}"; [ -n "$snapshot_action" ] || mp_machine_error INVALID_ARGUMENT \
-            "snapshot requires list, create or verify"
+            "snapshot requires list, create, verify, export or import"
         shift || true
         case "$snapshot_action" in
           list)
@@ -1178,7 +1189,7 @@ case "$command_name" in
             [ "$#" -eq 0 ] || mp_machine_error INVALID_ARGUMENT "snapshot list accepts only --json"
             status=0; output="$(mp_machine_snapshot_list)" || status=$?
             ;;
-          create|verify)
+          create|verify|export)
             input_stdin=false
             while [ "$#" -gt 0 ]; do
                 case "$1" in --input-stdin) input_stdin=true; shift ;; --json) shift ;;
@@ -1189,7 +1200,25 @@ case "$command_name" in
                 "snapshot ${snapshot_action} requires --input-stdin"
             status=0; output="$(mp_machine_snapshot_action "$snapshot_action")" || status=$?
             ;;
-          *) mp_machine_error INVALID_ARGUMENT "snapshot requires list, create or verify" ;;
+          import)
+            sha256=""; idempotency_key=""; input_stdin=false
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                  --sha256) sha256="${2:-}"; shift 2 ;;
+                  --idempotency-key) idempotency_key="${2:-}"; shift 2 ;;
+                  --input-stdin) input_stdin=true; shift ;;
+                  --json) shift ;;
+                  *) mp_machine_error INVALID_ARGUMENT "Unsupported snapshot import argument: $1" ;;
+                esac
+            done
+            [ "$input_stdin" = true ] && [ -n "$sha256" ] && [ -n "$idempotency_key" ] \
+                || mp_machine_error INVALID_ARGUMENT \
+                    "snapshot import requires --sha256, --idempotency-key and --input-stdin"
+            status=0; output="$(mp_machine_snapshot_import_package "$sha256" "$idempotency_key")" \
+                || status=$?
+            ;;
+          *) mp_machine_error INVALID_ARGUMENT \
+                "snapshot requires list, create, verify, export or import" ;;
         esac
         case "$status" in
           0) printf '%s\n' "$output" ;;

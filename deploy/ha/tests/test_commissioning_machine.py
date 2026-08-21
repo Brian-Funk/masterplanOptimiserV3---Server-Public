@@ -98,7 +98,10 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 export MP_STATE="$1/state"
                 export MP_SNAPSHOTS="$1/snapshots"
                 export MP_MACHINE_SNAPSHOT_RECEIPTS="$MP_STATE/snapshot-machine-receipts"
-                mkdir -m 0700 "$MP_STATE" "$MP_SNAPSHOTS"
+                export MP_SETUP_V2_ARTIFACTS="$MP_STATE/machine-artifacts"
+                export MP_PORTABLE_TOOL="$2/deploy/management/portable_snapshot.py"
+                export MP_PORTABLE_LAST_IMPORT_STATE="$MP_STATE/portable-last-import.json"
+                mkdir -m 0700 "$MP_STATE" "$MP_SNAPSHOTS" "$MP_SETUP_V2_ARTIFACTS"
                 source "$2/deploy/management/machine_snapshots.sh"
                 mp_machine_require_local_owner() { return 0; }
                 mp_setup_test_hook_policy() { return 0; }
@@ -111,12 +114,14 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                         && test "$(stat -c '%u:%a' "$1")" = "$(id -u):$2"
                 }
                 mp_secure_remove_file() { test -z "${1:-}" || rm -f -- "$1"; }
+                mp_portable_initialise() { return 0; }
+                mp_ha_role() { printf standalone; }
                 mp_snapshot_receipt_is_v2() {
                     jq -e '.format == "mp-opt-snapshot-receipt-v2"' \
                         "$1/receipt.json" >/dev/null
                 }
                 mp_snapshot_create() {
-                    local type="$1" name="$2" directory archive_hash count
+                    local type="$1" name="$2" directory archive_hash count recipient fingerprint
                     count=0; test ! -f "$MP_STATE/create-count" \
                         || count="$(cat "$MP_STATE/create-count")"
                     printf '%s\n' "$((count + 1))" > "$MP_STATE/create-count"
@@ -124,13 +129,17 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                     mkdir -m 0700 "$directory"
                     printf 'encrypted fixture' > "$directory/snapshot.tar.age"
                     archive_hash="$(sha256sum "$directory/snapshot.tar.age" | awk '{print $1}')"
+                    recipient="age1$(printf 'a%.0s' {1..58})"
+                    fingerprint="$(printf '%s' "$recipient" | sha256sum | awk '{print $1}')"
                     printf '%s  snapshot.tar.age\n' "$archive_hash" > "$directory/archive.sha256"
-                    jq -n --arg type "$type" --arg name "$name" --arg hash "$archive_hash" '
+                    jq -n --arg type "$type" --arg name "$name" --arg hash "$archive_hash" \
+                        --arg recipient "$recipient" --arg fingerprint "$fingerprint" '
                       {format:"mp-opt-snapshot-receipt-v2",type:$type,name:$name,
                        created_at:"2026-08-21T12:00:00Z",archive_sha256:$hash,
                        archive_size:17,verification:"encrypted",recovery_status:"key-required",
-                       encryption:{scheme:"age-x25519",recipient:"age1fixture",
-                         recipient_sha256:("a"*64),recovery_key_id:"fixture"},
+                       encryption:{scheme:"age-x25519",recipient:$recipient,
+                         recipient_sha256:$fingerprint,
+                         recovery_key_id:("rk-"+($fingerprint[0:16]))},
                        storage:{local:"hash-verified",off_server:"not-copied"}}' \
                        > "$directory/receipt.json"
                     chmod 600 "$directory"/*
@@ -163,6 +172,19 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 verified="$(mp_machine_snapshot_action verify <<< "$verify")"
                 test "$(jq -r .verification <<< "$verified")" = deep-verified
                 test "$(jq -r .recovery_status <<< "$verified")" = recoverable
+                export_request="$(jq -cn --arg ref "$reference" '{
+                  format:"mp-opt-snapshot-machine-request-v1",action:"export",
+                  idempotency_key:"12345678-1234-4234-8234-123456789abc:snapshot-export",
+                  values:{snapshot_ref:$ref}}')"
+                exported="$(mp_machine_snapshot_action export <<< "$export_request")"
+                ticket="$(jq -r .ticket <<< "$exported")"
+                package="$MP_SETUP_V2_ARTIFACTS/$ticket/portable.mpopt-snapshot"
+                test -f "$package"
+                package_sha="$(jq -r .package_sha256 <<< "$exported")"
+                imported="$(mp_machine_snapshot_import_package "$package_sha" \
+                  '12345678-1234-4234-8234-123456789abc:snapshot-import' < "$package")"
+                test "$(jq -r .snapshot_ref <<< "$imported")" = "$reference"
+                test "$(jq -r .import_status <<< "$imported")" = already-present
                 ! grep -R 'AGE-SECRET-KEY' "$MP_MACHINE_SNAPSHOT_RECEIPTS" "$MP_SNAPSHOTS"
             '''
             result = subprocess.run(
@@ -1270,6 +1292,9 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("mp-opt-commissioning-machine-capabilities-v1", capabilities)
         self.assertIn("MP_SETUP_TEST_HOOK_TRANSITION_SPECS", capabilities)
         self.assertIn('snapshot:{create:($policy=="test")', capabilities)
+        self.assertIn('export:($policy=="test")', capabilities)
+        self.assertIn('import:($policy=="test")', capabilities)
+        self.assertIn('restore:false', capabilities)
         self.assertIn('retention_as_of:($policy=="test")', capabilities)
         self.assertIn("handover:false", capabilities)
         self.assertIn("automatic_failover:false", capabilities)
@@ -1280,6 +1305,11 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         source = (ROOT / "deploy/management/machine_snapshots.sh").read_text(encoding="utf-8")
         self.assertIn("mp_snapshot_create", source)
         self.assertIn("mp_snapshot_verify_path", source)
+        self.assertIn('"$MP_PORTABLE_TOOL" export', source)
+        self.assertIn('"$MP_PORTABLE_TOOL" import', source)
+        self.assertIn("mp-opt-snapshot-export-result-v1", source)
+        self.assertIn("mp-opt-snapshot-import-result-v1", source)
+        self.assertIn("portable.mpopt-snapshot", source)
         self.assertIn("mp_setup_execution_acquire", source)
         self.assertIn("mp_setup_test_hook_policy || return 77", source)
         self.assertIn('for file in receipt.json snapshot.tar.age archive.sha256', source)
