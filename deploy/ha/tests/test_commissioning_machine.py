@@ -1461,7 +1461,7 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             state = json.loads((Path(environment["MP_STATE"]) / "setup-state-v2.json").read_text())
             self.assertEqual(state["state"], "complete")
 
-    def test_armed_later_transition_does_not_wrap_earlier_checkpoint(self) -> None:
+    def test_enabled_run_receipts_earlier_checkpoint_without_firing_later_fault(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             environment = self.environment(Path(directory_name))
             self.enable_test_policy(environment)
@@ -1503,7 +1503,68 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             )
             self.assertIn(result.returncode, (0, 10), result.stderr)
             receipts = Path(environment["MP_STATE"]) / "setup-test-hooks" / "transition-receipts"
-            self.assertEqual(list(receipts.glob("*.json")), [])
+            receipt_documents = [
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in receipts.glob("*.json")
+            ]
+            self.assertEqual(len(receipt_documents), 1)
+            self.assertEqual(
+                receipt_documents[0]["transition"], "artifact.images-activate"
+            )
+            triggered = Path(environment["MP_STATE"]) / "setup-test-hooks" / "triggered.jsonl"
+            self.assertFalse(triggered.exists())
+
+    def test_compound_driver_resume_does_not_repeat_earlier_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            self.enable_test_policy(environment)
+            run_id = "12345678-1234-4234-8234-123456789abc"
+            self.assertEqual(self.invoke(
+                environment, "test-hook", "enable", "--input-stdin", "--json",
+                input_document=json.dumps({
+                    "format": "mp-opt-commissioning-test-hook-enable-v1",
+                    "run_id": run_id, "enabled": True,
+                }),
+            ).returncode, 0)
+            transition = "backend.activate"
+            boundary = "after-receipt-before-checkpoint"
+            fault_id = "fault-" + hashlib.sha256(
+                f"{transition}\0{boundary}".encode()
+            ).hexdigest()[:16]
+            self.assertEqual(self.invoke(
+                environment, "test-hook", "arm", "--input-stdin", "--json",
+                input_document=json.dumps({
+                    "format": "mp-opt-commissioning-fault-v1", "run_id": run_id,
+                    "fault_id": fault_id, "transition": transition, "boundary": boundary,
+                }),
+            ).returncode, 0)
+            hooks = ROOT / "deploy" / "management" / "test_hooks.sh"
+            script = r'''
+                set -Eeuo pipefail
+                source "$1"
+                effect() { printf '%s\n' "$1" >> "$MP_STATE/effect-count"; }
+                key="compound-application-deployed-0001"
+                mp_setup_test_hook_run_driver_transition \
+                    database.create application_deployed "$key" effect database
+                mp_setup_test_hook_run_driver_transition \
+                    backend.activate application_deployed "$key" effect backend
+                mp_setup_test_hook_run_driver_transition \
+                    caddy.activate application_deployed "$key" effect caddy
+            '''
+            interrupted = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "test", str(hooks)],
+                env=environment, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(interrupted.returncode, 197, interrupted.stderr)
+            resumed = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "test", str(hooks)],
+                env=environment, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertEqual(
+                (Path(environment["MP_STATE"]) / "effect-count").read_text().splitlines(),
+                ["database", "backend", "caddy"],
+            )
 
     def test_provider_cleanup_reconciles_lost_delete_ack_without_second_delete(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:

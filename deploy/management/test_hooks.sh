@@ -202,28 +202,25 @@ mp_setup_test_hook_transition_for_checkpoint() {
         '$mapping[] | select(.checkpoint == $checkpoint) | .transition' | head -1
 }
 
-# Return success only when the current checkpoint must pass through the fault
-# wrapper: either its exact transition is armed, or a durable transition
-# receipt proves that its side effect already returned successfully. Merely
-# enabling a test run must not change unrelated commissioning semantics.
+# Return success for every declared transition while one test run is enabled.
+#
+# A single public checkpoint can contain several ordered material side effects
+# (for example database creation, migration, Backend activation, and Caddy
+# activation).  Recording only the armed transition lets a retry repeat earlier
+# side effects after a later receipt has become durable.  An earlier database
+# replay can then undo the later result by stopping an already-activated
+# Backend.  Keep a receipt and driver checkpoint for every transition in the
+# enabled run; only the explicitly armed transition can terminate at a boundary.
+# Production policy and ordinary runs still bypass this state completely.
 mp_setup_test_hook_should_wrap() {
-    local transition="$1" checkpoint="$2" idempotency_key="$3" status=0 run_id
+    local transition="$1" checkpoint="$2" idempotency_key="$3"
     mp_setup_test_hook_policy || return 1
     [ -s "$MP_SETUP_TEST_HOOK_ENABLED" ] || return 1
     mp_setup_test_hook_prepare || return $?
     mp_setup_test_hook_validate_enabled "" || return $?
-    if mp_setup_test_hook_receipt_matches "$transition" "$checkpoint" "$idempotency_key"; then
-        return 0
-    else
-        status=$?
-        [ "$status" -eq 1 ] || return "$status"
-    fi
-    mp_setup_test_hook_validate_file "$MP_SETUP_TEST_HOOK_ARMED" || return $?
-    [ -s "$MP_SETUP_TEST_HOOK_ARMED" ] || return 1
-    run_id="$(jq -r .run_id "$MP_SETUP_TEST_HOOK_ENABLED")" || return 65
-    jq -e --arg run "$run_id" --arg transition "$transition" '
-        .run_id == $run and .transition == $transition and .state == "armed"
-    ' "$MP_SETUP_TEST_HOOK_ARMED" >/dev/null 2>&1
+    mp_setup_test_hook_transition "$transition" || return 64
+    [ -n "$checkpoint" ] && [ -n "$idempotency_key" ] || return 64
+    return 0
 }
 
 # Invoke a boundary from inside the real commissioning process.  There is no
