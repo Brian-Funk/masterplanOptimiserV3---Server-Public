@@ -30,7 +30,13 @@ from app.core.governance_rendering import (
 )
 from app.core.evidence import lock_evidence_transaction
 from app.core import runtime_settings
-from app.core.security import get_current_user, require_root_admin_read_only, require_root_recent_reauth
+from app.core.tenancy import TENANCY_HOSTED, tenancy_mode
+from app.core.security import (
+    get_current_user,
+    require_event_access,
+    require_root_admin_read_only,
+    require_root_recent_reauth,
+)
 from app.db.database import get_db
 from app.models.governance import (
     DataPolicyAcknowledgement, EventGovernanceOverride, GovernancePublication,
@@ -220,6 +226,12 @@ def _profile_payload(profile: InstanceGovernanceProfile) -> dict[str, object]:
 @public_router.get("/public")
 def public_governance(db: Session = Depends(get_db)):
     """Return only the latest published controller notice, never a draft."""
+
+    if tenancy_mode(db) == TENANCY_HOSTED:
+        raise HTTPException(
+            status_code=409,
+            detail="Select an event-specific legal notice in hosted mode",
+        )
 
     publication = db.query(GovernancePublication).order_by(
         GovernancePublication.version.desc()
@@ -542,6 +554,12 @@ def _render_governance_html(
 def public_governance_html(section: str, db: Session = Depends(get_db)):
     """Render the current controller notice without requiring JavaScript."""
 
+    if tenancy_mode(db) == TENANCY_HOSTED:
+        raise HTTPException(
+            status_code=409,
+            detail="Select an event-specific legal notice in hosted mode",
+        )
+
     publication = db.query(GovernancePublication).order_by(
         GovernancePublication.version.desc()
     ).first()
@@ -561,6 +579,12 @@ def versioned_public_governance_html(
     db: Session = Depends(get_db),
 ):
     """Render an immutable policy publication at a permanent exact URL."""
+
+    if tenancy_mode(db) == TENANCY_HOSTED:
+        raise HTTPException(
+            status_code=409,
+            detail="Use controller-specific immutable legal publications in hosted mode",
+        )
 
     if section not in PUBLIC_SECTIONS:
         raise HTTPException(status_code=404, detail="Legal-centre section not found")
@@ -906,11 +930,7 @@ def _event_governance_payload(
             if override and override.controller_override_enabled
             else notice.get("privacy_contact_email")
         ),
-        "retention_days": (
-            override.retention_override_days
-            if override and override.retention_override_days is not None
-            else retention.get("event_grace_days")
-        ),
+        "retention_days": retention.get("event_grace_days"),
         "enabled_optional_features": (
             sorted(set(json.loads(override.enabled_optional_features_json)) & allowed_event_features)
             if override else sorted(allowed_event_features)
@@ -928,6 +948,12 @@ def _event_governance_payload(
 def public_event_governance(event_id: int, db: Session = Depends(get_db)):
     """Return the exact policy layer applicable to one event."""
 
+    if tenancy_mode(db) == TENANCY_HOSTED:
+        raise HTTPException(
+            status_code=409,
+            detail="Use the event public identifier on /api/v1/legal/events in hosted mode",
+        )
+
     event = db.get(Event, event_id)
     publication = db.query(GovernancePublication).order_by(GovernancePublication.version.desc()).first()
     if event is None or publication is None:
@@ -940,6 +966,11 @@ def public_event_governance(event_id: int, db: Session = Depends(get_db)):
 def public_event_privacy_details(event_id: int, db: Session = Depends(get_db)):
     """Render the effective event controller layer without exposing private facts."""
 
+    if tenancy_mode(db) == TENANCY_HOSTED:
+        raise HTTPException(
+            status_code=409,
+            detail="Use the event public identifier on /api/v1/legal/events in hosted mode",
+        )
     event = db.get(Event, event_id)
     publication = db.query(GovernancePublication).order_by(
         GovernancePublication.version.desc()
@@ -1013,6 +1044,22 @@ def save_event_governance_override(
     ).first()
     if publication is None:
         raise HTTPException(status_code=409, detail="Published instance governance is unavailable")
+    if (
+        body.controller_override_enabled
+        or body.controller_identity_override is not None
+        or body.privacy_contact_override is not None
+        or body.retention_override_days is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "legacy_event_governance_override_removed",
+                "message": (
+                    "Controller identity belongs to a first-class Controller and retention "
+                    "is fixed by the hosting operator. This legacy event override is no longer writable."
+                ),
+            },
+        )
     disabled_features = sorted(
         set(body.enabled_optional_features) - _published_event_features(publication)
     )
@@ -1036,10 +1083,10 @@ def save_event_governance_override(
     if row is None:
         row = EventGovernanceOverride(event_id=event_id, policy_version=identity[0])
         db.add(row)
-    row.controller_override_enabled = body.controller_override_enabled
-    row.controller_identity_override = body.controller_identity_override if body.controller_override_enabled else None
-    row.privacy_contact_override = str(body.privacy_contact_override) if body.controller_override_enabled else None
-    row.retention_override_days = body.retention_override_days
+    row.controller_override_enabled = False
+    row.controller_identity_override = None
+    row.privacy_contact_override = None
+    row.retention_override_days = None
     row.enabled_optional_features_json = json.dumps(sorted(set(body.enabled_optional_features)))
     row.policy_version = identity[0]
     row.updated_by_id = root.id
@@ -1067,8 +1114,7 @@ def acknowledge_data_policy(
 ):
     """Record a user's current permitted-data acknowledgement locally."""
 
-    if not user.is_root_admin and user.event_id != body.event_id:
-        raise HTTPException(status_code=403, detail="No access to this event")
+    event = require_event_access(body.event_id, user, db)
     permitted_scope = (
         user.is_root_admin
         or (body.scope == "head_organiser" and user.is_issuer)
@@ -1078,7 +1124,7 @@ def acknowledge_data_policy(
     if not permitted_scope:
         raise HTTPException(status_code=403, detail="The acknowledgement scope does not match your role")
     version, digest = require_current_policy_identity(
-        body.policy_version, body.policy_sha256, db
+        body.policy_version, body.policy_sha256, db, event_id=body.event_id
     )
     existing = db.query(DataPolicyAcknowledgement).filter(
         DataPolicyAcknowledgement.user_id == user.id,
@@ -1089,7 +1135,9 @@ def acknowledge_data_policy(
     ).first()
     if existing is None:
         db.add(DataPolicyAcknowledgement(
-            user_id=user.id, event_id=body.event_id, policy_version=version,
+            user_id=user.id, event_id=body.event_id,
+            controller_id=event.controller_id,
+            policy_version=version,
             policy_sha256=digest, scope=body.scope,
         ))
         audit(db, user=user, action="governance.data_policy_acknowledged",

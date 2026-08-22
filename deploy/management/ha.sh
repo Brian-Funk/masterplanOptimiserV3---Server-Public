@@ -357,10 +357,20 @@ mp_ha_send_alert() {
 }
 
 mp_ha_replicate_now() {
+    local replication_status=0 replication_job_id=""
+    local -a replication_args=()
     mp_load_ha_config || return 1
     [ "$HA_ROLE" = "dynamic" ] || { ui_error "Symmetric HA is not configured."; return 1; }
+    if [ -n "${MP_SETUP_MACHINE_IDEMPOTENCY_KEY:-}" ]; then
+        replication_job_id="setup-$(printf '%s' "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
+            | sha256sum | awk '{print substr($1,1,40)}')"
+        replication_args=("$replication_job_id")
+    fi
     ui_run_command "Replicate now" "Capturing, encrypting and verifying the complete application state" \
-        "$MP_ROOT/deploy/ha/replicate_now.sh" || return 1
+        "$MP_ROOT/deploy/ha/replicate_now.sh" "${replication_args[@]}" \
+        || replication_status=$?
+    [ "$replication_status" -ne 197 ] || return 197
+    [ "$replication_status" -eq 0 ] || return 1
     ui_message "Replication complete" "The peer accepted the complete hash-verified application state."
 }
 
@@ -372,6 +382,7 @@ mp_ha_verify_smtp_both_nodes() {
     local recipient="${2:-}" correlation_id="${3:-}" recipient_b64 send_message local_node peer_node require_delivery="${1:-optional}" delivery_sent=false
     local -a correlation_args=()
     mp_load_ha_config || return 1
+    [[ "$require_delivery" =~ ^(optional|required|authenticate-only)$ ]] || return 65
     [ -z "$correlation_id" ] || correlation_args=(--correlation-id "$correlation_id")
     [ "$HA_ROLE" = "dynamic" ] || { ui_error "Symmetric HA is not configured."; return 1; }
     [[ "$HA_NODE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
@@ -407,7 +418,8 @@ mp_ha_verify_smtp_both_nodes() {
     if [ "$local_ready" = true ] && [ "$peer_ready" = true ] \
         && [ -n "$local_fingerprint" ] && [ "$local_fingerprint" = "$peer_fingerprint" ] \
         && { [ "$require_delivery" = required ] \
-            || ui_confirm "SMTP delivery" "Both origins authenticate with the same protected SMTP configuration. Send one token-free delivery test from each origin?"; }; then
+            || { [ "$require_delivery" = optional ] \
+                && ui_confirm "SMTP delivery" "Both origins authenticate with the same protected SMTP configuration. Send one token-free delivery test from each origin?"; }; }; then
         [ -n "$recipient" ] \
             || recipient="$(ui_input "SMTP delivery" "Test recipient email")" \
             || recipient=""
@@ -714,29 +726,101 @@ mp_ha_automatic_failover() {
     else
         ui_confirm "Automatic failover" "Disable automatic failover now?" || return 0
     fi
-    python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic "$next" >/dev/null || return 1
-    mp_ha_set_config_value HA_AUTOMATIC_FAILOVER "$next" || return 1
-    mp_audit "ha.automatic" "success" "$next"
+    mp_ha_automatic_failover_apply "$next" >/dev/null || return 1
     ui_message "Automatic failover" "Automatic failover is ${next}."
 }
 
+mp_ha_automatic_failover_apply() {
+    local next="$1" current configured control result
+    local provider_changed=false config_changed=false
+    [ "$next" = enabled ] || [ "$next" = disabled ] || return 64
+    mp_load_ha_config || return 1
+    mp_require_active_or_standalone || return 1
+    [ "$HA_ROLE" = dynamic ] || return 65
+    [ -s "$MP_ROOT/runtime/ha-control.json" ] || return 20
+    control="$(cat "$MP_ROOT/runtime/ha-control.json")" || return 20
+    current="$(jq -er 'if .automatic_failover == true then "enabled" else "disabled" end' \
+        <<< "$control")" || return 65
+    configured="${HA_AUTOMATIC_FAILOVER:-}"
+    if [ "$current" != "$next" ]; then
+        if [ "$next" = enabled ]; then
+            mp_ha_active_verification_readiness >/dev/null || return 20
+        fi
+        result="$(python3 "$MP_ROOT/deploy/ha/witness_control.py" automatic "$next")" \
+            || return 20
+        jq -e --arg node "$HA_NODE_ID" --argjson enabled \
+            "$([ "$next" = enabled ] && printf true || printf false)" '
+          .holder_node_id == $node
+          and (.generation | type == "number" and . >= 1)
+          and .automatic_failover == $enabled
+          and (.routing_ready | type == "boolean")' <<< "$result" >/dev/null \
+            || return 65
+        provider_changed=true
+        control="$result"
+    fi
+    if [ "$configured" != "$next" ]; then
+        mp_ha_set_config_value HA_AUTOMATIC_FAILOVER "$next" || return 1
+        config_changed=true
+    fi
+    if [ "$provider_changed" = true ] || [ "$config_changed" = true ]; then
+        mp_audit "ha.automatic" "success" "$next"
+    fi
+    jq -cn --arg state "$next" --arg node "$HA_NODE_ID" \
+        --arg holder "$(jq -er .holder_node_id <<< "$control")" \
+        --argjson generation "$(jq -er '.generation | select(type == "number" and . >= 1)' <<< "$control")" \
+        --argjson routing "$(jq -er '.routing_ready | select(type == "boolean")' <<< "$control")" \
+        '{format:"mp-opt-ha-automatic-result-v1",state:$state,node_id:$node,
+          holder_node_id:$holder,generation:$generation,routing_ready:$routing}'
+}
+
+mp_ha_planned_switchover_apply() {
+    local target="$1" handed_off=false before result
+    mp_load_ha_config || return 1
+    mp_require_active_or_standalone || return 1
+    [ "$HA_ROLE" = dynamic ] || return 65
+    [ "$target" = "$HA_PEER_NODE_ID" ] || return 64
+    before="$(cat "$MP_ROOT/runtime/ha-control.json" 2>/dev/null)" || return 20
+    jq -e --arg holder "$HA_NODE_ID" '
+      .holder_node_id == $holder
+      and (.generation | type == "number" and . >= 1)
+      and .routing_ready == true
+      and .automatic_failover == false' <<< "$before" >/dev/null || return 20
+    mp_ha_active_verification_readiness >/dev/null || return 20
+    MP_MANAGEMENT_LOCK_HELD="${MP_MANAGEMENT_LOCK_HELD:-0}" \
+        "$MP_ROOT/deploy/ha/replicate_now.sh" || return 20
+    result=""
+    for _ in $(seq 1 15); do
+        if result="$(python3 "$MP_ROOT/deploy/ha/witness_control.py" handoff "$target" \
+            2>/dev/null)"; then
+            if jq -e --arg target "$target" --argjson previous \
+                "$(jq -er .generation <<< "$before")" '
+              .holder_node_id == $target
+              and (.generation | type == "number" and . > $previous)
+              and .automatic_failover == false' <<< "$result" >/dev/null; then
+                handed_off=true
+                break
+            fi
+        fi
+        sleep 1
+    done
+    [ "$handed_off" = true ] || return 20
+    mp_audit "ha.switchover" "success" "$target"
+    jq -cn --arg source "$HA_NODE_ID" --arg target "$target" \
+        --argjson previous_generation "$(jq -er .generation <<< "$before")" \
+        --argjson generation "$(jq -er .generation <<< "$result")" \
+        --argjson routing "$(jq -er '.routing_ready | select(type == "boolean")' <<< "$result")" \
+        '{format:"mp-opt-ha-handover-result-v1",source_node_id:$source,
+          target_node_id:$target,previous_generation:$previous_generation,
+          generation:$generation,routing_ready:$routing,automatic_failover:false}'
+}
+
 mp_ha_planned_switchover() {
-    local handed_off=false
     mp_load_ha_config || return 1
     mp_require_active_or_standalone || return 1
     ui_require_phrase "Planned switchover" \
         "A fresh complete copy will be accepted before ownership moves to ${HA_PEER_NODE_ID}. Existing bearer access will be invalidated; passkeys remain registered." \
         "HAND OFF TO $HA_PEER_NODE_ID" || return 0
-    "$MP_ROOT/deploy/ha/replicate_now.sh" || return 1
-    for _ in $(seq 1 15); do
-        if python3 "$MP_ROOT/deploy/ha/witness_control.py" handoff "$HA_PEER_NODE_ID" >/dev/null 2>&1; then
-            handed_off=true
-            break
-        fi
-        sleep 1
-    done
-    [ "$handed_off" = true ] \
+    mp_ha_planned_switchover_apply "$HA_PEER_NODE_ID" >/dev/null \
         || { ui_error "The witness did not accept the handoff. Ownership was not changed."; return 1; }
-    mp_audit "ha.switchover" "success" "$HA_PEER_NODE_ID"
     ui_message "Ownership handed off" "The peer owns the next generation. Cloudflare routes traffic only after its local promotion checks pass."
 }

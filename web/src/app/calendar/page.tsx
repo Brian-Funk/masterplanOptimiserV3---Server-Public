@@ -327,6 +327,8 @@ function CalendarContent() {
       payload,
       cachedAt,
       marker.valid_until,
+      undefined,
+      marker,
     );
     if (!stored) {
       throw new OfflineCalendarStorageError(
@@ -407,6 +409,7 @@ function CalendarContent() {
         cached = await getOfflineCalendarPayload<CalendarData>(
           validOfflineAccess.user_id,
           eventId,
+          validOfflineAccess,
         );
       } catch (storageError) {
         setOfflineStorageError(

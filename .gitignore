@@ -29,6 +29,7 @@ docs/generated/
 site/
 
 # Local tooling caches
+.codex-temp/
 .pytest_cache/
 .coverage
 htmlcov/

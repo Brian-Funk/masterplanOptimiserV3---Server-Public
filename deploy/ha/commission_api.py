@@ -16,6 +16,14 @@ import urllib.parse
 import urllib.request
 
 
+class RemoteApiError(RuntimeError):
+    """A bounded remote failure whose HTTP status is safe to classify."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 def request_json(url: str, token: str, *, body: dict | None = None) -> dict:
     data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
     request = urllib.request.Request(url, data=data)
@@ -35,7 +43,9 @@ def request_json(url: str, token: str, *, body: dict | None = None) -> dict:
             if provider_error
             else ""
         )
-        raise RuntimeError(f"remote API returned HTTP {exc.code}{suffix}") from exc
+        raise RemoteApiError(
+            exc.code, f"remote API returned HTTP {exc.code}{suffix}"
+        ) from exc
     if len(raw) > 1_048_576:
         raise RuntimeError("remote API response was unexpectedly large")
     result = json.loads(raw)
@@ -88,6 +98,19 @@ def main() -> int:
         if args.command == "zone-id":
             return zone_id(args.hostname)
         return witness(args.action, args.url, args.cluster)
+    except RemoteApiError as exc:
+        print(str(exc), file=sys.stderr)
+        # A replacement standby remains deliberately non-replaceable until
+        # its last heartbeat is older than the witness lease.  Keep that
+        # expected 409 as a retryable commissioning wait; the local guards
+        # have already proved holder identity and disabled automatic failover.
+        if (
+            args.command == "witness"
+            and args.action == "pair-open"
+            and exc.status == 409
+        ):
+            return 10
+        return 1
     except (RuntimeError, ValueError, json.JSONDecodeError, urllib.error.URLError) as exc:
         print(str(exc), file=sys.stderr)
         return 1

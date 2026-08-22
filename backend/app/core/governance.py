@@ -14,6 +14,11 @@ from app.models.governance import (
     InstanceGovernanceProfile,
 )
 from app.models.server_setting import ServerSetting
+from app.models.event import Event
+from app.models.tenancy import (
+    ControllerGovernancePublication,
+    EventGovernanceConfiguration,
+)
 from app.models.user import User
 
 
@@ -42,8 +47,34 @@ def current_policy_version(db: Session) -> int | None:
     return publication.version if publication else None
 
 
-def current_policy_identity(db: Session) -> tuple[int, str] | None:
-    """Return the exact immutable version and digest currently in force."""
+def current_policy_identity(
+    db: Session,
+    *,
+    event_id: int | None = None,
+    controller_id: int | None = None,
+) -> tuple[int, str] | None:
+    """Return the exact controller policy applicable to one tenant context."""
+
+    mode = db.query(ServerSetting).filter(ServerSetting.key == "tenancy_mode").first()
+    if mode is not None and mode.value == "hosted-multi-controller":
+        if event_id is not None:
+            event = db.get(Event, event_id)
+            config = db.get(EventGovernanceConfiguration, event_id)
+            if event is None or config is None or config.controller_id != event.controller_id:
+                return None
+            publication = db.query(ControllerGovernancePublication).filter(
+                ControllerGovernancePublication.controller_id == event.controller_id,
+                ControllerGovernancePublication.version == config.controller_policy_version,
+            ).first()
+        elif controller_id is not None:
+            publication = db.query(ControllerGovernancePublication).filter(
+                ControllerGovernancePublication.controller_id == controller_id,
+            ).order_by(ControllerGovernancePublication.version.desc()).first()
+        else:
+            return None
+        if publication is None:
+            return None
+        return publication.version, publication.content_sha256
 
     publication = db.query(GovernancePublication).order_by(
         GovernancePublication.version.desc()
@@ -53,12 +84,35 @@ def current_policy_identity(db: Session) -> tuple[int, str] | None:
     return publication.version, publication.content_sha256
 
 
-def current_policy_template_version(db: Session) -> str | None:
-    """Return the renderer version embedded in the current immutable policy."""
+def current_policy_template_version(
+    db: Session,
+    *,
+    event_id: int | None = None,
+    controller_id: int | None = None,
+) -> str | None:
+    """Return the renderer version for one exact controller policy."""
 
-    publication = db.query(GovernancePublication).order_by(
-        GovernancePublication.version.desc()
-    ).first()
+    mode = db.query(ServerSetting).filter(ServerSetting.key == "tenancy_mode").first()
+    if mode is not None and mode.value == "hosted-multi-controller":
+        if event_id is not None:
+            event = db.get(Event, event_id)
+            config = db.get(EventGovernanceConfiguration, event_id)
+            if event is None or config is None or config.controller_id != event.controller_id:
+                return None
+            publication = db.query(ControllerGovernancePublication).filter(
+                ControllerGovernancePublication.controller_id == event.controller_id,
+                ControllerGovernancePublication.version == config.controller_policy_version,
+            ).first()
+        elif controller_id is not None:
+            publication = db.query(ControllerGovernancePublication).filter(
+                ControllerGovernancePublication.controller_id == controller_id,
+            ).order_by(ControllerGovernancePublication.version.desc()).first()
+        else:
+            return None
+    else:
+        publication = db.query(GovernancePublication).order_by(
+            GovernancePublication.version.desc()
+        ).first()
     if publication is None:
         return None
     try:
@@ -66,6 +120,9 @@ def current_policy_template_version(db: Session) -> str | None:
     except (json.JSONDecodeError, TypeError):
         return None
     version = content.get("template_version") if isinstance(content, dict) else None
+    if version is None and isinstance(content, dict):
+        governance = content.get("governance")
+        version = governance.get("template_version") if isinstance(governance, dict) else None
     return version if isinstance(version, str) else None
 
 
@@ -73,10 +130,15 @@ def require_current_policy_identity(
     policy_version: int,
     policy_sha256: str,
     db: Session,
+    *,
+    event_id: int | None = None,
+    controller_id: int | None = None,
 ) -> tuple[int, str]:
     """Fail closed unless a submitted acknowledgement names the current policy."""
 
-    identity = current_policy_identity(db)
+    identity = current_policy_identity(
+        db, event_id=event_id, controller_id=controller_id
+    )
     if identity is None:
         raise HTTPException(status_code=409, detail="No permitted-data policy is published")
     if identity != (policy_version, policy_sha256.lower()):
@@ -113,7 +175,7 @@ BOOTSTRAP_POLICY_SHA256 = hashlib.sha256(
 def require_data_policy_acknowledgement(user: User, event_id: int, db: Session) -> None:
     """Require the current event policy before a user writes broad event data."""
 
-    identity = current_policy_identity(db)
+    identity = current_policy_identity(db, event_id=event_id)
     if identity is None:
         return
     version, digest = identity
@@ -138,7 +200,7 @@ def require_data_policy_acknowledgement(user: User, event_id: int, db: Session) 
 def has_data_policy_acknowledgement(user: User, event_id: int, db: Session) -> bool:
     """Return whether the user has acknowledged the current event policy."""
 
-    identity = current_policy_identity(db)
+    identity = current_policy_identity(db, event_id=event_id)
     if identity is None:
         return True
     version, digest = identity

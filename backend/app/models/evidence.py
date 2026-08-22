@@ -26,6 +26,16 @@ class EvidenceKey(Base):
             "('retired','lost','compromised','role_changed')",
             name="ck_evidence_key_revocation_reason",
         ),
+        CheckConstraint(
+            "(role = 'instance' AND controller_id IS NULL) OR "
+            "(role IN ('controller','processor') AND controller_id IS NOT NULL)",
+            name="ck_evidence_key_controller_scope",
+        ),
+        CheckConstraint(
+            "(role = 'processor' AND (event_id IS NOT NULL OR revoked_at IS NOT NULL)) OR "
+            "(role IN ('instance','controller') AND event_id IS NULL)",
+            name="ck_evidence_key_event_scope",
+        ),
     )
 
     id = Column(Integer, primary_key=True)
@@ -34,6 +44,8 @@ class EvidenceKey(Base):
     public_key_sha256 = Column(String(64), nullable=False, unique=True)
     instance_id = Column(String(36), nullable=False, index=True)
     entity_id = Column(String(64), nullable=True, index=True)
+    controller_id = Column(Integer, ForeignKey("controllers.id", ondelete="RESTRICT"), nullable=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True)
     algorithm = Column(String(16), nullable=False, default="Ed25519")
     role = Column(String(32), nullable=False, default="instance")
     valid_from = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -64,12 +76,17 @@ class ProcessorIdentity(Base):
             "status IN ('pending','active','revoked')",
             name="ck_processor_identity_status",
         ),
+        CheckConstraint(
+            "event_id IS NOT NULL OR status = 'revoked'",
+            name="ck_processor_identity_event_scope",
+        ),
     )
 
     id = Column(Integer, primary_key=True)
     assignment_id = Column(String(36), nullable=False, unique=True, default=_uuid)
     instance_id = Column(String(36), nullable=False, index=True)
     entity_id = Column(String(64), nullable=False, unique=True, index=True)
+    controller_id = Column(Integer, ForeignKey("controllers.id", ondelete="RESTRICT"), nullable=False, index=True)
     event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True)
     event_evidence_id = Column(String(36), nullable=False, index=True)
     event_display_name = Column(String(128), nullable=True)
@@ -95,6 +112,8 @@ class ProcessorPolicyAcknowledgement(Base):
     id = Column(Integer, primary_key=True)
     acknowledgement_id = Column(String(36), nullable=False, unique=True, default=_uuid)
     instance_id = Column(String(36), nullable=False, index=True)
+    controller_id = Column(Integer, ForeignKey("controllers.id", ondelete="RESTRICT"), nullable=False, index=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True)
     event_evidence_id = Column(String(36), nullable=False, index=True)
     entity_id = Column(String(64), nullable=False, index=True)
     key_id = Column(String(19), nullable=False, index=True)
@@ -124,6 +143,15 @@ class EvidenceKeyRegistrationChallenge(Base):
             "rotation_reason IS NULL OR rotation_reason IN ('routine','lost','compromised')",
             name="ck_evidence_key_challenge_rotation_reason",
         ),
+        CheckConstraint(
+            "controller_id IS NOT NULL",
+            name="ck_evidence_key_challenge_controller_scope",
+        ),
+        CheckConstraint(
+            "(role = 'processor' AND event_id IS NOT NULL) OR "
+            "(role = 'controller' AND event_id IS NULL)",
+            name="ck_evidence_key_challenge_event_scope",
+        ),
     )
 
     id = Column(Integer, primary_key=True)
@@ -131,7 +159,8 @@ class EvidenceKeyRegistrationChallenge(Base):
     purpose = Column(String(16), nullable=False)
     instance_id = Column(String(36), nullable=False, index=True)
     entity_id = Column(String(64), nullable=False, index=True)
-    event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True)
+    controller_id = Column(Integer, ForeignKey("controllers.id", ondelete="RESTRICT"), nullable=False, index=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=True, index=True)
     event_evidence_id = Column(String(36), nullable=True, index=True)
     event_display_name = Column(String(128), nullable=True)
     display_label = Column(String(128), nullable=True)
@@ -194,6 +223,29 @@ class EvidenceChainState(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class ControllerEvidenceChainState(Base):
+    """One operator-signed, controller-scoped evidence chain."""
+
+    __tablename__ = "controller_evidence_chain_states"
+
+    controller_id = Column(
+        Integer,
+        ForeignKey("controllers.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    instance_id = Column(String(36), nullable=False, index=True)
+    controller_public_id = Column(String(36), nullable=False, unique=True)
+    controller_trust_entity_id = Column(String(52), nullable=False, unique=True)
+    chain_id = Column(String(36), nullable=False, unique=True, default=_uuid)
+    evidence_mode = Column(String(16), nullable=False, default="required")
+    last_sequence = Column(Integer, nullable=False, default=0)
+    head_sha256 = Column(String(64), nullable=True)
+    legacy_chain_head_sha256 = Column(String(64), nullable=True)
+    initialised_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    verified_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class EvidenceOperation(Base):
     """Restart-safe outbox entry coordinating DB state and signed files."""
 
@@ -207,11 +259,19 @@ class EvidenceOperation(Base):
             "workflow_type", "workflow_id", "operation_type",
             name="uq_evidence_operation",
         ),
+        CheckConstraint(
+            "(chain_scope = 'operator' AND controller_id IS NULL AND event_id IS NULL) OR "
+            "(chain_scope = 'controller' AND controller_id IS NOT NULL)",
+            name="ck_evidence_operation_scope",
+        ),
     )
 
     id = Column(Integer, primary_key=True)
     operation_id = Column(String(36), nullable=False, unique=True, default=_uuid)
     record_id = Column(String(36), nullable=False, unique=True, default=_uuid)
+    chain_scope = Column(String(16), nullable=False, default="operator", index=True)
+    controller_id = Column(Integer, ForeignKey("controllers.id", ondelete="RESTRICT"), nullable=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True)
     workflow_type = Column(String(32), nullable=False)
     workflow_id = Column(String(36), nullable=False, index=True)
     operation_type = Column(String(64), nullable=False)

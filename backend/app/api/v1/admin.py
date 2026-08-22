@@ -68,7 +68,19 @@ from app.core.ha_replication import (
 )
 from app.core.ha_witness import HAWritePermitError
 from app.core.retention import materialise_event_purge_deadline, retention_status
+from app.core.features import (
+    FEATURE_ALIASES,
+    require_event_feature,
+    validate_hosted_event_features,
+)
 from app.core.governance import current_policy_identity, require_current_policy_identity
+from app.core.tenancy import (
+    TENANCY_HOSTED,
+    assign_event_membership,
+    event_governance_identity,
+    membership_for_user,
+    tenancy_mode,
+)
 from app.core.web_edits import (
     derive_web_edit_summary,
     revert_web_edit,
@@ -84,6 +96,7 @@ from app.core.security import (
     require_root_admin,
     require_root_admin_read_only,
     require_root_recent_reauth,
+    require_event_access,
     require_same_event,
     require_user_management_access,
     ensure_recent_reauth,
@@ -106,6 +119,13 @@ from app.core.passkey_ceremonies import (
     create_ceremony,
 )
 from app.models.event import Event
+from app.models.tenancy import (
+    Controller,
+    ControllerGovernancePublication,
+    EventGovernanceConfiguration,
+    EventMembership,
+    OperatorPolicyPublication,
+)
 from app.models.ha import HAProtectionOperation
 from app.models.audit import AuditLog
 from app.models.deletion import DeletionCase
@@ -271,6 +291,12 @@ class EventCreateIn(BaseModel):
     """Admin payload for creating a server event."""
 
     name: str = Field(..., min_length=1, max_length=128)
+    controller_public_id: Optional[str] = Field(
+        None, pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    )
+    event_notice: Optional[str] = Field(None, max_length=5000)
+    enabled_optional_features: List[str] = Field(default_factory=list, max_length=20)
+    contact_routing: dict[str, object] = Field(default_factory=dict)
     evidence_id: CanonicalEvidenceIdentity = Field(
         default_factory=lambda: str(uuid.uuid4()),
     )
@@ -285,6 +311,12 @@ class EventCreateIn(BaseModel):
     @model_validator(mode="after")
     def validate_date_range(self) -> "EventCreateIn":
         require_valid_event_date_range(self.start_date, self.end_date)
+        if len(self.enabled_optional_features) != len(set(self.enabled_optional_features)):
+            raise ValueError("Optional features must be unique")
+        unsupported = sorted(set(self.enabled_optional_features) - set(FEATURE_ALIASES))
+        if unsupported:
+            raise ValueError(f"Unsupported optional features: {', '.join(unsupported)}")
+        self.enabled_optional_features = sorted(self.enabled_optional_features)
         return self
 
 
@@ -292,6 +324,8 @@ class EventOut(BaseModel):
     """Event record returned to administration screens."""
 
     id: int
+    controller_public_id: str
+    controller_name: str
     evidence_id: str
     name: str
     location: Optional[str] = None
@@ -774,6 +808,9 @@ def _event_operation(event_id: int, db: Session) -> HAProtectionOperation | None
 
 
 def _event_out(event: Event, db: Session, *, now: datetime | None = None) -> EventOut:
+    controller = db.get(Controller, event.controller_id)
+    if controller is None:
+        raise RuntimeError("Event controller is missing")
     operation = _event_operation(event.id, db) if settings.HA_MODE == "ha" else None
     if operation is not None and operation.state not in {"accepted", "cancelled"}:
         sync_protection_operation(db, operation)
@@ -785,6 +822,8 @@ def _event_out(event: Event, db: Session, *, now: datetime | None = None) -> Eve
     current = now or datetime.now(timezone.utc)
     return EventOut(
         id=event.id,
+        controller_public_id=controller.public_id,
+        controller_name=controller.display_name,
         evidence_id=event.evidence_id,
         name=event.name,
         location=event.location,
@@ -919,11 +958,30 @@ def create_event(
     request: Request,
     response: Response,
     body: EventCreateIn,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_root_recent_reauth),
     db: Session = Depends(get_db),
 ):
     """Create a new event. Returns the publish secret ONCE."""
-    policy_identity = current_policy_identity(db)
+    if body.controller_public_id is None:
+        if tenancy_mode(db) == TENANCY_HOSTED:
+            raise HTTPException(
+                status_code=422,
+                detail="controller_public_id is required in hosted mode",
+            )
+        controller = db.get(Controller, 1)
+    else:
+        controller = (
+            db.query(Controller)
+            .filter(
+                Controller.public_id == body.controller_public_id,
+                Controller.status == "active",
+            )
+            .first()
+        )
+    if controller is None:
+        raise HTTPException(status_code=404, detail="Controller not found")
+
+    policy_identity = current_policy_identity(db, controller_id=controller.id)
     if policy_identity is not None:
         if body.policy_version is None or body.policy_sha256 is None:
             raise HTTPException(
@@ -936,7 +994,8 @@ def create_event(
                 },
             )
         policy_version, policy_sha256 = require_current_policy_identity(
-            body.policy_version, body.policy_sha256, db
+            body.policy_version, body.policy_sha256, db,
+            controller_id=controller.id,
         )
     secret_hash = hashlib.sha256(body.publish_secret.encode()).hexdigest()
     if settings.HA_MODE == "ha":
@@ -961,6 +1020,7 @@ def create_event(
             )
 
     event = Event(
+        controller_id=controller.id,
         evidence_id=body.evidence_id,
         name=body.name,
         location=body.location,
@@ -972,10 +1032,62 @@ def create_event(
     )
     db.add(event)
     db.flush()
+    if tenancy_mode(db) == TENANCY_HOSTED:
+        controller_publication = db.query(ControllerGovernancePublication).filter(
+            ControllerGovernancePublication.controller_id == controller.id
+        ).order_by(ControllerGovernancePublication.version.desc()).first()
+        operator_publication = (
+            db.query(OperatorPolicyPublication).filter(
+                OperatorPolicyPublication.version
+                == controller_publication.operator_policy_version
+            ).first()
+            if controller_publication is not None
+            else None
+        )
+        if controller_publication is None or operator_publication is None:
+            raise HTTPException(
+                status_code=409,
+                detail="The selected controller governance chain is incomplete",
+            )
+        selected_features = validate_hosted_event_features(
+            body.enabled_optional_features,
+            operator_publication,
+            controller_publication,
+        )
+        features_json = json.dumps(
+            selected_features,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        routing_json = json.dumps(
+            body.contact_routing,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        db.add(EventGovernanceConfiguration(
+            event_id=event.id,
+            controller_id=controller.id,
+            event_notice=body.event_notice,
+            enabled_optional_features_json=features_json,
+            contact_routing_json=routing_json,
+            operator_policy_version=operator_publication.version,
+            controller_policy_version=controller_publication.version,
+            revision=1,
+            content_sha256=event_governance_identity(
+                event_notice=body.event_notice,
+                enabled_optional_features_json=features_json,
+                contact_routing_json=routing_json,
+                operator_policy_version=operator_publication.version,
+                controller_policy_version=controller_publication.version,
+            ),
+            updated_by_id=admin.id,
+        ))
+        db.flush()
     materialise_event_purge_deadline(event, db)
     if policy_identity is not None:
         db.add(DataPolicyAcknowledgement(
             user_id=admin.id,
+            controller_id=controller.id,
             event_id=event.id,
             policy_version=policy_version,
             policy_sha256=policy_sha256,
@@ -1031,7 +1143,12 @@ def list_events(
 ):
     """List all server events for administrators."""
 
-    events = db.query(Event).order_by(Event.created_at.desc()).all()
+    query = db.query(Event)
+    if not admin.is_root_admin:
+        if admin.event_id is None:
+            return []
+        query = query.filter(Event.id == admin.event_id)
+    events = query.order_by(Event.created_at.desc()).all()
     now = datetime.now(timezone.utc)
     values = [_event_out(event, db, now=now) for event in events]
     db.commit()
@@ -1079,11 +1196,7 @@ def get_event_web_edits(
     db: Session = Depends(get_db),
 ):
     """Return compact web-edit confidence state for one event."""
-    event = db.query(Event).filter(Event.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-    if _is_issuer_only(admin) and admin.event_id != event_id:
-        raise HTTPException(status_code=403, detail="No access to this event")
+    require_event_access(event_id, admin, db)
 
     summary = derive_web_edit_summary(event_id, db)
     return WebEditSummaryOut(
@@ -1110,11 +1223,7 @@ def revert_event_web_edit(
     db: Session = Depends(get_db),
 ):
     """Revert one committed web edit for an event."""
-    event = db.query(Event).filter(Event.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-    if _is_issuer_only(admin) and admin.event_id != event_id:
-        raise HTTPException(status_code=403, detail="No access to this event")
+    require_event_access(event_id, admin, db)
 
     audit_entries = _web_edit_audit_entries(event_id, db, [task_id])
     try:
@@ -1159,11 +1268,7 @@ def revert_event_web_edits(
     db: Session = Depends(get_db),
 ):
     """Revert selected or all committed web edits for an event."""
-    event = db.query(Event).filter(Event.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-    if _is_issuer_only(admin) and admin.event_id != event_id:
-        raise HTTPException(status_code=403, detail="No access to this event")
+    require_event_access(event_id, admin, db)
     if not body.revert_all and not body.task_ids:
         raise HTTPException(status_code=400, detail="Select at least one web edit to revert")
 
@@ -1214,9 +1319,7 @@ def regenerate_event_secret(
     db: Session = Depends(get_db),
 ):
     """Regenerate the publish secret for an event. Returns the new secret ONCE."""
-    event = db.query(Event).filter(Event.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
+    event = require_event_access(event_id, admin, db)
     if event.purge_case_request_id:
         raise HTTPException(
             status_code=409,
@@ -1303,11 +1406,12 @@ def create_user(
     db: Session = Depends(get_db),
 ):
     """Create a new user and return a one-time activation URL."""
-    # Issuer scoping: force own event, block privilege escalation
-    if _is_issuer_only(admin):
+    # Every non-root administrator is an event administrator. Client-supplied
+    # tenant identifiers are never authoritative for non-root accounts.
+    if not admin.is_root_admin:
         body.event_id = admin.event_id
         if body.is_admin or body.is_issuer:
-            raise HTTPException(status_code=403, detail="Issuers cannot grant admin or issuer roles")
+            raise HTTPException(status_code=403, detail="Only root can grant event administrator or issuer roles")
         body.is_issuer = False
 
     if body.is_admin and not admin.is_root_admin:
@@ -1320,21 +1424,22 @@ def create_user(
         raise HTTPException(status_code=403, detail="Only root admin can grant issuer role")
 
     # Check username uniqueness
-    existing = db.query(User).filter(User.username == body.username).first()
+    existing = db.query(User).filter(
+        User.event_id == body.event_id,
+        User.username == body.username,
+    ).first()
     if existing:
         raise HTTPException(status_code=409, detail="Username already taken")
 
-    # Root may prepare an ordinary account before deciding its event. Other
-    # operators remain event-scoped, and privileged roles must always have an
-    # event so they cannot acquire ambiguous global access.
+    # Every non-root account must have one exact event membership. Root may
+    # create the event first, but never an unscoped ordinary account.
     if not body.event_id:
-        if not admin.is_root_admin:
-            raise HTTPException(status_code=422, detail="event_id is required")
-        if body.is_admin or body.is_issuer:
-            raise HTTPException(status_code=422, detail="Privileged users require an event")
+        raise HTTPException(status_code=422, detail="event_id is required")
     else:
         event = db.query(Event).filter(Event.id == body.event_id).first()
         if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
+        if not admin.is_root_admin and event.id != admin.event_id:
             raise HTTPException(status_code=404, detail="Event not found")
 
     user = User(
@@ -1350,6 +1455,9 @@ def create_user(
         tags=_normalise_tags(body.tags),
     )
     db.add(user)
+    db.flush()
+    if body.event_id is not None:
+        assign_event_membership(db, user, event)
     db.commit()
     db.refresh(user)
 
@@ -1384,14 +1492,14 @@ def bulk_create_users(
     """Create multiple ordinary users for one event, returning row errors."""
 
     event_id = body.event_id
-    if _is_issuer_only(admin):
+    if not admin.is_root_admin:
         event_id = admin.event_id
 
     if not event_id:
         raise HTTPException(status_code=422, detail="event_id is required")
 
-    event = db.query(Event).filter(Event.id == event_id).first()
-    if not event:
+    event = require_event_access(event_id, admin, db)
+    if not admin.is_root_admin and event.id != admin.event_id:
         raise HTTPException(status_code=404, detail="Event not found")
 
     created: list[UserOut] = []
@@ -1400,7 +1508,10 @@ def bulk_create_users(
     existing_usernames = {
         username
         for (username,) in db.query(User.username)
-        .filter(User.username.in_([row.username for row in body.users]))
+        .filter(
+            User.event_id == event_id,
+            User.username.in_([row.username for row in body.users]),
+        )
         .all()
     }
 
@@ -1447,6 +1558,8 @@ def bulk_create_users(
         )
         db.add(user)
         try:
+            db.flush()
+            assign_event_membership(db, user, event)
             db.commit()
         except IntegrityError:
             db.rollback()
@@ -1487,12 +1600,11 @@ def list_users(
     """List users visible to the current admin or issuer."""
 
     query = db.query(User).filter(User.is_root_admin == False)
-    # Issuer scoping: force filter to own event
-    if _is_issuer_only(admin):
+    # Every non-root account is limited to its exact event. Event admins may
+    # see the event's issuer/admin accounts, but never another tenant.
+    if not admin.is_root_admin:
         query = query.filter(
             User.event_id == admin.event_id,
-            User.is_admin == False,  # noqa: E712
-            User.is_issuer == False,  # noqa: E712
         )
     elif event_id is not None:
         query = query.filter(User.event_id == event_id)
@@ -1545,10 +1657,12 @@ def apply_user_tag_action(
     if body.action in {"add", "remove"}:
         query = query.filter(User.id.in_(body.user_ids or []))
     else:
-        event_id = admin.event_id if _is_issuer_only(admin) else body.event_id
-        if _is_issuer_only(admin) and body.event_id != admin.event_id:
-            raise HTTPException(status_code=403, detail="Issuers may only manage their own event")
+        event_id = admin.event_id if not admin.is_root_admin else body.event_id
+        if not admin.is_root_admin and body.event_id != admin.event_id:
+            raise HTTPException(status_code=404, detail="Event not found")
         query = query.filter(User.event_id == event_id)
+    if not admin.is_root_admin:
+        query = query.filter(User.event_id == admin.event_id)
 
     targets = query.order_by(User.id.asc()).all()
     if body.action in {"add", "remove"} and len(targets) != len(body.user_ids or []):
@@ -1609,15 +1723,15 @@ def update_user(
     if not user.is_active:
         raise HTTPException(status_code=409, detail="Cannot modify a deactivated user")
 
-    # Issuer scoping
-    if _is_issuer_only(admin):
+    # Every non-root administrator is fixed to its membership event.
+    if not admin.is_root_admin:
         # Block privilege escalation and event reassignment
         if body.is_admin is not None:
-            raise HTTPException(status_code=403, detail="Issuers cannot change admin status")
+            raise HTTPException(status_code=403, detail="Only root can change event administrator status")
         if body.is_issuer is not None:
-            raise HTTPException(status_code=403, detail="Issuers cannot change issuer status")
+            raise HTTPException(status_code=403, detail="Only root can change issuer status")
         if "event_id" in body.model_fields_set and body.event_id != admin.event_id:
-            raise HTTPException(status_code=403, detail="Issuers cannot reassign users to other events")
+            raise HTTPException(status_code=404, detail="Event not found")
 
     # Only a recently re-authenticated root may change global roles.
     if body.is_admin is not None and not admin.is_root_admin:
@@ -1636,10 +1750,10 @@ def update_user(
             raise HTTPException(status_code=403, detail="Only root admin can unassign users")
         if user.is_admin or user.is_issuer:
             raise HTTPException(status_code=409, detail="Privileged users require an event")
+        if tenancy_mode(db) == TENANCY_HOSTED:
+            raise HTTPException(status_code=409, detail="Hosted accounts require an event membership")
     if event_field_supplied and body.event_id is not None:
-        event = db.query(Event).filter(Event.id == body.event_id).first()
-        if event is None:
-            raise HTTPException(status_code=404, detail="Event not found")
+        event = require_event_access(body.event_id, admin, db)
 
     event_changed = event_field_supplied and body.event_id != user.event_id
     if event_changed:
@@ -1692,6 +1806,24 @@ def update_user(
             user.linked_person_id = None
     if body.tags is not None:
         user.tags = [str(tag)[:100] for tag in body.tags[:100]]
+
+    membership = membership_for_user(db, user)
+    if user.event_id is None:
+        if membership is not None:
+            db.delete(membership)
+    else:
+        membership_event = db.get(Event, user.event_id)
+        if membership_event is None:
+            raise HTTPException(status_code=404, detail="Event not found")
+        assign_event_membership(
+            db,
+            user,
+            membership_event,
+            is_event_admin=user.is_admin,
+            is_issuer=user.is_issuer,
+            can_edit=user.can_edit,
+            linked_person_id=user.linked_person_id,
+        )
 
     audit(
         db,
@@ -2262,9 +2394,9 @@ def batch_activation_links(
 
     event_id = body.event_id
     user_ids = body.user_ids
-    if _is_issuer_only(admin):
+    if not admin.is_root_admin:
         if admin.event_id is None:
-            raise HTTPException(status_code=403, detail="Issuer has no event access")
+            raise HTTPException(status_code=403, detail="Account has no event access")
         event_id = admin.event_id
 
     skipped: list[BatchActivationLinkSkipped] = []
@@ -2476,6 +2608,8 @@ def send_user_activation_email(
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     require_user_management_access(user, admin)
+    if user.event_id is not None and tenancy_mode(db) == TENANCY_HOSTED:
+        require_event_feature(user.event_id, "smtp_activation", db)
     requested_purpose = body.purpose if body else None
     try:
         purpose = resolve_activation_purpose(
@@ -2585,6 +2719,20 @@ def send_batch_activation_emails(
             ))
             continue
         require_user_management_access(user, admin)
+        if user.event_id is not None and tenancy_mode(db) == TENANCY_HOSTED:
+            try:
+                require_event_feature(user.event_id, "smtp_activation", db)
+            except HTTPException:
+                results.append(ActivationEmailResult(
+                    user_id=user.id,
+                    display_name=user.display_name,
+                    email=user.email,
+                    status="skipped",
+                    message="Email activation is not enabled for this event.",
+                    error_code="event_feature_unavailable",
+                    purpose=INITIAL_SETUP,
+                ))
+                continue
         if not user.is_active:
             results.append(ActivationEmailResult(
                 user_id=user.id,
@@ -2868,6 +3016,8 @@ def request_additional_passkey_email(
             status_code=409,
             detail="Management accounts add passkeys directly after re-authentication.",
         )
+    if current_user.event_id is not None and tenancy_mode(db) == TENANCY_HOSTED:
+        require_event_feature(current_user.event_id, "smtp_activation", db)
     if runtime_settings.get_int("self_service_additional_passkeys_enabled", db) != 1:
         raise HTTPException(
             status_code=403,
@@ -3041,9 +3191,7 @@ def delete_event(
     db: Session = Depends(get_db),
 ):
     """Reject direct deletion in favour of the accountable case workflow."""
-    event = db.query(Event).filter(Event.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
+    require_event_access(event_id, admin, db)
     raise HTTPException(
         status_code=409,
         detail={
@@ -3095,11 +3243,26 @@ class ImportSetupIn(BaseModel):
     """Bulk setup import payload containing one event and users."""
 
     event: ImportEventIn
+    controller_public_id: Optional[str] = Field(
+        None,
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    )
+    enabled_optional_features: List[str] = Field(default_factory=list, max_length=20)
     users: List[ImportUserIn] = Field(default_factory=list, max_length=1000)
     publish_secret: str = Field(..., min_length=32, max_length=128)
     idempotency_key: str = Field(..., pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("enabled_optional_features")
+    @classmethod
+    def valid_optional_features(cls, value: List[str]) -> List[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("Optional features must be unique")
+        unsupported = sorted(set(value) - set(FEATURE_ALIASES))
+        if unsupported:
+            raise ValueError(f"Unsupported optional features: {', '.join(unsupported)}")
+        return sorted(value)
 
 
 class ImportUserOut(BaseModel):
@@ -3130,6 +3293,48 @@ def import_setup(
     db: Session = Depends(get_db),
 ):
     """Import event + users with a browser/Desktop-generated publish secret."""
+    if tenancy_mode(db) == TENANCY_HOSTED and not admin.is_root_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only root may provision a new event in hosted mode",
+        )
+    if body.controller_public_id is None:
+        if tenancy_mode(db) == TENANCY_HOSTED:
+            raise HTTPException(
+                status_code=422,
+                detail="controller_public_id is required in hosted mode",
+            )
+        controller = db.get(Controller, 1)
+    else:
+        controller = db.query(Controller).filter(
+            Controller.public_id == body.controller_public_id,
+            Controller.status == "active",
+        ).first()
+    if controller is None:
+        raise HTTPException(status_code=404, detail="Controller not found")
+
+    operator_publication = None
+    controller_publication = None
+    if tenancy_mode(db) == TENANCY_HOSTED:
+        controller_publication = db.query(ControllerGovernancePublication).filter(
+            ControllerGovernancePublication.controller_id == controller.id
+        ).order_by(ControllerGovernancePublication.version.desc()).first()
+        operator_publication = (
+            db.query(OperatorPolicyPublication).filter(
+                OperatorPolicyPublication.version
+                == controller_publication.operator_policy_version,
+                OperatorPolicyPublication.content_sha256
+                == controller_publication.operator_policy_sha256,
+            ).first()
+            if controller_publication is not None
+            else None
+        )
+        if operator_publication is None or controller_publication is None:
+            raise HTTPException(
+                status_code=409,
+                detail="The selected controller governance chain is incomplete",
+            )
+
     secret_hash = hashlib.sha256(body.publish_secret.encode()).hexdigest()
     if settings.HA_MODE == "ha":
         existing_operation = find_protection_operation(db, body.idempotency_key)
@@ -3137,7 +3342,11 @@ def import_setup(
             if existing_operation.operation_type != "publisher-secret-import":
                 raise HTTPException(status_code=409, detail="Idempotency key is already in use")
             event = db.query(Event).filter(Event.id == int(existing_operation.resource_id or 0)).first()
-            if event is None or event.publish_secret_hash != secret_hash:
+            if (
+                event is None
+                or event.publish_secret_hash != secret_hash
+                or event.controller_id != controller.id
+            ):
                 raise HTTPException(status_code=409, detail="Idempotent setup import does not match")
             sync_protection_operation(db, existing_operation)
             db.commit()
@@ -3150,6 +3359,7 @@ def import_setup(
             )
 
     event = Event(
+        controller_id=controller.id,
         evidence_id=body.event.evidence_id,
         name=body.event.name,
         location=body.event.location,
@@ -3161,12 +3371,45 @@ def import_setup(
     db.add(event)
     db.flush()  # Get event.id
     materialise_event_purge_deadline(event, db)
+    if operator_publication is not None and controller_publication is not None:
+        selected_features = validate_hosted_event_features(
+            body.enabled_optional_features,
+            operator_publication,
+            controller_publication,
+        )
+        features_json = json.dumps(
+            selected_features,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        routing_json = "{}"
+        db.add(EventGovernanceConfiguration(
+            event_id=event.id,
+            controller_id=controller.id,
+            event_notice=None,
+            enabled_optional_features_json=features_json,
+            contact_routing_json=routing_json,
+            operator_policy_version=operator_publication.version,
+            controller_policy_version=controller_publication.version,
+            revision=1,
+            content_sha256=event_governance_identity(
+                event_notice=None,
+                enabled_optional_features_json=features_json,
+                contact_routing_json=routing_json,
+                operator_policy_version=operator_publication.version,
+                controller_policy_version=controller_publication.version,
+            ),
+            updated_by_id=admin.id,
+        ))
 
     # Create users
     user_results: List[ImportUserOut] = []
     for u_in in body.users:
         # Skip duplicates
-        existing = db.query(User).filter(User.username == u_in.username).first()
+        existing = db.query(User).filter(
+            User.event_id == event.id,
+            User.username == u_in.username,
+        ).first()
         if existing:
             continue
 
@@ -3183,6 +3426,13 @@ def import_setup(
         )
         db.add(user)
         db.flush()
+        assign_event_membership(
+            db,
+            user,
+            event,
+            can_edit=user.can_edit,
+            linked_person_id=user.linked_person_id,
+        )
 
         raw_token, activation_link = create_activation_link(
             user_id=user.id,

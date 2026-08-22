@@ -14,14 +14,28 @@ from sqlalchemy.orm import Session
 
 from app.core.evidence import EvidenceUnavailable, evidence_home
 from app.models.deletion import DesktopDeletionWorkOrder
+from app.models.deletion import DeletionCase
 from app.models.evidence import ProcessorPolicyAcknowledgement
+from app.models.tenancy import Controller
 
 
 EXPORT_TOOL = Path("/app/evidence/evidence_bundle.py")
 
 
-def _stage_evidence(db: Session, destination: Path) -> None:
-    source = evidence_home()
+def _stage_evidence(
+    db: Session,
+    destination: Path,
+    *,
+    controller_id: int | None = None,
+) -> None:
+    controller = db.get(Controller, controller_id) if controller_id is not None else None
+    if controller_id is not None and controller is None:
+        raise EvidenceUnavailable("The evidence controller is unavailable")
+    source = (
+        evidence_home() / "controllers" / controller.trust_entity_id
+        if controller is not None
+        else evidence_home()
+    )
     destination.mkdir(mode=0o700)
     for name in ("ledger", "public", "anchors", "archive-trust"):
         path = source / name
@@ -29,11 +43,21 @@ def _stage_evidence(db: Session, destination: Path) -> None:
             shutil.copytree(path, destination / name, symlinks=True)
     artifacts = destination / "artifacts"
     artifacts.mkdir(mode=0o700)
+    acknowledgement_query = db.query(ProcessorPolicyAcknowledgement)
+    if controller_id is not None:
+        acknowledgement_query = acknowledgement_query.filter(
+            ProcessorPolicyAcknowledgement.controller_id == controller_id
+        )
     packages: list[tuple[str | None, str | None]] = [
         (row.evidence_package_sha256, row.evidence_package_json)
-        for row in db.query(ProcessorPolicyAcknowledgement).all()
+        for row in acknowledgement_query.all()
     ]
-    for row in db.query(DesktopDeletionWorkOrder).all():
+    work_orders = db.query(DesktopDeletionWorkOrder)
+    if controller_id is not None:
+        work_orders = work_orders.join(
+            DeletionCase, DeletionCase.id == DesktopDeletionWorkOrder.case_id
+        ).filter(DeletionCase.controller_id == controller_id)
+    for row in work_orders.all():
         packages.extend((
             (row.report_evidence_package_sha256, row.report_evidence_package_json),
             (row.copy_resolution_evidence_package_sha256, row.copy_resolution_evidence_package_json),
@@ -57,7 +81,12 @@ def _stage_evidence(db: Session, destination: Path) -> None:
         target.write_bytes(raw)
 
 
-def create_complete_evidence_export(db: Session, instance_id: str) -> tuple[Path, dict]:
+def create_complete_evidence_export(
+    db: Session,
+    instance_id: str,
+    *,
+    controller_id: int | None = None,
+) -> tuple[Path, dict]:
     """Return a verified ZIP in a private temporary directory."""
 
     directory = Path(tempfile.mkdtemp(prefix="mp-opt-evidence-download."))
@@ -73,7 +102,7 @@ def create_complete_evidence_export(db: Session, instance_id: str) -> tuple[Path
         str(output),
     ]
     try:
-        _stage_evidence(db, staged_home)
+        _stage_evidence(db, staged_home, controller_id=controller_id)
         result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
             raise EvidenceUnavailable("The complete evidence ZIP could not be created from the verified chain")

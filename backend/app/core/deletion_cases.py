@@ -67,6 +67,8 @@ def create_event_erasure_case(
         initiation_reason=initiation_reason,
         event_purge_key=event.evidence_id,
         instance_id=stable_instance_id(db),
+        controller_id=event.controller_id,
+        event_id=event.id,
         event_evidence_id=event.evidence_id,
         event_display_name=event.name,
         subject_evidence_id=event.evidence_id,

@@ -76,6 +76,11 @@ class PairingCodeTests(unittest.TestCase):
         self.assertIn('mp_setup_verify_exact_environment "$commit"', activate)
         self.assertNotIn('^masterplan-(backend|caddy|postgres|tools):test-', activate)
         self.assertIn('HA_WRITER_ESTABLISHING', activate)
+        self.assertIn('mp_prepare_runtime_permissions', establish)
+        self.assertLess(
+            establish.index('mp_prepare_runtime_permissions'),
+            establish.index('lease_agent.py" --once'),
+        )
         self.assertIn('lease_agent.py" --once', establish)
         self.assertLess(
             establish.index('lease_agent.py" --once'),
@@ -586,6 +591,7 @@ class PairingSetupContractTests(unittest.TestCase):
             SETUP.index("\nmp_setup_repair_witness_admin_secret() {", SETUP.index("mp_setup_repair_witness_admin_secret_scoped() ("))
         ]
         primary = shell_function(SETUP, "mp_setup_primary_create")
+        machine = shell_function(SETUP, "mp_setup_machine_advance_one")
         self.assertIn("--secrets-file /run/mp-opt-witness-secrets.json", deploy)
         self.assertIn("ADMIN_TOKEN:$admin", deploy)
         self.assertIn("CLOUDFLARE_DNS_API_TOKEN:$dns", deploy)
@@ -595,6 +601,14 @@ class PairingSetupContractTests(unittest.TestCase):
         self.assertNotIn("CLOUDFLARE_DNS_API_TOKEN:$dns", repair)
         self.assertIn("remote API returned HTTP 401([^0-9]|$)", primary)
         self.assertIn("mp_setup_repair_witness_admin_secret", primary)
+        self.assertIn(
+            "remote API returned HTTP (401|404|429|500|502|503|504)", primary
+        )
+        self.assertIn('[ "$attempt" -eq 20 ] || sleep 3', primary)
+        self.assertIn(
+            "remote API returned HTTP (401|404|429|500|502|503|504)", machine
+        )
+        self.assertIn('[ "$attempt" -eq 20 ] || sleep 3', machine)
 
     def test_local_pending_receipts_cover_both_remote_commit_boundaries(self) -> None:
         self.assertIn("pending-witness-bootstrap.json", SETUP)

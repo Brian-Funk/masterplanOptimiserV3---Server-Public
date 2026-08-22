@@ -43,6 +43,12 @@ source "$MP_ROOT/deploy/management/evidence.sh"
 source "$MP_ROOT/deploy/management/setup_v2.sh"
 # shellcheck source=management/test_hooks.sh
 source "$MP_ROOT/deploy/management/test_hooks.sh"
+# shellcheck source=management/machine_snapshots.sh
+source "$MP_ROOT/deploy/management/machine_snapshots.sh"
+# shellcheck source=management/machine_retention.sh
+source "$MP_ROOT/deploy/management/machine_retention.sh"
+# shellcheck source=management/machine_ha.sh
+source "$MP_ROOT/deploy/management/machine_ha.sh"
 
 readonly MP_MACHINE_OK=0
 readonly MP_MACHINE_WAITING=10
@@ -50,6 +56,7 @@ readonly MP_MACHINE_ATTENTION=20
 readonly MP_MACHINE_BUSY=30
 readonly MP_MACHINE_INVALID=40
 readonly MP_MACHINE_UNAUTHORISED=50
+readonly MP_MACHINE_EVIDENCE_GIT_RECEIPTS="$MP_STATE/evidence-git-machine-receipts"
 
 # Never open a dialog or read operator input from this adapter.
 ui_error() { printf '%s\n' "$*" >&2; }
@@ -68,6 +75,40 @@ mp_machine_error() {
         --argjson exit_code "$exit_code" \
         '{format:"mp-opt-commissioning-error-v1",ok:false,error:{code:$code,message:$message},exit_code:$exit_code}'
     exit "$exit_code"
+}
+
+mp_machine_capabilities() {
+    local policy
+    mp_machine_require_local_owner || return 77
+    policy="$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)"
+    case "$policy" in production|test) ;; *) return 65 ;; esac
+    jq -cn --arg policy "$policy" \
+        --argjson transition_specs "$MP_SETUP_TEST_HOOK_TRANSITION_SPECS" \
+        --argjson boundaries "$MP_SETUP_TEST_HOOK_BOUNDARIES" '
+      {format:"mp-opt-commissioning-machine-capabilities-v1",
+       deployment_policy:$policy,host_local_only:true,
+       commands:["capabilities","validate","plan","start","stage-candidate","stage-migration",
+         "stage-recovery","artifact","deployment","advance","status","events",
+         "reconcile","cancel","handoff","cleanup-provider","evidence-git","snapshot","retention","ha","test-hook"],
+       setup_modes:["standalone-new","ha-primary-new","ha-join","convert-ha",
+         "replace-primary","replace-node","full-restore"],
+       interruption:{boundaries:$boundaries,transitions:$transition_specs,
+         executable_count:($transition_specs|map(select(.wired))|length),
+         declared_count:($transition_specs|length)},
+       operations:{
+         candidate_stage:true,signed_lifecycle:true,candidate_lifecycle:true,
+         portable_migration:true,portable_recovery:true,
+         evidence_git:{status:($policy=="test"),configure:($policy=="test"),
+           retry:($policy=="test"),disable:($policy=="test")},
+         provider_cleanup:($policy=="test"),
+         snapshot:{create:($policy=="test"),verify:($policy=="test"),
+           list:($policy=="test"),export:($policy=="test"),
+           import:($policy=="test"),restore:false},
+          handover:($policy=="test"),automatic_failover:($policy=="test"),
+          ha_status:true,ha_runtime:true,ha_readiness:($policy=="test"),
+          ha_runtime_fault:($policy=="test"),
+         retention_as_of:($policy=="test")},
+       production_policy_test_mutations:false}'
 }
 
 mp_machine_require_local_owner() {
@@ -102,6 +143,40 @@ mp_machine_validate() {
     mp_machine_validate_regular_file "$MP_SETUP_V2_CANCEL_REQUEST" 600 || return 77
     mp_machine_validate_regular_file "$MP_SETUP_V2_EXECUTION_LOCK" 600 || return 77
     mp_machine_validate_regular_file "$MP_STATE/test-deployments/candidate/receipt.json" 600 || return 77
+    if [ -e "$MP_MACHINE_EVIDENCE_GIT_RECEIPTS" ] \
+        || [ -L "$MP_MACHINE_EVIDENCE_GIT_RECEIPTS" ]; then
+        [ -d "$MP_MACHINE_EVIDENCE_GIT_RECEIPTS" ] \
+            && [ ! -L "$MP_MACHINE_EVIDENCE_GIT_RECEIPTS" ] \
+            && [ "$(stat -c '%u:%a' "$MP_MACHINE_EVIDENCE_GIT_RECEIPTS" 2>/dev/null)" \
+                = "$(id -u):700" ] || return 77
+        while IFS= read -r -d '' receipt; do
+            [[ "$(basename "$receipt")" =~ ^[0-9a-f]{64}\.json$ ]] || return 77
+            mp_machine_validate_regular_file "$receipt" 600 || return 77
+            jq -e '.format == "mp-opt-evidence-git-machine-receipt-v1"
+                and (.request_sha256 | test("^[0-9a-f]{64}$"))
+                and (.action | IN("configure","retry","disable"))
+                and (.completed_at | type == "string")
+                and (.result | type == "object")' "$receipt" >/dev/null 2>&1 || return 65
+        done < <(find -P "$MP_MACHINE_EVIDENCE_GIT_RECEIPTS" \
+            -maxdepth 1 -mindepth 1 -print0)
+    fi
+    if [ -e "$MP_MACHINE_HA_RECEIPTS" ] || [ -L "$MP_MACHINE_HA_RECEIPTS" ]; then
+        [ -d "$MP_MACHINE_HA_RECEIPTS" ] \
+            && [ ! -L "$MP_MACHINE_HA_RECEIPTS" ] \
+            && [ "$(stat -c '%u:%a' "$MP_MACHINE_HA_RECEIPTS" 2>/dev/null)" \
+                = "$(id -u):700" ] || return 77
+        while IFS= read -r -d '' receipt; do
+            [[ "$(basename "$receipt")" =~ ^[0-9a-f]{64}\.json$ ]] || return 77
+            mp_machine_validate_regular_file "$receipt" 600 || return 77
+            jq -e '.format == "mp-opt-ha-machine-receipt-v1"
+                and (.request_sha256 | test("^[0-9a-f]{64}$"))
+                and (.action | IN("readiness","handover","automatic","fault"))
+                and (.run_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
+                and (.completed_at | type == "string")
+                and (.result | type == "object")' "$receipt" >/dev/null 2>&1 \
+                || return 65
+        done < <(find -P "$MP_MACHINE_HA_RECEIPTS" -maxdepth 1 -mindepth 1 -print0)
+    fi
     if [ -e "$MP_SETUP_TEST_HOOK_DIR" ] || [ -L "$MP_SETUP_TEST_HOOK_DIR" ]; then
         [ "$policy" = test ] && [ -d "$MP_SETUP_TEST_HOOK_DIR" ] \
             && [ ! -L "$MP_SETUP_TEST_HOOK_DIR" ] \
@@ -122,7 +197,8 @@ mp_machine_validate() {
                 jq -e '.format == "mp-opt-commissioning-transition-receipt-v1"
                     and (.run_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
                     and (.transition | type == "string")
-                    and (.checkpoint | test("^[a-z0-9_]{1,64}$"))
+                    and (.checkpoint | type == "string" and length <= 64
+                        and test("^[a-z0-9_]+(\\.[a-z0-9_]+)*$"))
                     and (.idempotency_key_sha256 | test("^[0-9a-f]{64}$"))
                     and (.side_effect_completed_at | type == "string")' \
                     "$receipt" >/dev/null 2>&1 || return 65
@@ -620,11 +696,14 @@ mp_machine_stage_migration_snapshot() {
 }
 
 mp_machine_read_artifact() {
-    local ticket="$1" directory receipt package expected owner run_id status
+    local ticket="$1" directory receipt package expected owner run_id status kind expected_name
     [[ "$ticket" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
         || return 64
     mp_machine_require_local_owner || return 77
+    mp_machine_snapshot_validate_artifact_root || return 77
     directory="$MP_SETUP_V2_ARTIFACTS/$ticket"; receipt="$directory/receipt.json"
+    [ "$(readlink -f "$(dirname "$directory")" 2>/dev/null)" \
+        = "$(readlink -f "$MP_SETUP_V2_ARTIFACTS" 2>/dev/null)" ] || return 65
     [ -d "$directory" ] && [ ! -L "$directory" ] \
         && [ "$(stat -c '%a' "$directory" 2>/dev/null)" = 700 ] \
         && [ -f "$receipt" ] && [ ! -L "$receipt" ] \
@@ -633,12 +712,19 @@ mp_machine_read_artifact() {
     [ "$(stat -c '%u' "$directory")" = "$owner" ] \
         && [ "$(stat -c '%u' "$receipt")" = "$owner" ] || return 77
     jq -e --arg ticket "$ticket" '.format == "mp-opt-machine-artifact-v1"
-        and .kind == "migration-snapshot" and .ticket == $ticket
+        and (.kind | IN("migration-snapshot","portable-snapshot")) and .ticket == $ticket
         and (.package_sha256 | test("^[0-9a-f]{64}$"))
         and (.package_size | type == "number" and . >= 1 and . <= 4294967296)' \
         "$receipt" >/dev/null 2>&1 || return 65
+    kind="$(jq -r .kind "$receipt")"
+    if [ "$kind" = migration-snapshot ]; then
+        expected_name=migration.mpopt-snapshot
+    else
+        expected_name=portable.mpopt-snapshot
+        jq -e '.snapshot_ref | type == "string"' "$receipt" >/dev/null || return 65
+    fi
     package="$(jq -r .package_path "$receipt")"
-    [ "$(readlink -f "$package")" = "$(readlink -f "$directory")/migration.mpopt-snapshot" ] \
+    [ "$(readlink -f "$package")" = "$(readlink -f "$directory")/$expected_name" ] \
         && [ -f "$package" ] && [ ! -L "$package" ] \
         && [ "$(stat -c '%u:%a' "$package")" = "$owner:600" ] || return 65
     [ "$(stat -c %s "$package")" = "$(jq -r .package_size "$receipt")" ] || return 65
@@ -902,8 +988,22 @@ mp_machine_read_test_hook_input() {
     jq -e 'type == "object"' "$target" >/dev/null 2>&1 || return 64
 }
 
+mp_machine_prepare_test_hook_state() {
+    local owner
+    # A freshly reset peer has the reviewed machine adapter and test policy,
+    # but deliberately has no commissioning state directory yet.  Authorise
+    # the test-only operation before creating anything, then use the shared
+    # non-symlink owner-directory helper rather than an unguarded mkdir.
+    mp_setup_test_hook_policy || return 77
+    mp_create_private_owner_directory_chain "$MP_STATE" || return 77
+    [ -d "$MP_STATE" ] && [ ! -L "$MP_STATE" ] || return 77
+    owner="$(id -u):$(id -g)"
+    [ "$(stat -c '%u:%g:%a' "$MP_STATE" 2>/dev/null)" = "$owner:700" ]
+}
+
 mp_machine_test_hook_input_action() {
     local action="$1" input status=0 output
+    mp_machine_prepare_test_hook_state || return $?
     mp_machine_require_local_owner || return 77
     input="$(mktemp "$MP_STATE/setup-machine-input.XXXXXX")" || return 1
     MP_MACHINE_INPUT_FILE="$input"; chmod 600 "$input"
@@ -921,12 +1021,353 @@ mp_machine_test_hook_input_action() {
     return "$status"
 }
 
+mp_machine_evidence_git_status() {
+    local enabled configured=false owner repository branch fingerprint runtime_status
+    mp_machine_require_local_owner || return 77
+    mp_setup_test_hook_policy || return 77
+    enabled="$(mp_env_get EVIDENCE_GIT_ARCHIVE_ENABLED 2>/dev/null || printf false)"
+    [ -s "$MP_EVIDENCE_GITHUB_TOKEN" ] && configured=true
+    owner="$(mp_env_get EVIDENCE_GIT_REPOSITORY_OWNER 2>/dev/null || true)"
+    repository="$(mp_env_get EVIDENCE_GIT_REPOSITORY_NAME 2>/dev/null || true)"
+    branch="$(mp_env_get EVIDENCE_GIT_DEFAULT_BRANCH 2>/dev/null || printf main)"
+    fingerprint="$(mp_env_get EVIDENCE_GITHUB_TOKEN_FINGERPRINT 2>/dev/null || printf unconfigured)"
+    mp_compose_init
+    runtime_status="$("${MP_COMPOSE[@]}" exec -T backend \
+        python -m app.services.evidence_archive status 2>/dev/null \
+        || printf '{"state":"unavailable"}')"
+    jq -cn --argjson enabled "$enabled" --argjson configured "$configured" \
+        --arg owner "$owner" --arg repository "$repository" --arg branch "$branch" \
+        --arg fingerprint "$fingerprint" --argjson runtime "$runtime_status" \
+        '{format:"mp-opt-evidence-git-machine-status-v1",enabled:$enabled,
+          token_configured:$configured,token_fingerprint:$fingerprint,
+          repository:(if ($owner != "" and $repository != "") then
+            {owner:$owner,name:$repository,default_branch:$branch} else null end),runtime:$runtime}'
+}
+
+mp_machine_read_evidence_git_input() {
+    local target="$1" action="$2" bytes
+    head -c 16385 > "$target" || return 1
+    bytes="$(wc -c < "$target" | tr -d ' ')"
+    [ "$bytes" -gt 0 ] && [ "$bytes" -le 16384 ] || return 64
+    chmod 600 "$target"
+    jq -e --arg action "$action" '
+      type == "object"
+      and ((keys | sort) == ["action","format","idempotency_key","values"])
+      and .format == "mp-opt-evidence-git-machine-request-v1"
+      and .action == $action
+      and (.idempotency_key | type == "string"
+        and test("^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"))
+      and (.values | type == "object")
+      and (if $action == "configure" then
+        ((.values | keys | sort) == ["default_branch","owner","protection_acknowledged",
+          "repository","schedule_seconds","token"])
+        and (.values.owner | type == "string" and test("^[A-Za-z0-9._-]{1,100}$"))
+        and (.values.repository | type == "string" and test("^[A-Za-z0-9._-]{1,100}$"))
+        and (.values.default_branch | type == "string" and test("^[A-Za-z0-9._/-]{1,100}$"))
+        and (.values.schedule_seconds | type == "number" and floor == . and . >= 60 and . <= 86400)
+        and (.values.token | type == "string" and startswith("github_pat_")
+          and length >= 20 and length <= 4096)
+        and .values.protection_acknowledged == true
+      elif $action == "retry" then
+        ((.values | keys) == ["submission_id"])
+        and (.values.submission_id | type == "string" and test("^sub-[0-9a-f]{32}$"))
+      elif $action == "disable" then
+        ((.values | keys) == ["confirmation"])
+        and .values.confirmation == "DISABLE EVIDENCE ARCHIVAL"
+      else false end)' "$target" >/dev/null 2>&1 || return 64
+}
+
+mp_machine_evidence_git_receipt_path() {
+    local key="$1"
+    printf '%s/%s.json\n' "$MP_MACHINE_EVIDENCE_GIT_RECEIPTS" \
+        "$(printf '%s' "$key" | sha256sum | awk '{print $1}')"
+}
+
+mp_machine_prepare_evidence_git_receipts() {
+    mp_create_private_owner_directory_chain "$MP_MACHINE_EVIDENCE_GIT_RECEIPTS" \
+        && chmod 700 "$MP_MACHINE_EVIDENCE_GIT_RECEIPTS" \
+        && [ -d "$MP_MACHINE_EVIDENCE_GIT_RECEIPTS" ] \
+        && [ ! -L "$MP_MACHINE_EVIDENCE_GIT_RECEIPTS" ] \
+        && [ "$(stat -c '%u:%a' "$MP_MACHINE_EVIDENCE_GIT_RECEIPTS" 2>/dev/null)" \
+            = "$(id -u):700" ] || return 77
+}
+
+mp_machine_evidence_git_record_receipt() {
+    local receipt="$1" request_sha="$2" action="$3" result="$4" temporary
+    mp_machine_prepare_evidence_git_receipts || return $?
+    temporary="$(mktemp "$MP_MACHINE_EVIDENCE_GIT_RECEIPTS/.receipt.XXXXXX")" || return 1
+    jq -cn --arg request_sha "$request_sha" --arg action "$action" \
+        --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson result "$result" \
+        '{format:"mp-opt-evidence-git-machine-receipt-v1",request_sha256:$request_sha,
+          action:$action,completed_at:$completed_at,result:$result}' > "$temporary" \
+        && chmod 600 "$temporary" && sync -f "$temporary" 2>/dev/null \
+        && mv "$temporary" "$receipt" && sync -f "$MP_MACHINE_EVIDENCE_GIT_RECEIPTS" 2>/dev/null \
+        || { rm -f "$temporary"; return 1; }
+}
+
+mp_machine_evidence_git_action() {
+    local action="$1" input run_id status=0 request_sha idempotency receipt result
+    local owner repository branch schedule instance_id preflight controller_id token_file readiness repository_id
+    mp_machine_require_local_owner || return 77
+    mp_setup_test_hook_policy || return 77
+    run_id="evidence-git-${action}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    mp_setup_execution_acquire "$run_id" evidence-git || return $?
+    trap 'mp_secure_remove_file "${MP_MACHINE_INPUT_FILE:-}"; mp_secure_remove_file "${MP_MACHINE_TOKEN_FILE:-}"; mp_setup_execution_release' EXIT
+    mp_initialise_paths || return 77
+    mp_machine_prepare_evidence_git_receipts || return $?
+    input="$(mktemp "$MP_STATE/evidence-git-input.XXXXXX")" || return 1
+    chmod 600 "$input"; MP_MACHINE_INPUT_FILE="$input"
+    mp_machine_read_evidence_git_input "$input" "$action" || return $?
+    idempotency="$(jq -er .idempotency_key "$input")" || return 64
+    request_sha="$(sha256sum "$input" | awk '{print $1}')"
+    receipt="$(mp_machine_evidence_git_receipt_path "$idempotency")"
+    if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+        mp_machine_validate_regular_file "$receipt" 600 || return 77
+        jq -e --arg request_sha "$request_sha" --arg action "$action" \
+          '.format == "mp-opt-evidence-git-machine-receipt-v1"
+           and .request_sha256 == $request_sha and .action == $action' "$receipt" >/dev/null \
+          || return 65
+        jq -c .result "$receipt"
+        mp_secure_remove_file "$input"; MP_MACHINE_INPUT_FILE=""
+        mp_setup_execution_release; trap - EXIT
+        return 0
+    fi
+    case "$action" in
+      configure)
+        owner="$(jq -er .values.owner "$input")"; repository="$(jq -er .values.repository "$input")"
+        branch="$(jq -er .values.default_branch "$input")"; schedule="$(jq -er .values.schedule_seconds "$input")"
+        [ "${repository,,}" != "masterplanoptimiserv3---evidence-public" ] || return 65
+        instance_id="$(mp_env_get MP_INSTANCE_ID 2>/dev/null || true)"
+        [[ "$instance_id" =~ ^[0-9a-f-]{36}$ ]] || return 65
+        mp_compose_init
+        if ! preflight="$("${MP_COMPOSE[@]}" exec -T backend \
+          python -m app.services.evidence_archive preflight 2>&1)"; then
+          if grep -Fq 'hosted_controller_archive_requires_explicit_controller' <<< "$preflight"; then
+            jq -cn '{format:"mp-opt-evidence-git-machine-result-v1",state:"rejected",
+              code:"hosted_controller_archive_requires_explicit_controller"}'
+          fi
+          return 20
+        fi
+        controller_id="$(jq -er '.controller_id | select(test("^ctl-[a-z0-9]{8,48}$"))' <<< "$preflight")" \
+          || return 65
+        mp_create_private_owner_directory_chain "$MP_ROOT/secrets" \
+          && chmod 700 "$MP_ROOT/secrets" || return 1
+        token_file="$(mktemp "$MP_ROOT/secrets/.evidence-git-token.XXXXXX")" || return 1
+        chmod 600 "$token_file"; MP_MACHINE_TOKEN_FILE="$token_file"
+        jq -jr .values.token "$input" > "$token_file" || return 1
+        readiness="$(mp_evidence_git_test_file "$token_file" "$owner" "$repository" "$branch" 2>/dev/null)" \
+          || return 20
+        repository_id="$(jq -er '.repository_id | tostring | select(test("^[0-9]+$"))' <<< "$readiness")" \
+          || return 65
+        result="$(mp_evidence_git_apply_verified_configuration "$token_file" "$owner" "$repository" \
+          "$repository_id" "$branch" "$controller_id" "$instance_id" "$schedule")" || status=$?
+        MP_MACHINE_TOKEN_FILE=""
+        if [ "$status" -eq 0 ]; then
+          mp_compose_init
+          "${MP_COMPOSE[@]}" up -d --force-recreate backend >/dev/null 2>&1 || status=$?
+          [ "$status" -ne 0 ] || mp_wait_for_local_health 60 >/dev/null 2>&1 || status=20
+        fi
+        ;;
+      retry)
+        mp_compose_init
+        result="$("${MP_COMPOSE[@]}" exec -T backend python -m app.services.evidence_archive \
+          retry-failed --submission-id "$(jq -er .values.submission_id "$input")" 2>/dev/null)" || status=$?
+        ;;
+      disable) result="$(mp_evidence_git_disable_configuration)" || status=$? ;;
+      *) return 64 ;;
+    esac
+    [ "$status" -eq 0 ] || return "$status"
+    jq -e 'type == "object"' <<< "$result" >/dev/null 2>&1 || return 65
+    mp_machine_evidence_git_record_receipt "$receipt" "$request_sha" "$action" "$result" || return 1
+    printf '%s\n' "$result"
+    mp_secure_remove_file "$input"; MP_MACHINE_INPUT_FILE=""
+    mp_setup_execution_release; trap - EXIT
+}
+
 command_name="${1:-}"
 [ -n "$command_name" ] || mp_machine_error INVALID_ARGUMENT \
-    "Usage: mp-opt setup validate|plan|start|stage-candidate|stage-migration|stage-recovery|artifact|deployment|advance|status|events|reconcile|cancel|handoff|cleanup-provider|test-hook"
+    "Usage: mp-opt setup capabilities|validate|plan|start|stage-candidate|stage-migration|stage-recovery|artifact|deployment|advance|status|events|reconcile|cancel|handoff|cleanup-provider|evidence-git|snapshot|retention|ha|test-hook"
 shift || true
 
 case "$command_name" in
+    ha)
+        ha_action="${1:-}"; [ -n "$ha_action" ] || mp_machine_error INVALID_ARGUMENT \
+            "ha requires status, runtime, readiness, handover, automatic or fault"
+        shift || true
+        case "$ha_action" in
+          status)
+            [ "${1:-}" != --json ] || shift
+            [ "$#" -eq 0 ] || mp_machine_error INVALID_ARGUMENT \
+                "ha status accepts only --json"
+            status=0; output="$(mp_machine_ha_status)" || status=$?
+            ;;
+          runtime)
+            [ "${1:-}" != --json ] || shift
+            [ "$#" -eq 0 ] || mp_machine_error INVALID_ARGUMENT \
+                "ha runtime accepts only --json"
+            status=0; output="$(mp_machine_ha_runtime_status)" || status=$?
+            ;;
+          readiness|handover|automatic|fault)
+            input_stdin=false
+            while [ "$#" -gt 0 ]; do
+                case "$1" in --input-stdin) input_stdin=true; shift ;; --json) shift ;;
+                  *) mp_machine_error INVALID_ARGUMENT "Unsupported ha argument: $1" ;;
+                esac
+            done
+            [ "$input_stdin" = true ] || mp_machine_error INVALID_ARGUMENT \
+                "ha ${ha_action} requires --input-stdin"
+            status=0; output="$(mp_machine_ha_action "$ha_action")" || status=$?
+            ;;
+          *) mp_machine_error INVALID_ARGUMENT \
+              "ha requires status, runtime, readiness, handover, automatic or fault" ;;
+        esac
+        case "$status" in
+          0) printf '%s\n' "$output" ;;
+          20) mp_machine_error HA_NOT_READY \
+            "The exact HA transition is not ready and no unverified ownership change was accepted." \
+            "$MP_MACHINE_ATTENTION" ;;
+          75) mp_machine_error EXECUTION_BUSY \
+            "Another setup or management operation holds the execution lease." "$MP_MACHINE_BUSY" ;;
+          77) mp_machine_error TEST_POLICY_REQUIRED \
+            "HA mutation automation is available only to the local owner under test policy." \
+            "$MP_MACHINE_UNAUTHORISED" ;;
+          64|65) mp_machine_error INVALID_INPUT \
+            "The HA request, expected generation, node identity, or durable receipt is invalid." \
+            "$MP_MACHINE_INVALID" ;;
+          *) mp_machine_error HA_ACTION_FAILED \
+            "The HA action failed closed and remains safely diagnosable." "$MP_MACHINE_ATTENTION" ;;
+        esac
+        ;;
+    retention)
+        retention_action="${1:-}"; [ "$retention_action" = run-as-of ] \
+            || mp_machine_error INVALID_ARGUMENT "retention requires run-as-of"
+        shift || true
+        input_stdin=false
+        while [ "$#" -gt 0 ]; do
+            case "$1" in --input-stdin) input_stdin=true; shift ;; --json) shift ;;
+              *) mp_machine_error INVALID_ARGUMENT "Unsupported retention argument: $1" ;;
+            esac
+        done
+        [ "$input_stdin" = true ] || mp_machine_error INVALID_ARGUMENT \
+            "retention run-as-of requires --input-stdin"
+        status=0; output="$(mp_machine_retention_run_as_of)" || status=$?
+        case "$status" in
+          0) printf '%s\n' "$output" ;;
+          20) mp_machine_error RETENTION_NOT_READY \
+            "The bounded retention cycle failed safely and remains retryable." "$MP_MACHINE_ATTENTION" ;;
+          75) mp_machine_error EXECUTION_BUSY "Another operation holds the execution lease." "$MP_MACHINE_BUSY" ;;
+          77) mp_machine_error TEST_POLICY_REQUIRED \
+            "Synthetic retention time is available only to the local owner under test policy." "$MP_MACHINE_UNAUTHORISED" ;;
+          64|65) mp_machine_error INVALID_INPUT \
+            "The retention request or durable receipt is invalid." "$MP_MACHINE_INVALID" ;;
+          *) mp_machine_error RETENTION_FAILED \
+            "The retention adapter failed closed." "$MP_MACHINE_ATTENTION" ;;
+        esac
+        ;;
+    snapshot)
+        snapshot_action="${1:-}"; [ -n "$snapshot_action" ] || mp_machine_error INVALID_ARGUMENT \
+            "snapshot requires list, create, verify, export or import"
+        shift || true
+        case "$snapshot_action" in
+          list)
+            [ "${1:-}" != --json ] || shift
+            [ "$#" -eq 0 ] || mp_machine_error INVALID_ARGUMENT "snapshot list accepts only --json"
+            status=0; output="$(mp_machine_snapshot_list)" || status=$?
+            ;;
+          create|verify|export)
+            input_stdin=false
+            while [ "$#" -gt 0 ]; do
+                case "$1" in --input-stdin) input_stdin=true; shift ;; --json) shift ;;
+                  *) mp_machine_error INVALID_ARGUMENT "Unsupported snapshot argument: $1" ;;
+                esac
+            done
+            [ "$input_stdin" = true ] || mp_machine_error INVALID_ARGUMENT \
+                "snapshot ${snapshot_action} requires --input-stdin"
+            status=0; output="$(mp_machine_snapshot_action "$snapshot_action")" || status=$?
+            ;;
+          import)
+            sha256=""; idempotency_key=""; input_stdin=false
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                  --sha256) sha256="${2:-}"; shift 2 ;;
+                  --idempotency-key) idempotency_key="${2:-}"; shift 2 ;;
+                  --input-stdin) input_stdin=true; shift ;;
+                  --json) shift ;;
+                  *) mp_machine_error INVALID_ARGUMENT "Unsupported snapshot import argument: $1" ;;
+                esac
+            done
+            [ "$input_stdin" = true ] && [ -n "$sha256" ] && [ -n "$idempotency_key" ] \
+                || mp_machine_error INVALID_ARGUMENT \
+                    "snapshot import requires --sha256, --idempotency-key and --input-stdin"
+            status=0; output="$(mp_machine_snapshot_import_package "$sha256" "$idempotency_key")" \
+                || status=$?
+            ;;
+          *) mp_machine_error INVALID_ARGUMENT \
+                "snapshot requires list, create, verify, export or import" ;;
+        esac
+        case "$status" in
+          0) printf '%s\n' "$output" ;;
+          20) mp_machine_error SNAPSHOT_NOT_READY \
+            "The encrypted snapshot operation failed safely and remains retryable." "$MP_MACHINE_ATTENTION" ;;
+          75) mp_machine_error EXECUTION_BUSY "Another operation holds the execution lease." "$MP_MACHINE_BUSY" ;;
+          77) mp_machine_error TEST_POLICY_REQUIRED \
+            "Structured snapshot automation is available only to the local owner under test policy." "$MP_MACHINE_UNAUTHORISED" ;;
+          64|65) mp_machine_error INVALID_INPUT \
+            "The snapshot request, identity, archive, or receipt is invalid." "$MP_MACHINE_INVALID" ;;
+          *) mp_machine_error SNAPSHOT_FAILED \
+            "The snapshot operation failed closed." "$MP_MACHINE_ATTENTION" ;;
+        esac
+        ;;
+    capabilities)
+        [ "${1:-}" != --json ] || shift
+        [ "$#" -eq 0 ] || mp_machine_error INVALID_ARGUMENT "capabilities accepts only --json"
+        status=0; output="$(mp_machine_capabilities)" || status=$?
+        case "$status" in
+          0) printf '%s\n' "$output" ;;
+          77) mp_machine_error LOCAL_OWNER_REQUIRED \
+            "Machine capabilities require the protected state owner." "$MP_MACHINE_UNAUTHORISED" ;;
+          *) mp_machine_error INVALID_STATE \
+            "Machine capabilities could not be derived safely." "$MP_MACHINE_INVALID" ;;
+        esac
+        ;;
+    evidence-git)
+        evidence_action="${1:-}"; [ -n "$evidence_action" ] || mp_machine_error INVALID_ARGUMENT \
+            "evidence-git requires status, configure, retry or disable"
+        shift || true
+        case "$evidence_action" in
+          status)
+            [ "${1:-}" != --json ] || shift
+            [ "$#" -eq 0 ] || mp_machine_error INVALID_ARGUMENT "evidence-git status accepts only --json"
+            status=0; output="$(mp_machine_evidence_git_status)" || status=$?
+            ;;
+          configure|retry|disable)
+            input_stdin=false
+            while [ "$#" -gt 0 ]; do
+                case "$1" in --input-stdin) input_stdin=true; shift ;; --json) shift ;;
+                  *) mp_machine_error INVALID_ARGUMENT "Unsupported evidence-git argument: $1" ;;
+                esac
+            done
+            [ "$input_stdin" = true ] || mp_machine_error INVALID_ARGUMENT \
+              "evidence-git ${evidence_action} requires --input-stdin"
+            status=0; output="$(mp_machine_evidence_git_action "$evidence_action")" || status=$?
+            ;;
+          *) mp_machine_error INVALID_ARGUMENT "evidence-git requires status, configure, retry or disable" ;;
+        esac
+        case "$status" in
+          0) printf '%s\n' "$output" ;;
+          20) if [ -n "${output:-}" ]; then printf '%s\n' "$output"; exit "$MP_MACHINE_ATTENTION"; else
+                mp_machine_error EVIDENCE_GIT_NOT_READY \
+                  "Evidence Git verification or archival is not ready; no secret was retained unless configuration completed." "$MP_MACHINE_ATTENTION"
+              fi ;;
+          75) mp_machine_error EXECUTION_BUSY "Another coordinator holds the lease." "$MP_MACHINE_BUSY" ;;
+          77) mp_machine_error TEST_POLICY_REQUIRED \
+            "Evidence Git automation is available only to the local owner under test policy." "$MP_MACHINE_UNAUTHORISED" ;;
+          64|65) mp_machine_error INVALID_INPUT \
+            "The Evidence Git request, repository proof, or protected receipt is invalid." "$MP_MACHINE_INVALID" ;;
+          *) mp_machine_error EVIDENCE_GIT_FAILED \
+            "Evidence Git automation failed closed and remains safely retryable." "$MP_MACHINE_ATTENTION" ;;
+        esac
+        ;;
     test-hook)
         hook_action="${1:-}"; [ -n "$hook_action" ] || mp_machine_error INVALID_ARGUMENT \
             "test-hook requires capabilities, enable, arm, disarm or boundary"

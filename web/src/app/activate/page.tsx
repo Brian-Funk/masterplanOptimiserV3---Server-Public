@@ -283,7 +283,7 @@ function ActivateContent() {
                     onChange={(event) => setConsentConfirmed(event.target.checked)}
                   />
                   <span>
-                    I reviewed the processing details and consent to my account being used as described.
+                    I have reviewed the processing details and acknowledge the disclosure for this account.
                     <span className="mt-1 block text-xs text-gray-500 dark:text-gray-400">
                       You can later use Delete my data or contact the controller.
                     </span>

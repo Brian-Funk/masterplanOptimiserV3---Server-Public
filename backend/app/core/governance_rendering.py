@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.models.governance import InstanceGovernanceProfile
 
 
-POLICY_TEMPLATE_VERSION = "2026-08-18"
+POLICY_TEMPLATE_VERSION = "2026-08-20"
 MATERIAL_PATH_PREFIXES = (
     "template_version",
     "controller_type",
@@ -218,9 +218,9 @@ def build_publication_payload(profile: InstanceGovernanceProfile) -> dict[str, A
     if features.get("offline_schedule_enabled"):
         storage["offline_schedule"] = (
             "Optional IndexedDB offline calendar response data is stored only after explicit enablement. It contains "
-            "names attached to authenticated task allocations, at most the signed-in member's linked directory "
-            "identity and own published unavailability. It excludes the complete people directory, other people's "
-            "unavailability, organiser audit history and unsupported internal data, carries the server-bounded "
+            "names attached to authenticated task allocations and the names and published unavailability visible "
+            "to all authenticated accounts in this event. It excludes the complete people directory, private "
+            "contact details, organiser audit history and unsupported internal data, carries the server-bounded "
             "expiry, and is removed on expiry, confirmed logout, authorisation failure or successful manual removal."
         )
 

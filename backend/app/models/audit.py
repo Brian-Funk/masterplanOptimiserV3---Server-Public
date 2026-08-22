@@ -13,6 +13,8 @@ class AuditLog(Base):
     id = Column(Integer, primary_key=True, index=True)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    controller_id = Column(Integer, ForeignKey("controllers.id", ondelete="SET NULL"), nullable=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True)
     # Legacy deployments retain a nullable username column until the migration
     # clears it. New records never populate it.
     username = Column(String, nullable=True)

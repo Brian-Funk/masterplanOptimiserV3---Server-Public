@@ -445,7 +445,10 @@ def test_published_root_commissioning_migrations_are_hash_pinned():
     }
     migration_dir = _server_root() / "deploy" / "migrations"
     for name, digest in expected.items():
-        assert hashlib.sha256((migration_dir / name).read_bytes()).hexdigest() == digest
+        # Git stores these text migrations with LF. A Windows checkout may
+        # materialise CRLF even though the committed/released blob remains LF.
+        committed_bytes = (migration_dir / name).read_bytes().replace(b"\r\n", b"\n")
+        assert hashlib.sha256(committed_bytes).hexdigest() == digest
 
 
 def test_root_commissioning_contract_follows_unchanged_expansion_migrations():

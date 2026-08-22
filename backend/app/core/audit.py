@@ -30,7 +30,7 @@ AUDIT_ACTIONS = frozenset({
     "auth.reauth", "auth.reauth_failed", "auth.session_revoke", "calendar.commit",
     "calendar.task_edit", "calendar.task_revert", "event.create", "event.import_setup",
     "commissioning.recovery_completed", "commissioning.completed",
-    "event.regenerate_secret", "evidence.export", "evidence.initialise", "evidence.verify",
+    "event.regenerate_secret", "evidence.export", "evidence.controller_export", "evidence.initialise", "evidence.verify",
     "evidence.trust_key.challenge", "evidence.trust_key.proof_verified",
     "evidence.trust_key.root_authorised", "evidence.trust_key.register",
     "evidence.trust_key.rotate", "evidence.trust_key.revoke",
@@ -46,7 +46,10 @@ AUDIT_ACTIONS = frozenset({
     "gdpr.resolve_backups", "gdpr.resolve_outstanding_actions", "gdpr.withdraw_deletion",
     "general_schedule.publish", "governance.data_policy_acknowledged",
     "governance.draft_saved", "governance.event_override_saved",
-    "governance.published", "ha.protection.retry", "ha.replication_requested",
+    "governance.published", "operator.profile_saved", "operator.policy_published",
+    "controller.create", "controller.update", "controller.governance_saved",
+    "controller.governance_published", "tenancy.mode_changed",
+    "ha.protection.retry", "ha.replication_requested",
     "history.delete", "history.restore", "history.update", "passkey.auth_failed",
     "passkey.bootstrap", "passkey.bootstrap_failed", "passkey.delete",
     "passkey.duplicate_denied", "passkey.register", "passkey.registration_failed",
@@ -60,7 +63,7 @@ AUDIT_ACTIONS = frozenset({
 AUDIT_RESOURCE_TYPES = frozenset({
     "activation_email_delivery", "activation_link", "announcement", "credential",
     "deletion_request", "event", "evidence", "governance_publication", "ha_cluster",
-    "instance", "public_schedule_link", "publish_snapshot", "published_task",
+    "instance", "operator", "controller", "public_schedule_link", "publish_snapshot", "published_task",
     "settings", "user",
 })
 AUDIT_OUTCOMES = frozenset({"success", "denied", "error"})
@@ -119,6 +122,84 @@ def _canonical_detail(detail: Optional[str]) -> Optional[str]:
     return rendered
 
 
+def _resource_tenant_scope(
+    db: Session,
+    *,
+    resource_type: str | None,
+    resource_id: int | None,
+) -> tuple[int | None, int | None]:
+    """Resolve known tenant resources without trusting caller-supplied labels."""
+
+    if resource_id is None or resource_type is None:
+        return None, None
+    event_id: int | None = None
+    controller_id: int | None = None
+    if resource_type == "controller":
+        from app.models.tenancy import Controller
+
+        controller = db.get(Controller, resource_id)
+        controller_id = controller.id if controller is not None else None
+    elif resource_type == "event":
+        from app.models.event import Event
+
+        event = db.get(Event, resource_id)
+        if event is not None:
+            event_id, controller_id = event.id, event.controller_id
+    elif resource_type == "user":
+        target = db.get(User, resource_id)
+        event_id = target.event_id if target is not None else None
+    elif resource_type == "announcement":
+        from app.models.notification import Announcement
+
+        row = db.get(Announcement, resource_id)
+        event_id = row.event_id if row is not None else None
+    elif resource_type == "public_schedule_link":
+        from app.models.public_schedule_link import PublicScheduleLink
+
+        row = db.get(PublicScheduleLink, resource_id)
+        event_id = row.event_id if row is not None else None
+    elif resource_type == "publish_snapshot":
+        from app.models.published import PublishSnapshot
+
+        row = db.get(PublishSnapshot, resource_id)
+        event_id = row.event_id if row is not None else None
+    elif resource_type == "published_task":
+        from app.models.published import PublishedTask
+
+        row = db.get(PublishedTask, resource_id)
+        event_id = row.event_id if row is not None else None
+    if event_id is not None and controller_id is None:
+        from app.models.event import Event
+
+        event = db.get(Event, event_id)
+        controller_id = event.controller_id if event is not None else None
+    return controller_id, event_id
+
+
+def _detail_tenant_scope(
+    db: Session,
+    *,
+    resource_type: str | None,
+    canonical_detail: str | None,
+) -> tuple[int | None, int | None]:
+    """Resolve opaque workflow identifiers retained in bounded audit detail."""
+
+    if resource_type != "deletion_request" or canonical_detail is None:
+        return None, None
+    try:
+        request_id = json.loads(canonical_detail).get("deletion_request_id")
+    except (AttributeError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(request_id, str):
+        return None, None
+    from app.models.deletion import DeletionCase
+
+    row = db.query(DeletionCase).filter(DeletionCase.request_id == request_id).first()
+    if row is None:
+        return None, None
+    return row.controller_id, row.event_id
+
+
 def audit(
     db: Session,
     *,
@@ -129,6 +210,8 @@ def audit(
     detail: Optional[str] = None,
     request: Optional[Request] = None,
     outcome: str = "success",
+    controller_id: Optional[int] = None,
+    event_id: Optional[int] = None,
 ) -> AuditLog:
     """Create one schema-bound, minimised audit entry (uncommitted)."""
     if action not in AUDIT_ACTIONS:
@@ -137,9 +220,36 @@ def audit(
         raise ValueError(f"unsupported audit resource type: {resource_type}")
     if outcome not in AUDIT_OUTCOMES:
         raise ValueError(f"unsupported audit outcome: {outcome}")
+    canonical_detail = _canonical_detail(detail)
     ip_hash = None
     if request is not None:
         ip_hash = _hash_ip(request.client.host if request.client else None)
+
+    if user is not None and not user.is_root_admin and event_id is None:
+        event_id = user.event_id
+    if controller_id is None or event_id is None:
+        resource_controller_id, resource_event_id = _resource_tenant_scope(
+            db,
+            resource_type=resource_type,
+            resource_id=resource_id,
+        )
+        controller_id = controller_id or resource_controller_id
+        event_id = event_id or resource_event_id
+    if controller_id is None or event_id is None:
+        detail_controller_id, detail_event_id = _detail_tenant_scope(
+            db,
+            resource_type=resource_type,
+            canonical_detail=canonical_detail,
+        )
+        controller_id = controller_id or detail_controller_id
+        event_id = event_id or detail_event_id
+    if event_id is not None and controller_id is None:
+        from app.models.event import Event
+
+        event = db.get(Event, event_id)
+        if event is None:
+            raise ValueError("audit event does not exist")
+        controller_id = event.controller_id
 
     entry = AuditLog(
         user_id=user.id if user else None,
@@ -148,9 +258,11 @@ def audit(
         action=action,
         resource_type=resource_type,
         resource_id=resource_id,
-        detail=_canonical_detail(detail),
+        detail=canonical_detail,
         ip_hash=ip_hash,
         outcome=outcome,
+        controller_id=controller_id,
+        event_id=event_id,
     )
     db.add(entry)
     return entry

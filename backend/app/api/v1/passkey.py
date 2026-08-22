@@ -37,6 +37,14 @@ from app.core.activation_consent import (
     STATEMENT_VERSION,
     resolve_activation_consent,
 )
+from app.core.database_tenancy import (
+    authentication_service_context,
+    authenticated_subject_context,
+    authenticated_user_context,
+    bounded_event_id_context,
+    root_service_context,
+)
+from app.core.tenancy import TENANCY_HOSTED, tenancy_mode
 from app.core.audit import audit
 from app.core.config import settings
 from app.core.governance import (
@@ -76,6 +84,7 @@ from app.models.user import (
     WebAuthnCredential,
 )
 from app.models.governance import AccountProcessingConsent
+from app.models.event import Event
 from app.models.server_setting import ServerSetting
 
 logger = logging.getLogger(__name__)
@@ -132,6 +141,7 @@ class CredentialRename(BaseModel):
 
 
 def _root_needs_bootstrap(db: Session) -> bool:
+    root_service_context(db, scope="root_bootstrap_status")
     root = db.query(User).filter(User.is_root_admin == True).first()  # noqa: E712
     if root is None:
         return True
@@ -142,6 +152,7 @@ def _root_needs_bootstrap(db: Session) -> bool:
 
 
 def _bootstrap_stage(db: Session) -> Literal["passkey", "setup", "complete"]:
+    root_service_context(db, scope="root_bootstrap_status")
     root = db.query(User).filter(User.is_root_admin == True).first()  # noqa: E712
     if root is None:
         return "passkey"
@@ -181,6 +192,7 @@ def _active_user(
     allow_root_recovery: bool = False,
 ) -> User:
     """Load an account that is currently permitted to authenticate."""
+    authenticated_subject_context(db, user_id)
     user = db.query(User).filter(User.id == user_id).first()
     if (
         user is None
@@ -191,6 +203,19 @@ def _active_user(
             and not (allow_root_recovery and user.is_root_admin)
         )
     ):
+        raise HTTPException(status_code=401, detail="Authentication failed")
+    if user.is_root_admin:
+        authenticated_user_context(
+            db,
+            user_id=user.id,
+            event_id=None,
+            controller_id=None,
+            is_root=True,
+        )
+    elif user.event_id is None:
+        if tenancy_mode(db) == TENANCY_HOSTED:
+            raise HTTPException(status_code=401, detail="Authentication failed")
+    elif bounded_event_id_context(db, scope="authentication", event_id=user.event_id) is None:
         raise HTTPException(status_code=401, detail="Authentication failed")
     return user
 
@@ -230,6 +255,12 @@ def _activation_context(
     if link is None:
         raise HTTPException(status_code=401, detail="Invalid or expired activation token")
     user = _active_user(link.user_id, db, require_activated=False)
+    if user.event_id is not None:
+        event = bounded_event_id_context(
+            db, scope="activation", event_id=user.event_id
+        )
+        if event is None:
+            raise HTTPException(status_code=401, detail="Invalid or expired activation token")
     return user, link
 
 
@@ -311,7 +342,7 @@ def _consent_action(
     confirmation: ProcessingConsentConfirmation | None,
     db: Session,
 ) -> tuple[str | None, str | None]:
-    """Validate and canonicalise consent only for an account's first activation."""
+    """Validate and canonicalise the first-activation disclosure acknowledgement."""
 
     if link.purpose != INITIAL_SETUP:
         return None, None
@@ -697,8 +728,10 @@ def register_complete(
     if consent_disclosure is not None and link is not None:
         document = consent_disclosure.document
         consented_at = datetime.now(timezone.utc)
+        consent_event = db.get(Event, user.event_id) if user.event_id is not None else None
         consent_row = AccountProcessingConsent(
             user_id=user.id,
+            controller_id=consent_event.controller_id if consent_event is not None else None,
             user_subject_id=user.evidence_subject_id,
             event_id=user.event_id,
             event_evidence_id=document.get("event_ref"),
@@ -708,6 +741,44 @@ def register_complete(
             statement_version=STATEMENT_VERSION,
             statement_sha256=consent_disclosure.statement_sha256,
             controller_identity=str(document["controller_identity"]),
+            confirmation_type=str(
+                document.get("confirmation_type") or "disclosure_acknowledgement"
+            ),
+            legal_basis_code=(
+                str(document["legal_basis_code"])
+                if document.get("legal_basis_code")
+                else None
+            ),
+            operator_policy_version=(
+                int(document["operator_policy_version"])
+                if document.get("operator_policy_version") is not None
+                else None
+            ),
+            operator_policy_sha256=(
+                str(document["operator_policy_sha256"])
+                if document.get("operator_policy_sha256")
+                else None
+            ),
+            controller_policy_version=(
+                int(document["controller_policy_version"])
+                if document.get("controller_policy_version") is not None
+                else None
+            ),
+            controller_policy_sha256=(
+                str(document["controller_policy_sha256"])
+                if document.get("controller_policy_sha256")
+                else None
+            ),
+            event_notice_revision=(
+                int(document["event_notice_revision"])
+                if document.get("event_notice_revision") is not None
+                else None
+            ),
+            event_notice_sha256=(
+                str(document["event_notice_sha256"])
+                if document.get("event_notice_sha256")
+                else None
+            ),
             document_json=consent_disclosure.document_json,
             consented_at=consented_at,
         )
@@ -721,33 +792,48 @@ def register_complete(
                 status_code=409,
                 detail={
                     "code": "processing_consent_already_recorded",
-                    "message": "This account activation consent is already recorded.",
+                    "message": "This account activation acknowledgement is already recorded.",
                 },
             ) from exc
         try:
+            evidence_payload = {
+                "subject_ref": user.evidence_subject_id,
+                **(
+                    {"event_ref": document["event_ref"]}
+                    if document.get("event_ref")
+                    else {}
+                ),
+                "policy_version": consent_row.policy_version,
+                "policy_sha256": consent_row.policy_sha256,
+                "statement_sha256": consent_row.statement_sha256,
+                "confirmation_type": consent_row.confirmation_type,
+                "legal_basis_code": consent_row.legal_basis_code,
+                "operator_policy_version": consent_row.operator_policy_version,
+                "operator_policy_sha256": consent_row.operator_policy_sha256,
+                "controller_policy_version": consent_row.controller_policy_version,
+                "controller_policy_sha256": consent_row.controller_policy_sha256,
+                "event_notice_revision": consent_row.event_notice_revision,
+                "event_notice_sha256": consent_row.event_notice_sha256,
+                "document_sha256": hashlib.sha256(
+                    consent_row.document_json.encode("utf-8")
+                ).hexdigest(),
+                "signed_at": consented_at.replace(microsecond=0).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+            }
             consent_row.instance_record_sha256 = append_record(
                 db,
-                workflow_type="account_consent",
+                workflow_type="account_disclosure",
                 workflow_id=consent_row.consent_id,
                 operation_type="recorded",
-                record_type="account.processing_consent_recorded",
+                record_type="account.processing_disclosure_acknowledged",
                 payload={
-                    "subject_ref": user.evidence_subject_id,
-                    **(
-                        {"event_ref": document["event_ref"]}
-                        if document.get("event_ref")
-                        else {}
-                    ),
-                    "policy_version": consent_row.policy_version,
-                    "policy_sha256": consent_row.policy_sha256,
-                    "statement_sha256": consent_row.statement_sha256,
-                    "document_sha256": hashlib.sha256(
-                        consent_row.document_json.encode("utf-8")
-                    ).hexdigest(),
-                    "signed_at": consented_at.replace(microsecond=0).strftime(
-                        "%Y-%m-%dT%H:%M:%SZ"
-                    ),
+                    key: value
+                    for key, value in evidence_payload.items()
+                    if value is not None
                 },
+                controller_id=consent_row.controller_id,
+                event_id=consent_row.event_id,
             )
         except EvidenceUnavailable as exc:
             db.rollback()
@@ -755,7 +841,7 @@ def register_complete(
                 status_code=409,
                 detail={
                     "code": "processing_consent_evidence_unavailable",
-                    "message": "The consent record could not be sealed. No passkey was registered; try again.",
+                    "message": "The processing acknowledgement could not be sealed. No passkey was registered; try again.",
                 },
             ) from exc
     replaced_passkeys = _apply_activation_credential_policy(
@@ -944,6 +1030,7 @@ def rename_credential(
 )
 def auth_begin(request: Request, db: Session = Depends(get_db)):
     """Start discoverable-passkey authentication."""
+    authentication_service_context(db)
     options = generate_authentication_options(
         rp_id=settings.WEBAUTHN_RP_ID,
         user_verification=UserVerificationRequirement.REQUIRED,
@@ -963,6 +1050,7 @@ def auth_complete(
     db: Session = Depends(get_db),
 ):
     """Verify a discoverable passkey and issue a short-lived exchange code."""
+    authentication_service_context(db)
     ceremony = consume_ceremony(body.ceremony_id, AUTHENTICATION, db)
     try:
         credential_id = _credential_id(body.credential)

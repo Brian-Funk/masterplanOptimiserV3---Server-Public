@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import {
   Activity,
   CalendarRange,
+  Building2,
   ChevronRight,
   FileCheck2,
   FileText,
@@ -28,7 +29,8 @@ export type AdminTab =
   | "security"
   | "privacy"
   | "ha"
-  | "audit";
+  | "audit"
+  | "tenancy";
 
 export type AdminDestination = AdminTab | "policies" | "trust";
 
@@ -66,6 +68,7 @@ const ITEMS: NavigationItem[] = [
   { key: "trust", label: "Trust & keys", group: "governance", icon: <KeyRound size={16} />, rootOnly: true },
   { key: "privacy", label: "Deletion evidence", group: "governance", icon: <Shield size={16} />, rootOnly: true },
   { key: "audit", label: "Audit log", group: "governance", icon: <FileText size={16} />, hiddenForIssuer: true },
+  { key: "tenancy", label: "Controllers & hosting", group: "governance", icon: <Building2 size={16} />, rootOnly: true },
   { key: "security", label: "Security", group: "system", icon: <Shield size={16} />, rootOnly: true },
   { key: "ha", label: "High availability", group: "system", icon: <Activity size={16} />, rootOnly: true },
 ];

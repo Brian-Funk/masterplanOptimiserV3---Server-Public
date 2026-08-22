@@ -24,8 +24,18 @@ from app.core.sessions import (
     validate_session,
 )
 from app.core.audit import audit
+from app.core.governance import current_policy_identity
+from app.core.database_tenancy import (
+    authentication_service_context,
+    authenticated_subject_context,
+    authenticated_user_context,
+    bounded_event_id_context,
+)
+from app.core.tenancy import TENANCY_HOSTED, tenancy_mode
 from app.db.database import get_db
 from app.models.user import AuthSession, ExchangeCode, User
+from app.models.event import Event
+from app.models.tenancy import Controller, EventMembership
 from app.core.rate_limit import client_ip_rate_key, limiter, runtime_limit
 
 router = APIRouter()
@@ -56,6 +66,12 @@ class UserMeResponse(BaseModel):
     is_activated: bool
     linked_person_id: Optional[int] = None
     event_id: Optional[int] = None
+    event_ref: Optional[str] = None
+    membership_id: Optional[int] = None
+    controller_public_id: Optional[str] = None
+    controller_trust_entity_id: Optional[str] = None
+    data_policy_version: Optional[int] = None
+    data_policy_sha256: Optional[str] = None
     offline_access_ttl_hours: int = 24
     commissioning_required: bool = False
     commissioning_stage: str = "complete"
@@ -158,6 +174,7 @@ def exchange_code_for_session(
     db: Session = Depends(get_db),
 ):
     """Exchange a short-lived one-time code (from passkey auth) for a session cookie."""
+    authentication_service_context(db)
     now = datetime.now(timezone.utc)
     exchange = (
         db.query(ExchangeCode)
@@ -176,10 +193,24 @@ def exchange_code_for_session(
     if now > expires:
         raise HTTPException(status_code=400, detail="Code expired")
 
+    authenticated_subject_context(db, exchange.user_id)
     user = db.query(User).filter(User.id == exchange.user_id).first()
     if not user or not user.is_active or (
         not user.is_activated and not user.is_root_admin
     ):
+        raise HTTPException(status_code=400, detail="Authentication failed")
+    if user.is_root_admin:
+        authenticated_user_context(
+            db,
+            user_id=user.id,
+            event_id=None,
+            controller_id=None,
+            is_root=True,
+        )
+    elif user.event_id is None:
+        if tenancy_mode(db) == TENANCY_HOSTED:
+            raise HTTPException(status_code=400, detail="Authentication failed")
+    elif bounded_event_id_context(db, scope="authentication", event_id=user.event_id) is None:
         raise HTTPException(status_code=400, detail="Authentication failed")
 
     consumed = (
@@ -245,6 +276,7 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
                 accept_language=request.headers.get("accept-language"),
             )
             if auth_sess:
+                authenticated_subject_context(db, auth_sess.user_id)
                 user = db.query(User).filter(User.id == auth_sess.user_id).first()
         except Exception:
             user = None
@@ -267,6 +299,17 @@ def get_me(
 ):
     """Return the currently authenticated user."""
 
+    event = db.get(Event, current_user.event_id) if current_user.event_id else None
+    controller = db.get(Controller, event.controller_id) if event is not None else None
+    membership = db.query(EventMembership).filter(
+        EventMembership.user_id == current_user.id,
+        EventMembership.event_id == current_user.event_id,
+        EventMembership.status == "active",
+    ).first() if current_user.event_id else None
+    policy_identity = current_policy_identity(
+        db, event_id=current_user.event_id
+    ) if current_user.event_id else None
+
     return UserMeResponse(
         id=current_user.id,
         username=current_user.username,
@@ -280,6 +323,14 @@ def get_me(
         is_activated=current_user.is_activated,
         linked_person_id=current_user.linked_person_id,
         event_id=current_user.event_id,
+        event_ref=event.evidence_id if event is not None else None,
+        membership_id=membership.id if membership is not None else None,
+        controller_public_id=controller.public_id if controller is not None else None,
+        controller_trust_entity_id=(
+            controller.trust_entity_id if controller is not None else None
+        ),
+        data_policy_version=policy_identity[0] if policy_identity else None,
+        data_policy_sha256=policy_identity[1] if policy_identity else None,
         offline_access_ttl_hours=runtime_settings.get_int(
             "offline_access_ttl_hours",
             db,

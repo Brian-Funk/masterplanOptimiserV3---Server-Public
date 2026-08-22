@@ -195,6 +195,14 @@ class TestDeploymentPlannerTests(unittest.TestCase):
         self.assertIn('internal-verify-peer-identity "$target"', initial)
         self.assertNotIn('tar -C "$MP_TEST_SOURCE" -czf - web/out', initial)
 
+    def test_peer_finalisation_waits_for_backend_startup_convergence(self) -> None:
+        finalize = SUPERVISOR.split("internal_finalize_peer()", 1)[1].split(
+            "internal_activate()", 1
+        )[0]
+        self.assertEqual(finalize.count("mp_wait_for_backend_health 45"), 2)
+        self.assertNotIn("urlopen(\"http://127.0.0.1:8000/health\"", finalize)
+        self.assertIn("bounded startup window", finalize)
+
     def test_initial_candidate_preparation_accepts_a_blank_replacement_peer(self) -> None:
         prepare = SUPERVISOR.split("internal_prepare_peer()", 1)[1].split(
             "internal_repin_setup()", 1

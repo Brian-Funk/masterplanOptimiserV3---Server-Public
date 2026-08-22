@@ -151,9 +151,9 @@ def test_draft_is_private_and_publication_is_immutable(db):
     storage = public["storage"]
     assert "IndexedDB offline calendar response" in storage["offline_schedule"]
     assert "names attached to authenticated task allocations" in storage["offline_schedule"]
-    assert "linked directory identity" in storage["offline_schedule"]
+    assert "all authenticated accounts in this event" in storage["offline_schedule"]
     assert "complete people directory" in storage["offline_schedule"]
-    assert "other people's unavailability" in storage["offline_schedule"]
+    assert "private contact details" in storage["offline_schedule"]
     assert "server-bounded expiry" in storage["offline_schedule"]
     assert "never stores authenticated API responses" in storage["application_shell"]
     assert "localStorage" in storage["preferences"]
@@ -393,7 +393,7 @@ def test_public_legal_notice_is_readable_without_javascript_and_escapes_controll
     assert "fetch(" not in response.text
     assert 'href="/rights"' in response.text
     assert "IndexedDB offline calendar response" in response.text
-    assert "linked directory identity" in response.text
+    assert "all authenticated accounts in this event" in response.text
     assert "names attached to authenticated task allocations" in response.text
     assert "sessionStorage" in response.text
 
@@ -558,7 +558,7 @@ def test_offline_disclosure_and_template_revision_are_material_changes():
     }
 
 
-def test_event_controller_override_requires_root_review_and_complete_contact(db):
+def test_legacy_event_controller_override_is_rejected_and_features_remain_bounded(db):
     client, _root = _root_with_reauth(db)
     client.put("/api/v1/admin/governance", json=PROFILE)
     client.post("/api/v1/admin/governance/publish", json=PUBLICATION_CONFIRMATION)
@@ -568,7 +568,8 @@ def test_event_controller_override_requires_root_review_and_complete_contact(db)
         f"/api/v1/admin/governance/events/{event.id}",
         json={"controller_override_enabled": True, "controller_identity_override": "Event Controller"},
     )
-    assert incomplete.status_code == 422
+    assert incomplete.status_code == 409
+    assert incomplete.json()["detail"]["code"] == "legacy_event_governance_override_removed"
 
     disabled = client.put(
         f"/api/v1/admin/governance/events/{event.id}",
@@ -584,16 +585,12 @@ def test_event_controller_override_requires_root_review_and_complete_contact(db)
     saved = client.put(
         f"/api/v1/admin/governance/events/{event.id}",
         json={
-            "controller_override_enabled": True,
-            "controller_identity_override": "Event Controller",
-            "privacy_contact_override": "privacy@synthetic-event-controller.ch",
-            "retention_override_days": 14,
             "enabled_optional_features": ["public_schedule"],
         },
     )
     assert saved.status_code == 200
-    assert saved.json()["controller_identity"] == "Event Controller"
-    assert saved.json()["retention_days"] == 14
+    assert saved.json()["controller_identity"] == PROFILE["controller_legal_name"]
+    assert saved.json()["retention_days"] == settings.EVENT_PURGE_GRACE_DAYS
     public = client.get(f"/api/v1/governance/public/events/{event.id}")
     assert public.status_code == 200
     assert public.json()["policy_version"] == 1

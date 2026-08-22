@@ -69,6 +69,18 @@ def _request() -> Request:
     })
 
 
+def _same_event_admin_client(db, event, suffix: str):
+    return _make_client(
+        db,
+        create_test_user(
+            db,
+            username=f"activation.{suffix}.admin",
+            event_id=event.id,
+            is_admin=True,
+        ),
+    )
+
+
 MAIL_NOTICE = {
     "instance_name": "Synthetic Access Portal",
     "controller_legal_name": "Synthetic Event Controller",
@@ -143,6 +155,7 @@ def test_single_user_email_contains_link_and_one_inline_qr(
         event_id=event.id,
         is_activated=False,
     )
+    admin_client = _same_event_admin_client(db, event, "single-email")
 
     response = admin_client.post(
         f"/api/v1/admin/users/{user.id}/activation-email",
@@ -194,7 +207,6 @@ def test_delivery_helper_commits_only_non_secret_metadata(
         event_id=event.id,
         is_activated=False,
     )
-
     result = admin_module._send_user_activation_email(
         user=user,
         admin=admin,
@@ -733,6 +745,7 @@ def test_qr_zip_uses_identical_canonical_bytes_and_token_free_audit(
         event_id=event.id,
         is_activated=False,
     )
+    admin_client = _same_event_admin_client(db, event, "canonical-qr")
     token, link = create_activation_link(
         user_id=user.id,
         created_by_id=None,
@@ -893,7 +906,7 @@ def test_issuer_cannot_render_another_events_qr(db, issuer_client):
         json={"items": [{"user_id": user.id, "token": token}]},
     )
 
-    assert response.status_code == 403
+    assert response.status_code == 404
     assert token not in response.text
 
 
@@ -911,6 +924,7 @@ def test_qr_rendering_failure_does_not_invalidate_link(
         event_id=event.id,
         is_activated=False,
     )
+    admin_client = _same_event_admin_client(db, event, "render-failure")
     token, link = create_activation_link(
         user_id=user.id,
         created_by_id=None,
@@ -949,6 +963,7 @@ def test_unknown_delivery_is_recorded_and_link_is_invalidated(
         event_id=event.id,
         is_activated=False,
     )
+    admin_client = _same_event_admin_client(db, event, "unknown")
     monkeypatch.setattr(
         admin_module,
         "ActivationMailer",
@@ -986,6 +1001,7 @@ def test_retry_links_attempts_and_creates_a_fresh_token(
         event_id=event.id,
         is_activated=False,
     )
+    admin_client = _same_event_admin_client(db, event, "retry")
     errors = [ActivationMailError("recipient_rejected", "Recipient rejected.")]
     monkeypatch.setattr(
         admin_module,
@@ -1047,6 +1063,7 @@ def test_batch_uses_only_selected_users_and_reports_missing_email(
         event_id=event.id,
         is_activated=False,
     )
+    admin_client = _same_event_admin_client(db, event, "batch")
     missing.email = None
     db.commit()
 

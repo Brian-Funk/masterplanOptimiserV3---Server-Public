@@ -52,7 +52,8 @@ class CommissionApiTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(
-            RuntimeError, r"remote API returned HTTP 403 \(provider error 1010\)"
+            commission_api.RemoteApiError,
+            r"remote API returned HTTP 403 \(provider error 1010\)",
         ) as raised:
             commission_api.request_json(
                 "https://witness.example.test/v1/test", "secret-token", body={}
@@ -60,3 +61,43 @@ class CommissionApiTests(unittest.TestCase):
 
         self.assertNotIn("private-provider-detail", str(raised.exception))
         self.assertNotIn("secret-token", str(raised.exception))
+
+    @mock.patch("deploy.ha.commission_api.witness")
+    def test_pair_open_conflict_is_a_retryable_witness_wait(
+        self, witness: mock.Mock
+    ) -> None:
+        witness.side_effect = commission_api.RemoteApiError(
+            409, "remote API returned HTTP 409"
+        )
+
+        with mock.patch(
+            "sys.argv",
+            [
+                "commission_api.py",
+                "witness",
+                "pair-open",
+                "https://witness.example.test",
+                "mp-opt-example",
+            ],
+        ), mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            self.assertEqual(commission_api.main(), 10)
+
+        self.assertEqual(stderr.getvalue().strip(), "remote API returned HTTP 409")
+
+    @mock.patch("deploy.ha.commission_api.witness")
+    def test_other_witness_conflict_remains_a_failure(self, witness: mock.Mock) -> None:
+        witness.side_effect = commission_api.RemoteApiError(
+            409, "remote API returned HTTP 409"
+        )
+
+        with mock.patch(
+            "sys.argv",
+            [
+                "commission_api.py",
+                "witness",
+                "join",
+                "https://witness.example.test",
+                "mp-opt-example",
+            ],
+        ), mock.patch("sys.stderr", new_callable=io.StringIO):
+            self.assertEqual(commission_api.main(), 1)

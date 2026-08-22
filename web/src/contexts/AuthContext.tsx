@@ -35,6 +35,12 @@ export interface User {
   is_activated: boolean;
   linked_person_id: number | null;
   event_id: number | null;
+  event_ref: string | null;
+  membership_id: number | null;
+  controller_public_id: string | null;
+  controller_trust_entity_id: string | null;
+  data_policy_version: number | null;
+  data_policy_sha256: string | null;
   offline_access_ttl_hours: number;
   commissioning_required?: boolean;
   commissioning_stage?: "recovery" | "controller" | "governance" | "complete";

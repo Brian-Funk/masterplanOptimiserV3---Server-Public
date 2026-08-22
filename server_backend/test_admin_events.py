@@ -26,9 +26,9 @@ def protected_event_body(**values):
 # ── POST /admin/events ──
 
 
-def test_create_event(db, admin_client):
-    """Admin can create an event; publish secret returned once."""
-    r = admin_client.post("/api/v1/admin/events", json=protected_event_body(
+def test_create_event(db, reauth_root_client):
+    """Root can provision an event; publish secret is returned once."""
+    r = reauth_root_client.post("/api/v1/admin/events", json=protected_event_body(
         name="New Event", location="Zurich",
         start_date="2026-08-01", end_date="2026-08-10",
     ))
@@ -40,15 +40,15 @@ def test_create_event(db, admin_client):
     assert data["publish_secret"] == PUBLISH_SECRET
 
 
-def test_create_event_minimal(db, admin_client):
+def test_create_event_minimal(db, reauth_root_client):
     """Event can be created with just a name."""
-    r = admin_client.post("/api/v1/admin/events", json=protected_event_body(name="Minimal Event"))
+    r = reauth_root_client.post("/api/v1/admin/events", json=protected_event_body(name="Minimal Event"))
     assert r.status_code == 200
     assert r.json()["event"]["name"] == "Minimal Event"
 
 
-def test_create_event_rejects_end_date_before_start_date(db, admin_client):
-    response = admin_client.post("/api/v1/admin/events", json=protected_event_body(
+def test_create_event_rejects_end_date_before_start_date(db, reauth_root_client):
+    response = reauth_root_client.post("/api/v1/admin/events", json=protected_event_body(
         name="Invalid date range", start_date="2031-08-20", end_date="2031-08-12",
     ))
 
@@ -56,8 +56,8 @@ def test_create_event_rejects_end_date_before_start_date(db, admin_client):
     assert "End date must be on or after start date" in response.text
 
 
-def test_create_event_allows_same_day_range(db, admin_client):
-    response = admin_client.post("/api/v1/admin/events", json=protected_event_body(
+def test_create_event_allows_same_day_range(db, reauth_root_client):
+    response = reauth_root_client.post("/api/v1/admin/events", json=protected_event_body(
         name="Same-day event", start_date="2031-08-20", end_date="2031-08-20",
     ))
 
@@ -66,7 +66,7 @@ def test_create_event_allows_same_day_range(db, admin_client):
 
 
 def test_ha_event_creation_is_durable_idempotent_and_returns_only_after_polling(
-    db, root_client, monkeypatch, tmp_path,
+    db, reauth_root_client, monkeypatch, tmp_path,
 ):
     import app.main as main_module
     from app.core import ha_replication
@@ -86,7 +86,7 @@ def test_ha_event_creation_is_durable_idempotent_and_returns_only_after_polling(
         idempotency_key="99999999-9999-4999-8999-999999999999",
     )
 
-    first = root_client.post("/api/v1/admin/events", json=body)
+    first = reauth_root_client.post("/api/v1/admin/events", json=body)
     assert first.status_code == 202
     assert first.json()["publish_secret"] is None
     operation_id = first.json()["protection_operation_id"]
@@ -96,14 +96,14 @@ def test_ha_event_creation_is_durable_idempotent_and_returns_only_after_polling(
     assert operation.state == "pending"
     assert (request_dir / f"{operation_id}.json").is_file()
 
-    repeated = root_client.post("/api/v1/admin/events", json=body)
+    repeated = reauth_root_client.post("/api/v1/admin/events", json=body)
     assert repeated.status_code == 202
     assert repeated.json()["protection_operation_id"] == operation_id
     assert db.query(Event).filter(Event.name == "Standby protected event").count() == 1
 
 
 def test_ha_queue_failure_rejects_event_before_commit(
-    db, root_client, monkeypatch, tmp_path,
+    db, reauth_root_client, monkeypatch, tmp_path,
 ):
     import app.main as main_module
 
@@ -116,7 +116,7 @@ def test_ha_queue_failure_rejects_event_before_commit(
     monkeypatch.setattr(main_module, "assess_readiness", lambda _db: SimpleNamespace(ready=True))
     monkeypatch.setattr(main_module, "require_write_permit", lambda **_kwargs: None)
 
-    response = root_client.post(
+    response = reauth_root_client.post(
         "/api/v1/admin/events",
         json=protected_event_body(
             name="Must not commit",
@@ -192,12 +192,12 @@ def test_root_retry_reuses_the_indeterminate_operation_without_duplicates(
 # ── GET /admin/events ──
 
 
-def test_list_events(db, admin_client):
-    """Admin can list all events."""
+def test_list_events(db, root_client):
+    """Root can list all events."""
     event_a, _ = create_test_event(db, name="Event A")
     event_b, _ = create_test_event(db, name="Event B")
 
-    r = admin_client.get("/api/v1/admin/events")
+    r = root_client.get("/api/v1/admin/events")
     assert r.status_code == 200
     events = r.json()
     names = [e["name"] for e in events]
@@ -247,7 +247,7 @@ def test_delete_event_requires_reauth(db, admin_client):
 
 def test_delete_event_requires_accountable_case(db, reauth_admin_client):
     """Direct event deletion cannot bypass the accountable erasure workflow."""
-    event, _ = create_test_event(db, name="Cascade Evt")
+    event = db.query(Event).filter(Event.name == "Reauth Event").one()
     user = create_test_user(db, username="evt_user", event_id=event.id)
     user_id = user.id
 
@@ -267,7 +267,7 @@ def test_delete_event_requires_accountable_case(db, reauth_admin_client):
 
 def test_rejected_direct_delete_preserves_privileged_accounts(db, reauth_admin_client):
     """A rejected shortcut leaves privileged accounts and sessions unchanged."""
-    event, _ = create_test_event(db, name="Privileged Event")
+    event = db.query(Event).filter(Event.name == "Reauth Event").one()
     privileged = create_test_user(
         db,
         username="event.issuer",
@@ -297,7 +297,8 @@ def test_delete_event_not_found(db, reauth_admin_client):
 
 def test_regenerate_secret(db, reauth_admin_client):
     """Admin with reauth can regenerate an event's publish secret."""
-    event, old_secret = create_test_event(db, name="Regen Evt")
+    event = db.query(Event).filter(Event.name == "Reauth Event").one()
+    old_secret = event.publish_secret_hash
     new_value = "n" * 48
     r = reauth_admin_client.post(
         f"/api/v1/admin/events/{event.id}/regenerate-secret",

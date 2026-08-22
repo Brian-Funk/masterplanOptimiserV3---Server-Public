@@ -17,7 +17,9 @@ from app.core.config import settings
 from app.core.evidence import initialise as initialise_evidence
 from app.core.evidence import verify_existing
 from app.core.security import create_default_admin
+from app.core.tenancy import ensure_default_tenancy
 from app.db.database import SessionLocal
+from app.core.database_tenancy import root_service_context
 from app.tools.bootstrap_schema import load_model_registry
 
 
@@ -123,9 +125,11 @@ def main() -> int:
 
     load_model_registry()
     db = SessionLocal()
+    root_service_context(db, scope="fresh_commissioning")
     try:
         _assert_narrow_fresh_state(db)
-        create_default_admin(db)
+        root = create_default_admin(db)
+        ensure_default_tenancy(db, root_user_id=root.id)
         initialise_evidence(db)
         _initialise_ha_bootstrap_state(db)
         db.commit()

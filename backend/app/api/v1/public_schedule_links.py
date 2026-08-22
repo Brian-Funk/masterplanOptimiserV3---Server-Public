@@ -22,6 +22,12 @@ from app.core.ha_witness import HAWritePermitError
 from app.core.rate_limit import limiter
 from app.core.schedule_days import event_schedule_day_range, working_date_for_clock
 from app.core.security import require_root_or_issuer
+from app.core.features import require_event_feature
+from app.core.database_tenancy import (
+    DatabaseTenantContext,
+    apply_database_tenant_context,
+    bounded_event_id_context,
+)
 from app.db.database import get_db
 from app.models.event import Event
 from app.models.ha import HAProtectionOperation
@@ -230,7 +236,7 @@ def _require_event_access(event_id: int, user: User, db: Session) -> Event:
         return event
     if user.is_issuer and user.event_id == event_id:
         return event
-    raise HTTPException(status_code=403, detail="No access to this event")
+    raise HTTPException(status_code=404, detail="Event not found")
 
 
 def _current_views(
@@ -485,6 +491,7 @@ def create_public_schedule_link(
 ):
     """Create a sharing link and return its raw URL exactly once."""
     _require_event_access(event_id, user, db)
+    require_event_feature(event_id, "public_schedule_links", db)
     expires_at = _validate_expiry(body.expires_at)
     _validate_new_view_permissions(event_id, body.view_ids, db)
     token_hash = hashlib.sha256(body.token.encode()).hexdigest()
@@ -570,6 +577,7 @@ def update_public_schedule_link(
     db: Session = Depends(get_db),
 ):
     """Update an active link without changing its token."""
+    require_event_feature(event_id, "public_schedule_links", db)
     if not (body.model_fields_set - {"idempotency_key"}):
         raise HTTPException(status_code=422, detail="No changes supplied")
     link = _load_managed_link(event_id, link_id, user, db)
@@ -848,6 +856,9 @@ def get_shared_public_schedule(
     if token is None:
         raise HTTPException(status_code=404, detail=_UNAVAILABLE_DETAIL)
     token_hash = hashlib.sha256(token.encode()).hexdigest()
+    apply_database_tenant_context(
+        db, DatabaseTenantContext(scope="public_link_lookup")
+    )
     link = (
         db.query(PublicScheduleLink)
         .filter(PublicScheduleLink.token_hash == token_hash)
@@ -855,6 +866,14 @@ def get_shared_public_schedule(
     )
     if link is None:
         raise HTTPException(status_code=404, detail=_UNAVAILABLE_DETAIL)
+    if bounded_event_id_context(
+        db, scope="public_schedule_link", event_id=link.event_id
+    ) is None:
+        raise HTTPException(status_code=404, detail=_UNAVAILABLE_DETAIL)
+    try:
+        require_event_feature(link.event_id, "public_schedule_links", db)
+    except HTTPException:
+        raise HTTPException(status_code=404, detail=_UNAVAILABLE_DETAIL) from None
     protection = _link_operation(link.id, db)
     if protection is not None and protection.state != "accepted":
         raise HTTPException(status_code=404, detail=_UNAVAILABLE_DETAIL)

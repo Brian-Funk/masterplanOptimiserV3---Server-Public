@@ -115,6 +115,9 @@ def validate_activation_token(
     for_update: bool = False,
 ) -> Optional[ActivationLink]:
     """Look up a token and return the link row if it is still valid."""
+    from app.core.database_tenancy import authentication_service_context
+
+    authentication_service_context(db)
     hashed = hash_token(token)
     query = db.query(ActivationLink).filter(ActivationLink.token_hash == hashed)
     if for_update:

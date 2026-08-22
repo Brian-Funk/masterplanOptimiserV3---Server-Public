@@ -15,6 +15,11 @@ from app.core.commissioning import commissioning_required, commissioning_stage
 from app.db.database import get_db
 from app.models.event import Event
 from app.models.user import User
+from app.core.tenancy import TENANCY_HOSTED, apply_membership_projection, tenancy_mode
+from app.core.database_tenancy import (
+    authenticated_subject_context,
+    authenticated_user_context,
+)
 
 
 # Sentinel value for root admin (no password  -  passkey only)
@@ -54,6 +59,7 @@ def _get_current_user(
             detail="Session expired or invalid",
         )
 
+    authenticated_subject_context(db, auth_session.user_id)
     user = db.query(User).filter(User.id == auth_session.user_id).first()
     if (
         user is None
@@ -66,6 +72,42 @@ def _get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found, inactive, or not activated",
+        )
+    if user.is_root_admin:
+        authenticated_user_context(
+            db,
+            user_id=user.id,
+            event_id=None,
+            controller_id=None,
+            is_root=True,
+        )
+    else:
+        # The legacy event column is only a bootstrap projection used to set a
+        # restrictive context before EventMembership itself is loaded.
+        authenticated_user_context(
+            db,
+            user_id=user.id,
+            event_id=user.event_id,
+            controller_id=None,
+            is_root=False,
+        )
+        event = db.get(Event, user.event_id) if user.event_id is not None else None
+        authenticated_user_context(
+            db,
+            user_id=user.id,
+            event_id=user.event_id,
+            controller_id=event.controller_id if event is not None else None,
+            is_root=False,
+        )
+    context = apply_membership_projection(db, user)
+    if (
+        not user.is_root_admin
+        and context.event_id is None
+        and tenancy_mode(db) == TENANCY_HOSTED
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account has no active event membership",
         )
     user._auth_session = auth_session  # type: ignore[attr-defined]
     # The access log uses the random evidence reference rather than a database
@@ -169,13 +211,15 @@ def _is_issuer_only(user: User) -> bool:
 
 
 def require_same_event(target_user: User, current_user: User) -> None:
-    """Raise 403 if current issuer-only user doesn't share event with target."""
-    if _is_issuer_only(current_user):
-        if current_user.event_id is None or target_user.event_id != current_user.event_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="No access to users from other events",
-            )
+    """Require exact event equality for every non-root account."""
+
+    if current_user.is_root_admin:
+        return
+    if current_user.event_id is None or target_user.event_id != current_user.event_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
 
 
 def require_user_management_access(target_user: User, current_user: User) -> None:
@@ -184,6 +228,11 @@ def require_user_management_access(target_user: User, current_user: User) -> Non
     Only root may manage another root, global administrator, or issuer account.
     Issuers may manage ordinary users only within their own event.
     """
+    # Resolve the tenant boundary before the account hierarchy. Otherwise a
+    # foreign root/admin/issuer identifier would return 403 while a foreign
+    # ordinary identifier returns 404, leaking the target's existence/role.
+    if not current_user.is_root_admin:
+        require_same_event(target_user, current_user)
     if target_user.is_root_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -196,24 +245,23 @@ def require_user_management_access(target_user: User, current_user: User) -> Non
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only root admin can manage privileged accounts",
         )
-    require_same_event(target_user, current_user)
 
 
 def require_event_access(event_id: int, current_user: User, db: Session) -> Event:
     """Return an event when the current user may access it.
 
-    Root and global admins may access every event. Issuers, editors, and
-    viewers must have an exact, non-null event assignment.
+    Root may access every event. All non-root roles, including event admins,
+    must have the exact active event membership projected onto the user.
     """
     event = db.query(Event).filter(Event.id == event_id).first()
     if event is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
-    if current_user.is_root_admin or current_user.is_admin:
+    if current_user.is_root_admin:
         return event
     if current_user.event_id is None or current_user.event_id != event_id:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No access to this event",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Event not found",
         )
     return event
 

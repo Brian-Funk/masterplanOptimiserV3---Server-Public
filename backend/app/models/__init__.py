@@ -19,6 +19,7 @@ from app.models.deletion import (
 from app.models.evidence import (
     BackupInventoryRecord,
     EvidenceChainState,
+    ControllerEvidenceChainState,
     EvidenceKey,
     EvidenceKeyRegistrationChallenge,
     ProcessorIdentity,
@@ -28,6 +29,15 @@ from app.models.evidence import (
     PrivacyActionReceipt,
 )
 from app.models.retention import RetentionSchedulerState
+from app.models.tenancy import (
+    Controller,
+    ControllerGovernanceProfile,
+    ControllerGovernancePublication,
+    EventGovernanceConfiguration,
+    EventMembership,
+    InstanceOperatorProfile,
+    OperatorPolicyPublication,
+)
 
 __all__ = [
     "HAClusterState",
@@ -45,6 +55,7 @@ __all__ = [
     "DeletionChecklistApproval",
     "BackupInventoryRecord",
     "EvidenceChainState",
+    "ControllerEvidenceChainState",
     "EvidenceKey",
     "EvidenceKeyRegistrationChallenge",
     "ProcessorIdentity",
@@ -53,4 +64,11 @@ __all__ = [
     "EvidenceOperation",
     "PrivacyActionReceipt",
     "RetentionSchedulerState",
+    "Controller",
+    "ControllerGovernanceProfile",
+    "ControllerGovernancePublication",
+    "EventGovernanceConfiguration",
+    "EventMembership",
+    "InstanceOperatorProfile",
+    "OperatorPolicyPublication",
 ]

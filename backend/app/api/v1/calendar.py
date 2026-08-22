@@ -23,6 +23,7 @@ from app.core.governance import (
     require_data_policy_acknowledgement,
 )
 from app.core.governance_rendering import POLICY_TEMPLATE_VERSION
+from app.core.features import require_event_feature
 from app.core.schedule_days import (
     event_schedule_day_range,
     working_date_for_clock,
@@ -30,6 +31,7 @@ from app.core.schedule_days import (
 )
 from app.db.database import get_db
 from app.models.event import Event
+from app.models.tenancy import Controller, EventMembership
 from app.models.published import (
     GeneralSchedulePublishState,
     PublishedGeneralScheduleCategory,
@@ -228,6 +230,12 @@ class OfflinePublicScheduleItemOut(BaseModel):
 class OfflineCalendarResponse(BaseModel):
     """Fail-closed calendar contract that may be retained in IndexedDB."""
 
+    offline_contract_version: str = "mp-opt-offline-calendar-v6"
+    controller_public_id: str
+    controller_trust_entity_id: str
+    event_ref: str
+    membership_id: int
+    linked_person_id: Optional[int] = None
     event_id: int
     event_name: str
     start_date: Optional[str] = None
@@ -834,15 +842,16 @@ def _build_calendar_response(
     ]
     if restrict_identity_directory:
         linked_person_id = current_user.linked_person_id
+        unavailable_person_ids = {
+            row.external_person_id for row in unavailabilities
+        }
         persons = [
             person for person in persons
-            if linked_person_id is not None
-            and person.external_person_id == linked_person_id
-        ]
-        unavailabilities = [
-            row for row in unavailabilities
-            if linked_person_id is not None
-            and row.external_person_id == linked_person_id
+            if person.external_person_id in unavailable_person_ids
+            or (
+                linked_person_id is not None
+                and person.external_person_id == linked_person_id
+            )
         ]
         if restrict_task_assignments:
             safe_tasks: list[TaskOut] = []
@@ -867,7 +876,7 @@ def _build_calendar_response(
                 }))
             task_outputs = safe_tasks
 
-    policy_identity = current_policy_identity(db)
+    policy_identity = current_policy_identity(db, event_id=event.id)
     return CalendarResponse(
         event_id=event.id,
         event_name=event.name,
@@ -927,9 +936,20 @@ def _build_calendar_response(
     )
 
 
-def _offline_calendar_response(calendar: CalendarResponse) -> OfflineCalendarResponse:
+def _offline_calendar_response(
+    calendar: CalendarResponse,
+    *,
+    controller: Controller,
+    event: Event,
+    membership: EventMembership,
+) -> OfflineCalendarResponse:
     """Select the current bounded calendar fields approved for device storage."""
     return OfflineCalendarResponse(
+        controller_public_id=controller.public_id,
+        controller_trust_entity_id=controller.trust_entity_id,
+        event_ref=event.evidence_id,
+        membership_id=membership.id,
+        linked_person_id=membership.linked_person_id,
         event_id=calendar.event_id,
         event_name=calendar.event_name,
         start_date=calendar.start_date,
@@ -1046,8 +1066,9 @@ def get_offline_calendar(
     db: Session = Depends(get_db),
 ):
     """Return the bounded calendar contract approved for optional device storage."""
+    require_event_feature(event_id, "offline_schedule", db)
     policy_allows_allocation_names = (
-        current_policy_template_version(db) == POLICY_TEMPLATE_VERSION
+        current_policy_template_version(db, event_id=event_id) == POLICY_TEMPLATE_VERSION
     )
     calendar = _build_calendar_response(
         event_id,
@@ -1056,7 +1077,24 @@ def get_offline_calendar(
         restrict_identity_directory=True,
         restrict_task_assignments=not policy_allows_allocation_names,
     )
-    return _offline_calendar_response(calendar)
+    event = db.get(Event, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    controller = db.get(Controller, event.controller_id)
+    membership = db.query(EventMembership).filter(
+        EventMembership.user_id == current_user.id,
+        EventMembership.event_id == event.id,
+        EventMembership.controller_id == event.controller_id,
+        EventMembership.status == "active",
+    ).first()
+    if controller is None or membership is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    return _offline_calendar_response(
+        calendar,
+        controller=controller,
+        event=event,
+        membership=membership,
+    )
 
 
 @router.get("/{event_id}/persons", response_model=List[PersonOut])

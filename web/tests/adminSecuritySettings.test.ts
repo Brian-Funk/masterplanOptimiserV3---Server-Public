@@ -31,7 +31,7 @@ describe("admin security settings", () => {
   it("limits the Security tab to root admins", () => {
     const source = adminPageSource();
 
-    expect(source).toContain('["security", "privacy", "ha"].includes(requestedTab)');
+    expect(source).toContain('["tenancy", "security", "privacy", "ha"].includes(requestedTab)');
     expect(source).toContain("isRootAdmin={!!user?.is_root_admin}");
     expect(source).toContain("user?.is_root_admin");
     expect(source).toContain('tab === "security" && user?.is_root_admin');

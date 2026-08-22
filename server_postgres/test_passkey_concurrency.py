@@ -1,4 +1,5 @@
 """PostgreSQL integration tests for simultaneous passkey ceremonies."""
+import hashlib
 import secrets
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -13,7 +14,9 @@ from webauthn.helpers import base64url_to_bytes, bytes_to_base64url
 import app.api.v1.passkey as passkey_api
 from app.core.activation import create_activation_link
 from app.core.sessions import _hash_token
+from app.core.tenancy import assign_event_membership, ensure_default_tenancy
 from app.main import app
+from app.models.event import Event
 from app.models.user import AuthSession, User, WebAuthnCredential
 from server_backend.conftest import create_test_governance_publication
 
@@ -52,15 +55,31 @@ def _user(
     activated: bool = True,
     admin: bool = False,
 ) -> User:
-    """Create an account used by a concurrency scenario."""
+    """Create an exactly event-scoped account used by a concurrency scenario."""
+    controller = ensure_default_tenancy(db)
+    event = db.query(Event).filter(Event.name == "Passkey concurrency event").first()
+    if event is None:
+        event = Event(
+            controller_id=controller.id,
+            name="Passkey concurrency event",
+            status="draft",
+            publish_secret_hash=hashlib.sha256(
+                b"passkey-concurrency-publish-secret"
+            ).hexdigest(),
+        )
+        db.add(event)
+        db.flush()
     user = User(
         username=username,
         display_name=username,
+        event_id=event.id,
         is_active=True,
         is_activated=activated,
         is_admin=admin,
     )
     db.add(user)
+    db.flush()
+    assign_event_membership(db, user, event)
     db.commit()
     db.refresh(user)
     return user
@@ -206,6 +225,8 @@ def test_different_users_authenticate_simultaneously(db, monkeypatch):
     credential_b = b"parallel-auth-b"
     _credential(db, user_a, credential_a)
     _credential(db, user_b, credential_b)
+    user_a_id = user_a.id
+    user_b_id = user_b.id
     _mock_authentication(monkeypatch, synchronise=True)
 
     begin_response_a, begin_response_b = _run_together(
@@ -219,11 +240,11 @@ def test_different_users_authenticate_simultaneously(db, monkeypatch):
     response_a, response_b = _run_together(
         lambda: _client().post(
             "/api/v1/passkey/auth/complete",
-            json=_auth_body(credential_a, user_a.id, begin_a["ceremony_id"]),
+            json=_auth_body(credential_a, user_a_id, begin_a["ceremony_id"]),
         ),
         lambda: _client().post(
             "/api/v1/passkey/auth/complete",
-            json=_auth_body(credential_b, user_b.id, begin_b["ceremony_id"]),
+            json=_auth_body(credential_b, user_b_id, begin_b["ceremony_id"]),
         ),
     )
 
@@ -243,6 +264,8 @@ def test_different_activation_links_register_simultaneously(db, monkeypatch):
     user_b = _user(db, "parallel.activation.b", activated=False)
     token_a, _ = create_activation_link(user_a.id, issuer.id, db)
     token_b, _ = create_activation_link(user_b.id, issuer.id, db)
+    user_a_id = user_a.id
+    user_b_id = user_b.id
     create_test_governance_publication(db)
     db.commit()
     ceremony_a, ceremony_b = _run_together(
@@ -268,8 +291,8 @@ def test_different_activation_links_register_simultaneously(db, monkeypatch):
     assert response_b.status_code == 200, response_b.text
     db.expire_all()
     assert db.query(WebAuthnCredential).count() == 2
-    assert db.get(User, user_a.id).is_activated is True
-    assert db.get(User, user_b.id).is_activated is True
+    assert db.get(User, user_a_id).is_activated is True
+    assert db.get(User, user_b_id).is_activated is True
 
 
 def test_distinct_account_sessions_register_simultaneously(db, monkeypatch):

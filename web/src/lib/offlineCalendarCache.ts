@@ -1,10 +1,10 @@
 "use client";
 
 const DB_NAME = "mp-opt-offline-calendar";
-const DB_VERSION = 4;
+const DB_VERSION = 6;
 const STORE_NAME = "calendar-payloads";
-const CACHE_SCHEMA_VERSION = 4;
-const OPT_IN_PREFIX = "mp-opt-offline-calendar-enabled:v2:";
+const CACHE_SCHEMA_VERSION = 6;
+const OPT_IN_PREFIX = "mp-opt-offline-calendar-enabled:v3:";
 
 type StorageErrorCode =
   | "storage_unavailable"
@@ -30,6 +30,12 @@ export interface OfflineCalendarCacheEntry<TPayload = unknown> {
   schema_version: typeof CACHE_SCHEMA_VERSION;
   user_id: number;
   event_id: number;
+  event_ref: string;
+  membership_id: number;
+  controller_public_id: string;
+  controller_trust_entity_id: string;
+  data_policy_version: number;
+  data_policy_sha256: string;
   cached_at: string;
   valid_until: string;
   payload: TPayload;
@@ -65,6 +71,12 @@ function assertOnlyKeys(
 }
 
 const CALENDAR_KEYS = new Set([
+  "offline_contract_version",
+  "controller_public_id",
+  "controller_trust_entity_id",
+  "event_ref",
+  "membership_id",
+  "linked_person_id",
   "event_id",
   "event_name",
   "start_date",
@@ -195,6 +207,23 @@ export function assertParticipantSafeOfflineCalendarPayload(
   }
   assertOnlyKeys(payload, CALENDAR_KEYS, "calendar");
   if (
+    payload.offline_contract_version !== "mp-opt-offline-calendar-v6" ||
+    typeof payload.controller_public_id !== "string" ||
+    payload.controller_public_id.length === 0 ||
+    typeof payload.controller_trust_entity_id !== "string" ||
+    payload.controller_trust_entity_id.length === 0 ||
+    typeof payload.event_ref !== "string" ||
+    payload.event_ref.length === 0 ||
+    !Number.isInteger(payload.membership_id) ||
+    Number(payload.membership_id) <= 0 ||
+    !(
+      payload.linked_person_id === null
+      || (Number.isInteger(payload.linked_person_id) && Number(payload.linked_person_id) > 0)
+    ) ||
+    !Number.isInteger(payload.data_policy_version) ||
+    Number(payload.data_policy_version) <= 0 ||
+    typeof payload.data_policy_sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(payload.data_policy_sha256) ||
     !Number.isInteger(payload.event_id) ||
     typeof payload.event_name !== "string" ||
     !Array.isArray(payload.tasks) ||
@@ -350,6 +379,7 @@ export function assertParticipantSafeOfflineCalendarPayload(
   if (payload.unavailabilities !== undefined && !Array.isArray(payload.unavailabilities)) {
     throw new OfflineCalendarStorageError("unsafe_payload", "Offline unavailability data is invalid.");
   }
+  const unavailablePersonIds = new Set<number>();
   for (const intervalValue of payload.unavailabilities ?? []) {
     if (!isRecord(intervalValue)) {
       throw new OfflineCalendarStorageError("unsafe_payload", "An offline unavailability is invalid.");
@@ -358,13 +388,19 @@ export function assertParticipantSafeOfflineCalendarPayload(
     if (!Number.isInteger(intervalValue.person_id)) {
       throw new OfflineCalendarStorageError("unsafe_payload", "An offline unavailability is invalid.");
     }
-    directoryIdentityIds.add(intervalValue.person_id as number);
+    unavailablePersonIds.add(intervalValue.person_id as number);
   }
 
-  if (directoryIdentityIds.size > 1) {
+  const linkedPersonId = payload.linked_person_id as number | null;
+  const permittedDirectoryIds = new Set(unavailablePersonIds);
+  if (linkedPersonId !== null) permittedDirectoryIds.add(linkedPersonId);
+  if (
+    [...directoryIdentityIds].some((personId) => !permittedDirectoryIds.has(personId))
+    || [...unavailablePersonIds].some((personId) => !directoryIdentityIds.has(personId))
+  ) {
     throw new OfflineCalendarStorageError(
       "unsafe_payload",
-      "The offline calendar contains another person's directory identity or availability.",
+      "The offline calendar contains a directory identity unrelated to event unavailability.",
     );
   }
 
@@ -458,6 +494,14 @@ function validStoredEntry<TPayload>(
   userId: number,
   eventId: number,
   now: Date,
+  expectedIdentity?: {
+    event_ref: string | null;
+    membership_id: number | null;
+    controller_public_id: string | null;
+    controller_trust_entity_id: string | null;
+    data_policy_version: number | null;
+    data_policy_sha256: string | null;
+  },
 ): value is StoredOfflineCalendarCacheEntry<TPayload> {
   if (!isRecord(value)) return false;
   const cachedAt = timestamp(value.cached_at);
@@ -467,6 +511,20 @@ function validStoredEntry<TPayload>(
     value.id !== cacheKey(userId, eventId) ||
     value.user_id !== userId ||
     value.event_id !== eventId ||
+    typeof value.event_ref !== "string" ||
+    !Number.isInteger(value.membership_id) ||
+    typeof value.controller_public_id !== "string" ||
+    typeof value.controller_trust_entity_id !== "string" ||
+    !Number.isInteger(value.data_policy_version) ||
+    typeof value.data_policy_sha256 !== "string" ||
+    (expectedIdentity !== undefined && (
+      value.event_ref !== expectedIdentity.event_ref ||
+      value.membership_id !== expectedIdentity.membership_id ||
+      value.controller_public_id !== expectedIdentity.controller_public_id ||
+      value.controller_trust_entity_id !== expectedIdentity.controller_trust_entity_id ||
+      value.data_policy_version !== expectedIdentity.data_policy_version ||
+      value.data_policy_sha256 !== expectedIdentity.data_policy_sha256
+    )) ||
     cachedAt === null ||
     validUntil === null ||
     cachedAt > validUntil ||
@@ -490,9 +548,31 @@ export async function storeOfflineCalendarPayload<TPayload>(
   cachedAt: string,
   validUntil: string,
   now = new Date(),
+  expectedIdentity?: {
+    event_ref: string | null;
+    membership_id: number | null;
+    controller_public_id: string | null;
+    controller_trust_entity_id: string | null;
+    data_policy_version: number | null;
+    data_policy_sha256: string | null;
+  },
 ): Promise<OfflineCalendarCacheEntry<TPayload> | null> {
   if (!offlineCalendarStorageEnabled(userId)) return null;
   assertParticipantSafeOfflineCalendarPayload(payload);
+  const boundedPayload = payload as Record<string, unknown>;
+  if (expectedIdentity !== undefined && (
+    boundedPayload.event_ref !== expectedIdentity.event_ref ||
+    boundedPayload.membership_id !== expectedIdentity.membership_id ||
+    boundedPayload.controller_public_id !== expectedIdentity.controller_public_id ||
+    boundedPayload.controller_trust_entity_id !== expectedIdentity.controller_trust_entity_id ||
+    boundedPayload.data_policy_version !== expectedIdentity.data_policy_version ||
+    boundedPayload.data_policy_sha256 !== expectedIdentity.data_policy_sha256
+  )) {
+    throw new OfflineCalendarStorageError(
+      "unsafe_payload",
+      "The offline schedule did not match the authenticated tenant and policy.",
+    );
+  }
   const cachedTime = timestamp(cachedAt);
   const validTime = timestamp(validUntil);
   if (
@@ -511,6 +591,12 @@ export async function storeOfflineCalendarPayload<TPayload>(
     schema_version: CACHE_SCHEMA_VERSION,
     user_id: userId,
     event_id: eventId,
+    event_ref: boundedPayload.event_ref as string,
+    membership_id: boundedPayload.membership_id as number,
+    controller_public_id: boundedPayload.controller_public_id as string,
+    controller_trust_entity_id: boundedPayload.controller_trust_entity_id as string,
+    data_policy_version: boundedPayload.data_policy_version as number,
+    data_policy_sha256: boundedPayload.data_policy_sha256 as string,
     cached_at: cachedAt,
     valid_until: validUntil,
     payload,
@@ -554,9 +640,23 @@ export async function storeOfflineCalendarPayload<TPayload>(
 export async function getOfflineCalendarPayload<TPayload>(
   userId: number,
   eventId: number,
-  now = new Date(),
+  expectedIdentityOrNow?: {
+    event_ref: string | null;
+    membership_id: number | null;
+    controller_public_id: string | null;
+    controller_trust_entity_id: string | null;
+    data_policy_version: number | null;
+    data_policy_sha256: string | null;
+  } | Date,
+  nowArg?: Date,
 ): Promise<OfflineCalendarCacheEntry<TPayload> | null> {
   if (!offlineCalendarStorageEnabled(userId)) return null;
+  const expectedIdentity = expectedIdentityOrNow instanceof Date
+    ? undefined
+    : expectedIdentityOrNow;
+  const now = expectedIdentityOrNow instanceof Date
+    ? expectedIdentityOrNow
+    : (nowArg ?? new Date());
   const db = await openDatabase();
   try {
     return await new Promise<OfflineCalendarCacheEntry<TPayload> | null>((resolve, reject) => {
@@ -578,11 +678,17 @@ export async function getOfflineCalendarPayload<TPayload>(
         const request = store.get(cacheKey(userId, eventId));
         request.onsuccess = () => {
           const record = request.result as unknown;
-          if (validStoredEntry<TPayload>(record, userId, eventId, now)) {
+          if (validStoredEntry<TPayload>(record, userId, eventId, now, expectedIdentity)) {
             result = {
               schema_version: CACHE_SCHEMA_VERSION,
               user_id: record.user_id,
               event_id: record.event_id,
+              event_ref: record.event_ref,
+              membership_id: record.membership_id,
+              controller_public_id: record.controller_public_id,
+              controller_trust_entity_id: record.controller_trust_entity_id,
+              data_policy_version: record.data_policy_version,
+              data_policy_sha256: record.data_policy_sha256,
               cached_at: record.cached_at,
               valid_until: record.valid_until,
               payload: record.payload,

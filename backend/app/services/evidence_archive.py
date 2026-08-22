@@ -23,6 +23,8 @@ from app.core.evidence import append_record, evidence_home
 from app.core.ha import control_witness_ready, is_ha_enabled
 from app.core.ha_witness import require_write_permit
 from app.db.database import SessionLocal
+from app.core.database_tenancy import root_service_context
+from app.core.tenancy import TENANCY_HOSTED, tenancy_mode
 from app.models.evidence import EvidenceArchiveSubmission, EvidenceChainState
 from app.services import evidence_export
 
@@ -120,6 +122,8 @@ def _create_verified_bundle(
 def preflight(db: Session) -> dict[str, Any]:
     """Build and verify a disposable current bundle without contacting GitHub."""
 
+    if tenancy_mode(db) == TENANCY_HOSTED:
+        raise RuntimeError("hosted_controller_archive_requires_explicit_controller")
     state = db.get(EvidenceChainState, 1)
     if state is None or not state.instance_id or not state.head_sha256:
         raise RuntimeError("evidence_chain_is_unavailable")
@@ -172,6 +176,8 @@ def enqueue_current_chain(db: Session) -> EvidenceArchiveSubmission | None:
 
     if not settings.EVIDENCE_GIT_ARCHIVE_ENABLED:
         return None
+    if tenancy_mode(db) == TENANCY_HOSTED:
+        raise RuntimeError("hosted_controller_archive_requires_explicit_controller")
     state = db.get(EvidenceChainState, 1)
     if state is None or not state.head_sha256:
         return None
@@ -300,6 +306,7 @@ def run_archive_cycle(
     observed = now or utcnow()
     worker_id = worker_id or f"worker-{uuid.uuid4().hex[:16]}"
     db = session_factory()
+    root_service_context(db, scope="evidence_archive_worker")
     try:
         if enqueue:
             enqueue_current_chain(db)
@@ -433,6 +440,7 @@ def cli(argv: list[str] | None = None) -> int:
     commands.add_parser("export-tui")
     arguments = parser.parse_args(argv)
     db = SessionLocal()
+    root_service_context(db, scope="evidence_archive_cli")
     try:
         if arguments.command == "status":
             print(json.dumps(archive_status(db), sort_keys=True, default=str))

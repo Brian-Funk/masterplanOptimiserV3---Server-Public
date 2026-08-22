@@ -27,6 +27,8 @@ def _case(db, event, *, case_type="personal_data_erasure", subject_ref=None):
     case = DeletionCase(
         case_type=case_type,
         instance_id="11111111-1111-4111-8111-111111111111",
+        controller_id=event.controller_id,
+        event_id=event.id,
         event_evidence_id=event.evidence_id,
         event_display_name=event.name,
         subject_evidence_id=subject_ref or event.evidence_id,
@@ -54,10 +56,12 @@ def _activate_processor(db, event, *, entity_id="prc-synthetic0001"):
         public_key="ssh-ed25519 " + ("B" if alternate else "A") * 44,
         public_key_sha256=("e" if alternate else "f") * 64,
         instance_id="11111111-1111-4111-8111-111111111111",
-        entity_id=entity_id, role="processor", activated_at=datetime.now(timezone.utc),
+        entity_id=entity_id, controller_id=event.controller_id, event_id=event.id,
+        role="processor", activated_at=datetime.now(timezone.utc),
     )
     identity = ProcessorIdentity(
-        instance_id=key.instance_id, entity_id=entity_id, event_id=event.id,
+        instance_id=key.instance_id, entity_id=entity_id,
+        controller_id=event.controller_id, event_id=event.id,
         event_evidence_id=event.evidence_id, event_display_name=event.name,
         display_label="Synthetic workstation", status="active", active_key_id=key.key_id,
         activated_at=datetime.now(timezone.utc),

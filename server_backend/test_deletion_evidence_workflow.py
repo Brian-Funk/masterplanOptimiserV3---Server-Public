@@ -31,6 +31,8 @@ def _case(db, event, *, case_type, user=None):
     case = DeletionCase(
         case_type=case_type,
         instance_id="11111111-1111-4111-8111-111111111111",
+        controller_id=event.controller_id,
+        event_id=event.id,
         event_evidence_id=event.evidence_id,
         subject_evidence_id=(
             user.evidence_subject_id if user is not None else event.evidence_id
@@ -51,12 +53,15 @@ def _activate_processor(db, event):
         public_key_sha256="f" * 64,
         instance_id="11111111-1111-4111-8111-111111111111",
         entity_id="prc-synthetic0001",
+        controller_id=event.controller_id,
+        event_id=event.id,
         role="processor",
         activated_at=datetime.now(timezone.utc),
     )
     identity = ProcessorIdentity(
         instance_id=key.instance_id,
         entity_id=key.entity_id,
+        controller_id=event.controller_id,
         event_id=event.id,
         event_evidence_id=event.evidence_id,
         event_display_name=event.name,

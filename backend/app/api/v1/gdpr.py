@@ -18,6 +18,7 @@ from webauthn.helpers import base64url_to_bytes, options_to_json
 from webauthn.helpers.structs import UserVerificationRequirement
 
 from app.core.audit import audit
+from app.core.database_tenancy import database_tenant_context
 from app.core.config import settings
 from app.core.evidence import EvidenceUnavailable, append_record as append_evidence_record
 from app.core.compliance_receipts import (
@@ -206,9 +207,18 @@ def _deletion_response(job: DeletionCase, *, status: str, message: str) -> Delet
 
 
 def _admin_deletion_job(db: Session, request_id: str) -> DeletionCase:
-    job = db.query(DeletionCase).filter(
+    query = db.query(DeletionCase).filter(
         DeletionCase.request_id == request_id,
-    ).first()
+    )
+    context = database_tenant_context(db)
+    if not context.is_root:
+        if context.event_id is None or context.controller_id is None:
+            raise HTTPException(status_code=404, detail="Deletion request not found")
+        query = query.filter(
+            DeletionCase.event_id == context.event_id,
+            DeletionCase.controller_id == context.controller_id,
+        )
+    job = query.first()
     if job is None:
         raise HTTPException(status_code=404, detail="Deletion request not found")
     return job
@@ -387,6 +397,8 @@ def _new_deletion_job(db: Session, user: User, *, state: str = "submitted") -> D
     )
     job = DeletionCase(
         instance_id=instance_id,
+        controller_id=event.controller_id if event is not None else 1,
+        event_id=event.id if event is not None else None,
         event_evidence_id=event_ref,
         event_display_name=event.name if event is not None else None,
         subject_display_name=user.display_name or user.username,
@@ -587,7 +599,16 @@ def list_deletion_requests(
 ):
     """List non-identifying deletion workflow receipts."""
 
-    jobs = db.query(DeletionCase).order_by(DeletionCase.id.desc()).limit(500).all()
+    query = db.query(DeletionCase)
+    context = database_tenant_context(db)
+    if not context.is_root:
+        if context.event_id is None or context.controller_id is None:
+            return []
+        query = query.filter(
+            DeletionCase.event_id == context.event_id,
+            DeletionCase.controller_id == context.controller_id,
+        )
+    jobs = query.order_by(DeletionCase.id.desc()).limit(500).all()
     return [_job_detail(job, db) for job in jobs]
 
 

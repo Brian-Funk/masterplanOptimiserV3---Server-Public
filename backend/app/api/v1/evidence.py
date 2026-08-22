@@ -8,10 +8,21 @@ from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
 
 from app.core.audit import audit
-from app.core.evidence import EvidenceUnavailable, initialise, verify_local_chain
+from app.core.evidence import (
+    EvidenceUnavailable,
+    initialise,
+    verify_controller_chain,
+    verify_local_chain,
+)
 from app.core.security import require_root_admin, require_root_recent_reauth
 from app.db.database import get_db
-from app.models.evidence import BackupInventoryRecord, EvidenceChainState, EvidenceKey
+from app.models.evidence import (
+    BackupInventoryRecord,
+    ControllerEvidenceChainState,
+    EvidenceChainState,
+    EvidenceKey,
+)
+from app.models.tenancy import Controller
 from app.models.user import User
 from app.services.evidence_archive import archive_status, retry_submission
 from app.services.evidence_export import create_complete_evidence_export, remove_complete_evidence_export
@@ -36,6 +47,9 @@ def evidence_status(
 
     state = db.get(EvidenceChainState, 1)
     keys = db.query(EvidenceKey).order_by(EvidenceKey.registered_at).all()
+    controller_chains = db.query(ControllerEvidenceChainState).order_by(
+        ControllerEvidenceChainState.controller_id
+    ).all()
     return {
         "initialised": state is not None,
         "mode": state.evidence_mode if state else None,
@@ -52,6 +66,17 @@ def evidence_status(
                 "revoked_at": key.revoked_at,
             }
             for key in keys
+        ],
+        "controller_chains": [
+            {
+                "controller_public_id": row.controller_public_id,
+                "controller_trust_entity_id": row.controller_trust_entity_id,
+                "chain_id": row.chain_id,
+                "last_sequence": row.last_sequence,
+                "head_sha256": row.head_sha256,
+                "legacy_chain_head_sha256": row.legacy_chain_head_sha256,
+            }
+            for row in controller_chains
         ],
     }
 
@@ -205,6 +230,79 @@ def export_evidence(
             "X-Content-Type-Options": "nosniff",
             "X-Evidence-Chain-Head": metadata["chain_head_sha256"],
             "X-Evidence-Zip-SHA256": metadata["zip_sha256"],
+        },
+        background=BackgroundTask(remove_complete_evidence_export, output),
+    )
+
+
+@router.post("/controllers/{controller_public_id}/export")
+def export_controller_evidence(
+    controller_public_id: str,
+    request: Request,
+    root: User = Depends(require_root_recent_reauth),
+    db: Session = Depends(get_db),
+):
+    """Return a verifiable archive containing exactly one controller chain."""
+
+    controller = db.query(Controller).filter(
+        Controller.public_id == controller_public_id
+    ).first()
+    if controller is None:
+        raise HTTPException(status_code=404, detail="Controller not found")
+    output = None
+    try:
+        verified = verify_controller_chain(db, controller.id)
+        output, metadata = create_complete_evidence_export(
+            db,
+            verified["instance_id"],
+            controller_id=controller.id,
+        )
+        if metadata.get("chain_head_sha256") != verified.get("head_sha256"):
+            remove_complete_evidence_export(output)
+            raise EvidenceUnavailable("The controller chain changed during export")
+    except EvidenceUnavailable as exc:
+        if output is not None:
+            remove_complete_evidence_export(output)
+        raise _unavailable(exc) from exc
+    try:
+        audit(
+            db,
+            user=root,
+            action="evidence.controller_export",
+            resource_type="controller",
+            resource_id=controller.id,
+            controller_id=controller.id,
+            detail=json.dumps(
+                {
+                    "bundle_id": metadata["bundle_id"],
+                    "chain_head_sha256": metadata["chain_head_sha256"],
+                    "record_count": metadata["record_count"],
+                    "zip_sha256": metadata["zip_sha256"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            request=request,
+        )
+        db.commit()
+    except Exception:
+        remove_complete_evidence_export(output)
+        raise
+    filename = (
+        f"controller-evidence-{controller.public_id}-"
+        f"{metadata['chain_head_sha256'][:12]}.zip"
+    )
+    return FileResponse(
+        output,
+        media_type="application/zip",
+        filename=filename,
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+            "X-Evidence-Chain-Head": metadata["chain_head_sha256"],
+            "X-Evidence-Zip-SHA256": metadata["zip_sha256"],
+            "X-Evidence-Controller": controller.public_id,
         },
         background=BackgroundTask(remove_complete_evidence_export, output),
     )

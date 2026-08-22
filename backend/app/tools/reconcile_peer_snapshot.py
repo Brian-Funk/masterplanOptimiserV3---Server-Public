@@ -11,6 +11,7 @@ from app.core.compliance_receipts import (
 )
 from app.core.deletion_workflow import reconcile_completed_case_peer_snapshot
 from app.db.database import SessionLocal
+from app.core.database_tenancy import root_service_context
 from app.models.deletion import DeletionCase
 
 
@@ -19,6 +20,7 @@ def main() -> int:
     parser.add_argument("--request-id", required=True)
     args = parser.parse_args()
     db = SessionLocal()
+    root_service_context(db, scope="peer_snapshot_reconciliation")
     try:
         job = db.query(DeletionCase).filter(DeletionCase.request_id == args.request_id).one()
         if not job.clean_backup_job_id or not job.live_data_purged_at:

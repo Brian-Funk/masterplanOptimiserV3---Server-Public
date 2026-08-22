@@ -13,6 +13,8 @@ expected_hash="${2:?archive hash required}"
 
 # shellcheck source=../management/common.sh
 source "$MP_ROOT/deploy/management/common.sh"
+# shellcheck source=../management/test_hooks.sh
+source "$MP_ROOT/deploy/management/test_hooks.sh"
 # shellcheck source=../management/snapshots.sh
 source "$MP_ROOT/deploy/management/snapshots.sh"
 mp_load_ha_config
@@ -282,6 +284,8 @@ stage_db="mp_stage_${bundle_id//[^A-Za-z0-9]/}"
 stage_db="${stage_db:0:48}"
 rollback_db="mp_rollback_${bundle_id//[^A-Za-z0-9]/}"
 rollback_db="${rollback_db:0:48}"
+receiver_hook_key="$bundle_id:$expected_hash:$(basename "$stage")"
+restore_bundle_database() {
 "${MP_COMPOSE[@]}" exec -T db dropdb -U masterplan --if-exists "$stage_db"
 "${MP_COMPOSE[@]}" exec -T db createdb -U masterplan -T template0 "$stage_db"
 restore_started_ms="$(date +%s%3N)"
@@ -294,6 +298,10 @@ db_identity="$("${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d "$stage_db" -
     || { echo "The database writer identity does not match the authorized bundle." >&2; exit 1; }
 "${MP_COMPOSE[@]}" exec -T db psql -U masterplan -d "$stage_db" -Atqc \
     "SELECT 1 FROM users LIMIT 1" >/dev/null
+}
+
+mp_setup_test_hook_run_driver_transition bundle.restore replicated.restore \
+    "$receiver_hook_key" restore_bundle_database || exit $?
 
 # Critical-operation acknowledgement is bound to rows inside this exact
 # restored database. A request file or sender claim alone is never enough.
@@ -377,6 +385,7 @@ cp -a "$MP_ROOT/secrets/." "$stage/secrets.previous/"
 # sender already reconciles a lost acknowledgement against ha-receiver.json,
 # so completing a verified copy after SIGHUP is safe and deterministic.
 trap '' HUP INT TERM
+mp_setup_test_hook_reach_named bundle.verify before-side-effect || exit $?
 "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
 database_swap_started=true
 "${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U masterplan -d postgres \
@@ -463,6 +472,7 @@ if ! "${MP_COMPOSE[@]}" exec -T backend python -c \
     echo "HA_RECEIVER_BACKEND_HEALTH_FAILED: the replicated backend did not become healthy." >&2
     exit 1
 fi
+mp_setup_test_hook_reach_named bundle.verify after-side-effect-before-receipt || exit $?
 python3 "$MP_ROOT/deploy/ha/smtp_probe.py" --root "$MP_ROOT" --node-id "$HA_NODE_ID" \
     --output "$MP_ROOT/runtime/ha-smtp-status.json" >/dev/null 2>&1 || true
 
@@ -479,6 +489,9 @@ jq -n --arg bundle "$bundle_id" --arg hash "$expected_hash" --arg received "$rec
       generation:$generation,privacy_assertion:$privacy,protection_operations:$operations}' \
     > "$stage/receiver.json"
 install -m 0600 "$stage/receiver.json" "$MP_ROOT/runtime/ha-receiver.json"
+sync -f "$MP_ROOT/runtime/ha-receiver.json" 2>/dev/null || exit 1
+sync -f "$MP_ROOT/runtime" 2>/dev/null || exit 1
+mp_setup_test_hook_reach_named bundle.verify after-receipt-before-checkpoint || exit $?
 # The old database is intentionally retained until the next successful copy;
 # it is the immediate local rollback point for operator recovery.
 "${MP_COMPOSE[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U masterplan -d postgres \
@@ -496,6 +509,7 @@ if [ "$lease_service_active" = true ]; then
     sudo -n systemctl restart mp-opt-ha-lease.service
 fi
 database_swap_started=false
+mp_setup_test_hook_reach_named bundle.verify after-checkpoint-before-next-action || exit $?
 # Clear the witness transfer guard. Failure is harmless: it expires after the
 # failover delay and the fully applied, hash-verified copy remains valid.
 python3 "$MP_ROOT/deploy/ha/witness_control.py" complete-transfer \

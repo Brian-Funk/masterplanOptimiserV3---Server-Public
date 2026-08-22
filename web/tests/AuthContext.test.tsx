@@ -71,6 +71,12 @@ const mockUser = {
   is_activated: true,
   linked_person_id: null,
   event_id: 1,
+  event_ref: "11111111-1111-4111-8111-111111111111",
+  membership_id: 101,
+  controller_public_id: "22222222-2222-4222-8222-222222222222",
+  controller_trust_entity_id: "ctl-1111111111111111",
+  data_policy_version: 3,
+  data_policy_sha256: "a".repeat(64),
   offline_access_ttl_hours: 24,
 };
 
@@ -231,9 +237,15 @@ describe("AuthContext", () => {
 
   it("denies expired offline access and removes its marker", async () => {
     localStorage.setItem("mp-opt-offline-access", JSON.stringify({
-      schema_version: 1,
+      schema_version: 2,
       user_id: 1,
       event_id: 1,
+      event_ref: mockUser.event_ref,
+      membership_id: mockUser.membership_id,
+      controller_public_id: mockUser.controller_public_id,
+      controller_trust_entity_id: mockUser.controller_trust_entity_id,
+      data_policy_version: mockUser.data_policy_version,
+      data_policy_sha256: mockUser.data_policy_sha256,
       cached_at: "2000-01-01T00:00:00.000Z",
       valid_until: "2000-01-01T01:00:00.000Z",
       ttl_hours: 1,
@@ -275,7 +287,7 @@ describe("AuthContext", () => {
       expect(
         JSON.parse(localStorage.getItem("mp-opt-offline-access") ?? "{}"),
       ).toMatchObject({
-        schema_version: 1,
+        schema_version: 2,
         ttl_hours: 3,
         valid_until: "2026-05-21T12:30:00.000Z",
       });

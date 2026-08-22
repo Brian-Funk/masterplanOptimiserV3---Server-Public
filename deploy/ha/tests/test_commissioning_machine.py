@@ -6,6 +6,7 @@ import json
 import hashlib
 import io
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -15,14 +16,36 @@ import tarfile
 import zipfile
 
 from deploy import candidate_bundle
+from deploy.ha import cloudflare_worker_script
 
 
 ROOT = Path(__file__).resolve().parents[3]
 MACHINE = ROOT / "deploy/commissioning-machine.sh"
+MACHINE_HA = (ROOT / "deploy/management/machine_ha.sh").read_text(encoding="utf-8")
+HA_MANAGEMENT = (ROOT / "deploy/management/ha.sh").read_text(encoding="utf-8")
 SETUP = (ROOT / "deploy/management/setup_v2.sh").read_text(encoding="utf-8")
 COMMON = (ROOT / "deploy/management/common.sh").read_text(encoding="utf-8")
 MANAGE = (ROOT / "manage.sh").read_text(encoding="utf-8")
 BOOTSTRAP = (ROOT / "deploy/setup-server.sh").read_text(encoding="utf-8")
+
+
+class CloudflareWorkerScriptTests(unittest.TestCase):
+    def test_observe_uses_settings_but_delete_targets_the_script(self) -> None:
+        account = "a" * 32
+        worker = "mp-opt-ha-mpopt12345"
+        base = (
+            "https://api.cloudflare.com/client/v4/accounts/"
+            f"{account}/workers/scripts/{worker}"
+        )
+
+        self.assertEqual(
+            cloudflare_worker_script.worker_api_url("observe", account, worker),
+            f"{base}/settings",
+        )
+        self.assertEqual(
+            cloudflare_worker_script.worker_api_url("delete", account, worker),
+            base,
+        )
 
 
 def state_document(*, state: str = "in_progress") -> dict[str, object]:
@@ -68,6 +91,292 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             "MP_HA_CONFIG": str(ha / "node.env"),
             "MP_DEPLOYMENT_POLICY_FILE": str(policy),
         }
+
+    def test_structured_snapshot_replays_without_duplicate_creation_and_verifies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            script = r'''
+                set -Eeuo pipefail
+                export MP_STATE="$1/state"
+                export MP_SNAPSHOTS="$1/snapshots"
+                export MP_MACHINE_SNAPSHOT_RECEIPTS="$MP_STATE/snapshot-machine-receipts"
+                export MP_SETUP_V2_ARTIFACTS="$MP_STATE/machine-artifacts"
+                export MP_PORTABLE_TOOL="$2/deploy/management/portable_snapshot.py"
+                export MP_PORTABLE_LAST_IMPORT_STATE="$MP_STATE/portable-last-import.json"
+                mkdir -m 0700 "$MP_STATE" "$MP_SNAPSHOTS" "$MP_SETUP_V2_ARTIFACTS"
+                source "$2/deploy/management/machine_snapshots.sh"
+                mp_machine_require_local_owner() { return 0; }
+                mp_setup_test_hook_policy() { return 0; }
+                mp_setup_execution_acquire() { return 0; }
+                mp_setup_execution_release() { return 0; }
+                mp_initialise_paths() { return 0; }
+                mp_create_private_owner_directory_chain() { mkdir -p "$1"; chmod 700 "$1"; }
+                mp_machine_validate_regular_file() {
+                    test -f "$1" && test ! -L "$1" \
+                        && test "$(stat -c '%u:%a' "$1")" = "$(id -u):$2"
+                }
+                mp_secure_remove_file() { test -z "${1:-}" || rm -f -- "$1"; }
+                mp_portable_initialise() { return 0; }
+                mp_ha_role() { printf standalone; }
+                mp_snapshot_receipt_is_v2() {
+                    jq -e '.format == "mp-opt-snapshot-receipt-v2"' \
+                        "$1/receipt.json" >/dev/null
+                }
+                mp_snapshot_create() {
+                    local type="$1" name="$2" directory archive_hash count recipient fingerprint
+                    count=0; test ! -f "$MP_STATE/create-count" \
+                        || count="$(cat "$MP_STATE/create-count")"
+                    printf '%s\n' "$((count + 1))" > "$MP_STATE/create-count"
+                    directory="$MP_SNAPSHOTS/20260821T120000Z_${type}_${name}"
+                    mkdir -m 0700 "$directory"
+                    printf 'encrypted fixture' > "$directory/snapshot.tar.age"
+                    archive_hash="$(sha256sum "$directory/snapshot.tar.age" | awk '{print $1}')"
+                    recipient="age1$(printf 'a%.0s' {1..58})"
+                    fingerprint="$(printf '%s' "$recipient" | sha256sum | awk '{print $1}')"
+                    printf '%s  snapshot.tar.age\n' "$archive_hash" > "$directory/archive.sha256"
+                    jq -n --arg type "$type" --arg name "$name" --arg hash "$archive_hash" \
+                        --arg recipient "$recipient" --arg fingerprint "$fingerprint" '
+                      {format:"mp-opt-snapshot-receipt-v2",type:$type,name:$name,
+                       created_at:"2026-08-21T12:00:00Z",archive_sha256:$hash,
+                       archive_size:17,verification:"encrypted",recovery_status:"key-required",
+                       encryption:{scheme:"age-x25519",recipient:$recipient,
+                         recipient_sha256:$fingerprint,
+                         recovery_key_id:("rk-"+($fingerprint[0:16]))},
+                       storage:{local:"hash-verified",off_server:"not-copied"}}' \
+                       > "$directory/receipt.json"
+                    chmod 600 "$directory"/*
+                    printf '%s\n' "$directory"
+                }
+                mp_setup_machine_identity_file() {
+                    local target
+                    target="$(mktemp "$MP_STATE/identity.XXXXXX")"
+                    chmod 600 "$target"; printf '%s\n' "$1" > "$target"
+                    printf '%s\n' "$target"
+                }
+                mp_snapshot_verify_path() {
+                    local directory="$1" identity="$2" temporary
+                    test "$(stat -c '%a' "$identity")" = 600
+                    grep -q '^AGE-SECRET-KEY-1' "$identity"
+                    temporary="$(mktemp "$directory/receipt.XXXXXX")"
+                    jq '.verification="deep-verified" | .recovery_status="recoverable"
+                        | .storage.local="deep-verified"' "$directory/receipt.json" > "$temporary"
+                    chmod 600 "$temporary"; mv "$temporary" "$directory/receipt.json"
+                }
+                request='{"format":"mp-opt-snapshot-machine-request-v1","action":"create","idempotency_key":"12345678-1234-4234-8234-123456789abc:snapshot-create","values":{"type":"full","name":"acceptance"}}'
+                first="$(mp_machine_snapshot_action create <<< "$request")"
+                second="$(mp_machine_snapshot_action create <<< "$request")"
+                test "$(cat "$MP_STATE/create-count")" = 1
+                test "$(jq -r .snapshot_ref <<< "$first")" = "$(jq -r .snapshot_ref <<< "$second")"
+                reference="$(jq -r .snapshot_ref <<< "$first")"
+                verify="$(jq -cn --arg ref "$reference" '{format:"mp-opt-snapshot-machine-request-v1",
+                  action:"verify",idempotency_key:"12345678-1234-4234-8234-123456789abc:snapshot-verify",
+                  values:{snapshot_ref:$ref,recovery_identity:("AGE-SECRET-KEY-1"+("A"*40))}}')"
+                verified="$(mp_machine_snapshot_action verify <<< "$verify")"
+                test "$(jq -r .verification <<< "$verified")" = deep-verified
+                test "$(jq -r .recovery_status <<< "$verified")" = recoverable
+                export_request="$(jq -cn --arg ref "$reference" '{
+                  format:"mp-opt-snapshot-machine-request-v1",action:"export",
+                  idempotency_key:"12345678-1234-4234-8234-123456789abc:snapshot-export",
+                  values:{snapshot_ref:$ref}}')"
+                exported="$(mp_machine_snapshot_action export <<< "$export_request")"
+                ticket="$(jq -r .ticket <<< "$exported")"
+                package="$MP_SETUP_V2_ARTIFACTS/$ticket/portable.mpopt-snapshot"
+                test -f "$package"
+                package_sha="$(jq -r .package_sha256 <<< "$exported")"
+                imported="$(mp_machine_snapshot_import_package "$package_sha" \
+                  '12345678-1234-4234-8234-123456789abc:snapshot-import' < "$package")"
+                test "$(jq -r .snapshot_ref <<< "$imported")" = "$reference"
+                test "$(jq -r .import_status <<< "$imported")" = already-present
+                ! grep -R 'AGE-SECRET-KEY' "$MP_MACHINE_SNAPSHOT_RECEIPTS" "$MP_SNAPSHOTS"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(root), str(ROOT)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_structured_snapshot_production_policy_creates_no_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            script = r'''
+                set -Eeuo pipefail
+                export MP_STATE="$1/state"
+                export MP_SNAPSHOTS="$1/snapshots"
+                export MP_MACHINE_SNAPSHOT_RECEIPTS="$MP_STATE/snapshot-machine-receipts"
+                mkdir -m 0700 "$MP_STATE" "$MP_SNAPSHOTS"
+                source "$2/deploy/management/machine_snapshots.sh"
+                mp_machine_require_local_owner() { return 0; }
+                mp_setup_test_hook_policy() { return 1; }
+                request='{"format":"mp-opt-snapshot-machine-request-v1","action":"create","idempotency_key":"12345678-1234-4234-8234-123456789abc:snapshot-create","values":{"type":"full","name":"acceptance"}}'
+                status=0; mp_machine_snapshot_action create <<< "$request" >/dev/null || status=$?
+                test "$status" = 77
+                test ! -e "$MP_MACHINE_SNAPSHOT_RECEIPTS"
+                test -z "$(find "$MP_SNAPSHOTS" -mindepth 1 -print -quit)"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(root), str(ROOT)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_retention_as_of_is_idempotent_and_production_policy_creates_no_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            script = r'''
+                set -Eeuo pipefail
+                export MP_STATE="$1/state"
+                export MP_MACHINE_RETENTION_RECEIPTS="$MP_STATE/retention-machine-receipts"
+                mkdir -m 0700 "$MP_STATE"
+                source "$2/deploy/management/machine_retention.sh"
+                mp_machine_require_local_owner() { return 0; }
+                mp_setup_test_hook_policy() { return 0; }
+                mp_setup_execution_acquire() { return 0; }
+                mp_setup_execution_release() { return 0; }
+                mp_initialise_paths() { return 0; }
+                mp_create_private_owner_directory_chain() { mkdir -p "$1"; chmod 700 "$1"; }
+                mp_machine_validate_regular_file() {
+                    test -f "$1" && test ! -L "$1" \
+                        && test "$(stat -c '%u:%a' "$1")" = "$(id -u):$2"
+                }
+                mp_secure_remove_file() { test -z "${1:-}" || rm -f -- "$1"; }
+                mp_machine_retention_execute() {
+                    local mode="$1" as_of="$2" count=0
+                    test ! -f "$MP_STATE/run-count" || count="$(cat "$MP_STATE/run-count")"
+                    if test "$mode" = run; then
+                        count=$((count + 1)); printf '%s\n' "$count" > "$MP_STATE/run-count"
+                    fi
+                    jq -cn --arg as_of "$as_of" --arg mode "$mode" '
+                      {format:"mp-opt-retention-machine-result-v1",
+                       state:(if $mode == "run" then "completed" else "not-completed" end),
+                       as_of:$as_of,counts:{event_purge_cases_started:1},reconciled:false}'
+                }
+                request='{"format":"mp-opt-retention-machine-request-v1","action":"run-as-of","idempotency_key":"12345678-1234-4234-8234-123456789abc:retention","values":{"as_of":"2029-01-02T03:04:05Z"}}'
+                first="$(mp_machine_retention_run_as_of <<< "$request")"
+                second="$(mp_machine_retention_run_as_of <<< "$request")"
+                test "$(cat "$MP_STATE/run-count")" = 1
+                test "$(jq -S . <<< "$first")" = "$(jq -S . <<< "$second")"
+                test "$(jq -r .counts.event_purge_cases_started <<< "$first")" = 1
+
+                export MP_STATE="$1/production-state"
+                export MP_MACHINE_RETENTION_RECEIPTS="$MP_STATE/retention-machine-receipts"
+                mkdir -m 0700 "$MP_STATE"
+                mp_setup_test_hook_policy() { return 1; }
+                status=0; mp_machine_retention_run_as_of <<< "$request" >/dev/null || status=$?
+                test "$status" = 77
+                test ! -e "$MP_MACHINE_RETENTION_RECEIPTS"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(root), str(ROOT)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_initialise_paths_creates_missing_fresh_host_parents(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            home = root / "deploy-home"
+            home.mkdir(mode=0o700)
+            script = r'''
+                set -Eeuo pipefail
+                export HOME="$1"
+                export MP_HOME="$HOME/.config/mp-opt-server"
+                export MP_STATE="$HOME/.local/state/mp-opt-server"
+                export MP_SNAPSHOTS="$HOME/masterplan-snapshots"
+                export MP_AUDIT_FILE="$MP_STATE/management.log"
+                export MP_LOCK_FILE="$MP_STATE/management.lock"
+                source "$2/deploy/management/common.sh"
+                test ! -e "$HOME/.config"
+                test ! -e "$HOME/.local"
+                mp_initialise_paths
+                for path in \
+                    "$HOME/.config" \
+                    "$HOME/.config/mp-opt-server" \
+                    "$HOME/.local" \
+                    "$HOME/.local/state" \
+                    "$HOME/.local/state/mp-opt-server" \
+                    "$HOME/masterplan-snapshots"
+                do
+                    test -d "$path"
+                    test ! -L "$path"
+                    test "$(stat -c '%u:%g' "$path")" = "$(id -u):$(id -g)"
+                done
+                test "$(stat -c '%a' "$HOME/.config")" = 700
+                test "$(stat -c '%a' "$HOME/.local/state")" = 700
+                test "$(stat -c '%a' "$MP_HOME")" = 700
+                test "$(stat -c '%a' "$MP_STATE")" = 700
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(home), str(ROOT)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_initialise_paths_rejects_substituted_fresh_host_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            home = root / "deploy-home"
+            outside = root / "outside"
+            home.mkdir(mode=0o700)
+            outside.mkdir(mode=0o700)
+            (home / ".config").symlink_to(outside, target_is_directory=True)
+            script = r'''
+                set -Eeuo pipefail
+                export HOME="$1"
+                export MP_HOME="$HOME/.config/mp-opt-server"
+                export MP_STATE="$HOME/.local/state/mp-opt-server"
+                export MP_SNAPSHOTS="$HOME/masterplan-snapshots"
+                export MP_AUDIT_FILE="$MP_STATE/management.log"
+                export MP_LOCK_FILE="$MP_STATE/management.lock"
+                source "$2/deploy/management/common.sh"
+                ! mp_initialise_paths
+                test ! -e "$3/mp-opt-server"
+            '''
+            result = subprocess.run(
+                [
+                    "bash", "-Eeuo", "pipefail", "-c", script, "bash",
+                    str(home), str(ROOT), str(outside),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_initialise_paths_rejects_writable_fresh_host_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            home = root / "deploy-home"
+            home.mkdir(mode=0o700)
+            unsafe = home / ".config"
+            unsafe.mkdir(mode=0o770)
+            unsafe.chmod(0o770)
+            script = r'''
+                set -Eeuo pipefail
+                export HOME="$1"
+                export MP_HOME="$HOME/.config/mp-opt-server"
+                export MP_STATE="$HOME/.local/state/mp-opt-server"
+                export MP_SNAPSHOTS="$HOME/masterplan-snapshots"
+                export MP_AUDIT_FILE="$MP_STATE/management.log"
+                export MP_LOCK_FILE="$MP_STATE/management.lock"
+                source "$2/deploy/management/common.sh"
+                ! mp_initialise_paths
+                test ! -e "$MP_HOME"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "bash", str(home), str(ROOT)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def invoke(
         self,
@@ -434,10 +743,30 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             self.assertEqual(
                 capability_body["transitions"],
                 [
-                    "artifact.images-activate", "witness.register-primary",
-                    "dns.propagate", "peer.pair", "bundle.acknowledge",
-                    "smtp.deliver-and-receive", "evidence.verify",
+                    "artifact.acquire", "artifact.images-activate", "database.create",
+                    "database.migrate", "backend.activate", "caddy.activate",
+                    "witness.deploy-code", "witness.bind-secrets",
+                    "witness.register-primary", "dns.create",
+                    "dns.propagate", "peer.pair", "bundle.capture", "bundle.transfer",
+                    "bundle.restore", "bundle.verify", "bundle.acknowledge",
+                    "root.passkey-register", "recovery.download", "recovery.reselect",
+                    "controller.download-or-import", "controller.possession-proof",
+                    "controller.root-authorise", "governance.save",
+                    "governance.preview", "governance.publish",
+                    "smtp.authenticate", "smtp.dns-verify",
+                    "smtp.deliver-and-receive", "commissioning.finalise",
+                    "evidence.verify",
                 ],
+            )
+            self.assertEqual(len(capability_body["declared_transitions"]), 31)
+            self.assertEqual(len(capability_body["transition_specs"]), 31)
+            self.assertEqual(
+                {
+                    item["transition"]
+                    for item in capability_body["transition_specs"]
+                    if item["wired"]
+                },
+                set(capability_body["transitions"]),
             )
             self.assertEqual(len(capability_body["boundaries"]), 4)
             self.assertIn(
@@ -514,6 +843,439 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             self.assertFalse((hook_dir / "armed.json").exists())
             for name in ("enabled.json", "triggered.jsonl", "lock"):
                 self.assertEqual((hook_dir / name).stat().st_mode & 0o777, 0o600)
+
+    def test_fault_hook_enable_prepares_a_clean_peer_state_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            state = Path(environment["MP_STATE"])
+            state.rmdir()
+            self.enable_test_policy(environment)
+            run_id = "12345678-1234-4234-8234-123456789abc"
+
+            enabled = self.invoke(
+                environment,
+                "test-hook",
+                "enable",
+                "--input-stdin",
+                "--json",
+                input_document=json.dumps({
+                    "format": "mp-opt-commissioning-test-hook-enable-v1",
+                    "run_id": run_id,
+                    "enabled": True,
+                }),
+            )
+
+            self.assertEqual(enabled.returncode, 0, enabled.stderr)
+            self.assertEqual(json.loads(enabled.stdout)["state"], "enabled")
+            self.assertTrue(state.is_dir())
+            self.assertFalse(state.is_symlink())
+            self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(
+                (state / "setup-test-hooks" / "enabled.json").stat().st_mode
+                & 0o777,
+                0o600,
+            )
+
+    def test_fault_hook_enable_does_not_create_state_under_production_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            state = Path(environment["MP_STATE"])
+            state.rmdir()
+
+            denied = self.invoke(
+                environment,
+                "test-hook",
+                "enable",
+                "--input-stdin",
+                "--json",
+                input_document=json.dumps({
+                    "format": "mp-opt-commissioning-test-hook-enable-v1",
+                    "run_id": "12345678-1234-4234-8234-123456789abc",
+                    "enabled": True,
+                }),
+            )
+
+            self.assertEqual(denied.returncode, 50, denied.stderr)
+            self.assertEqual(
+                json.loads(denied.stdout)["error"]["code"],
+                "TEST_POLICY_REQUIRED",
+            )
+            self.assertFalse(state.exists())
+
+    def test_ha_mutation_is_denied_under_production_policy_before_state_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            request = {
+                "format": "mp-opt-ha-machine-request-v1",
+                "action": "automatic",
+                "run_id": "12345678-1234-4234-8234-123456789abc",
+                "idempotency_key": "ha-production-denial-0001",
+                "values": {
+                    "expected_holder": "node-a",
+                    "expected_generation": 1,
+                    "state": "enabled",
+                },
+            }
+            denied = self.invoke(
+                environment,
+                "ha",
+                "automatic",
+                "--input-stdin",
+                "--json",
+                input_document=json.dumps(request),
+            )
+            self.assertEqual(denied.returncode, 50, denied.stderr)
+            self.assertEqual(
+                json.loads(denied.stdout)["error"]["code"], "TEST_POLICY_REQUIRED"
+            )
+            self.assertFalse(
+                (Path(environment["MP_STATE"]) / "ha-machine-receipts").exists()
+            )
+
+    def test_ha_handover_receipt_replays_without_repeating_shared_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            self.enable_test_policy(environment)
+            prefix = MACHINE.read_text(encoding="utf-8").split(
+                'command_name="${1:-}"', 1
+            )[0]
+            script = prefix + r'''
+                mp_machine_ha_status() {
+                  jq -cn '{format:"mp-opt-ha-machine-status-v1",mode:"ha",
+                    local_node_id:"node-a",peer_node_id:"node-b",
+                    holder_node_id:"node-a",generation:3,routing_ready:true,
+                    automatic_failover:false,nodes:[
+                      {node_id:"node-a",healthy:true},
+                      {node_id:"node-b",healthy:true}]}'
+                }
+                mp_ha_planned_switchover_apply() {
+                  local count=0
+                  test ! -f "$MP_STATE/handover-count" \
+                    || count="$(cat "$MP_STATE/handover-count")"
+                  printf '%s\n' "$((count + 1))" > "$MP_STATE/handover-count"
+                  jq -cn '{format:"mp-opt-ha-handover-result-v1",
+                    source_node_id:"node-a",target_node_id:"node-b",
+                    previous_generation:3,generation:4,routing_ready:true,
+                    automatic_failover:false}'
+                }
+                mp_machine_ha_action handover
+            '''
+            request = json.dumps({
+                "format": "mp-opt-ha-machine-request-v1",
+                "action": "handover",
+                "run_id": "12345678-1234-4234-8234-123456789abc",
+                "idempotency_key": "ha-handover-replay-0001",
+                "values": {
+                    "expected_holder": "node-a",
+                    "expected_generation": 3,
+                    "target_node_id": "node-b",
+                },
+            })
+            first = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                input=request,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            replay = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                input=request,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(replay.returncode, 0, replay.stderr)
+            self.assertEqual(
+                (Path(environment["MP_STATE"]) / "handover-count").read_text().strip(),
+                "1",
+            )
+            self.assertEqual(json.loads(first.stdout), json.loads(replay.stdout))
+
+    def test_ha_handover_reconciles_lost_receipt_without_repeating_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            self.enable_test_policy(environment)
+            prefix = MACHINE.read_text(encoding="utf-8").split(
+                'command_name="${1:-}"', 1
+            )[0]
+            script = prefix + r'''
+                mp_machine_ha_status() {
+                  jq -cn '{format:"mp-opt-ha-machine-status-v1",mode:"ha",
+                    local_node_id:"node-a",peer_node_id:"node-b",
+                    holder_node_id:"node-b",generation:4,routing_ready:false,
+                    automatic_failover:false,nodes:[
+                      {node_id:"node-a",healthy:true},
+                      {node_id:"node-b",healthy:true}]}'
+                }
+                mp_ha_planned_switchover_apply() {
+                  touch "$MP_STATE/handover-was-repeated"
+                  return 1
+                }
+                mp_machine_ha_action handover
+            '''
+            request = json.dumps({
+                "format": "mp-opt-ha-machine-request-v1",
+                "action": "handover",
+                "run_id": "12345678-1234-4234-8234-123456789abc",
+                "idempotency_key": "ha-handover-lost-receipt-0001",
+                "values": {
+                    "expected_holder": "node-a",
+                    "expected_generation": 3,
+                    "target_node_id": "node-b",
+                },
+            })
+            reconciled = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                input=request,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(reconciled.returncode, 0, reconciled.stderr)
+            document = json.loads(reconciled.stdout)
+            self.assertTrue(document["reconciled"])
+            self.assertEqual(document["source_node_id"], "node-a")
+            self.assertEqual(document["target_node_id"], "node-b")
+            self.assertEqual(document["generation"], 4)
+            self.assertFalse(
+                (Path(environment["MP_STATE"]) / "handover-was-repeated").exists()
+            )
+
+    def test_ha_automatic_reconciles_witness_config_split_before_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            self.enable_test_policy(environment)
+            prefix = MACHINE.read_text(encoding="utf-8").split(
+                'command_name="${1:-}"', 1
+            )[0]
+            script = prefix + r'''
+                MP_ROOT="$MP_STATE/fake-root"
+                mkdir -p "$MP_ROOT/runtime"
+                jq -cn '{holder_node_id:"node-a",generation:3,
+                  routing_ready:true,automatic_failover:true}' \
+                  > "$MP_ROOT/runtime/ha-control.json"
+                mp_machine_ha_status() {
+                  jq -cn '{format:"mp-opt-ha-machine-status-v1",mode:"ha",
+                    local_node_id:"node-a",peer_node_id:"node-b",
+                    holder_node_id:"node-a",generation:3,routing_ready:true,
+                    automatic_failover:true,nodes:[
+                      {node_id:"node-a",healthy:true},
+                      {node_id:"node-b",healthy:true}]}'
+                }
+                mp_load_ha_config() {
+                  HA_ROLE=dynamic
+                  HA_NODE_ID=node-a
+                  HA_PEER_NODE_ID=node-b
+                  HA_AUTOMATIC_FAILOVER=disabled
+                }
+                mp_require_active_or_standalone() { return 0; }
+                mp_ha_set_config_value() {
+                  printf '%s\n' "$2" > "$MP_STATE/automatic-config-value"
+                }
+                mp_audit() { return 0; }
+                mp_machine_ha_action automatic
+            '''
+            request = json.dumps({
+                "format": "mp-opt-ha-machine-request-v1",
+                "action": "automatic",
+                "run_id": "12345678-1234-4234-8234-123456789abc",
+                "idempotency_key": "ha-automatic-config-reconcile-0001",
+                "values": {
+                    "expected_holder": "node-a",
+                    "expected_generation": 3,
+                    "state": "enabled",
+                },
+            })
+            reconciled = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                input=request,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(reconciled.returncode, 0, reconciled.stderr)
+            document = json.loads(reconciled.stdout)
+            self.assertEqual(document["state"], "enabled")
+            self.assertEqual(document["holder_node_id"], "node-a")
+            self.assertEqual(document["generation"], 3)
+            self.assertEqual(
+                (Path(environment["MP_STATE"]) / "automatic-config-value")
+                .read_text(encoding="ascii").strip(),
+                "enabled",
+            )
+            self.assertEqual(
+                len(list(
+                    (Path(environment["MP_STATE"]) / "ha-machine-receipts")
+                    .glob("*.json")
+                )),
+                1,
+            )
+
+    def test_ha_runtime_fault_stops_and_rejoins_without_starting_old_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            self.enable_test_policy(environment)
+            prefix = MACHINE.read_text(encoding="utf-8").split(
+                'command_name="${1:-}"', 1
+            )[0]
+            script = prefix + r'''
+                test -f "$MP_STATE/fake-lease" || printf 'active\n' > "$MP_STATE/fake-lease"
+                test -f "$MP_STATE/fake-backend" || printf 'running\n' > "$MP_STATE/fake-backend"
+                test -f "$MP_STATE/fake-holder" || printf 'node-a\n' > "$MP_STATE/fake-holder"
+                test -f "$MP_STATE/fake-generation" || printf '3\n' > "$MP_STATE/fake-generation"
+                mp_load_ha_config() {
+                  HA_ROLE=dynamic; HA_NODE_ID=node-a; HA_PEER_NODE_ID=node-b
+                }
+                mp_compose_init_existing_runtime() { MP_COMPOSE=(fake_compose); }
+                fake_compose() {
+                  if [ "$1" = ps ]; then
+                    test "$(cat "$MP_STATE/fake-backend")" != running || printf 'backend\n'
+                    return 0
+                  fi
+                  if [ "$1" = exec ]; then
+                    test "$(cat "$MP_STATE/fake-backend")" = running \
+                      && test "$(cat "$MP_STATE/fake-holder")" = node-a
+                    return
+                  fi
+                  if [ "$1" = stop ] && [ "$2" = backend ]; then
+                    printf 'stopped\n' > "$MP_STATE/fake-backend"
+                    return 0
+                  fi
+                  if [ "$1" = up ] && [ "$2" = -d ] && [ "$3" = backend ]; then
+                    printf 'running\n' > "$MP_STATE/fake-backend"
+                    return 0
+                  fi
+                  return 64
+                }
+                systemctl() {
+                  if [ "$1" = is-active ]; then
+                    test "$(cat "$MP_STATE/fake-lease")" = active
+                    return
+                  fi
+                  return 64
+                }
+                sudo() {
+                  test "$1" = -n; shift
+                  test "$1" = systemctl; shift
+                  case "$1" in
+                    stop) printf 'stopped\n' > "$MP_STATE/fake-lease" ;;
+                    start) printf 'active\n' > "$MP_STATE/fake-lease" ;;
+                    *) return 64 ;;
+                  esac
+                }
+                sleep() { :; }
+                mp_machine_ha_status() {
+                  jq -cn --arg holder "$(cat "$MP_STATE/fake-holder")" \
+                    --argjson generation "$(cat "$MP_STATE/fake-generation")" '
+                    {format:"mp-opt-ha-machine-status-v1",mode:"ha",
+                     local_node_id:"node-a",peer_node_id:"node-b",
+                     holder_node_id:$holder,generation:$generation,
+                     routing_ready:true,automatic_failover:true,nodes:[
+                       {node_id:"node-a",healthy:true},
+                       {node_id:"node-b",healthy:true}]}'
+                }
+                mp_machine_ha_action fault
+            '''
+            offline_request = json.dumps({
+                "format": "mp-opt-ha-machine-request-v1",
+                "action": "fault",
+                "run_id": "12345678-1234-4234-8234-123456789abc",
+                "idempotency_key": "ha-runtime-fault-offline-0001",
+                "values": {
+                    "expected_holder": "node-a",
+                    "expected_generation": 3,
+                    "state": "offline",
+                },
+            })
+            offline = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                input=offline_request,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(offline.returncode, 0, offline.stderr)
+            self.assertEqual(json.loads(offline.stdout)["state"], "offline")
+            state = Path(environment["MP_STATE"])
+            self.assertEqual((state / "fake-lease").read_text().strip(), "stopped")
+            self.assertEqual((state / "fake-backend").read_text().strip(), "stopped")
+
+            (state / "fake-holder").write_text("node-b\n", encoding="ascii")
+            (state / "fake-generation").write_text("4\n", encoding="ascii")
+            stale_online_request = json.dumps({
+                "format": "mp-opt-ha-machine-request-v1",
+                "action": "fault",
+                "run_id": "12345678-1234-4234-8234-123456789abc",
+                "idempotency_key": "ha-runtime-fault-online-stale-0001",
+                "values": {
+                    "expected_holder": "node-b",
+                    "expected_generation": 3,
+                    "state": "online",
+                },
+            })
+            stale_online = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                input=stale_online_request,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(stale_online.returncode, 20, stale_online.stderr)
+            self.assertEqual((state / "fake-lease").read_text().strip(), "stopped")
+            self.assertEqual((state / "fake-backend").read_text().strip(), "stopped")
+            online_request = json.dumps({
+                "format": "mp-opt-ha-machine-request-v1",
+                "action": "fault",
+                "run_id": "12345678-1234-4234-8234-123456789abc",
+                "idempotency_key": "ha-runtime-fault-online-0001",
+                "values": {
+                    "expected_holder": "node-b",
+                    "expected_generation": 4,
+                    "state": "online",
+                },
+            })
+            online = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                input=online_request,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(online.returncode, 0, online.stderr)
+            document = json.loads(online.stdout)
+            self.assertEqual(document["state"], "online")
+            self.assertTrue(document["lease_agent_active"])
+            self.assertTrue(document["backend_running"])
+            self.assertFalse(document["writer_ready"])
+            self.assertEqual((state / "fake-backend").read_text().strip(), "running")
+
+            # A fault action is a normal, durable machine receipt.  Generic
+            # preflight must continue to accept the state after the adapter
+            # has taken a node offline and brought it back.  Unknown action
+            # values remain invalid rather than broadening the receipt
+            # contract beyond the explicitly supported HA operations.
+            validation = self.invoke(environment, "validate", "--json")
+            self.assertEqual(validation.returncode, 0, validation.stderr)
+            self.assertTrue(json.loads(validation.stdout)["ok"])
+
+            receipts = sorted((state / "ha-machine-receipts").glob("*.json"))
+            self.assertEqual(len(receipts), 2)
+            malformed = json.loads(receipts[0].read_text(encoding="utf-8"))
+            malformed["action"] = "unknown"
+            receipts[0].write_text(json.dumps(malformed), encoding="utf-8")
+            receipts[0].chmod(0o600)
+            rejected = self.invoke(environment, "validate", "--json")
+            self.assertEqual(rejected.returncode, 40, rejected.stderr)
+            self.assertEqual(json.loads(rejected.stdout)["error"]["code"], "INVALID_STATE")
 
     def test_fault_hook_rejects_wrong_identity_and_can_disarm_exact_arm(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
@@ -669,7 +1431,14 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             })
             prefix = MACHINE.read_text(encoding="utf-8").split('command_name="${1:-}"', 1)[0]
             script = prefix + r'''
-                mp_setup_verify_smtp_and_dns_machine() { :; }
+                smtp_test_effect() { printf 'called\n' >> "$MP_STATE/effect-count"; }
+                mp_setup_verify_smtp_and_dns_machine() {
+                    local key
+                    key="smtp-delivery-$(printf '%s' "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
+                        | sha256sum | awk '{print $1}')"
+                    mp_setup_test_hook_run_driver_transition \
+                        smtp.deliver-and-receive smtp_verified "$key" smtp_test_effect
+                }
                 mp_machine_advance_command
             '''
             interrupted = subprocess.run(
@@ -679,16 +1448,20 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             self.assertEqual(interrupted.returncode, 197, interrupted.stderr)
             state = json.loads((Path(environment["MP_STATE"]) / "setup-state-v2.json").read_text())
             self.assertEqual(state["state"], "in_progress")
-            self.assertIn("smtp_verified", state["completed"])
+            self.assertNotIn("smtp_verified", state["completed"])
             resumed = subprocess.run(
                 ["bash", "-Eeuo", "pipefail", "-c", script], input=request,
                 env=environment, text=True, capture_output=True, check=False,
             )
             self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertEqual(
+                (Path(environment["MP_STATE"]) / "effect-count").read_text().splitlines(),
+                ["called"],
+            )
             state = json.loads((Path(environment["MP_STATE"]) / "setup-state-v2.json").read_text())
             self.assertEqual(state["state"], "complete")
 
-    def test_armed_later_transition_does_not_wrap_earlier_checkpoint(self) -> None:
+    def test_enabled_run_receipts_earlier_checkpoint_without_firing_later_fault(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             environment = self.environment(Path(directory_name))
             self.enable_test_policy(environment)
@@ -730,7 +1503,147 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             )
             self.assertIn(result.returncode, (0, 10), result.stderr)
             receipts = Path(environment["MP_STATE"]) / "setup-test-hooks" / "transition-receipts"
-            self.assertEqual(list(receipts.glob("*.json")), [])
+            receipt_documents = [
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in receipts.glob("*.json")
+            ]
+            self.assertEqual(len(receipt_documents), 1)
+            self.assertEqual(
+                receipt_documents[0]["transition"], "artifact.images-activate"
+            )
+            triggered = Path(environment["MP_STATE"]) / "setup-test-hooks" / "triggered.jsonl"
+            self.assertFalse(triggered.exists())
+
+    def test_compound_driver_resume_does_not_repeat_earlier_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            self.enable_test_policy(environment)
+            run_id = "12345678-1234-4234-8234-123456789abc"
+            self.assertEqual(self.invoke(
+                environment, "test-hook", "enable", "--input-stdin", "--json",
+                input_document=json.dumps({
+                    "format": "mp-opt-commissioning-test-hook-enable-v1",
+                    "run_id": run_id, "enabled": True,
+                }),
+            ).returncode, 0)
+            transition = "backend.activate"
+            boundary = "after-receipt-before-checkpoint"
+            fault_id = "fault-" + hashlib.sha256(
+                f"{transition}\0{boundary}".encode()
+            ).hexdigest()[:16]
+            self.assertEqual(self.invoke(
+                environment, "test-hook", "arm", "--input-stdin", "--json",
+                input_document=json.dumps({
+                    "format": "mp-opt-commissioning-fault-v1", "run_id": run_id,
+                    "fault_id": fault_id, "transition": transition, "boundary": boundary,
+                }),
+            ).returncode, 0)
+            hooks = ROOT / "deploy" / "management" / "test_hooks.sh"
+            script = r'''
+                set -Eeuo pipefail
+                source "$1"
+                effect() { printf '%s\n' "$1" >> "$MP_STATE/effect-count"; }
+                key="compound-application-deployed-0001"
+                mp_setup_test_hook_run_driver_transition \
+                    database.create application_deployed "$key" effect database
+                mp_setup_test_hook_run_driver_transition \
+                    backend.activate application_deployed "$key" effect backend
+                mp_setup_test_hook_run_driver_transition \
+                    caddy.activate application_deployed "$key" effect caddy
+            '''
+            interrupted = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "test", str(hooks)],
+                env=environment, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(interrupted.returncode, 197, interrupted.stderr)
+            resumed = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "test", str(hooks)],
+                env=environment, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertEqual(
+                (Path(environment["MP_STATE"]) / "effect-count").read_text().splitlines(),
+                ["database", "backend", "caddy"],
+            )
+
+    def test_hook_lock_descriptor_does_not_escape_boundary_call(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            self.enable_test_policy(environment)
+            run_id = "12345678-1234-4234-8234-123456789abc"
+            self.assertEqual(self.invoke(
+                environment, "test-hook", "enable", "--input-stdin", "--json",
+                input_document=json.dumps({
+                    "format": "mp-opt-commissioning-test-hook-enable-v1",
+                    "run_id": run_id, "enabled": True,
+                }),
+            ).returncode, 0)
+            hooks = ROOT / "deploy" / "management" / "test_hooks.sh"
+            script = r'''
+                set -Eeuo pipefail
+                source "$1"
+                mp_setup_test_hook_reach_named \
+                    artifact.images-activate before-side-effect
+                [ ! -e "/proc/$$/fd/9" ] || {
+                    printf 'test hook lock descriptor escaped boundary call\n' >&2
+                    exit 99
+                }
+                timeout --kill-after=1 5 bash -Eeuo pipefail -c '
+                    source "$1"
+                    effect() { printf "called\n" >> "$MP_STATE/effect-count"; }
+                    mp_setup_test_hook_run_driver_transition \
+                        database.create application_deployed lock-scope-key effect
+                ' nested "$1"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "test", str(hooks)],
+                env=environment, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                (Path(environment["MP_STATE"]) / "effect-count").read_text().splitlines(),
+                ["called"],
+            )
+
+    def test_dotted_driver_checkpoint_receipt_passes_machine_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            self.enable_test_policy(environment)
+            run_id = "12345678-1234-4234-8234-123456789abc"
+            self.assertEqual(self.invoke(
+                environment, "test-hook", "enable", "--input-stdin", "--json",
+                input_document=json.dumps({
+                    "format": "mp-opt-commissioning-test-hook-enable-v1",
+                    "run_id": run_id, "enabled": True,
+                }),
+            ).returncode, 0)
+            hooks = ROOT / "deploy" / "management" / "test_hooks.sh"
+            script = r'''
+                set -Eeuo pipefail
+                source "$1"
+                effect() { printf 'called\n' >> "$MP_STATE/effect-count"; }
+                mp_setup_test_hook_run_driver_transition \
+                    bundle.capture replicated.capture bundle-capture-key effect
+            '''
+            recorded = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "test", str(hooks)],
+                env=environment, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(recorded.returncode, 0, recorded.stderr)
+            validated = self.invoke(environment, "validate", "--json")
+            self.assertEqual(validated.returncode, 0, validated.stderr)
+            self.assertTrue(json.loads(validated.stdout)["ok"])
+
+            receipt = next(
+                (Path(environment["MP_STATE"]) / "setup-test-hooks"
+                 / "transition-receipts").glob("*.json")
+            )
+            document = json.loads(receipt.read_text(encoding="utf-8"))
+            document["checkpoint"] = "replicated..capture"
+            receipt.write_text(json.dumps(document), encoding="utf-8")
+            receipt.chmod(0o600)
+            rejected = self.invoke(environment, "validate", "--json")
+            self.assertEqual(rejected.returncode, 40, rejected.stderr)
 
     def test_provider_cleanup_reconciles_lost_delete_ack_without_second_delete(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
@@ -830,6 +1743,7 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 mp_require_commands() { :; }
                 mp_validate_email_address() { :; }
                 mp_ha_role() { printf standalone; }
+                mp_setup_smtp_authenticate_machine() { :; }
                 mp_send_smtp_test_to() {
                     local count=0
                     [ ! -s "$SEND_COUNT" ] || count="$(cat "$SEND_COUNT")"
@@ -934,9 +1848,10 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
     def test_machine_adapter_has_bounded_commands_and_no_secret_inputs(self) -> None:
         source = MACHINE.read_text(encoding="utf-8")
         for command in (
-            "validate", "plan", "start", "stage-candidate", "status", "events",
+            "capabilities", "validate", "plan", "start", "stage-candidate", "status", "events",
             "stage-migration", "stage-recovery", "artifact", "deployment",
-            "reconcile", "advance", "cancel", "handoff", "cleanup-provider", "test-hook",
+            "reconcile", "advance", "cancel", "handoff", "cleanup-provider",
+            "evidence-git", "snapshot", "retention", "ha", "test-hook",
         ):
             self.assertIn(command, source)
         self.assertNotIn("--secret", source)
@@ -944,6 +1859,153 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("MP_MACHINE_BUSY=30", source)
         self.assertIn("idempotency_key", source)
         self.assertIn("setup-machine-input", COMMON)
+
+    def test_evidence_git_machine_adapter_reuses_shared_mutation_and_keeps_tokens_on_stdin(self) -> None:
+        source = MACHINE.read_text(encoding="utf-8")
+        evidence = (ROOT / "deploy/management/evidence.sh").read_text(encoding="utf-8")
+        adapter = source[source.index("mp_machine_evidence_git_status()") :]
+        adapter = adapter[: adapter.index('command_name="${1:-}"')]
+        self.assertIn("mp_evidence_git_apply_verified_configuration", adapter)
+        self.assertIn("mp_evidence_git_disable_configuration", adapter)
+        self.assertIn("mp_setup_test_hook_policy || return 77", adapter)
+        self.assertGreaterEqual(adapter.count("mp_setup_test_hook_policy || return 77"), 2)
+        self.assertIn("mp_setup_execution_acquire", adapter)
+        self.assertIn("mp_machine_prepare_evidence_git_receipts", adapter)
+        self.assertIn("mp-opt-evidence-git-machine-receipt-v1", source)
+        self.assertIn("mp-opt-evidence-git-machine-receipt-v1", adapter)
+        self.assertIn("request_sha256", adapter)
+        self.assertIn('jq -jr .values.token "$input" > "$token_file"', adapter)
+        self.assertNotIn("--token ", adapter)
+        self.assertNotIn("printf '%s' \"$token\"", adapter)
+        self.assertEqual(evidence.count("mp_evidence_git_apply_verified_configuration"), 2)
+        self.assertEqual(evidence.count("mp_evidence_git_disable_configuration"), 2)
+
+    def test_machine_capability_inventory_is_truthful_and_secret_free(self) -> None:
+        source = MACHINE.read_text(encoding="utf-8")
+        capabilities = source[
+            source.index("mp_machine_capabilities()"):
+            source.index("mp_machine_require_local_owner()")
+        ]
+        self.assertIn("mp-opt-commissioning-machine-capabilities-v1", capabilities)
+        self.assertIn("MP_SETUP_TEST_HOOK_TRANSITION_SPECS", capabilities)
+        self.assertIn('snapshot:{create:($policy=="test")', capabilities)
+        self.assertIn('export:($policy=="test")', capabilities)
+        self.assertIn('import:($policy=="test")', capabilities)
+        self.assertIn('restore:false', capabilities)
+        self.assertIn('retention_as_of:($policy=="test")', capabilities)
+        self.assertIn('handover:($policy=="test")', capabilities)
+        self.assertIn('automatic_failover:($policy=="test")', capabilities)
+        self.assertIn("ha_status:true", capabilities)
+        self.assertIn("ha_runtime:true", capabilities)
+        self.assertIn('ha_readiness:($policy=="test")', capabilities)
+        self.assertIn('ha_runtime_fault:($policy=="test")', capabilities)
+        self.assertIn('production_policy_test_mutations:false', capabilities)
+        self.assertNotIn("token", capabilities.lower())
+
+    def test_ha_machine_adapter_is_test_policy_only_idempotent_and_reuses_shared_actions(self) -> None:
+        machine = MACHINE.read_text(encoding="utf-8")
+        self.assertIn("mp_setup_test_hook_policy", MACHINE_HA)
+        self.assertIn("mp_setup_execution_acquire", MACHINE_HA)
+        self.assertIn("mp_lock", MACHINE_HA)
+        self.assertIn("mp_machine_ha_record_receipt", MACHINE_HA)
+        self.assertIn("mp-opt-ha-machine-receipt-v1", MACHINE_HA)
+        self.assertIn("request_sha256", MACHINE_HA)
+        self.assertIn("expected_generation", MACHINE_HA)
+        self.assertIn("expected_holder", MACHINE_HA)
+        self.assertIn("mp_ha_planned_switchover_apply", MACHINE_HA)
+        self.assertIn("mp_ha_automatic_failover_apply", MACHINE_HA)
+        self.assertIn("mp_machine_ha_runtime_status", MACHINE_HA)
+        self.assertIn('urlopen("http://127.0.0.1:8000/ha/ready"', MACHINE_HA)
+        self.assertIn("writer_ready", MACHINE_HA)
+        self.assertIn("mp_machine_ha_fault_offline", MACHINE_HA)
+        self.assertIn("mp_machine_ha_fault_online", MACHINE_HA)
+        self.assertIn(
+            '.action | IN("readiness","handover","automatic","fault")',
+            machine,
+        )
+        self.assertIn("sudo -n systemctl stop mp-opt-ha-lease.service", MACHINE_HA)
+        self.assertIn("sudo -n systemctl start mp-opt-ha-lease.service", MACHINE_HA)
+        self.assertIn(
+            "sudo -n systemctl stop mp-opt-ha-lease.service >/dev/null 2>&1 || true",
+            MACHINE_HA,
+        )
+        offline = MACHINE_HA.split("mp_machine_ha_fault_offline()", 1)[1].split(
+            "mp_machine_ha_fault_online()", 1
+        )[0]
+        self.assertLess(
+            offline.index('"${MP_COMPOSE[@]}" stop backend'),
+            offline.index("sudo -n systemctl stop mp-opt-ha-lease.service"),
+        )
+        self.assertIn('"${MP_COMPOSE[@]}" stop backend', MACHINE_HA)
+        self.assertIn("mp_compose_init_existing_runtime ha", MACHINE_HA)
+        self.assertNotIn("ui_require_phrase", MACHINE_HA)
+        self.assertNotIn("ui_confirm", MACHINE_HA)
+        automatic = HA_MANAGEMENT[
+            HA_MANAGEMENT.index("mp_ha_automatic_failover()"):
+            HA_MANAGEMENT.index("mp_ha_automatic_failover_apply()")
+        ]
+        handover = HA_MANAGEMENT[
+            HA_MANAGEMENT.index("mp_ha_planned_switchover()"):
+        ]
+        self.assertIn("mp_ha_automatic_failover_apply", automatic)
+        self.assertIn("mp_ha_planned_switchover_apply", handover)
+        automatic_apply = HA_MANAGEMENT[
+            HA_MANAGEMENT.index("mp_ha_automatic_failover_apply()"):
+            HA_MANAGEMENT.index("mp_ha_planned_switchover_apply()")
+        ]
+        provider_branch_end = automatic_apply.index(
+            '    if [ "$configured" != "$next" ]; then'
+        )
+        self.assertGreater(
+            provider_branch_end,
+            automatic_apply.index('    if [ "$current" != "$next" ]; then'),
+        )
+        self.assertIn(
+            'mp_ha_set_config_value HA_AUTOMATIC_FAILOVER "$next"',
+            automatic_apply[provider_branch_end:],
+        )
+        self.assertIn('($nodes | length) == 2', MACHINE_HA)
+        self.assertIn('([$nodes[].node_id] | sort) == ([$node,$peer] | sort)', MACHINE_HA)
+        self.assertIn('local_node_id="$(jq -er .local_node_id <<< "$current")"', MACHINE_HA)
+        self.assertIn('[ "$expected_holder" = "$local_node_id" ]', MACHINE_HA)
+
+    def test_snapshot_machine_adapter_uses_real_snapshot_operations_and_protected_receipts(self) -> None:
+        source = (ROOT / "deploy/management/machine_snapshots.sh").read_text(encoding="utf-8")
+        self.assertIn("mp_snapshot_create", source)
+        self.assertIn("mp_snapshot_verify_path", source)
+        self.assertIn('"$MP_PORTABLE_TOOL" export', source)
+        self.assertIn('"$MP_PORTABLE_TOOL" import', source)
+        self.assertIn("mp-opt-snapshot-export-result-v1", source)
+        self.assertIn("mp-opt-snapshot-import-result-v1", source)
+        self.assertIn("portable.mpopt-snapshot", source)
+        self.assertIn("mp_setup_execution_acquire", source)
+        self.assertIn("mp_setup_test_hook_policy || return 77", source)
+        self.assertIn('for file in receipt.json snapshot.tar.age archive.sha256', source)
+        self.assertIn('= "$owner:600"', source)
+        self.assertIn("mp-opt-snapshot-machine-receipt-v1", source)
+        self.assertIn('state="$4"', source)
+        self.assertIn('state:$state', source)
+        self.assertIn("mp_setup_machine_identity_file", source)
+        self.assertNotIn("printf '%s' \"$identity", source)
+
+    def test_retention_machine_adapter_uses_the_real_cycle_and_protected_receipts(self) -> None:
+        source = (ROOT / "deploy/management/machine_retention.sh").read_text(encoding="utf-8")
+        self.assertIn("run_retention_cycle_once(now=when)", source)
+        self.assertIn("retention_status(db)", source)
+        self.assertIn("mp_setup_execution_acquire", source)
+        self.assertIn("mp_setup_test_hook_policy || return 77", source)
+        self.assertIn("mp-opt-retention-machine-receipt-v1", source)
+        self.assertIn("request_sha256", source)
+        self.assertIn("mp_machine_validate_regular_file", source)
+        self.assertNotIn("--as-of", source)
+        embedded = re.search(
+            r"program='(?P<program>.*?)'\n    MP_RETENTION_AS_OF=",
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(embedded)
+        compile(embedded.group("program"), "retention-machine-adapter", "exec")
+        self.assertIn("from app.db.database import SessionLocal", embedded.group("program"))
 
     def test_plan_and_status_disclose_lifecycle_coverage_and_remaining_gaps(self) -> None:
         source = MACHINE.read_text(encoding="utf-8")
@@ -962,8 +2024,16 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
     def test_fault_hook_contract_advertises_only_instrumented_transitions_and_boundaries(self) -> None:
         source = (ROOT / "deploy/management/test_hooks.sh").read_text(encoding="utf-8")
         transitions = (
-            "artifact.images-activate", "witness.register-primary", "dns.propagate",
-            "peer.pair", "bundle.acknowledge", "smtp.deliver-and-receive",
+            "artifact.images-activate", "witness.deploy-code", "witness.bind-secrets",
+            "witness.register-primary", "dns.create", "dns.propagate",
+            "peer.pair", "bundle.capture", "bundle.transfer", "bundle.restore",
+            "bundle.verify", "bundle.acknowledge", "root.passkey-register",
+            "recovery.download", "recovery.reselect",
+            "controller.download-or-import", "controller.possession-proof",
+            "controller.root-authorise", "governance.save", "governance.preview",
+            "governance.publish", "smtp.authenticate", "smtp.dns-verify",
+            "smtp.deliver-and-receive",
+            "commissioning.finalise",
             "evidence.verify",
         )
         boundaries = (
@@ -978,6 +2048,99 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("mp_setup_test_hook_record_transition_receipt", SETUP)
         self.assertNotIn("curl ", source)
         self.assertNotIn("http", source.lower())
+
+    def test_fault_hook_catalog_wires_every_declared_transition(self) -> None:
+        source = (ROOT / "deploy/management/test_hooks.sh").read_text(encoding="utf-8")
+        newly_wired = (
+            "witness.deploy-code",
+            "witness.bind-secrets", "dns.create",
+            "smtp.authenticate", "smtp.dns-verify",
+        )
+        for transition in newly_wired:
+            self.assertIn(
+                f'{{"transition":"{transition}","driver":"server-checkpoint","wired":true}}',
+                source,
+            )
+        executable_block = source[
+            source.index("readonly MP_SETUP_TEST_HOOK_TRANSITIONS="):
+            source.index("readonly MP_SETUP_TEST_HOOK_BOUNDARIES=")
+        ]
+        for transition in newly_wired:
+            self.assertIn(f'"{transition}"', executable_block)
+
+    def test_machine_worker_and_smtp_side_effects_use_adjacent_driver_hooks(self) -> None:
+        machine_witness = SETUP[
+            SETUP.index("mp_setup_witness_operation_receipt_path()"):
+            SETUP.index("mp_setup_verify_smtp_and_dns()")
+        ]
+        self.assertIn(
+            "mp_setup_test_hook_run_driver_transition witness.deploy-code witness_bootstrap",
+            SETUP,
+        )
+        self.assertIn(
+            "mp_setup_test_hook_run_driver_transition witness.bind-secrets witness_bootstrap",
+            SETUP,
+        )
+        self.assertIn(
+            '"$tools_image" secret bulk /run/mp-opt-witness-secrets.json',
+            SETUP,
+        )
+        self.assertNotIn("--secrets-file /run/mp-opt-witness-secrets.json", machine_witness)
+        self.assertLess(
+            machine_witness.index("mp_setup_record_cloudflare_resource"),
+            machine_witness.index(
+                "mp_setup_test_hook_run_driver_transition witness.bind-secrets"
+            ),
+        )
+        self.assertIn(
+            "mp_setup_test_hook_run_driver_transition dns.create witness_ready",
+            SETUP,
+        )
+        for transition in (
+            "smtp.authenticate", "smtp.deliver-and-receive", "smtp.dns-verify",
+        ):
+            self.assertIn(
+                f"mp_setup_test_hook_run_driver_transition {transition} smtp_verified",
+                SETUP,
+            )
+        self.assertIn("mp_ha_verify_smtp_both_nodes authenticate-only", SETUP)
+        self.assertIn("mp_setup_smtp_delivery_receipt", SETUP)
+        self.assertNotIn(
+            '{"checkpoint":"smtp_verified","transition":"smtp.deliver-and-receive"}',
+            (ROOT / "deploy/management/test_hooks.sh").read_text(encoding="utf-8"),
+        )
+
+    def test_candidate_deployment_reaches_each_wired_driver_transition(self) -> None:
+        hooks = (ROOT / "deploy/management/test_hooks.sh").read_text(encoding="utf-8")
+        deployment = (ROOT / "deploy/test-deployment.sh").read_text(encoding="utf-8")
+        setup = (ROOT / "deploy/management/setup_v2.sh").read_text(encoding="utf-8")
+        for transition in (
+            "database.create", "database.migrate", "backend.activate", "caddy.activate",
+        ):
+            self.assertIn(
+                f'{{"transition":"{transition}","driver":"deployment-script","wired":true}}',
+                hooks,
+            )
+            self.assertIn(f"candidate_driver_transition {transition}", deployment)
+        self.assertIn("mp_setup_test_hook_run_driver_transition", hooks)
+        database_callback = deployment[
+            deployment.index("candidate_database_create()"):
+            deployment.index("candidate_database_migrate()")
+        ]
+        compose_activate = deployment[deployment.index("compose_activate()") :]
+        self.assertIn('stop backend', database_callback)
+        self.assertNotIn('stop backend', compose_activate.split(
+            "candidate_driver_transition database.create", 1
+        )[0])
+        self.assertIn(
+            "export MP_SETUP_MACHINE_CHECKPOINT MP_SETUP_MACHINE_IDEMPOTENCY_KEY",
+            setup,
+        )
+        self.assertIn("candidate_apply_status=0", setup)
+        self.assertIn(
+            '[ "$candidate_apply_status" -ne 197 ] || return 197',
+            setup,
+        )
 
     def test_lifecycle_inputs_are_streamed_and_receipts_are_secret_free(self) -> None:
         source = MACHINE.read_text(encoding="utf-8")
@@ -1213,6 +2376,8 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
             'mp_setup_state_has application_deployed || mp_setup_state_mark application_deployed',
             opening,
         )
+        self.assertIn('witness_rc=0', opening)
+        self.assertIn('[ "$witness_rc" -eq 10 ] && return 10', opening)
 
         replicated = advance[advance.index("        replicated)") :]
         replicated = replicated[: replicated.index("        ha_services_activated)")]
@@ -1221,6 +2386,15 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
             replicated.index("mp_ha_replicate_now"),
         )
         self.assertIn("PEER_CANDIDATE_IDENTITY_MISMATCH", replicated)
+
+    def test_machine_first_copy_uses_stable_job_and_preserves_adjacent_fault_status(self) -> None:
+        ha = (ROOT / "deploy/management/ha.sh").read_text(encoding="utf-8")
+        replicated = SETUP[SETUP.index("        replicated)") :]
+        replicated = replicated[: replicated.index("        ha_services_activated)")]
+        self.assertIn("MP_SETUP_MACHINE_IDEMPOTENCY_KEY", ha)
+        self.assertIn('replication_args=("$replication_job_id")', ha)
+        self.assertIn('[ "$replication_status" -ne 197 ] || return 197', ha)
+        self.assertIn('[ "$replication_status" -ne 197 ] || return 197', replicated)
 
     def test_operations_only_debug_retry_does_not_recreate_services_before_first_copy(self) -> None:
         deployment = (ROOT / "deploy/test-deployment.sh").read_text(encoding="utf-8")

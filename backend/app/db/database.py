@@ -1,5 +1,5 @@
 """Database Configuration  -  PostgreSQL via SQLAlchemy."""
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.orm import declarative_base, sessionmaker
 from app.core.config import settings
@@ -9,6 +9,29 @@ engine = create_engine(settings.DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
+
+
+@event.listens_for(SessionLocal.class_, "after_begin")
+def _apply_tenant_context_after_begin(session, transaction, connection) -> None:
+    """Reapply the durable Session context after every commit/rollback."""
+
+    del transaction
+    if connection.dialect.name != "postgresql":
+        return
+    from app.core.database_tenancy import database_tenant_context, _values
+
+    values = _values(database_tenant_context(session))
+    connection.execute(
+        text(
+            "SELECT "
+            "set_config('mp_opt.scope', :scope, true), "
+            "set_config('mp_opt.user_id', :user_id, true), "
+            "set_config('mp_opt.event_id', :event_id, true), "
+            "set_config('mp_opt.controller_id', :controller_id, true), "
+            "set_config('mp_opt.is_root', :is_root, true)"
+        ),
+        values,
+    )
 
 
 @event.listens_for(SessionLocal.class_, "before_commit")
@@ -44,6 +67,8 @@ def _require_ha_write_permit_before_bulk_write(execute_state) -> None:
 def get_db():
     """FastAPI dependency  -  yields a DB session, auto-closed after request."""
     db = SessionLocal()
+    from app.core.database_tenancy import DENY_CONTEXT
+    db.info["mp_opt_tenant_context"] = DENY_CONTEXT
     try:
         yield db
     finally:

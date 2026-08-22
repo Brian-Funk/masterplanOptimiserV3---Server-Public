@@ -1,7 +1,7 @@
 """User and authentication models  -  ported from MasterplanOptimiserV2 Server."""
 from sqlalchemy import (
     CheckConstraint, Column, Integer, String, ForeignKey, Boolean, DateTime,
-    Index, JSON, LargeBinary, text,
+    Index, JSON, LargeBinary, UniqueConstraint, text,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -12,10 +12,13 @@ import uuid
 class User(Base):
     """Login accounts. Passkey-only authentication."""
     __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("event_id", "username", name="uq_user_event_username"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     evidence_subject_id = Column(String(36), nullable=False, unique=True, default=lambda: str(uuid.uuid4()), index=True)
-    username = Column(String, unique=True, nullable=False, index=True)
+    username = Column(String, nullable=False, index=True)
     display_name = Column(String, nullable=False)
     email = Column(String, nullable=True)
     is_root_admin = Column(Boolean, default=False)

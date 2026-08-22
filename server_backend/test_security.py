@@ -247,7 +247,7 @@ def test_require_same_event_blocks_cross_event(db):
     import pytest as pt
     with pt.raises(HTTPException) as exc_info:
         require_same_event(target, issuer)
-    assert exc_info.value.status_code == 403
+    assert exc_info.value.status_code == 404
 
 
 def test_require_same_event_allows_same_event(db):
@@ -264,8 +264,8 @@ def test_require_same_event_allows_same_event(db):
     require_same_event(target, issuer)
 
 
-def test_require_same_event_noop_for_admin(db):
-    """require_same_event is a no-op for full admins."""
+def test_require_same_event_blocks_event_admin_cross_event(db):
+    """Event administrators are not global administrators."""
     event1, _ = create_test_event(db, name="Evt1")
     event2, _ = create_test_event(db, name="Evt2")
     admin = create_test_user(
@@ -275,8 +275,23 @@ def test_require_same_event_noop_for_admin(db):
         db, username="tgt", event_id=event2.id,
     )
     from app.core.security import require_same_event
-    # Should not raise
-    require_same_event(target, admin)
+    from fastapi import HTTPException
+    import pytest as pt
+    with pt.raises(HTTPException) as exc_info:
+        require_same_event(target, admin)
+    assert exc_info.value.status_code == 404
+
+
+def test_require_same_event_allows_root_cross_event(db):
+    """Root remains explicitly outside the tenant isolation boundary."""
+    event1, _ = create_test_event(db, name="Evt1")
+    event2, _ = create_test_event(db, name="Evt2")
+    root = create_test_user(
+        db, username="root_global", is_root_admin=True,
+    )
+    target = create_test_user(db, username="tgt_global", event_id=event2.id)
+    from app.core.security import require_same_event
+    require_same_event(target, root)
 
 
 # ── require_recent_reauth ──
@@ -368,7 +383,10 @@ def test_root_settings_rejects_invalid_offline_access_window(db):
 
 def test_admin_settings_update_blocks_non_root_admin(db):
     """PUT /admin/settings is limited to root admins."""
-    admin = create_test_user(db, username="settings.admin", is_admin=True)
+    event, _ = create_test_event(db, name="Settings scope")
+    admin = create_test_user(
+        db, username="settings.admin", is_admin=True, event_id=event.id
+    )
     client = _make_client(db, admin, reauth=True)
 
     r = client.put(
@@ -595,7 +613,8 @@ def test_logout_audits_user_before_revoking_session(db):
 def test_user_can_list_and_revoke_only_owned_active_sessions(db):
     from app.models.user import AuthSession
 
-    user = create_test_user(db, username="sessions.owner")
+    event, _ = create_test_event(db, name="Session scope")
+    user = create_test_user(db, username="sessions.owner", event_id=event.id)
     client = _make_client(db, user)
     current = (
         db.query(AuthSession)
@@ -613,7 +632,7 @@ def test_user_can_list_and_revoke_only_owned_active_sessions(db):
         .one()
     )
     other.user_agent = "Firefox on Linux"
-    outsider = create_test_user(db, username="sessions.outsider")
+    outsider = create_test_user(db, username="sessions.outsider", event_id=event.id)
     inject_session(db, outsider)
     outsider_session = (
         db.query(AuthSession).filter(AuthSession.user_id == outsider.id).one()
@@ -652,7 +671,8 @@ def test_user_can_list_and_revoke_only_owned_active_sessions(db):
 def test_revoking_current_session_clears_cookies_and_authentication(db):
     from app.models.user import AuthSession
 
-    user = create_test_user(db, username="sessions.current")
+    event, _ = create_test_event(db, name="Current session scope")
+    user = create_test_user(db, username="sessions.current", event_id=event.id)
     client = _make_client(db, user)
     current = db.query(AuthSession).filter(AuthSession.user_id == user.id).one()
 

@@ -9,7 +9,11 @@ from server_backend.conftest import (
 
 def test_create_announcement_admin(db, admin_client):
     """Admin can create an announcement."""
-    event, _ = create_test_event(db, name="Ann Evt")
+    from app.models.event import Event
+    from app.models.user import User
+
+    admin = db.query(User).filter(User.username == "admin.user").one()
+    event = db.get(Event, admin.event_id)
     r = admin_client.post("/api/v1/notifications/announcements", json={
         "event_id": event.id,
         "title": "Test Announcement",
@@ -96,7 +100,7 @@ def test_list_announcements_cross_event_blocked(db):
         f"/api/v1/notifications/announcements/{other_event.id}",
     )
 
-    assert response.status_code == 403
+    assert response.status_code == 404
 
 
 # ── DELETE /notifications/announcements/{id} ──
@@ -171,4 +175,4 @@ def test_delete_announcement_issuer_cross_event_blocked(db):
     # Issuer (event1) tries to delete
     issuer_client = _make_client(db, issuer)
     r2 = issuer_client.delete(f"/api/v1/notifications/announcements/{ann_id}")
-    assert r2.status_code == 403
+    assert r2.status_code == 404

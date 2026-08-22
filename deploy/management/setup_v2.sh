@@ -20,6 +20,20 @@ MP_SETUP_V2_ARTIFACTS="${MP_SETUP_V2_ARTIFACTS:-$MP_STATE/setup-artifacts}"
 MP_SETUP_V2_FULL_LOSS_AUTH="${MP_SETUP_V2_FULL_LOSS_AUTH:-$MP_STATE/setup-full-loss-authorization.json}"
 MP_SETUP_V2_PROVIDER_RESOURCE="${MP_SETUP_V2_PROVIDER_RESOURCE:-$MP_STATE/cloudflare-provider-resource.json}"
 
+# The machine adapter loads the test-policy hook module after this shared
+# setup implementation and replaces this fallback with the guarded adjacent
+# transition driver.  The interactive TUI and focused helpers intentionally
+# do not load test-hook state; for them, execute the same operation directly.
+# Keeping the fallback here prevents test-only instrumentation from becoming
+# a runtime dependency of normal commissioning.
+if ! declare -F mp_setup_test_hook_run_driver_transition >/dev/null; then
+    mp_setup_test_hook_run_driver_transition() {
+        [ "$#" -ge 4 ] || return 64
+        shift 3
+        "$@"
+    }
+fi
+
 mp_setup_record_cloudflare_resource() {
     local cluster="$1" account="$2" worker="$3" witness="$4" zone="$5" domain="$6" temporary host
     [[ "$cluster" =~ ^mp-opt-[0-9a-f-]{36}$ ]] || return 65
@@ -625,7 +639,7 @@ mp_setup_machine_import_recovery_package() {
 }
 
 mp_setup_machine_open_replacement() {
-    local pair body token response pending replacement_tmp lane campaign
+    local pair body token response pending replacement_tmp lane campaign witness_rc=0
     mp_load_ha_config || return 1
     [ "$HA_ROLE" = dynamic ] || return 65
     mp_require_active_or_standalone || return 65
@@ -649,7 +663,12 @@ mp_setup_machine_open_replacement() {
     jq -n --arg node "$HA_NODE_ID" --arg target "$HA_PEER_NODE_ID" --arg pair "$pair" \
         '{node_id:$node,target_node_id:$target,pairing_secret:$pair}' > "$body" || return 1
     response="$(mp_setup_witness_call pair-open "$HA_WITNESS_URL" "$HA_CLUSTER_ID" "$token" "$body")" \
-        || { rm -f "$body"; unset pair token; return 1; }
+        || witness_rc=$?
+    if [ "$witness_rc" -ne 0 ]; then
+        rm -f "$body"; unset pair token
+        [ "$witness_rc" -eq 10 ] && return 10
+        return 1
+    fi
     rm -f "$body"; unset token
     jq -e '.pairing_open == true' <<< "$response" >/dev/null 2>&1 || return 1
     lane="$(jq -r .deployment_lane "$MP_SETUP_V2_STATE")"
@@ -965,7 +984,7 @@ mp_setup_machine_advance_one() {
     local cluster_id node_token pairing_secret body pending bootstrap_tmp response peer current
     local bootstrap_error bootstrap_ok=false repair_attempted=false attempt
     local requested_tag requested_commit fault_transition="" replay_test_receipt=false
-    local fault_hook_active=false hook_status=0 step_status=0
+    local fault_hook_active=false hook_status=0 step_status=0 routing_key
     local -a install_args
     mp_setup_validate_state_contract "$MP_SETUP_V2_STATE" || return $?
     checkpoint="$(jq -r .checkpoint "$input_file")"
@@ -1028,6 +1047,7 @@ mp_setup_machine_advance_one() {
     fi
     MP_SETUP_MACHINE_CHECKPOINT="$checkpoint"
     MP_SETUP_MACHINE_IDEMPOTENCY_KEY="$idempotency_key"
+    export MP_SETUP_MACHINE_CHECKPOINT MP_SETUP_MACHINE_IDEMPOTENCY_KEY
     if declare -F mp_setup_test_hook_transition_for_checkpoint >/dev/null; then
         fault_transition="$(mp_setup_test_hook_transition_for_checkpoint "$checkpoint")"
     fi
@@ -1218,9 +1238,10 @@ mp_setup_machine_advance_one() {
                             "$MP_SETUP_WITNESS_ADMIN_TOKEN" \
                             || { rm -f "$body" "$bootstrap_error"; return 20; }
                         repair_attempted=true
+                        [ "$attempt" -eq 20 ] || sleep 3
                         continue
                     fi
-                    if ! grep -Eq 'remote API returned HTTP (404|429|500|502|503|504)([^0-9]|$)|provider error 1042([^0-9]|$)' \
+                    if ! grep -Eq 'remote API returned HTTP (401|404|429|500|502|503|504)([^0-9]|$)|provider error 1042([^0-9]|$)' \
                         "$bootstrap_error"; then
                         break
                     fi
@@ -1308,12 +1329,20 @@ mp_setup_machine_advance_one() {
                 mp_setup_state_mark application_deployed
             elif [ "$lane" = unsigned ] \
                 && [ -s "$MP_STATE/test-deployments/candidate/receipt.json" ]; then
+                local candidate_apply_status=0
                 [ "$(jq -r '.commit // empty' "$MP_STATE/test-deployments/candidate/receipt.json")" \
                     = "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")" ] || return 65
-                if ! jq -c '.values.registry' "$input_file" \
+                jq -c '.values.registry' "$input_file" \
                     | "$MP_ROOT/deploy/test-deployment.sh" apply-prebuilt \
                         "$(jq -r .campaign_commit "$MP_SETUP_V2_STATE")" \
-                        --fresh-commissioning --registry-credentials-stdin; then
+                        --fresh-commissioning --registry-credentials-stdin \
+                    || candidate_apply_status=$?
+                if [ "$candidate_apply_status" -ne 0 ]; then
+                    # A test-policy-only adjacent fault deliberately exits 197.
+                    # Preserve that exact status so the private controller can
+                    # classify the interruption and exercise deterministic
+                    # resume instead of recording a generic deployment error.
+                    [ "$candidate_apply_status" -ne 197 ] || return 197
                     local failed_stage failure_code
                     failed_stage="$(tr -cd 'a-z0-9-' \
                         < "$MP_STATE/test-deployments/current-stage" 2>/dev/null \
@@ -1360,7 +1389,10 @@ mp_setup_machine_advance_one() {
                         "Node B is not bound to the exact candidate identity, so no replication bundle was sent." || true
                     return 1
                 }
-                mp_ha_replicate_now || return 1
+                local replication_status=0
+                mp_ha_replicate_now || replication_status=$?
+                [ "$replication_status" -ne 197 ] || return 197
+                [ "$replication_status" -eq 0 ] || return 1
                 mp_setup_record_first_verified_bundle >/dev/null 2>&1 || return 1
             fi
             mp_setup_finalize_fresh_unsigned_peer || return 1
@@ -1496,7 +1528,10 @@ mp_setup_machine_advance_one() {
         witness_ready)
             mp_setup_state_action "Activating public HA routing" \
                 WITNESS_ROUTING witness_ready || return 1
-            if mp_setup_activate_initial_witness_routing; then
+            routing_key="dns-create-$(printf '%s' "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
+                | sha256sum | awk '{print $1}')"
+            if mp_setup_test_hook_run_driver_transition dns.create witness_ready \
+                "$routing_key" mp_setup_activate_initial_witness_routing; then
                 :
             else
                 step_status=$?
@@ -1893,6 +1928,13 @@ mp_setup_reconcile_primary_campaign_pin() {
 mp_setup_establish_initial_writer_identity() {
     local generation holder
     mp_load_ha_config || return 1
+    # Conversion creates the bounded HA node token before the long-running HA
+    # services are installed. Establish the authoritative runtime contract
+    # now so the one-shot lease agent can use the same validation-only
+    # promotion path as the hardened service (notably node_token group-read
+    # access for the fixed Backend identity).
+    mp_prepare_runtime_permissions \
+        || { ui_error "The HA runtime permission contract could not be established before writer activation."; return 1; }
     generation="$(jq -r '.generation // 0' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
     holder="$(jq -r '.holder_node_id // empty' "$MP_ROOT/runtime/ha-control.json" 2>/dev/null || true)"
     # A standalone-to-HA conversion installs the node identity before it
@@ -2230,12 +2272,107 @@ mp_setup_deploy_witness() {
     unset result
 }
 
+mp_setup_witness_operation_receipt_path() {
+    local operation="$1" idempotency_key="$2" digest
+    [[ "$operation" =~ ^(code|secrets)$ ]] \
+        && [[ "$idempotency_key" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$ ]] || return 65
+    digest="$(printf '%s\0%s' "$operation" "$idempotency_key" \
+        | sha256sum | awk '{print $1}')" || return 1
+    printf '%s/setup-witness-%s-%s.json\n' "$MP_STATE" "$operation" "$digest"
+}
+
+mp_setup_validate_witness_operation_receipt() {
+    local receipt="$1" operation="$2" account_id="$3" worker_name="$4"
+    local idempotency_key="$5" payload_sha256="$6" key_hash
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] \
+        && [ "$(stat -c '%u:%a' "$receipt" 2>/dev/null)" = "$(id -u):600" ] \
+        || return 77
+    key_hash="$(printf '%s' "$idempotency_key" | sha256sum | awk '{print $1}')" || return 1
+    jq -e --arg operation "$operation" --arg account "$account_id" \
+        --arg worker "$worker_name" --arg key_hash "$key_hash" \
+        --arg payload "$payload_sha256" '
+        .format == "mp-opt-witness-operation-receipt-v1"
+        and .operation == $operation and .account_id == $account
+        and .worker_name == $worker and .idempotency_key_sha256 == $key_hash
+        and .payload_sha256 == $payload
+        and (.accepted_at | type == "string")
+        and (if $operation == "code" then
+               (.witness_url | test("^https://[^[:space:]]+\\.workers\\.dev$"))
+             else .witness_url == null end)
+    ' "$receipt" >/dev/null 2>&1
+}
+
+mp_setup_write_witness_operation_receipt() {
+    local receipt="$1" operation="$2" account_id="$3" worker_name="$4"
+    local idempotency_key="$5" payload_sha256="$6" witness_url="${7:-}" temporary key_hash
+    key_hash="$(printf '%s' "$idempotency_key" | sha256sum | awk '{print $1}')" || return 1
+    temporary="$(mktemp "$MP_STATE/setup-witness-operation.XXXXXX")" || return 1
+    jq -n --arg operation "$operation" --arg account "$account_id" \
+        --arg worker "$worker_name" --arg key_hash "$key_hash" \
+        --arg payload "$payload_sha256" --arg witness "$witness_url" \
+        --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        {format:"mp-opt-witness-operation-receipt-v1",operation:$operation,
+         account_id:$account,worker_name:$worker,idempotency_key_sha256:$key_hash,
+         payload_sha256:$payload,
+         witness_url:(if $witness == "" then null else $witness end),accepted_at:$at}
+    ' > "$temporary" \
+        && chmod 600 "$temporary" && sync -f "$temporary" 2>/dev/null \
+        && mv "$temporary" "$receipt" && sync -f "$MP_STATE" 2>/dev/null \
+        || { rm -f "$temporary"; return 1; }
+}
+
+mp_setup_deploy_witness_code_machine() {
+    local account_id="$1" deploy_token="$2" tools_image="$3" worker_name="$4"
+    local idempotency_key="$5" receipt="$6" payload_sha256 output witness
+    payload_sha256="$(sha256sum \
+        "$MP_ROOT/infra/cloudflare-ha-witness/src/index.ts" \
+        "$MP_ROOT/infra/cloudflare-ha-witness/wrangler.toml" | sha256sum | awk '{print $1}')" \
+        || return 1
+    if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+        mp_setup_validate_witness_operation_receipt "$receipt" code "$account_id" \
+            "$worker_name" "$idempotency_key" "$payload_sha256"
+        return $?
+    fi
+    output="$(mktemp "$MP_STATE/wrangler-deploy.XXXXXX")" || return 1
+    CLOUDFLARE_API_TOKEN="$deploy_token" docker run --rm -e CLOUDFLARE_API_TOKEN \
+        -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
+        -v "$MP_ROOT/infra/cloudflare-ha-witness:/worker:ro" \
+        "$tools_image" deploy /worker/src/index.ts --config /worker/wrangler.toml \
+            --name "$worker_name" > "$output" 2>&1 \
+        || { rm -f "$output"; return 1; }
+    witness="$(grep -Eo 'https://[^[:space:]]+\.workers\.dev' "$output" | tail -1)"
+    rm -f "$output"
+    [[ "$witness" =~ ^https://[^[:space:]]+\.workers\.dev/?$ ]] || return 1
+    mp_setup_write_witness_operation_receipt "$receipt" code "$account_id" \
+        "$worker_name" "$idempotency_key" "$payload_sha256" "${witness%/}"
+}
+
+mp_setup_bind_witness_secrets_machine() {
+    local account_id="$1" deploy_token="$2" tools_image="$3" worker_name="$4"
+    local idempotency_key="$5" receipt="$6" secrets_file="$7" payload_sha256
+    payload_sha256="$(sha256sum "$secrets_file" | awk '{print $1}')" || return 1
+    if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+        mp_setup_validate_witness_operation_receipt "$receipt" secrets "$account_id" \
+            "$worker_name" "$idempotency_key" "$payload_sha256"
+        return $?
+    fi
+    CLOUDFLARE_API_TOKEN="$deploy_token" docker run --rm -e CLOUDFLARE_API_TOKEN \
+        -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
+        -v "$MP_ROOT/infra/cloudflare-ha-witness:/worker:ro" \
+        -v "$secrets_file:/run/mp-opt-witness-secrets.json:ro" \
+        "$tools_image" secret bulk /run/mp-opt-witness-secrets.json \
+            --config /worker/wrangler.toml --name "$worker_name" >/dev/null \
+        || return 1
+    mp_setup_write_witness_operation_receipt "$receipt" secrets "$account_id" \
+        "$worker_name" "$idempotency_key" "$payload_sha256"
+}
+
 mp_setup_deploy_witness_machine() {
     local domain="$1" cluster_id="$2" account_id="$3" deploy_token="$4" dns_token="$5"
-    local admin_token="${6:-}" worker_name tools_image output="" witness zone_id secrets_file=""
+    local admin_token="${6:-}" worker_name tools_image witness zone_id secrets_file=""
+    local code_key secrets_key code_receipt secrets_receipt code_payload
     cleanup() {
         mp_secure_remove_file "$secrets_file" || true
-        [ -z "$output" ] || rm -f -- "$output"
         unset deploy_token dns_token admin_token
     }
     trap cleanup EXIT
@@ -2249,23 +2386,36 @@ mp_setup_deploy_witness_machine() {
     worker_name="mp-opt-ha-$(tr -cd 'a-z0-9' <<< "${cluster_id:0:12}")"
     [ -n "$admin_token" ] || admin_token="$(mp_random_secret)"
     secrets_file="$(mktemp "$MP_STATE/wrangler-secrets.XXXXXX")" || return 1
-    output="$(mktemp "$MP_STATE/wrangler-deploy.XXXXXX")" || return 1
     jq -n --arg admin "$admin_token" --arg dns "$dns_token" \
         '{ADMIN_TOKEN:$admin,CLOUDFLARE_DNS_API_TOKEN:$dns}' > "$secrets_file" \
         && chmod 600 "$secrets_file" || return 1
-    CLOUDFLARE_API_TOKEN="$deploy_token" docker run --rm -e CLOUDFLARE_API_TOKEN \
-        -e CLOUDFLARE_ACCOUNT_ID="$account_id" \
-        -v "$MP_ROOT/infra/cloudflare-ha-witness:/worker:ro" \
-        -v "$secrets_file:/run/mp-opt-witness-secrets.json:ro" \
-        "$tools_image" deploy /worker/src/index.ts --config /worker/wrangler.toml \
-            --name "$worker_name" --secrets-file /run/mp-opt-witness-secrets.json \
-        > "$output" 2>&1 || return 1
-    witness="$(grep -Eo 'https://[^[:space:]]+\.workers\.dev' "$output" | tail -1)"
-    [[ "$witness" =~ ^https://[^[:space:]]+\.workers\.dev/?$ ]] || return 1
+    code_key="witness-code-$(printf '%s' "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
+        | sha256sum | awk '{print $1}')"
+    secrets_key="witness-secrets-$(printf '%s' "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
+        | sha256sum | awk '{print $1}')"
+    code_receipt="$(mp_setup_witness_operation_receipt_path code "$code_key")" || return 1
+    secrets_receipt="$(mp_setup_witness_operation_receipt_path secrets "$secrets_key")" || return 1
+    mp_setup_test_hook_run_driver_transition witness.deploy-code witness_bootstrap \
+        "$code_key" mp_setup_deploy_witness_code_machine "$account_id" "$deploy_token" \
+        "$tools_image" "$worker_name" "$code_key" "$code_receipt" || return $?
+    code_payload="$(sha256sum \
+        "$MP_ROOT/infra/cloudflare-ha-witness/src/index.ts" \
+        "$MP_ROOT/infra/cloudflare-ha-witness/wrangler.toml" | sha256sum | awk '{print $1}')" \
+        || return 1
+    mp_setup_validate_witness_operation_receipt "$code_receipt" code "$account_id" \
+        "$worker_name" "$code_key" "$code_payload" || return $?
+    witness="$(jq -r .witness_url "$code_receipt")" || return 1
+    # Attribute the exact provider resource immediately after code deployment.
+    # If secret binding is interrupted, guarded cleanup can still remove only
+    # this run-owned Worker instead of leaving an untracked provider object.
+    mp_setup_record_cloudflare_resource "$cluster_id" "$account_id" "$worker_name" \
+        "$witness" "$zone_id" "$domain" || return 1
+    mp_setup_test_hook_run_driver_transition witness.bind-secrets witness_bootstrap \
+        "$secrets_key" mp_setup_bind_witness_secrets_machine "$account_id" "$deploy_token" \
+        "$tools_image" "$worker_name" "$secrets_key" "$secrets_receipt" "$secrets_file" \
+        || return $?
     MP_SETUP_WITNESS_URL="${witness%/}"; MP_SETUP_ZONE_ID="$zone_id"
     MP_SETUP_WITNESS_ADMIN_TOKEN="$admin_token"
-    mp_setup_record_cloudflare_resource "$cluster_id" "$account_id" "$worker_name" \
-        "$MP_SETUP_WITNESS_URL" "$MP_SETUP_ZONE_ID" "$domain" || return 1
     export MP_SETUP_WITNESS_URL MP_SETUP_ZONE_ID MP_SETUP_WITNESS_ADMIN_TOKEN
     cleanup
     trap - EXIT
@@ -2382,35 +2532,41 @@ mp_setup_smtp_delivery_receipt() {
         || { rm -f "$temporary"; return 1; }
 }
 
-mp_setup_verify_smtp_and_dns_machine() {
-    local selector="$1" recipient="$2" correlation_id="${3:-}" from_email domain spf dmarc dkim
-    local receipt_status=0
-    [ -n "$(mp_env_get SMTP_HOST 2>/dev/null || true)" ] || {
-        [ -z "$selector" ] && [ -z "$recipient" ]
-        return $?
-    }
-    mp_require_commands dig || return 1
-    [[ "$selector" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || return 65
-    mp_validate_email_address "$recipient" || return 65
-    [[ "$correlation_id" =~ ^[0-9a-f]{32}$ ]] || return 65
-    mp_setup_smtp_delivery_receipt "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
-        "$recipient" "$correlation_id" read || receipt_status=$?
-    if [ "$receipt_status" -ne 0 ]; then
-        # A prepared receipt means the process may have died after the provider
-        # accepted the message but before local acknowledgement was durable.
-        # Never resend automatically from that ambiguous boundary.
-        [ "$receipt_status" -ne 20 ] || return 20
-        [ "$receipt_status" -eq 10 ] || return "$receipt_status"
-        mp_setup_smtp_delivery_receipt "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
-            "$recipient" "$correlation_id" prepare || return 1
-        if [ "$(mp_ha_role 2>/dev/null || printf standalone)" = dynamic ]; then
-            mp_ha_verify_smtp_both_nodes required "$recipient" "$correlation_id" || return 1
-        else
-            mp_send_smtp_test_to "$recipient" "$correlation_id" || return 1
-        fi
-        mp_setup_smtp_delivery_receipt "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
-            "$recipient" "$correlation_id" accept || return 1
+mp_setup_smtp_authenticate_machine() {
+    if [ "$(mp_ha_role 2>/dev/null || printf standalone)" = dynamic ]; then
+        mp_ha_verify_smtp_both_nodes authenticate-only
+    else
+        python3 "$MP_ROOT/deploy/ha/smtp_probe.py" --root "$MP_ROOT" \
+            --node-id standalone >/dev/null
     fi
+}
+
+mp_setup_smtp_delivery_machine() {
+    local idempotency_key="$1" recipient="$2" correlation_id="$3" receipt_status=0
+    mp_setup_smtp_delivery_receipt "$idempotency_key" \
+        "$recipient" "$correlation_id" read || receipt_status=$?
+    if [ "$receipt_status" -eq 0 ]; then
+        return 0
+    fi
+    # A prepared receipt means the process may have died after the provider
+    # accepted the message but before local acknowledgement was durable.
+    # Never resend automatically from that ambiguous boundary.
+    [ "$receipt_status" -ne 20 ] || return 20
+    [ "$receipt_status" -eq 10 ] || return "$receipt_status"
+    mp_setup_smtp_delivery_receipt "$idempotency_key" \
+        "$recipient" "$correlation_id" prepare || return 1
+    if [ "$(mp_ha_role 2>/dev/null || printf standalone)" = dynamic ]; then
+        mp_ha_verify_smtp_both_nodes required "$recipient" "$correlation_id" || return 1
+    else
+        mp_send_smtp_test_to "$recipient" "$correlation_id" || return 1
+    fi
+    mp_setup_smtp_delivery_receipt "$idempotency_key" \
+        "$recipient" "$correlation_id" accept
+}
+
+mp_setup_smtp_dns_verify_machine() {
+    local selector="$1" from_email domain spf dmarc dkim
+    mp_require_commands dig || return 1
     from_email="$(mp_env_get SMTP_FROM_EMAIL)" || return 1
     domain="${from_email##*@}"
     spf="$(mp_public_dns_consensus "$domain" TXT | grep -m1 'v=spf1' || true)"
@@ -2419,6 +2575,31 @@ mp_setup_verify_smtp_and_dns_machine() {
     [ -n "$dkim" ] \
         || dkim="$(mp_public_dns_consensus "${selector}._domainkey.$domain" CNAME | grep -m1 '\.' || true)"
     [ -n "$spf" ] && [ -n "$dmarc" ] && [ -n "$dkim" ] || return 10
+}
+
+mp_setup_verify_smtp_and_dns_machine() {
+    local selector="$1" recipient="$2" correlation_id="${3:-}"
+    local auth_key delivery_key dns_key
+    [ -n "$(mp_env_get SMTP_HOST 2>/dev/null || true)" ] || {
+        [ -z "$selector" ] && [ -z "$recipient" ]
+        return $?
+    }
+    [[ "$selector" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || return 65
+    mp_validate_email_address "$recipient" || return 65
+    [[ "$correlation_id" =~ ^[0-9a-f]{32}$ ]] || return 65
+    auth_key="smtp-auth-$(printf '%s' "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
+        | sha256sum | awk '{print $1}')"
+    delivery_key="smtp-delivery-$(printf '%s' "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
+        | sha256sum | awk '{print $1}')"
+    dns_key="smtp-dns-$(printf '%s' "$MP_SETUP_MACHINE_IDEMPOTENCY_KEY" \
+        | sha256sum | awk '{print $1}')"
+    mp_setup_test_hook_run_driver_transition smtp.authenticate smtp_verified \
+        "$auth_key" mp_setup_smtp_authenticate_machine || return $?
+    mp_setup_test_hook_run_driver_transition smtp.deliver-and-receive smtp_verified \
+        "$delivery_key" mp_setup_smtp_delivery_machine "$delivery_key" \
+        "$recipient" "$correlation_id" || return $?
+    mp_setup_test_hook_run_driver_transition smtp.dns-verify smtp_verified \
+        "$dns_key" mp_setup_smtp_dns_verify_machine "$selector"
 }
 
 mp_setup_standalone_dns_matches() {
@@ -2754,9 +2935,10 @@ mp_setup_primary_create() {
                     || { rm -f "$body" "$bootstrap_error"; \
                         unset node_token pairing_secret MP_SETUP_WITNESS_ADMIN_TOKEN; return 1; }
                 repair_attempted=true
+                [ "$attempt" -eq 20 ] || sleep 3
                 continue
             fi
-            if ! grep -Eq 'remote API returned HTTP (404|429|500|502|503|504)([^0-9]|$)|provider error 1042([^0-9]|$)' \
+            if ! grep -Eq 'remote API returned HTTP (401|404|429|500|502|503|504)([^0-9]|$)|provider error 1042([^0-9]|$)' \
                 "$bootstrap_error"; then
                 break
             fi
@@ -3020,7 +3202,7 @@ mp_setup_join_node_machine() {
 }
 
 mp_setup_replace_standby() {
-    local pair body token response join_code domain pending replacement_tmp lane campaign
+    local pair body token response join_code domain pending replacement_tmp lane campaign witness_rc=0
     mp_load_ha_config || return 1
     [ "$HA_ROLE" = dynamic ] || { ui_error "This server is not an HA node."; return 1; }
     mp_require_active_or_standalone || return 1
@@ -3047,7 +3229,16 @@ mp_setup_replace_standby() {
     jq -n --arg node "$HA_NODE_ID" --arg target "$HA_PEER_NODE_ID" --arg pair "$pair" \
         '{node_id:$node,target_node_id:$target,pairing_secret:$pair}' > "$body"
     response="$(mp_setup_witness_call pair-open "$HA_WITNESS_URL" "$HA_CLUSTER_ID" "$token" "$body")" \
-        || { rm -f "$body"; unset pair token; return 1; }
+        || witness_rc=$?
+    if [ "$witness_rc" -ne 0 ]; then
+        rm -f "$body"; unset pair token
+        if [ "$witness_rc" -eq 10 ]; then
+            ui_message "Waiting for the old standby lease" \
+                "The witness still sees a recent heartbeat from the old standby. Keep it powered off and resume setup after the bounded lease expires."
+            return 10
+        fi
+        return 1
+    fi
     jq -e '.pairing_open == true' <<< "$response" >/dev/null || return 1
     domain="$(mp_env_get DOMAIN)" || return 1
     if [ "$(cat "$MP_DEPLOYMENT_POLICY_FILE" 2>/dev/null || printf production)" = test ]; then

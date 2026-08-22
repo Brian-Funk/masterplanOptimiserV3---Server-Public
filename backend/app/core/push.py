@@ -102,9 +102,13 @@ def send_push_to_event(
     Removes expired subscriptions (410/404).
     notification_type: "announcement" or "schedule" (used by SW to pick icon)."""
     from app.models.notification import PushSubscription
+    from app.core.features import enabled_event_features
 
     if not _vapid_configured():
         logger.info("VAPID is not configured; push delivery skipped")
+        return 0
+    if "push_notifications" not in enabled_event_features(event_id, db):
+        logger.info("Push notifications are disabled for event %s", event_id)
         return 0
 
     subs = db.query(PushSubscription).filter(PushSubscription.event_id == event_id).all()
