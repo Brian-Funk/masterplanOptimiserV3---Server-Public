@@ -1080,8 +1080,17 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                     test "$(cat "$MP_STATE/fake-backend")" != running || printf 'backend\n'
                     return 0
                   fi
+                  if [ "$1" = exec ]; then
+                    test "$(cat "$MP_STATE/fake-backend")" = running \
+                      && test "$(cat "$MP_STATE/fake-holder")" = node-a
+                    return
+                  fi
                   if [ "$1" = stop ] && [ "$2" = backend ]; then
                     printf 'stopped\n' > "$MP_STATE/fake-backend"
+                    return 0
+                  fi
+                  if [ "$1" = up ] && [ "$2" = -d ] && [ "$3" = backend ]; then
+                    printf 'running\n' > "$MP_STATE/fake-backend"
                     return 0
                   fi
                   return 64
@@ -1187,8 +1196,9 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             document = json.loads(online.stdout)
             self.assertEqual(document["state"], "online")
             self.assertTrue(document["lease_agent_active"])
-            self.assertFalse(document["backend_running"])
-            self.assertEqual((state / "fake-backend").read_text().strip(), "stopped")
+            self.assertTrue(document["backend_running"])
+            self.assertFalse(document["writer_ready"])
+            self.assertEqual((state / "fake-backend").read_text().strip(), "running")
 
     def test_fault_hook_rejects_wrong_identity_and_can_disarm_exact_arm(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
@@ -1687,6 +1697,8 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("mp_ha_planned_switchover_apply", MACHINE_HA)
         self.assertIn("mp_ha_automatic_failover_apply", MACHINE_HA)
         self.assertIn("mp_machine_ha_runtime_status", MACHINE_HA)
+        self.assertIn('urlopen("http://127.0.0.1:8000/ha/ready"', MACHINE_HA)
+        self.assertIn("writer_ready", MACHINE_HA)
         self.assertIn("mp_machine_ha_fault_offline", MACHINE_HA)
         self.assertIn("mp_machine_ha_fault_online", MACHINE_HA)
         self.assertIn("sudo -n systemctl stop mp-opt-ha-lease.service", MACHINE_HA)

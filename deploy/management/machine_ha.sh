@@ -50,7 +50,7 @@ mp_machine_ha_status() {
 }
 
 mp_machine_ha_runtime_status() {
-    local lease_active=false backend_running=false
+    local lease_active=false backend_running=false writer_ready=false
     mp_machine_require_local_owner || return 77
     mp_load_ha_config || return 65
     [ "$HA_ROLE" = dynamic ] || return 65
@@ -59,10 +59,17 @@ mp_machine_ha_runtime_status() {
         && lease_active=true
     "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null \
         | grep -Fxq backend && backend_running=true
+    if [ "$backend_running" = true ] && "${MP_COMPOSE[@]}" exec -T backend \
+      python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/ha/ready", timeout=3).read()' \
+      >/dev/null 2>&1; then
+        writer_ready=true
+    fi
     jq -cn --arg node "$HA_NODE_ID" \
         --argjson lease "$lease_active" --argjson backend "$backend_running" \
+        --argjson writer "$writer_ready" \
         '{format:"mp-opt-ha-runtime-status-v1",local_node_id:$node,
-          lease_agent_active:$lease,backend_running:$backend}'
+          lease_agent_active:$lease,backend_running:$backend,
+          writer_ready:$writer}'
 }
 
 mp_machine_ha_read_input() {
@@ -122,7 +129,8 @@ mp_machine_ha_fault_result() {
         routing_ready:$control.routing_ready,
         automatic_failover:$control.automatic_failover,
         lease_agent_active:$runtime.lease_agent_active,
-        backend_running:$runtime.backend_running}'
+        backend_running:$runtime.backend_running,
+        writer_ready:$runtime.writer_ready}'
 }
 
 mp_machine_ha_fault_offline() {
@@ -135,14 +143,15 @@ mp_machine_ha_fault_offline() {
     "${MP_COMPOSE[@]}" stop backend >/dev/null || return 1
     sudo -n systemctl stop mp-opt-ha-lease.service >/dev/null || return 1
     runtime="$(mp_machine_ha_runtime_status)" || return $?
-    jq -e '.lease_agent_active == false and .backend_running == false' \
+    jq -e '.lease_agent_active == false and .backend_running == false
+      and .writer_ready == false' \
         <<< "$runtime" >/dev/null || return 20
     mp_machine_ha_fault_result offline "$control"
 }
 
 mp_machine_ha_fault_online() {
     local expected_holder="$1" expected_generation="$2" peer_node_id="$3"
-    local control="" runtime="" ready=false
+    local control="" runtime="" control_ready=false ready=false
     [ "$expected_holder" = "$peer_node_id" ] || return 20
     mp_compose_init_existing_runtime ha || return 65
     sudo -n systemctl start mp-opt-ha-lease.service >/dev/null || return 1
@@ -153,14 +162,33 @@ mp_machine_ha_fault_online() {
             .holder_node_id == $holder and .generation == $generation
             and .automatic_failover == true' <<< "$control" >/dev/null; then
             runtime="$(mp_machine_ha_runtime_status 2>/dev/null || true)"
-            if jq -e '.lease_agent_active == true and .backend_running == false' \
-                <<< "$runtime" >/dev/null; then
-                ready=true
+            if jq -e '.lease_agent_active == true' <<< "$runtime" >/dev/null; then
+                control_ready=true
                 break
             fi
         fi
         sleep 1
     done
+    if [ "$control_ready" = true ]; then
+        # Restore the symmetric standby Backend only after the returning lease
+        # agent has observed the exact peer holder and generation.
+        "${MP_COMPOSE[@]}" up -d backend >/dev/null || control_ready=false
+    fi
+    if [ "$control_ready" = true ]; then
+        for _ in $(seq 1 30); do
+            runtime="$(mp_machine_ha_runtime_status 2>/dev/null || true)"
+            # Symmetric HA deliberately keeps both Backends running.  The
+            # returning node is fenced when its own generation-aware
+            # /ha/ready check rejects writer status, not when its container is
+            # absent.
+            if jq -e '.lease_agent_active == true and .backend_running == true
+              and .writer_ready == false' <<< "$runtime" >/dev/null; then
+                ready=true
+                break
+            fi
+            sleep 1
+        done
+    fi
     if [ "$ready" != true ]; then
         # Starting the returning lease agent is the only way to refresh its
         # deliberately stale local witness observation. If the exact peer
