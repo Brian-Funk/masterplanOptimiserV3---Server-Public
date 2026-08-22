@@ -1605,6 +1605,46 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 ["called"],
             )
 
+    def test_dotted_driver_checkpoint_receipt_passes_machine_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            self.enable_test_policy(environment)
+            run_id = "12345678-1234-4234-8234-123456789abc"
+            self.assertEqual(self.invoke(
+                environment, "test-hook", "enable", "--input-stdin", "--json",
+                input_document=json.dumps({
+                    "format": "mp-opt-commissioning-test-hook-enable-v1",
+                    "run_id": run_id, "enabled": True,
+                }),
+            ).returncode, 0)
+            hooks = ROOT / "deploy" / "management" / "test_hooks.sh"
+            script = r'''
+                set -Eeuo pipefail
+                source "$1"
+                effect() { printf 'called\n' >> "$MP_STATE/effect-count"; }
+                mp_setup_test_hook_run_driver_transition \
+                    bundle.capture replicated.capture bundle-capture-key effect
+            '''
+            recorded = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "test", str(hooks)],
+                env=environment, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(recorded.returncode, 0, recorded.stderr)
+            validated = self.invoke(environment, "validate", "--json")
+            self.assertEqual(validated.returncode, 0, validated.stderr)
+            self.assertTrue(json.loads(validated.stdout)["ok"])
+
+            receipt = next(
+                (Path(environment["MP_STATE"]) / "setup-test-hooks"
+                 / "transition-receipts").glob("*.json")
+            )
+            document = json.loads(receipt.read_text(encoding="utf-8"))
+            document["checkpoint"] = "replicated..capture"
+            receipt.write_text(json.dumps(document), encoding="utf-8")
+            receipt.chmod(0o600)
+            rejected = self.invoke(environment, "validate", "--json")
+            self.assertEqual(rejected.returncode, 40, rejected.stderr)
+
     def test_provider_cleanup_reconciles_lost_delete_ack_without_second_delete(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             directory = Path(directory_name)

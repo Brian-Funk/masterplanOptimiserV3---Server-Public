@@ -197,7 +197,8 @@ mp_machine_validate() {
                 jq -e '.format == "mp-opt-commissioning-transition-receipt-v1"
                     and (.run_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
                     and (.transition | type == "string")
-                    and (.checkpoint | test("^[a-z0-9_]{1,64}$"))
+                    and (.checkpoint | type == "string" and length <= 64
+                        and test("^[a-z0-9_]+(\\.[a-z0-9_]+)*$"))
                     and (.idempotency_key_sha256 | test("^[0-9a-f]{64}$"))
                     and (.side_effect_completed_at | type == "string")' \
                     "$receipt" >/dev/null 2>&1 || return 65
