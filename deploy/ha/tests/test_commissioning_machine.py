@@ -1566,6 +1566,45 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 ["database", "backend", "caddy"],
             )
 
+    def test_hook_lock_descriptor_does_not_escape_boundary_call(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            self.enable_test_policy(environment)
+            run_id = "12345678-1234-4234-8234-123456789abc"
+            self.assertEqual(self.invoke(
+                environment, "test-hook", "enable", "--input-stdin", "--json",
+                input_document=json.dumps({
+                    "format": "mp-opt-commissioning-test-hook-enable-v1",
+                    "run_id": run_id, "enabled": True,
+                }),
+            ).returncode, 0)
+            hooks = ROOT / "deploy" / "management" / "test_hooks.sh"
+            script = r'''
+                set -Eeuo pipefail
+                source "$1"
+                mp_setup_test_hook_reach_named \
+                    artifact.images-activate before-side-effect
+                [ ! -e "/proc/$$/fd/9" ] || {
+                    printf 'test hook lock descriptor escaped boundary call\n' >&2
+                    exit 99
+                }
+                timeout --kill-after=1 5 bash -Eeuo pipefail -c '
+                    source "$1"
+                    effect() { printf "called\n" >> "$MP_STATE/effect-count"; }
+                    mp_setup_test_hook_run_driver_transition \
+                        database.create application_deployed lock-scope-key effect
+                ' nested "$1"
+            '''
+            result = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script, "test", str(hooks)],
+                env=environment, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                (Path(environment["MP_STATE"]) / "effect-count").read_text().splitlines(),
+                ["called"],
+            )
+
     def test_provider_cleanup_reconciles_lost_delete_ack_without_second_delete(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             directory = Path(directory_name)

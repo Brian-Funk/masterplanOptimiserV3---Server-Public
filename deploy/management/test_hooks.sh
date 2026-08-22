@@ -397,7 +397,11 @@ mp_setup_test_hook_run_driver_transition() {
         after-checkpoint-before-next-action
 }
 
-mp_setup_test_hook_enable() {
+# Keep the lock descriptor inside a subshell.  These helpers can be called from
+# a long-lived commissioning shell which later forks deployment drivers.  An
+# `exec 9>` in that parent would otherwise leave the advisory lock inherited by
+# the child and a later boundary check could wait forever on its own lock.
+mp_setup_test_hook_enable() (
     local input="$1" run_id document existing
     mp_setup_test_hook_prepare || return $?
     jq -e '
@@ -422,9 +426,9 @@ mp_setup_test_hook_enable() {
     fi
     jq -cn --arg run "$run_id" \
         '{format:"mp-opt-commissioning-test-hook-enable-result-v1",run_id:$run,state:"enabled"}'
-}
+)
 
-mp_setup_test_hook_arm() {
+mp_setup_test_hook_arm() (
     local input="$1" run_id fault_id transition boundary expected document
     mp_setup_test_hook_prepare || return $?
     jq -e '
@@ -462,9 +466,9 @@ mp_setup_test_hook_arm() {
         --arg boundary "$boundary" '
         {format:"mp-opt-commissioning-fault-result-v1",run_id:$run,fault_id:$fault,
          transition:$transition,boundary:$boundary,state:"armed"}'
-}
+)
 
-mp_setup_test_hook_disarm() {
+mp_setup_test_hook_disarm() (
     local input="$1" run_id fault_id transition=null boundary=null
     mp_setup_test_hook_prepare || return $?
     jq -e '
@@ -491,11 +495,11 @@ mp_setup_test_hook_disarm() {
         {format:"mp-opt-commissioning-fault-result-v1",run_id:$run,fault_id:$fault,
          transition:(if $transition=="null" then null else $transition end),
          boundary:(if $boundary=="null" then null else $boundary end),state:"disarmed"}'
-}
+)
 
 # Reach one controller-defined material boundary. A matching fault is consumed
 # durably before exit 197 is returned, so resume cannot fire it twice.
-mp_setup_test_hook_reach() {
+mp_setup_test_hook_reach() (
     local input="$1" run_id fault_id transition boundary receipt temporary already=false
     mp_setup_test_hook_prepare || return $?
     jq -e '
@@ -561,4 +565,4 @@ mp_setup_test_hook_reach() {
         || { rm -f "$temporary"; return 1; }
     printf '%s\n' "$receipt"
     return 197
-}
+)
