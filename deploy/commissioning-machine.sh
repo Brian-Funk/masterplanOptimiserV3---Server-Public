@@ -170,7 +170,7 @@ mp_machine_validate() {
             mp_machine_validate_regular_file "$receipt" 600 || return 77
             jq -e '.format == "mp-opt-ha-machine-receipt-v1"
                 and (.request_sha256 | test("^[0-9a-f]{64}$"))
-                and (.action | IN("readiness","handover","automatic"))
+                and (.action | IN("readiness","handover","automatic","fault"))
                 and (.run_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
                 and (.completed_at | type == "string")
                 and (.result | type == "object")' "$receipt" >/dev/null 2>&1 \

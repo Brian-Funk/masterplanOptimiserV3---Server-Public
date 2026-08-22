@@ -1200,6 +1200,25 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             self.assertFalse(document["writer_ready"])
             self.assertEqual((state / "fake-backend").read_text().strip(), "running")
 
+            # A fault action is a normal, durable machine receipt.  Generic
+            # preflight must continue to accept the state after the adapter
+            # has taken a node offline and brought it back.  Unknown action
+            # values remain invalid rather than broadening the receipt
+            # contract beyond the explicitly supported HA operations.
+            validation = self.invoke(environment, "validate", "--json")
+            self.assertEqual(validation.returncode, 0, validation.stderr)
+            self.assertTrue(json.loads(validation.stdout)["ok"])
+
+            receipts = sorted((state / "ha-machine-receipts").glob("*.json"))
+            self.assertEqual(len(receipts), 2)
+            malformed = json.loads(receipts[0].read_text(encoding="utf-8"))
+            malformed["action"] = "unknown"
+            receipts[0].write_text(json.dumps(malformed), encoding="utf-8")
+            receipts[0].chmod(0o600)
+            rejected = self.invoke(environment, "validate", "--json")
+            self.assertEqual(rejected.returncode, 40, rejected.stderr)
+            self.assertEqual(json.loads(rejected.stdout)["error"]["code"], "INVALID_STATE")
+
     def test_fault_hook_rejects_wrong_identity_and_can_disarm_exact_arm(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             environment = self.environment(Path(directory_name))
@@ -1686,6 +1705,7 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertNotIn("token", capabilities.lower())
 
     def test_ha_machine_adapter_is_test_policy_only_idempotent_and_reuses_shared_actions(self) -> None:
+        machine = MACHINE.read_text(encoding="utf-8")
         self.assertIn("mp_setup_test_hook_policy", MACHINE_HA)
         self.assertIn("mp_setup_execution_acquire", MACHINE_HA)
         self.assertIn("mp_lock", MACHINE_HA)
@@ -1701,6 +1721,10 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("writer_ready", MACHINE_HA)
         self.assertIn("mp_machine_ha_fault_offline", MACHINE_HA)
         self.assertIn("mp_machine_ha_fault_online", MACHINE_HA)
+        self.assertIn(
+            '.action | IN("readiness","handover","automatic","fault")',
+            machine,
+        )
         self.assertIn("sudo -n systemctl stop mp-opt-ha-lease.service", MACHINE_HA)
         self.assertIn("sudo -n systemctl start mp-opt-ha-lease.service", MACHINE_HA)
         self.assertIn(
