@@ -104,8 +104,9 @@ mp_machine_capabilities() {
          snapshot:{create:($policy=="test"),verify:($policy=="test"),
            list:($policy=="test"),export:($policy=="test"),
            import:($policy=="test"),restore:false},
-         handover:($policy=="test"),automatic_failover:($policy=="test"),
-         ha_status:true,ha_readiness:($policy=="test"),
+          handover:($policy=="test"),automatic_failover:($policy=="test"),
+          ha_status:true,ha_runtime:true,ha_readiness:($policy=="test"),
+          ha_runtime_fault:($policy=="test"),
          retention_as_of:($policy=="test")},
        production_policy_test_mutations:false}'
 }
@@ -1176,7 +1177,7 @@ shift || true
 case "$command_name" in
     ha)
         ha_action="${1:-}"; [ -n "$ha_action" ] || mp_machine_error INVALID_ARGUMENT \
-            "ha requires status, readiness, handover or automatic"
+            "ha requires status, runtime, readiness, handover, automatic or fault"
         shift || true
         case "$ha_action" in
           status)
@@ -1185,7 +1186,13 @@ case "$command_name" in
                 "ha status accepts only --json"
             status=0; output="$(mp_machine_ha_status)" || status=$?
             ;;
-          readiness|handover|automatic)
+          runtime)
+            [ "${1:-}" != --json ] || shift
+            [ "$#" -eq 0 ] || mp_machine_error INVALID_ARGUMENT \
+                "ha runtime accepts only --json"
+            status=0; output="$(mp_machine_ha_runtime_status)" || status=$?
+            ;;
+          readiness|handover|automatic|fault)
             input_stdin=false
             while [ "$#" -gt 0 ]; do
                 case "$1" in --input-stdin) input_stdin=true; shift ;; --json) shift ;;
@@ -1197,7 +1204,7 @@ case "$command_name" in
             status=0; output="$(mp_machine_ha_action "$ha_action")" || status=$?
             ;;
           *) mp_machine_error INVALID_ARGUMENT \
-              "ha requires status, readiness, handover or automatic" ;;
+              "ha requires status, runtime, readiness, handover, automatic or fault" ;;
         esac
         case "$status" in
           0) printf '%s\n' "$output" ;;

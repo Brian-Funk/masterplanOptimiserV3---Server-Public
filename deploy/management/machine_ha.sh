@@ -49,6 +49,22 @@ mp_machine_ha_status() {
         <<< "$control" || return 65
 }
 
+mp_machine_ha_runtime_status() {
+    local lease_active=false backend_running=false
+    mp_machine_require_local_owner || return 77
+    mp_load_ha_config || return 65
+    [ "$HA_ROLE" = dynamic ] || return 65
+    mp_compose_init_existing_runtime ha || return 65
+    systemctl is-active --quiet mp-opt-ha-lease.service 2>/dev/null \
+        && lease_active=true
+    "${MP_COMPOSE[@]}" ps --status running --services 2>/dev/null \
+        | grep -Fxq backend && backend_running=true
+    jq -cn --arg node "$HA_NODE_ID" \
+        --argjson lease "$lease_active" --argjson backend "$backend_running" \
+        '{format:"mp-opt-ha-runtime-status-v1",local_node_id:$node,
+          lease_agent_active:$lease,backend_running:$backend}'
+}
+
 mp_machine_ha_read_input() {
     local target="$1" action="$2" bytes
     head -c 8193 > "$target" || return 1
@@ -73,6 +89,9 @@ mp_machine_ha_read_input() {
       elif $action == "automatic" then
         ((.values | keys | sort) == ["expected_generation","expected_holder","state"])
         and (.values.state | IN("enabled","disabled"))
+      elif $action == "fault" then
+        ((.values | keys | sort) == ["expected_generation","expected_holder","state"])
+        and (.values.state | IN("offline","online"))
       else false end)' "$target" >/dev/null 2>&1 || return 64
 }
 
@@ -90,6 +109,69 @@ mp_machine_ha_record_receipt() {
         && mv "$temporary" "$receipt" \
         && sync -f "$MP_MACHINE_HA_RECEIPTS" 2>/dev/null \
         || { rm -f "$temporary"; return 1; }
+}
+
+mp_machine_ha_fault_result() {
+    local state="$1" control="$2" runtime
+    runtime="$(mp_machine_ha_runtime_status)" || return $?
+    jq -cn --arg state "$state" --argjson control "$control" \
+      --argjson runtime "$runtime" \
+      '{format:"mp-opt-ha-runtime-fault-result-v1",state:$state,
+        local_node_id:$runtime.local_node_id,
+        holder_node_id:$control.holder_node_id,generation:$control.generation,
+        routing_ready:$control.routing_ready,
+        automatic_failover:$control.automatic_failover,
+        lease_agent_active:$runtime.lease_agent_active,
+        backend_running:$runtime.backend_running}'
+}
+
+mp_machine_ha_fault_offline() {
+    local control="$1" runtime
+    jq -e '.automatic_failover == true' <<< "$control" >/dev/null || return 20
+    mp_compose_init_existing_runtime ha || return 65
+    # Remove the current writer before withholding its heartbeat. This avoids
+    # a window where the witness can promote the peer while the old backend is
+    # still accepting traffic.
+    "${MP_COMPOSE[@]}" stop backend >/dev/null || return 1
+    sudo -n systemctl stop mp-opt-ha-lease.service >/dev/null || return 1
+    runtime="$(mp_machine_ha_runtime_status)" || return $?
+    jq -e '.lease_agent_active == false and .backend_running == false' \
+        <<< "$runtime" >/dev/null || return 20
+    mp_machine_ha_fault_result offline "$control"
+}
+
+mp_machine_ha_fault_online() {
+    local expected_holder="$1" expected_generation="$2" peer_node_id="$3"
+    local control="" runtime="" ready=false
+    [ "$expected_holder" = "$peer_node_id" ] || return 20
+    mp_compose_init_existing_runtime ha || return 65
+    sudo -n systemctl start mp-opt-ha-lease.service >/dev/null || return 1
+    for _ in $(seq 1 30); do
+        if control="$(mp_machine_ha_status 2>/dev/null)" \
+          && jq -e --arg holder "$expected_holder" \
+            --argjson generation "$expected_generation" '
+            .holder_node_id == $holder and .generation == $generation
+            and .automatic_failover == true' <<< "$control" >/dev/null; then
+            runtime="$(mp_machine_ha_runtime_status 2>/dev/null || true)"
+            if jq -e '.lease_agent_active == true and .backend_running == false' \
+                <<< "$runtime" >/dev/null; then
+                ready=true
+                break
+            fi
+        fi
+        sleep 1
+    done
+    if [ "$ready" != true ]; then
+        # Starting the returning lease agent is the only way to refresh its
+        # deliberately stale local witness observation. If the exact peer
+        # holder/generation cannot then be proven, restore the simulated-loss
+        # state before returning so a stale request cannot leave a writer or
+        # lease agent running unexpectedly.
+        sudo -n systemctl stop mp-opt-ha-lease.service >/dev/null 2>&1 || true
+        "${MP_COMPOSE[@]}" stop backend >/dev/null 2>&1 || true
+        return 20
+    fi
+    mp_machine_ha_fault_result online "$control"
 }
 
 mp_machine_ha_action() {
@@ -154,29 +236,41 @@ mp_machine_ha_action() {
         fi
     elif [ "$action" = automatic ]; then
         next="$(jq -er .values.state "$input")" || return 64
+    elif [ "$action" = fault ]; then
+        next="$(jq -er .values.state "$input")" || return 64
     fi
-    [ "$(jq -r .holder_node_id <<< "$current")" = "$expected_holder" ] \
-        && [ "$(jq -r .generation <<< "$current")" = "$expected_generation" ] \
-        || return 20
-    case "$action" in
-      readiness)
-        [ "$expected_holder" = "$local_node_id" ] || return 20
-        mp_ha_active_verification_readiness >/dev/null || status=20
-        [ "$status" -ne 0 ] || result="$(jq -cn --arg holder "$expected_holder" \
-          --argjson generation "$expected_generation" \
-          '{format:"mp-opt-ha-readiness-result-v1",ready:true,
-            holder_node_id:$holder,generation:$generation}')"
-        ;;
-      handover)
-        [ "$expected_holder" = "$local_node_id" ] || return 20
-        result="$(mp_ha_planned_switchover_apply "$target")" || status=$?
-        ;;
-      automatic)
-        [ "$expected_holder" = "$local_node_id" ] || return 20
-        result="$(mp_ha_automatic_failover_apply "$next")" || status=$?
-        ;;
-      *) return 64 ;;
-    esac
+    if [ "$action" = fault ] && [ "$next" = online ]; then
+        result="$(mp_machine_ha_fault_online "$expected_holder" \
+            "$expected_generation" "$peer_node_id")" || status=$?
+    else
+        [ "$(jq -r .holder_node_id <<< "$current")" = "$expected_holder" ] \
+            && [ "$(jq -r .generation <<< "$current")" = "$expected_generation" ] \
+            || return 20
+        case "$action" in
+          readiness)
+            [ "$expected_holder" = "$local_node_id" ] || return 20
+            mp_ha_active_verification_readiness >/dev/null || status=20
+            [ "$status" -ne 0 ] || result="$(jq -cn --arg holder "$expected_holder" \
+              --argjson generation "$expected_generation" \
+              '{format:"mp-opt-ha-readiness-result-v1",ready:true,
+                holder_node_id:$holder,generation:$generation}')"
+            ;;
+          handover)
+            [ "$expected_holder" = "$local_node_id" ] || return 20
+            result="$(mp_ha_planned_switchover_apply "$target")" || status=$?
+            ;;
+          automatic)
+            [ "$expected_holder" = "$local_node_id" ] || return 20
+            result="$(mp_ha_automatic_failover_apply "$next")" || status=$?
+            ;;
+          fault)
+            [ "$expected_holder" = "$local_node_id" ] || return 20
+            [ "$next" = offline ] || return 64
+            result="$(mp_machine_ha_fault_offline "$current")" || status=$?
+            ;;
+          *) return 64 ;;
+        esac
+    fi
     [ "$status" -eq 0 ] || return "$status"
     jq -e 'type == "object"' <<< "$result" >/dev/null || return 65
     mp_machine_ha_record_receipt "$receipt" "$request_sha" "$action" "$run_id" \

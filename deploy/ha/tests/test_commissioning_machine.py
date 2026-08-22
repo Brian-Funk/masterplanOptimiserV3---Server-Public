@@ -1059,6 +1059,137 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
                 1,
             )
 
+    def test_ha_runtime_fault_stops_and_rejoins_without_starting_old_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            self.enable_test_policy(environment)
+            prefix = MACHINE.read_text(encoding="utf-8").split(
+                'command_name="${1:-}"', 1
+            )[0]
+            script = prefix + r'''
+                test -f "$MP_STATE/fake-lease" || printf 'active\n' > "$MP_STATE/fake-lease"
+                test -f "$MP_STATE/fake-backend" || printf 'running\n' > "$MP_STATE/fake-backend"
+                test -f "$MP_STATE/fake-holder" || printf 'node-a\n' > "$MP_STATE/fake-holder"
+                test -f "$MP_STATE/fake-generation" || printf '3\n' > "$MP_STATE/fake-generation"
+                mp_load_ha_config() {
+                  HA_ROLE=dynamic; HA_NODE_ID=node-a; HA_PEER_NODE_ID=node-b
+                }
+                mp_compose_init_existing_runtime() { MP_COMPOSE=(fake_compose); }
+                fake_compose() {
+                  if [ "$1" = ps ]; then
+                    test "$(cat "$MP_STATE/fake-backend")" != running || printf 'backend\n'
+                    return 0
+                  fi
+                  if [ "$1" = stop ] && [ "$2" = backend ]; then
+                    printf 'stopped\n' > "$MP_STATE/fake-backend"
+                    return 0
+                  fi
+                  return 64
+                }
+                systemctl() {
+                  if [ "$1" = is-active ]; then
+                    test "$(cat "$MP_STATE/fake-lease")" = active
+                    return
+                  fi
+                  return 64
+                }
+                sudo() {
+                  test "$1" = -n; shift
+                  test "$1" = systemctl; shift
+                  case "$1" in
+                    stop) printf 'stopped\n' > "$MP_STATE/fake-lease" ;;
+                    start) printf 'active\n' > "$MP_STATE/fake-lease" ;;
+                    *) return 64 ;;
+                  esac
+                }
+                sleep() { :; }
+                mp_machine_ha_status() {
+                  jq -cn --arg holder "$(cat "$MP_STATE/fake-holder")" \
+                    --argjson generation "$(cat "$MP_STATE/fake-generation")" '
+                    {format:"mp-opt-ha-machine-status-v1",mode:"ha",
+                     local_node_id:"node-a",peer_node_id:"node-b",
+                     holder_node_id:$holder,generation:$generation,
+                     routing_ready:true,automatic_failover:true,nodes:[
+                       {node_id:"node-a",healthy:true},
+                       {node_id:"node-b",healthy:true}]}'
+                }
+                mp_machine_ha_action fault
+            '''
+            offline_request = json.dumps({
+                "format": "mp-opt-ha-machine-request-v1",
+                "action": "fault",
+                "run_id": "12345678-1234-4234-8234-123456789abc",
+                "idempotency_key": "ha-runtime-fault-offline-0001",
+                "values": {
+                    "expected_holder": "node-a",
+                    "expected_generation": 3,
+                    "state": "offline",
+                },
+            })
+            offline = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                input=offline_request,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(offline.returncode, 0, offline.stderr)
+            self.assertEqual(json.loads(offline.stdout)["state"], "offline")
+            state = Path(environment["MP_STATE"])
+            self.assertEqual((state / "fake-lease").read_text().strip(), "stopped")
+            self.assertEqual((state / "fake-backend").read_text().strip(), "stopped")
+
+            (state / "fake-holder").write_text("node-b\n", encoding="ascii")
+            (state / "fake-generation").write_text("4\n", encoding="ascii")
+            stale_online_request = json.dumps({
+                "format": "mp-opt-ha-machine-request-v1",
+                "action": "fault",
+                "run_id": "12345678-1234-4234-8234-123456789abc",
+                "idempotency_key": "ha-runtime-fault-online-stale-0001",
+                "values": {
+                    "expected_holder": "node-b",
+                    "expected_generation": 3,
+                    "state": "online",
+                },
+            })
+            stale_online = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                input=stale_online_request,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(stale_online.returncode, 20, stale_online.stderr)
+            self.assertEqual((state / "fake-lease").read_text().strip(), "stopped")
+            self.assertEqual((state / "fake-backend").read_text().strip(), "stopped")
+            online_request = json.dumps({
+                "format": "mp-opt-ha-machine-request-v1",
+                "action": "fault",
+                "run_id": "12345678-1234-4234-8234-123456789abc",
+                "idempotency_key": "ha-runtime-fault-online-0001",
+                "values": {
+                    "expected_holder": "node-b",
+                    "expected_generation": 4,
+                    "state": "online",
+                },
+            })
+            online = subprocess.run(
+                ["bash", "-Eeuo", "pipefail", "-c", script],
+                input=online_request,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(online.returncode, 0, online.stderr)
+            document = json.loads(online.stdout)
+            self.assertEqual(document["state"], "online")
+            self.assertTrue(document["lease_agent_active"])
+            self.assertFalse(document["backend_running"])
+            self.assertEqual((state / "fake-backend").read_text().strip(), "stopped")
+
     def test_fault_hook_rejects_wrong_identity_and_can_disarm_exact_arm(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             environment = self.environment(Path(directory_name))
@@ -1538,7 +1669,9 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn('handover:($policy=="test")', capabilities)
         self.assertIn('automatic_failover:($policy=="test")', capabilities)
         self.assertIn("ha_status:true", capabilities)
+        self.assertIn("ha_runtime:true", capabilities)
         self.assertIn('ha_readiness:($policy=="test")', capabilities)
+        self.assertIn('ha_runtime_fault:($policy=="test")', capabilities)
         self.assertIn('production_policy_test_mutations:false', capabilities)
         self.assertNotIn("token", capabilities.lower())
 
@@ -1553,6 +1686,24 @@ class CommissioningMachineStaticContractTests(unittest.TestCase):
         self.assertIn("expected_holder", MACHINE_HA)
         self.assertIn("mp_ha_planned_switchover_apply", MACHINE_HA)
         self.assertIn("mp_ha_automatic_failover_apply", MACHINE_HA)
+        self.assertIn("mp_machine_ha_runtime_status", MACHINE_HA)
+        self.assertIn("mp_machine_ha_fault_offline", MACHINE_HA)
+        self.assertIn("mp_machine_ha_fault_online", MACHINE_HA)
+        self.assertIn("sudo -n systemctl stop mp-opt-ha-lease.service", MACHINE_HA)
+        self.assertIn("sudo -n systemctl start mp-opt-ha-lease.service", MACHINE_HA)
+        self.assertIn(
+            "sudo -n systemctl stop mp-opt-ha-lease.service >/dev/null 2>&1 || true",
+            MACHINE_HA,
+        )
+        offline = MACHINE_HA.split("mp_machine_ha_fault_offline()", 1)[1].split(
+            "mp_machine_ha_fault_online()", 1
+        )[0]
+        self.assertLess(
+            offline.index('"${MP_COMPOSE[@]}" stop backend'),
+            offline.index("sudo -n systemctl stop mp-opt-ha-lease.service"),
+        )
+        self.assertIn('"${MP_COMPOSE[@]}" stop backend', MACHINE_HA)
+        self.assertIn("mp_compose_init_existing_runtime ha", MACHINE_HA)
         self.assertNotIn("ui_require_phrase", MACHINE_HA)
         self.assertNotIn("ui_confirm", MACHINE_HA)
         automatic = HA_MANAGEMENT[
