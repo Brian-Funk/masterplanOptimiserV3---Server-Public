@@ -844,6 +844,64 @@ class CommissioningMachineRuntimeTests(unittest.TestCase):
             for name in ("enabled.json", "triggered.jsonl", "lock"):
                 self.assertEqual((hook_dir / name).stat().st_mode & 0o777, 0o600)
 
+    def test_fault_hook_enable_prepares_a_clean_peer_state_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            state = Path(environment["MP_STATE"])
+            state.rmdir()
+            self.enable_test_policy(environment)
+            run_id = "12345678-1234-4234-8234-123456789abc"
+
+            enabled = self.invoke(
+                environment,
+                "test-hook",
+                "enable",
+                "--input-stdin",
+                "--json",
+                input_document=json.dumps({
+                    "format": "mp-opt-commissioning-test-hook-enable-v1",
+                    "run_id": run_id,
+                    "enabled": True,
+                }),
+            )
+
+            self.assertEqual(enabled.returncode, 0, enabled.stderr)
+            self.assertEqual(json.loads(enabled.stdout)["state"], "enabled")
+            self.assertTrue(state.is_dir())
+            self.assertFalse(state.is_symlink())
+            self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(
+                (state / "setup-test-hooks" / "enabled.json").stat().st_mode
+                & 0o777,
+                0o600,
+            )
+
+    def test_fault_hook_enable_does_not_create_state_under_production_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            environment = self.environment(Path(directory_name))
+            state = Path(environment["MP_STATE"])
+            state.rmdir()
+
+            denied = self.invoke(
+                environment,
+                "test-hook",
+                "enable",
+                "--input-stdin",
+                "--json",
+                input_document=json.dumps({
+                    "format": "mp-opt-commissioning-test-hook-enable-v1",
+                    "run_id": "12345678-1234-4234-8234-123456789abc",
+                    "enabled": True,
+                }),
+            )
+
+            self.assertEqual(denied.returncode, 50, denied.stderr)
+            self.assertEqual(
+                json.loads(denied.stdout)["error"]["code"],
+                "TEST_POLICY_REQUIRED",
+            )
+            self.assertFalse(state.exists())
+
     def test_ha_mutation_is_denied_under_production_policy_before_state_creation(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             environment = self.environment(Path(directory_name))

@@ -987,8 +987,22 @@ mp_machine_read_test_hook_input() {
     jq -e 'type == "object"' "$target" >/dev/null 2>&1 || return 64
 }
 
+mp_machine_prepare_test_hook_state() {
+    local owner
+    # A freshly reset peer has the reviewed machine adapter and test policy,
+    # but deliberately has no commissioning state directory yet.  Authorise
+    # the test-only operation before creating anything, then use the shared
+    # non-symlink owner-directory helper rather than an unguarded mkdir.
+    mp_setup_test_hook_policy || return 77
+    mp_create_private_owner_directory_chain "$MP_STATE" || return 77
+    [ -d "$MP_STATE" ] && [ ! -L "$MP_STATE" ] || return 77
+    owner="$(id -u):$(id -g)"
+    [ "$(stat -c '%u:%g:%a' "$MP_STATE" 2>/dev/null)" = "$owner:700" ]
+}
+
 mp_machine_test_hook_input_action() {
     local action="$1" input status=0 output
+    mp_machine_prepare_test_hook_state || return $?
     mp_machine_require_local_owner || return 77
     input="$(mktemp "$MP_STATE/setup-machine-input.XXXXXX")" || return 1
     MP_MACHINE_INPUT_FILE="$input"; chmod 600 "$input"
